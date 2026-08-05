@@ -31,7 +31,10 @@ use search::{ProjectSearchView, project_search};
 use serde_json::json;
 use workspace::{DeploySearch, MultiWorkspace};
 
-use crate::{PushSneak, PushSneakBackward, VimAddon, insert::NormalBefore, motion, state::Mode};
+use crate::{
+    PushSneak, PushSneakBackward, SwitchToNormalMode, VimAddon, insert::NormalBefore, motion,
+    state::Mode,
+};
 
 use util_macros::perf;
 
@@ -447,6 +450,25 @@ async fn test_escape_cancels(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("escape");
 
     cx.assert_state("aˇbc", Mode::Normal);
+}
+
+#[gpui::test]
+async fn test_insert_line_with_multi_keybinding_to_normal(cx: &mut gpui::TestAppContext) {
+    let mut cx = VimTestContext::new(cx, true).await;
+
+    cx.update(|_, cx| {
+        cx.bind_keys([KeyBinding::new(
+            "j j",
+            SwitchToNormalMode,
+            Some("vim_mode == insert"),
+        )]);
+    });
+
+    cx.set_state("hello worldˇ\n", Mode::Insert);
+    cx.simulate_keystrokes("j j");
+    cx.assert_state("hello worldˇ\n", Mode::Normal);
+    cx.simulate_keystrokes("o");
+    cx.assert_state("hello world\nˇ\n", Mode::Insert);
 }
 
 #[perf]
