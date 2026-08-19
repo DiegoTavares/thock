@@ -812,6 +812,7 @@ impl Item for Editor {
                         params.max_title_len.unwrap_or(MAX_TAB_TITLE_LEN),
                     )
                 })
+                .single_line()
                 .color(label_color)
                 .when(params.truncate_title_middle, |this| {
                     this.truncate_middle().flex_1()
@@ -822,6 +823,7 @@ impl Item for Editor {
             .when_some(description, |this, description| {
                 this.child(
                     Label::new(description)
+                        .single_line()
                         .size(LabelSize::XSmall)
                         .when(params.truncate_title_middle, |this| {
                             this.truncate_start().flex_shrink()
