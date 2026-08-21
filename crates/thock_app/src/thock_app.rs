@@ -605,6 +605,10 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
         );
 
+        workspace_handle.update(cx, |workspace, cx| {
+            workspace.finish_dock_restoration(cx);
+        })?;
+
         // Thock: default the left dock to the timeline panel in vaults.
         workspace_handle
             .update_in(cx, |workspace, window, cx| {
