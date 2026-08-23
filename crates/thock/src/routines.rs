@@ -152,6 +152,7 @@ struct RoutineLinkContent {
     open: String,
     kind: Option<String>,
     icon: Option<String>,
+    group: Option<String>,
     #[serde(default)]
     create: bool,
     #[serde(flatten)]
@@ -183,6 +184,7 @@ impl RoutineLinkContent {
             open: self.open,
             kind,
             icon: self.icon.filter(|icon| !icon.is_empty()),
+            group: self.group.filter(|group| !group.is_empty()),
             create: self.create,
         }
     }
@@ -209,6 +211,7 @@ impl RoutineSurfaceContent {
             open: self.open,
             kind: LinkKind::Browser,
             icon: None,
+            group: None,
             create: false,
         }
     }
@@ -242,6 +245,7 @@ struct RoutineSkillContent {
     id: String,
     name: String,
     file: String,
+    kind: Option<String>,
     summary: Option<String>,
     icon: Option<String>,
     #[serde(default)]
@@ -255,10 +259,23 @@ struct RoutineSkillContent {
 impl RoutineSkillContent {
     fn resolve(self, warnings: &mut Vec<String>) -> RoutineSkill {
         collect_unknown_keys(warnings, "skill.", &self.unknown);
+        let kind = match self.kind.as_deref() {
+            None | Some("ritual") => SkillKind::Ritual,
+            Some("setup") => SkillKind::Setup,
+            Some(other) => {
+                warnings.push(format!(
+                    "unknown skill kind {other:?} on {:?} (expected ritual | setup); \
+                     listing it as a ritual",
+                    self.name
+                ));
+                SkillKind::Ritual
+            }
+        };
         RoutineSkill {
             id: self.id,
             name: self.name,
             file: self.file,
+            kind,
             summary: self.summary.unwrap_or_default(),
             icon: self.icon.filter(|icon| !icon.is_empty()),
             reads: self.reads,
@@ -349,6 +366,11 @@ pub struct RoutineLink {
     /// falls back to the default for the link's kind (the panel owns the
     /// mapping).
     pub icon: Option<String>,
+    /// Optional group label. Grouped links are demoted out of the panel's
+    /// primary list into a collapsed disclosure row carrying this label, so
+    /// a Routine can keep rarely-used destinations without spending rows on
+    /// them (V11 §4).
+    pub group: Option<String>,
     /// Create the target from the matching note template when missing,
     /// like the core Today action.
     pub create: bool,
@@ -368,12 +390,37 @@ pub enum ScaffoldEntry {
     },
 }
 
+/// What a skill is _for_, which decides where the panel puts it (V11 §3).
+/// A ritual recurs and earns a row; a setup step runs once and lives behind
+/// the section's collapsed Setup row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SkillKind {
+    #[default]
+    Ritual,
+    Setup,
+}
+
+impl SkillKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ritual => "ritual",
+            Self::Setup => "setup",
+        }
+    }
+
+    pub fn is_setup(self) -> bool {
+        matches!(self, Self::Setup)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoutineSkill {
     pub id: String,
     pub name: String,
     /// Vault-relative path of the skill file.
     pub file: String,
+    /// Recurring ritual (the default) or one-time setup step.
+    pub kind: SkillKind,
     pub summary: String,
     /// Named icon overriding the row default; `None` or an unknown name
     /// falls back to the skill default (the panel owns the mapping).
@@ -406,6 +453,8 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
         kind: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         icon: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        group: Option<&'a str>,
         #[serde(skip_serializing_if = "is_false")]
         create: bool,
     }
@@ -423,6 +472,8 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
         id: &'a str,
         name: &'a str,
         file: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<&'a str>,
         #[serde(skip_serializing_if = "str::is_empty")]
         summary: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -479,6 +530,7 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
                 open: &link.open,
                 kind: link.kind.as_str(),
                 icon: link.icon.as_deref(),
+                group: link.group.as_deref(),
                 create: link.create,
             })
             .collect(),
@@ -505,6 +557,9 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
                 id: &skill.id,
                 name: &skill.name,
                 file: &skill.file,
+                // The default stays absent so a re-rendered definition keeps
+                // reading like the hand-written one.
+                kind: skill.kind.is_setup().then(|| skill.kind.as_str()),
                 summary: &skill.summary,
                 icon: skill.icon.as_deref(),
                 reads: &skill.reads,
@@ -1757,7 +1812,7 @@ mod tests {
         let manifest = &catalog[0].manifest;
         assert_eq!(manifest.id, TIMELINE_ROUTINE_ID);
         assert_eq!(manifest.schema, 2);
-        assert_eq!(manifest.version, 7);
+        assert_eq!(manifest.version, 8);
         assert_eq!(manifest.icon.as_deref(), Some("clock"));
         assert_eq!(manifest.doc, "routines/timeline/Timeline.md");
         assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
@@ -1788,6 +1843,31 @@ mod tests {
         );
         assert!(manifest.links[0].create);
         assert_eq!(manifest.links[4].kind, LinkKind::Browser);
+        // Places the rail keeps in reach vs. the ones it demotes (V11 §4).
+        let grouped: Vec<(&str, Option<&str>)> = manifest
+            .links
+            .iter()
+            .map(|link| (link.id.as_str(), link.group.as_deref()))
+            .collect();
+        assert_eq!(
+            grouped,
+            vec![
+                ("today", None),
+                ("yesterday", Some("Older notes")),
+                ("this-week", None),
+                ("last-week", Some("Older notes")),
+                ("weekly-dashboard", None),
+            ]
+        );
+        // The one-time steps are setup, not rituals — that classification is
+        // what keeps them out of the panel's ritual list.
+        let setup: Vec<&str> = manifest
+            .skills
+            .iter()
+            .filter(|skill| skill.kind.is_setup())
+            .map(|skill| skill.id.as_str())
+            .collect();
+        assert_eq!(setup, vec!["connect-google-workspace", "onboarding"]);
         // The onboarding entry points at a file that is also a regular skill,
         // so materialization and removal treat it like any other skill.
         let onboarding = manifest.onboarding.as_ref().unwrap();
@@ -1806,6 +1886,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn link_groups_and_skill_kinds_parse_and_round_trip() {
+        let manifest = parse_manifest(
+            r#"
+            schema = 2
+            id = "finance"
+            name = "Finance"
+            doc = "routines/finance/Finance.md"
+            [[link]]
+            name = "Plan"
+            open = "finance/plan.md"
+            [[link]]
+            name = "Last Year"
+            open = "finance/2025.md"
+            group = "Archive"
+            [[skill]]
+            id = "sweep"
+            name = "Sweep"
+            file = "routines/finance/skills/sweep.md"
+            [[skill]]
+            id = "connect"
+            name = "Connect"
+            kind = "setup"
+            file = "routines/finance/skills/connect.md"
+            "#,
+        )
+        .unwrap();
+        assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
+        assert_eq!(manifest.links[0].group, None);
+        assert_eq!(manifest.links[1].group.as_deref(), Some("Archive"));
+        assert_eq!(manifest.skills[0].kind, SkillKind::Ritual);
+        assert_eq!(manifest.skills[1].kind, SkillKind::Setup);
+
+        let rendered = render_manifest_toml(&manifest).unwrap();
+        // Ritual is the default, so it stays out of a rendered definition.
+        assert!(!rendered.contains(r#"kind = "ritual""#));
+        assert!(rendered.contains(r#"kind = "setup""#));
+        assert_eq!(parse_manifest(&rendered).unwrap(), manifest);
+    }
+
+    #[test]
+    fn an_unknown_skill_kind_warns_and_stays_a_ritual() {
+        let manifest = parse_manifest(
+            r#"
+            schema = 2
+            id = "finance"
+            name = "Finance"
+            doc = "routines/finance/Finance.md"
+            [[skill]]
+            id = "sweep"
+            name = "Sweep"
+            kind = "chore"
+            file = "routines/finance/skills/sweep.md"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(manifest.skills[0].kind, SkillKind::Ritual);
+        assert_eq!(manifest.warnings.len(), 1);
+        assert!(
+            manifest.warnings[0].contains("chore"),
+            "{:?}",
+            manifest.warnings
+        );
     }
 
     #[test]
@@ -2532,7 +2677,7 @@ open = "weekly/site/index.html"
         assert!(raw.contains("[[routines.installed]]"), "{raw}");
         assert!(!raw.contains("[[areas.installed]]"), "{raw}");
         let vault = detect(root);
-        assert_eq!(vault.config.routines.installed[0].version, 7);
+        assert_eq!(vault.config.routines.installed[0].version, 8);
 
         // Idempotent: a second pass changes nothing.
         let vault = detect(root);

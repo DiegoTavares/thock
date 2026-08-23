@@ -1,14 +1,16 @@
 schema  = 2
 id      = "timeline"
 name    = "Daily & Weekly"
-version = 7
+version = 8
 summary = "Daily & weekly rhythm — weekly review and a progress dashboard."
 icon    = "clock"
 doc     = "routines/timeline/Timeline.md"
 
 # Quick links — the Routine's navigation rows, in order. `open` supports the
 # date templates {today} {yesterday} {tomorrow} {this_week} {last_week},
-# resolved from the vault's [daily]/[weekly] config.
+# resolved from the vault's [daily]/[weekly] config. A link with a `group`
+# is demoted into a collapsed row carrying that label, so the rail keeps
+# only what gets opened daily.
 [[link]]
 id     = "today"
 name   = "Today"
@@ -21,6 +23,7 @@ id     = "yesterday"
 name   = "Yesterday"
 open   = "daily/{yesterday}.md"
 kind   = "editor"
+group  = "Older notes"
 create = true
 
 [[link]]
@@ -35,6 +38,7 @@ id     = "last-week"
 name   = "Last Week"
 open   = "weekly/{last_week}.md"
 kind   = "editor"
+group  = "Older notes"
 create = true
 
 [[link]]
@@ -85,6 +89,7 @@ writes  = ["daily/<yesterday>.md (append)", "backlog.md (append)"]
 [[skill]]
 id      = "connect-google-workspace"
 name    = "Connect Google Workspace"
+kind    = "setup"
 file    = "routines/timeline/skills/connect-google-workspace.md"
 summary = "Link Google so meetings land in today's note and emails you label become Backlog tasks."
 reads   = ["google:calendar (read-only)", "google:gmail (read-only)"]
@@ -93,6 +98,7 @@ writes  = [".thock/calendar.toml", ".thock/gmail.toml", "daily/<today>.md (Calen
 [[skill]]
 id      = "onboarding"
 name    = "Set Up Timeline"
+kind    = "setup"
 file    = "routines/timeline/skills/onboarding.md"
 summary = "Guided setup — migrate your existing daily notes into this vault (copies, never moves)."
 reads   = ["daily/**", "weekly/**", ".thock/config.toml", "your existing notes (read-only)"]
