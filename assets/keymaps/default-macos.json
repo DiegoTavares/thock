@@ -1701,6 +1701,15 @@
     },
   },
   {
+    "context": "ThockRoutinesPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "left": "thock::CollapseGroup",
+      "right": "thock::ExpandGroup",
+      "alt-enter": "thock::ViewSkill",
+    },
+  },
+  {
     "context": "ThockBacklogPanel",
     "use_key_equivalents": true,
     "bindings": {

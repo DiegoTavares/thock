@@ -47,6 +47,14 @@ open = "finance/plan_2026.md"
 kind = "editor"
 icon = "hash"                   # optional; see the icon note below
 
+# A link with a `group` is demoted out of the panel's main list into a
+# collapsed row carrying that label. Use it for the destinations you keep but
+# rarely open — the rail is worth more than the archive.
+[[link]]
+name  = "Plan 2025"
+open  = "finance/plan_2025.md"
+group = "Past years"
+
 # `open` supports date templates, resolved from the vault's [daily]/[weekly]
 # config: {today} {yesterday} {tomorrow} {this_week} {last_week}
 [[link]]
@@ -72,6 +80,16 @@ summary = "Pull live data, compute the sweep, log the outcome."
 icon    = "flame"               # optional; see the icon note below
 reads   = ["finance/**"]
 writes  = ["finance/plan_2026.md (edit, confirmed)", "daily/<today>.md (append)"]
+
+# kind = "setup" marks a step that runs once — connecting an account,
+# migrating existing notes. Setup steps live behind the section's collapsed
+# "Setup" row instead of sitting among the rituals forever. Default: "ritual".
+[[skill]]
+id      = "connect-monarch"
+name    = "Connect Monarch"
+kind    = "setup"
+file    = "routines/finance/skills/connect-monarch.md"
+summary = "Link the account the Friday sweep reads from."
 ```
 
 Notes:
@@ -79,6 +97,9 @@ Notes:
 - `schema = 2`, `id`, `name`, and `doc` are required; everything else is
   optional. Unknown keys are warned about and ignored.
 - `reads`/`writes` are declared scope, shown to the user — not enforced.
+- Classify honestly. `kind` and `group` are the only things the panel can use
+  to tell a daily verb from a one-time chore, so a Routine that leaves
+  everything at the defaults gets a rail with everything at equal weight.
 - `[[surface]]` (schema 1) still parses as a deprecated alias for
   `[[link]]` with `kind = "browser"`.
 - `icon` is optional on the Routine, on each `[[link]]`, and on each
@@ -88,14 +109,32 @@ Notes:
   aliases: `todo` and `html`. Icons can't be supplied as files.
 - Leave `icon` off and the row picks a sensible default: `notepad` for a
   Markdown link, `file_code` for any other file, `html` for a browser link,
-  `ai_bedrock` for a skill, and `blocks` for the Routine itself. A name that
-  doesn't resolve falls back to that same default.
+  `play_outlined` for a ritual, `settings` for a setup step, and `blocks` for
+  the Routine itself. A name that doesn't resolve falls back to that same
+  default.
+
+## How the panel renders a Routine
+
+One section per Routine, and within it:
+
+1. **Notes** — the ungrouped links, in manifest order.
+2. One collapsed row per link `group`, in first-appearance order.
+3. **Rituals** — the skills that aren't setup.
+4. A collapsed **Setup** row, when the Routine has `kind = "setup"` skills.
+
+The two captions appear only when a section holds both links and skills;
+there is nothing to separate otherwise. Clicking or pressing `enter` on a
+link opens it, on a ritual **runs** it, and on a group row opens or closes
+it. `alt-enter` (`g space` in vim mode) opens a ritual's instructions instead
+of running them, and `left`/`right` (`h`/`l`) close and open groups.
 
 ## Keyboard shortcuts
 
 Routines can't add keybindings themselves — the user binds them. Any link or
 skill is addressable by id through two generic actions; the snippet below
-goes in the user's keymap (offer to add it, with their approval):
+goes in the user's keymap (offer to add it, with their approval). Once bound,
+the chord renders on the row itself, so a binding is visible rather than
+remembered:
 
 ```json
 [

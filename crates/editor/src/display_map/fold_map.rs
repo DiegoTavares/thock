@@ -36,6 +36,10 @@ pub struct FoldPlaceholder {
     /// Text provided by the language server to display in place of the folded range.
     /// When set, this is used instead of the default "⋯" ellipsis.
     pub collapsed_text: Option<SharedString>,
+    /// If false, this fold does not make its row show a fold toggle in the gutter.
+    /// Decorative folds — ones that stand in for markup rather than hiding content
+    /// the user chose to collapse — set this so the gutter keeps its hover behaviour.
+    pub gutter_toggle: bool,
 }
 
 impl Default for FoldPlaceholder {
@@ -46,6 +50,7 @@ impl Default for FoldPlaceholder {
             merge_adjacent: true,
             type_tag: None,
             collapsed_text: None,
+            gutter_toggle: true,
         }
     }
 }
@@ -79,6 +84,7 @@ impl FoldPlaceholder {
             merge_adjacent: true,
             type_tag: None,
             collapsed_text: None,
+            gutter_toggle: true,
         }
     }
 }

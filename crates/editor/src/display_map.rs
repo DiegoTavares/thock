@@ -987,6 +987,7 @@ impl DisplayMap {
                     constrain_width: false,
                     merge_adjacent: base_placeholder.merge_adjacent,
                     type_tag: base_placeholder.type_tag,
+                    gutter_toggle: base_placeholder.gutter_toggle,
                     collapsed_text: Some(collapsed_text),
                 }
             } else {

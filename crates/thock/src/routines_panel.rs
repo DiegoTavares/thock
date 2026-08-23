@@ -21,12 +21,16 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::str::FromStr as _;
 use ui::prelude::*;
-use ui::{Button, Divider, Icon, IconButton, IconSize, Label, ListItem, Tooltip};
+use ui::{
+    Button, Divider, Icon, IconButton, IconSize, KeyBinding, Label, ListItem, ListSubHeader,
+    Tooltip, rems_from_px,
+};
 use util::ResultExt as _;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 use workspace::notifications::NotificationId;
 use workspace::{OpenOptions, OpenVisible, Toast, Workspace};
 
+use crate::agent_panel::RunSkill;
 use crate::notes::{EnsureNoteOutcome, TimelineEntry, ensure_note};
 use crate::routines::{
     self, DiscoveredRoutine, LinkKind, RoutineLink, RoutineLoad, RoutineManifest, RoutineSkill,
@@ -53,7 +57,13 @@ actions!(
         /// Opens last week's weekly note, creating it if needed.
         OpenLastWeek,
         /// Creates a new Routine with your agent (the New Routine ritual).
-        NewRoutine
+        NewRoutine,
+        /// Opens the selected ritual's instructions so you can read or change them.
+        ViewSkill,
+        /// Hides the selected group of extra notes or setup steps.
+        CollapseGroup,
+        /// Shows what the selected group of extra notes or setup steps holds.
+        ExpandGroup
     ]
 );
 
@@ -171,12 +181,153 @@ fn link_icon(link: &RoutineLink) -> RowIcon {
         })
 }
 
+/// A skill's icon: the manifest's override, else a glyph that says what the
+/// row *does*. Rituals get the run glyph so a verb never reads like one of
+/// the note rows above it; setup steps get the settings glyph.
 fn skill_icon(skill: &RoutineSkill) -> RowIcon {
     skill
         .icon
         .as_deref()
         .and_then(manifest_icon)
-        .unwrap_or(RowIcon::Named(IconName::AiGemini))
+        .unwrap_or(RowIcon::Named(if skill.kind.is_setup() {
+            IconName::Settings
+        } else {
+            IconName::PlayOutlined
+        }))
+}
+
+/// Zone captions. They separate a Routine's destinations from its verbs, and
+/// only appear when a section actually holds both.
+const NOTES_CAPTION: &str = "Notes";
+const RITUALS_CAPTION: &str = "Rituals";
+/// The implicit group every `kind = "setup"` skill lands in.
+const SETUP_GROUP: &str = "Setup";
+
+/// Groups are keyed per Routine; the separator is a character no manifest
+/// label can contain.
+fn group_key(routine_id: &str, label: &str) -> String {
+    format!("{routine_id}\u{1}{label}")
+}
+
+/// What a row *is*, independent of where it currently sits. Opening or
+/// closing a group renumbers everything below it, so the cursor is re-found
+/// by this rather than left on a stale index.
+fn row_key(row: &NavRow) -> String {
+    match &row.kind {
+        NavRowKind::Link(link) => nav_key(&row.routine_id, "link", &link.id),
+        NavRowKind::Skill(skill) => nav_key(&row.routine_id, "skill", &skill.id),
+        NavRowKind::Group(label) => nav_key(&row.routine_id, "group", label),
+    }
+}
+
+fn nav_key(routine_id: &str, tag: &str, id: &str) -> String {
+    format!("{routine_id}\u{1}{tag}\u{1}{id}")
+}
+
+/// Where the cursor belongs once the row list has changed shape: back on the
+/// row it was on, or — when that row went away with the group that held it —
+/// on the group's own row.
+fn reanchor_selection(rows: &[NavRow], anchor: &str, group_row: &str) -> Option<usize> {
+    rows.iter()
+        .position(|row| row_key(row) == anchor)
+        .or_else(|| rows.iter().position(|row| row_key(row) == group_row))
+}
+
+/// A Routine section in display order (V11 §4): the destinations it wants in
+/// reach, then the groups holding the ones it doesn't, then its rituals, then
+/// the collapsed Setup row. Captions appear only when a section holds both
+/// places and verbs — with nothing to separate they would be decoration.
+fn section_items(
+    manifest: &RoutineManifest,
+    expanded_groups: &HashSet<String>,
+) -> Vec<SectionItem> {
+    fn item(kind: SectionItemKind) -> SectionItem {
+        SectionItem { group: None, kind }
+    }
+    let is_expanded =
+        |label: &str| expanded_groups.contains(&group_key(manifest.id.as_str(), label));
+
+    let mut items = Vec::new();
+    let (rituals, setup_skills): (Vec<&RoutineSkill>, Vec<&RoutineSkill>) = manifest
+        .skills
+        .iter()
+        .partition(|skill| !skill.kind.is_setup());
+    let captioned = !manifest.links.is_empty() && !manifest.skills.is_empty();
+
+    if captioned {
+        items.push(item(SectionItemKind::Caption(NOTES_CAPTION.into())));
+    }
+    for link in manifest.links.iter().filter(|link| link.group.is_none()) {
+        items.push(item(SectionItemKind::Link(link.clone())));
+    }
+    let mut labels: Vec<&str> = Vec::new();
+    for label in manifest
+        .links
+        .iter()
+        .filter_map(|link| link.group.as_deref())
+    {
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    for label in labels {
+        let members = manifest
+            .links
+            .iter()
+            .filter(|link| link.group.as_deref() == Some(label));
+        let expanded = is_expanded(label);
+        let label: SharedString = label.to_string().into();
+        items.push(item(SectionItemKind::Group {
+            label: label.clone(),
+            expanded,
+        }));
+        if expanded {
+            items.extend(members.map(|link| SectionItem {
+                group: Some(label.clone()),
+                kind: SectionItemKind::Link(link.clone()),
+            }));
+        }
+    }
+
+    if captioned && !rituals.is_empty() {
+        items.push(item(SectionItemKind::Caption(RITUALS_CAPTION.into())));
+    }
+    for skill in rituals {
+        items.push(item(SectionItemKind::Skill(skill.clone())));
+    }
+    if !setup_skills.is_empty() {
+        let expanded = is_expanded(SETUP_GROUP);
+        items.push(item(SectionItemKind::Group {
+            label: SETUP_GROUP.into(),
+            expanded,
+        }));
+        if expanded {
+            items.extend(setup_skills.into_iter().map(|skill| SectionItem {
+                group: Some(SETUP_GROUP.into()),
+                kind: SectionItemKind::Skill(skill.clone()),
+            }));
+        }
+    }
+    items
+}
+
+/// A zone caption. Not a row: it takes no selection and can't be collapsed,
+/// which is the whole reason it replaced the old "Skills" folder entry. The
+/// rule running off to the right is what makes it read as a separator rather
+/// than as another entry in the list.
+fn render_caption(label: SharedString) -> AnyElement {
+    div()
+        .pl(px(12.))
+        .pt_1()
+        .child(
+            ListSubHeader::new(label).end_slot(
+                div()
+                    .flex_1()
+                    .child(Divider::horizontal())
+                    .into_any_element(),
+            ),
+        )
+        .into_any_element()
 }
 
 /// Shows the routines panel (opening the left dock) when the workspace is a
@@ -201,16 +352,38 @@ pub fn show_panel_if_vault(
     }
 }
 
-/// One keyboard-navigable row of the panel: a Routine's link or skill.
-/// The flat list generalizes the old fixed Timeline cursor (V7 §7.4).
+/// One keyboard-navigable row of the panel: a Routine's link, skill, or the
+/// disclosure row standing in for a collapsed group. The flat list
+/// generalizes the old fixed Timeline cursor (V7 §7.4).
 enum NavRowKind {
     Link(RoutineLink),
     Skill(RoutineSkill),
+    Group(SharedString),
 }
 
 struct NavRow {
     routine_id: String,
+    /// `Some(label)` when the row lives inside that expanded group, so
+    /// `left` on a member can close the group it came from.
+    group: Option<SharedString>,
     kind: NavRowKind,
+}
+
+/// One rendered entry of a Routine section, in display order. Captions are
+/// not selectable, so the keyboard row list is this list minus its captions
+/// — deriving both from a single walk is what keeps the rendered order and
+/// the cursor indices from drifting apart.
+struct SectionItem {
+    /// `Some(label)` when the item sits inside that collapsible group.
+    group: Option<SharedString>,
+    kind: SectionItemKind,
+}
+
+enum SectionItemKind {
+    Caption(SharedString),
+    Link(RoutineLink),
+    Skill(RoutineSkill),
+    Group { label: SharedString, expanded: bool },
 }
 
 pub struct RoutinesPanel {
@@ -235,6 +408,9 @@ pub struct RoutinesPanel {
     addable_catalog: Vec<RoutineManifest>,
     /// Sections start expanded; this tracks the ones the user collapsed.
     collapsed_routines: HashSet<String>,
+    /// Groups (demoted links, setup steps) start collapsed; this tracks the
+    /// ones the user opened, keyed by `group_key`.
+    expanded_groups: HashSet<String>,
     show_add_routines: bool,
     /// Ready markers already offered with a toast this session, so a marker
     /// awaiting activation doesn't re-toast on every refresh.
@@ -319,6 +495,7 @@ impl RoutinesPanel {
                 discovered: Vec::new(),
                 addable_catalog: Vec::new(),
                 collapsed_routines: HashSet::new(),
+                expanded_groups: HashSet::new(),
                 show_add_routines: false,
                 ready_toasted: HashSet::new(),
                 position: DockPosition::Left,
@@ -1318,8 +1495,12 @@ impl RoutinesPanel {
         .detach_and_log_err(cx);
     }
 
+    fn section_items(&self, manifest: &RoutineManifest) -> Vec<SectionItem> {
+        section_items(manifest, &self.expanded_groups)
+    }
+
     /// The flat, visible row list keyboard selection walks: every expanded,
-    /// cleanly loaded Routine's links then skills, in section order.
+    /// cleanly loaded Routine's selectable section items, in section order.
     fn nav_rows(&self) -> Vec<NavRow> {
         let mut rows = Vec::new();
         for load in &self.routines {
@@ -1329,20 +1510,82 @@ impl RoutinesPanel {
             if self.collapsed_routines.contains(&manifest.id) {
                 continue;
             }
-            for link in &manifest.links {
+            for item in self.section_items(manifest) {
+                let kind = match item.kind {
+                    SectionItemKind::Caption(_) => continue,
+                    SectionItemKind::Link(link) => NavRowKind::Link(link),
+                    SectionItemKind::Skill(skill) => NavRowKind::Skill(skill),
+                    SectionItemKind::Group { label, .. } => NavRowKind::Group(label),
+                };
                 rows.push(NavRow {
                     routine_id: manifest.id.clone(),
-                    kind: NavRowKind::Link(link.clone()),
-                });
-            }
-            for skill in &manifest.skills {
-                rows.push(NavRow {
-                    routine_id: manifest.id.clone(),
-                    kind: NavRowKind::Skill(skill.clone()),
+                    group: item.group,
+                    kind,
                 });
             }
         }
         rows
+    }
+
+    fn manifest(&self, routine_id: &str) -> Option<&RoutineManifest> {
+        self.routines.iter().find_map(|load| match load {
+            RoutineLoad::Loaded(manifest) if manifest.id == routine_id => Some(manifest),
+            _ => None,
+        })
+    }
+
+    /// Onboarding runs are titled after the Routine rather than the skill, so
+    /// the agent thread reads as "<Routine> setup".
+    fn skill_run_title(&self, routine_id: &str, skill: &RoutineSkill) -> String {
+        self.manifest(routine_id)
+            .filter(|manifest| {
+                manifest
+                    .onboarding
+                    .as_ref()
+                    .is_some_and(|onboarding| onboarding.skill == skill.file)
+            })
+            .map_or_else(
+                || skill.name.clone(),
+                |manifest| format!("{} setup", manifest.name),
+            )
+    }
+
+    fn toggle_group(&mut self, routine_id: &str, label: &str, cx: &mut Context<Self>) {
+        let expanded = !self.expanded_groups.contains(&group_key(routine_id, label));
+        self.set_group_expanded(routine_id, label, expanded, cx);
+    }
+
+    /// Opens or closes a group, keeping the keyboard cursor on the row it was
+    /// on. A cursor inside a group that just closed lands on that group's own
+    /// row — never on whatever index happens to survive the list shrinking.
+    fn set_group_expanded(
+        &mut self,
+        routine_id: &str,
+        label: &str,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let key = group_key(routine_id, label);
+        if self.expanded_groups.contains(&key) == expanded {
+            return;
+        }
+        // Only a real keyboard cursor is worth preserving; a `None` selection
+        // is following the active editor item and should keep doing so.
+        let anchor = self
+            .selected_index
+            .is_some()
+            .then(|| self.selected_row(cx).map(|row| row_key(&row)))
+            .flatten();
+        if expanded {
+            self.expanded_groups.insert(key);
+        } else {
+            self.expanded_groups.remove(&key);
+        }
+        if let Some(anchor) = anchor {
+            let group_row = nav_key(routine_id, "group", label);
+            self.selected_index = reanchor_selection(&self.nav_rows(), &anchor, &group_row);
+        }
+        cx.notify();
     }
 
     /// The absolute path of the note open in the active editor, if any.
@@ -1368,7 +1611,7 @@ impl RoutinesPanel {
                     routines::vault_file_path(&vault.root, &resolved.relative_path).ok()
                 })
                 .is_some_and(|path| path == active_path),
-            NavRowKind::Skill(_) => false,
+            NavRowKind::Skill(_) | NavRowKind::Group(_) => false,
         })
     }
 
@@ -1426,20 +1669,59 @@ impl RoutinesPanel {
         cx.notify();
     }
 
-    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+    fn selected_row(&self, cx: &App) -> Option<NavRow> {
         let rows = self.nav_rows();
-        let Some(row) = self
-            .effective_selected_index(&rows, cx)
+        self.effective_selected_index(&rows, cx)
             .and_then(|index| rows.into_iter().nth(index))
-        else {
+    }
+
+    /// A row does the obvious thing: a link opens, a ritual runs, a group
+    /// opens or closes. Reading a ritual's instructions is `ViewSkill`.
+    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.selected_row(cx) else {
             return;
         };
         match row.kind {
             NavRowKind::Link(link) => self.open_link(row.routine_id, link, window, cx),
             NavRowKind::Skill(skill) => {
-                self.open_routine_file(skill.file, row.routine_id, window, cx)
+                let title = self.skill_run_title(&row.routine_id, &skill);
+                self.run_skill(title, skill.file, window, cx);
             }
+            NavRowKind::Group(label) => self.toggle_group(&row.routine_id, &label, cx),
         }
+    }
+
+    fn view_skill(&mut self, _: &ViewSkill, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.selected_row(cx) else {
+            return;
+        };
+        if let NavRowKind::Skill(skill) = row.kind {
+            self.open_routine_file(skill.file, row.routine_id, window, cx);
+        }
+    }
+
+    fn expand_group(&mut self, _: &ExpandGroup, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.selected_row(cx) else {
+            return;
+        };
+        let NavRowKind::Group(label) = &row.kind else {
+            return;
+        };
+        self.set_group_expanded(&row.routine_id, label, true, cx);
+    }
+
+    /// Closes the selected group, or the group the selected row lives in —
+    /// then parks the cursor on the group row, so collapsing never drops the
+    /// selection somewhere the user wasn't looking.
+    fn collapse_group(&mut self, _: &CollapseGroup, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(row) = self.selected_row(cx) else {
+            return;
+        };
+        let label = match (&row.kind, &row.group) {
+            (NavRowKind::Group(label), _) | (_, Some(label)) => label.clone(),
+            _ => return,
+        };
+        self.set_group_expanded(&row.routine_id, &label, false, cx);
     }
 
     fn render_routine_section(
@@ -1451,7 +1733,7 @@ impl RoutinesPanel {
     ) -> AnyElement {
         let routine_id = manifest.id.clone();
         let expanded = !self.collapsed_routines.contains(&manifest.id);
-        // "Finish setup" badge: onboarding is pending (V5 §7.3). Cleared by
+        // "Finish setup" chip: onboarding is pending (V5 §7.3). Cleared by
         // the done marker or the 24 h expiry, both persisted transitions.
         let finishing_setup = manifest.onboarding.is_some()
             && matches!(
@@ -1483,19 +1765,23 @@ impl RoutinesPanel {
                     .size(IconSize::Small)
                     .color(Color::Muted),
             )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(Label::new(manifest.name.clone()))
-                    .when(finishing_setup, |row| {
-                        row.child(
+            .child(Label::new(manifest.name.clone()))
+            .when(finishing_setup, |item| {
+                item.end_slot(
+                    h_flex()
+                        .px_1()
+                        .rounded_sm()
+                        .bg(cx.theme().colors().element_background)
+                        .child(
                             Label::new("Finish setup")
                                 .size(LabelSize::XSmall)
                                 .color(Color::Accent),
-                        )
-                    }),
-            )
-            .end_slot(
+                        ),
+                )
+            })
+            // Removal is destructive and rare, so it stays off the header
+            // until the pointer is actually on the row.
+            .end_slot_on_hover(
                 IconButton::new(
                     ElementId::Name(SharedString::from(format!(
                         "thock-remove-routine-{}",
@@ -1524,110 +1810,182 @@ impl RoutinesPanel {
         if !expanded {
             return section.into_any_element();
         }
-        section = section.children(manifest.links.iter().map(|link| {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        // Captions take no index, which is exactly what makes them unreachable
+        // by the cursor; everything else consumes one, in rendered order.
+        let mut next_index = || {
             let index = *row_index;
             *row_index += 1;
-            // Every row carries an icon so labels stay aligned.
-            let icon = link_icon(link);
-            ListItem::new(ElementId::Name(SharedString::from(format!(
-                "thock-link-{}-{}",
-                manifest.id, link.id
-            ))))
-            .indent_level(1)
-            .indent_step_size(px(12.))
-            .toggle_state(selected_index == Some(index))
-            .start_slot(icon.build().size(IconSize::XSmall).color(Color::Muted))
-            .child(Label::new(link.name.clone()).size(LabelSize::Small))
-            .on_click(cx.listener({
-                let routine_id = routine_id.clone();
-                let link = link.clone();
-                move |this, _, window, cx| {
-                    this.open_link(routine_id.clone(), link.clone(), window, cx);
+            index
+        };
+        for item in self.section_items(manifest) {
+            let nested = item.group.is_some();
+            rows.push(match item.kind {
+                SectionItemKind::Caption(label) => render_caption(label),
+                SectionItemKind::Link(link) => {
+                    let index = next_index();
+                    self.render_link_row(&routine_id, &link, nested, index, selected_index, cx)
                 }
-            }))
-        }));
-        // Skills group under their own folder row, like a file tree.
-        if !manifest.skills.is_empty() {
-            section = section.child(
-                ListItem::new(ElementId::Name(SharedString::from(format!(
-                    "thock-skills-header-{}",
-                    manifest.id
-                ))))
-                .indent_level(1)
-                .indent_step_size(px(12.))
-                .start_slot(
-                    Icon::new(IconName::Folder)
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
-                )
-                .child(
-                    Label::new("Skills")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                ),
-            );
+                SectionItemKind::Skill(skill) => {
+                    let index = next_index();
+                    self.render_skill_row(manifest, &skill, nested, index, selected_index, cx)
+                }
+                SectionItemKind::Group {
+                    label,
+                    expanded: group_expanded,
+                } => {
+                    let index = next_index();
+                    self.render_group_row(
+                        &routine_id,
+                        label,
+                        group_expanded,
+                        index,
+                        selected_index,
+                        cx,
+                    )
+                }
+            });
         }
-        section = section.children(manifest.skills.iter().map(|skill| {
-            let index = *row_index;
-            *row_index += 1;
-            let is_onboarding = manifest
-                .onboarding
-                .as_ref()
-                .is_some_and(|onboarding| onboarding.skill == skill.file);
-            let run_tooltip = if is_onboarding {
-                "Set up with AI"
+        section = section.children(rows);
+        section.into_any_element()
+    }
+
+    fn render_link_row(
+        &self,
+        routine_id: &str,
+        link: &RoutineLink,
+        nested: bool,
+        index: usize,
+        selected_index: Option<usize>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        // Every row carries an icon so labels stay aligned.
+        let icon = link_icon(link);
+        let open = OpenLink {
+            routine: routine_id.to_string(),
+            link: link.id.clone(),
+        };
+        ListItem::new(ElementId::Name(SharedString::from(format!(
+            "thock-link-{routine_id}-{}",
+            link.id
+        ))))
+        .indent_level(if nested { 2 } else { 1 })
+        .indent_step_size(px(12.))
+        .toggle_state(selected_index == Some(index))
+        .start_slot(icon.build().size(IconSize::XSmall).color(Color::Muted))
+        .child(Label::new(link.name.clone()).size(LabelSize::Small))
+        // An unbound action renders as nothing, so a chord appears the moment
+        // the user binds one — which is where binding gets discovered.
+        .end_slot(KeyBinding::for_action_in(&open, &self.focus_handle, cx).size(rems_from_px(10.)))
+        .on_click(cx.listener({
+            let routine_id = routine_id.to_string();
+            let link = link.clone();
+            move |this, _, window, cx| {
+                this.open_link(routine_id.clone(), link.clone(), window, cx);
+            }
+        }))
+        .into_any_element()
+    }
+
+    fn render_skill_row(
+        &self,
+        manifest: &RoutineManifest,
+        skill: &RoutineSkill,
+        nested: bool,
+        index: usize,
+        selected_index: Option<usize>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let run = RunSkill {
+            skill: Some(skill.id.clone()),
+        };
+        let title = self.skill_run_title(&manifest.id, skill);
+        ListItem::new(ElementId::Name(SharedString::from(format!(
+            "thock-skill-{}-{}",
+            manifest.id, skill.id
+        ))))
+        .indent_level(if nested { 2 } else { 1 })
+        .indent_step_size(px(12.))
+        .toggle_state(selected_index == Some(index))
+        .start_slot(skill_icon(skill).build().size(IconSize::XSmall).color(
+            if skill.kind.is_setup() {
+                Color::Muted
             } else {
-                "Run with your agent"
-            };
-            ListItem::new(ElementId::Name(SharedString::from(format!(
-                "thock-skill-{}-{}",
-                manifest.id, skill.id
-            ))))
-            .indent_level(2)
-            .indent_step_size(px(12.))
-            .toggle_state(selected_index == Some(index))
-            .start_slot(
-                skill_icon(skill)
-                    .build()
-                    .size(IconSize::XSmall)
-                    .color(Color::Muted),
+                Color::Accent
+            },
+        ))
+        .child(Label::new(skill.name.clone()).size(LabelSize::Small))
+        .when(!skill.summary.is_empty(), |item| {
+            item.tooltip(Tooltip::text(skill.summary.clone()))
+        })
+        .end_slot(KeyBinding::for_action_in(&run, &self.focus_handle, cx).size(rems_from_px(10.)))
+        // The row itself runs the ritual, so reading what it will do needs
+        // its own affordance.
+        .end_slot_on_hover(
+            IconButton::new(
+                ElementId::Name(SharedString::from(format!(
+                    "thock-view-skill-{}-{}",
+                    manifest.id, skill.id
+                ))),
+                IconName::FileDoc,
             )
-            .child(Label::new(skill.name.clone()).size(LabelSize::Small))
-            .when(!skill.summary.is_empty(), |item| {
-                item.tooltip(Tooltip::text(skill.summary.clone()))
-            })
-            .end_slot(
-                IconButton::new(
-                    ElementId::Name(SharedString::from(format!(
-                        "thock-run-skill-{}-{}",
-                        manifest.id, skill.id
-                    ))),
-                    IconName::PlayOutlined,
-                )
-                .icon_size(IconSize::XSmall)
-                .icon_color(Color::Muted)
-                .tooltip(Tooltip::text(run_tooltip))
-                .on_click(cx.listener({
-                    let title = if is_onboarding {
-                        format!("{} setup", manifest.name)
-                    } else {
-                        skill.name.clone()
-                    };
-                    let file = skill.file.clone();
-                    move |this, _, window, cx| {
-                        this.run_skill(title.clone(), file.clone(), window, cx);
-                    }
-                })),
-            )
+            .icon_size(IconSize::XSmall)
+            .icon_color(Color::Muted)
+            .tooltip(Tooltip::text("Open these instructions"))
             .on_click(cx.listener({
-                let routine_id = routine_id.clone();
+                let routine_id = manifest.id.clone();
                 let file = skill.file.clone();
                 move |this, _, window, cx| {
                     this.open_routine_file(file.clone(), routine_id.clone(), window, cx);
                 }
-            }))
-        }));
-        section.into_any_element()
+            })),
+        )
+        .on_click(cx.listener({
+            let file = skill.file.clone();
+            move |this, _, window, cx| {
+                this.run_skill(title.clone(), file.clone(), window, cx);
+            }
+        }))
+        .into_any_element()
+    }
+
+    fn render_group_row(
+        &self,
+        routine_id: &str,
+        label: SharedString,
+        expanded: bool,
+        index: usize,
+        selected_index: Option<usize>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        ListItem::new(ElementId::Name(SharedString::from(format!(
+            "thock-group-{routine_id}-{label}"
+        ))))
+        .indent_level(1)
+        .indent_step_size(px(12.))
+        .toggle_state(selected_index == Some(index))
+        // The disclosure sits in the start slot, not in `ListItem::toggle`'s
+        // own column, so the chevron lands exactly where its siblings' icons
+        // do and the group reads as one of them.
+        .start_slot(
+            Icon::new(if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .size(IconSize::XSmall)
+            .color(Color::Muted),
+        )
+        .child(
+            Label::new(label.clone())
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
+        .on_click(cx.listener({
+            let routine_id = routine_id.to_string();
+            move |this, _, _window, cx| this.toggle_group(&routine_id, &label, cx)
+        }))
+        .into_any_element()
     }
 
     /// An enabled Routine whose definition is missing or invalid collapses
@@ -1948,11 +2306,17 @@ impl Render for RoutinesPanel {
             .on_action(cx.listener(Self::select_first))
             .on_action(cx.listener(Self::select_last))
             .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::view_skill))
+            .on_action(cx.listener(Self::expand_group))
+            .on_action(cx.listener(Self::collapse_group))
             .size_full()
             .overflow_y_scroll()
             .pt_2()
             .pb_2()
-            .pl_2()
+            // `ListItem` hangs its disclosure a full rem outside the row's
+            // content box, so the left inset has to cover that overhang or the
+            // Routine header's chevron sits on the panel border.
+            .pl_4()
             .pr_1()
             .child(content)
     }
@@ -2024,6 +2388,8 @@ impl Panel for RoutinesPanel {
 mod tests {
     use super::*;
 
+    use crate::routines::SkillKind;
+
     fn link(open: &str, kind: LinkKind, icon: Option<&str>) -> RoutineLink {
         RoutineLink {
             id: "row".into(),
@@ -2031,15 +2397,21 @@ mod tests {
             open: open.into(),
             kind,
             icon: icon.map(str::to_string),
+            group: None,
             create: false,
         }
     }
 
     fn skill(icon: Option<&str>) -> RoutineSkill {
+        skill_of_kind(SkillKind::Ritual, icon)
+    }
+
+    fn skill_of_kind(kind: SkillKind, icon: Option<&str>) -> RoutineSkill {
         RoutineSkill {
             id: "row".into(),
             name: "Row".into(),
             file: "routines/x/skills/row.md".into(),
+            kind,
             summary: String::new(),
             icon: icon.map(str::to_string),
             reads: Vec::new(),
@@ -2065,7 +2437,216 @@ mod tests {
             link_icon(&link("weekly/site/index.html", LinkKind::Browser, None)),
             RowIcon::Path("icons/file_icons/html.svg")
         );
-        assert_eq!(skill_icon(&skill(None)), RowIcon::Named(IconName::AiGemini));
+        // A verb reads as a verb: rituals default to the run glyph, setup
+        // steps to the settings one.
+        assert_eq!(
+            skill_icon(&skill(None)),
+            RowIcon::Named(IconName::PlayOutlined)
+        );
+        assert_eq!(
+            skill_icon(&skill_of_kind(SkillKind::Setup, None)),
+            RowIcon::Named(IconName::Settings)
+        );
+    }
+
+    fn named_link(id: &str, group: Option<&str>) -> RoutineLink {
+        RoutineLink {
+            id: id.into(),
+            name: id.into(),
+            open: format!("daily/{id}.md"),
+            kind: LinkKind::Editor,
+            icon: None,
+            group: group.map(str::to_string),
+            create: false,
+        }
+    }
+
+    fn named_skill(id: &str, kind: SkillKind) -> RoutineSkill {
+        RoutineSkill {
+            id: id.into(),
+            name: id.into(),
+            file: format!("routines/x/skills/{id}.md"),
+            kind,
+            summary: String::new(),
+            icon: None,
+            reads: Vec::new(),
+            writes: Vec::new(),
+        }
+    }
+
+    fn manifest(links: Vec<RoutineLink>, skills: Vec<RoutineSkill>) -> RoutineManifest {
+        RoutineManifest {
+            schema: 2,
+            id: "x".into(),
+            name: "X".into(),
+            version: 1,
+            summary: String::new(),
+            icon: None,
+            doc: "routines/x/X.md".into(),
+            agent_doc: None,
+            links,
+            scaffold: Vec::new(),
+            skills,
+            onboarding: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// A compact transcript of a section, so the ordering rules read as one
+    /// list rather than a pile of index assertions.
+    fn transcript(items: &[SectionItem]) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| {
+                let indent = if item.group.is_some() { "  " } else { "" };
+                match &item.kind {
+                    SectionItemKind::Caption(label) => format!("# {label}"),
+                    SectionItemKind::Link(link) => format!("{indent}link {}", link.id),
+                    SectionItemKind::Skill(skill) => format!("{indent}skill {}", skill.id),
+                    SectionItemKind::Group { label, .. } => format!("> {label}"),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn section_demotes_grouped_links_and_setup_steps() {
+        let manifest = manifest(
+            vec![
+                named_link("today", None),
+                named_link("yesterday", Some("Older notes")),
+                named_link("this-week", None),
+                named_link("last-week", Some("Older notes")),
+            ],
+            vec![
+                named_skill("wrap-today", SkillKind::Ritual),
+                named_skill("connect-google", SkillKind::Setup),
+                named_skill("week-review", SkillKind::Ritual),
+                named_skill("onboarding", SkillKind::Setup),
+            ],
+        );
+        // Groups start closed: the two demoted links and both setup steps
+        // cost one row each, not four.
+        assert_eq!(
+            transcript(&section_items(&manifest, &HashSet::new())),
+            vec![
+                "# Notes",
+                "link today",
+                "link this-week",
+                "> Older notes",
+                "# Rituals",
+                "skill wrap-today",
+                "skill week-review",
+                "> Setup",
+            ]
+        );
+    }
+
+    #[test]
+    fn expanded_groups_nest_their_members_in_place() {
+        let manifest = manifest(
+            vec![
+                named_link("today", None),
+                named_link("yesterday", Some("Older notes")),
+            ],
+            vec![named_skill("onboarding", SkillKind::Setup)],
+        );
+        let expanded = HashSet::from([group_key("x", "Older notes")]);
+        assert_eq!(
+            transcript(&section_items(&manifest, &expanded)),
+            vec![
+                "# Notes",
+                "link today",
+                "> Older notes",
+                "  link yesterday",
+                "> Setup",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_section_with_nothing_to_separate_gets_no_captions() {
+        let links_only = manifest(vec![named_link("today", None)], Vec::new());
+        assert_eq!(
+            transcript(&section_items(&links_only, &HashSet::new())),
+            vec!["link today"]
+        );
+        let skills_only = manifest(
+            Vec::new(),
+            vec![named_skill("wrap-today", SkillKind::Ritual)],
+        );
+        assert_eq!(
+            transcript(&section_items(&skills_only, &HashSet::new())),
+            vec!["skill wrap-today"]
+        );
+    }
+
+    /// Captions take no keyboard stop, so every row the cursor can land on
+    /// must line up with a rendered, actionable item.
+    #[test]
+    fn every_selectable_row_is_an_action() {
+        let manifest = manifest(
+            vec![named_link("today", None), named_link("old", Some("Older"))],
+            vec![
+                named_skill("wrap", SkillKind::Ritual),
+                named_skill("setup", SkillKind::Setup),
+            ],
+        );
+        let items = section_items(&manifest, &HashSet::new());
+        let selectable = items
+            .iter()
+            .filter(|item| !matches!(item.kind, SectionItemKind::Caption(_)))
+            .count();
+        assert_eq!(items.len(), selectable + 2, "expected two captions");
+        assert_eq!(selectable, 4, "today, Older, wrap, Setup");
+    }
+
+    fn nav_rows_of(manifest: &RoutineManifest, expanded: &HashSet<String>) -> Vec<NavRow> {
+        section_items(manifest, expanded)
+            .into_iter()
+            .filter_map(|item| {
+                let kind = match item.kind {
+                    SectionItemKind::Caption(_) => return None,
+                    SectionItemKind::Link(link) => NavRowKind::Link(link),
+                    SectionItemKind::Skill(skill) => NavRowKind::Skill(skill),
+                    SectionItemKind::Group { label, .. } => NavRowKind::Group(label),
+                };
+                Some(NavRow {
+                    routine_id: manifest.id.clone(),
+                    group: item.group,
+                    kind,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn toggling_a_group_keeps_the_cursor_on_its_row() {
+        let manifest = manifest(
+            vec![
+                named_link("today", None),
+                named_link("yesterday", Some("Older notes")),
+            ],
+            vec![named_skill("wrap-today", SkillKind::Ritual)],
+        );
+        let group_row = nav_key("x", "group", "Older notes");
+        let wrap = nav_key("x", "skill", "wrap-today");
+        let yesterday = nav_key("x", "link", "yesterday");
+
+        // Opening the group inserts a row above the ritual: the cursor moves
+        // with the row, not with the index.
+        let closed = nav_rows_of(&manifest, &HashSet::new());
+        assert_eq!(reanchor_selection(&closed, &wrap, &group_row), Some(2));
+        let expanded = nav_rows_of(&manifest, &HashSet::from([group_key("x", "Older notes")]));
+        assert_eq!(reanchor_selection(&expanded, &wrap, &group_row), Some(3));
+
+        // Closing it takes the cursor's row with it, so the cursor lands on
+        // the group row rather than on whatever index survives.
+        assert_eq!(
+            reanchor_selection(&expanded, &yesterday, &group_row),
+            Some(2)
+        );
+        assert_eq!(reanchor_selection(&closed, &yesterday, &group_row), Some(1));
     }
 
     #[test]
@@ -2095,7 +2676,7 @@ mod tests {
         );
         assert_eq!(
             skill_icon(&skill(Some("nope"))),
-            RowIcon::Named(IconName::AiGemini)
+            RowIcon::Named(IconName::PlayOutlined)
         );
         assert_eq!(routine_icon(Some("nope")), RowIcon::Named(IconName::Blocks));
         assert_eq!(routine_icon(None), RowIcon::Named(IconName::Blocks));

@@ -18,7 +18,7 @@ impl EditorSnapshot {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        let folded = self.is_line_folded(buffer_row);
+        let folded = self.is_line_folded(buffer_row) && self.row_has_gutter_fold(buffer_row);
         let mut is_foldable = false;
 
         if let Some(crease) = self
@@ -71,6 +71,17 @@ impl EditorSnapshot {
         } else {
             None
         }
+    }
+
+    /// Whether anything on this row should pin a fold toggle in the gutter.
+    /// Rows folded only by decorative folds (markup conceal) keep the default
+    /// hover-and-cursor behaviour instead of advertising a fold that isn't one.
+    fn row_has_gutter_fold(&self, buffer_row: MultiBufferRow) -> bool {
+        let buffer_snapshot = self.buffer_snapshot();
+        let row_start = MultiBufferPoint::new(buffer_row.0, 0);
+        let row_end = MultiBufferPoint::new(buffer_row.0, buffer_snapshot.line_len(buffer_row));
+        let mut folds = self.folds_in_range(row_start..row_end).peekable();
+        folds.peek().is_none() || folds.any(|fold| fold.placeholder.gutter_toggle)
     }
 
     pub fn render_crease_trailer(
@@ -958,6 +969,7 @@ impl Editor {
                 constrain_width: false,
                 merge_adjacent: false,
                 type_tag: Some(type_id),
+                gutter_toggle: true,
                 collapsed_text: None,
             };
             let creases = new_newlines
