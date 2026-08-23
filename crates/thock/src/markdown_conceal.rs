@@ -452,6 +452,7 @@ fn marker_placeholder() -> FoldPlaceholder {
         constrain_width: false,
         merge_adjacent: false,
         type_tag: Some(fold_type_tag()),
+        gutter_toggle: false,
         collapsed_text: Some(" ".into()),
     }
 }
@@ -492,6 +493,7 @@ fn checkbox_placeholder(checked: bool) -> FoldPlaceholder {
         constrain_width: false,
         merge_adjacent: false,
         type_tag: Some(fold_type_tag()),
+        gutter_toggle: false,
         collapsed_text: Some(if checked { "☑" } else { "☐" }.into()),
     }
 }
@@ -527,6 +529,7 @@ fn rule_placeholder(editor: WeakEntity<Editor>) -> FoldPlaceholder {
         constrain_width: false,
         merge_adjacent: false,
         type_tag: Some(fold_type_tag()),
+        gutter_toggle: false,
         collapsed_text: Some(" ".into()),
     }
 }
@@ -606,7 +609,7 @@ mod tests {
     use gpui::{
         Entity, Modifiers, MouseButton, TestAppContext, VisualContext as _, VisualTestContext,
     };
-    use multi_buffer::MultiBufferPoint;
+    use multi_buffer::{MultiBufferPoint, MultiBufferRow};
     use project::Project;
     use serde_json::json;
     use std::path::Path;
@@ -686,6 +689,40 @@ mod tests {
         assert_eq!(
             display_text(&editor, &mut cx),
             " Title\nsee [[wiki]] and [docs](https://a.example)\n \nplain tail\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn conceal_folds_do_not_pin_a_gutter_toggle(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, NOTE).await;
+        move_cursor_to(&editor, 3, &mut cx);
+
+        let snapshot = editor.update_in(&mut cx, |editor, window, cx| editor.snapshot(window, cx));
+        let toggle = cx.update(|window, cx| {
+            snapshot.render_crease_toggle(MultiBufferRow(0), false, editor.clone(), window, cx)
+        });
+        assert!(
+            toggle.is_none(),
+            "a row folded only by conceal must keep the gutter's hover behaviour"
+        );
+
+        move_cursor_to(&editor, 1, &mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            let range = MultiBufferPoint::new(3, 0)..MultiBufferPoint::new(3, 5);
+            editor.fold_creases(
+                vec![Crease::simple(range, FoldPlaceholder::default())],
+                false,
+                window,
+                cx,
+            );
+        });
+        let snapshot = editor.update_in(&mut cx, |editor, window, cx| editor.snapshot(window, cx));
+        let toggle = cx.update(|window, cx| {
+            snapshot.render_crease_toggle(MultiBufferRow(3), false, editor.clone(), window, cx)
+        });
+        assert!(
+            toggle.is_some(),
+            "a fold the user made still advertises itself in the gutter"
         );
     }
 
