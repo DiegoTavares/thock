@@ -1,8 +1,7 @@
-use collab_ui::collab_panel;
 use gpui::{App, Menu, MenuItem, OsAction};
 use release_channel::ReleaseChannel;
 use terminal_view::terminal_panel;
-use zed_actions::{Quit, assistant, debug_panel, dev, git_panel, project_panel};
+use zed_actions::{Quit, dev, project_panel};
 
 pub fn app_menus(cx: &mut App) -> Vec<Menu> {
     let mut view_items = vec![
@@ -38,15 +37,19 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             ],
         }),
         MenuItem::separator(),
+        // Thock: the inherited code-editor panels are hidden; the Thock panels
+        // are listed instead (V12 de-Zed-ification).
+        MenuItem::action("Routines Panel", thock::routines_panel::ToggleFocus),
+        MenuItem::action(
+            "Day Planner Panel",
+            thock::day_planner_panel::ToggleDayPlannerFocus,
+        ),
+        MenuItem::action("Backlog Panel", thock::backlog_panel::ToggleBacklogFocus),
+        MenuItem::action("Agent Panel", thock::agent_panel::ToggleAgentFocus),
+        MenuItem::separator(),
         MenuItem::action("Project Panel", project_panel::ToggleFocus),
         MenuItem::action("Outline Panel", outline_panel::ToggleFocus),
-        MenuItem::action("Collab Panel", collab_panel::ToggleFocus),
         MenuItem::action("Terminal Panel", terminal_panel::Toggle),
-        MenuItem::action("Debugger Panel", debug_panel::ToggleFocus),
-        MenuItem::action("Agent Panel", assistant::ToggleFocus),
-        MenuItem::action("Git Panel", git_panel::ToggleFocus),
-        MenuItem::separator(),
-        MenuItem::action("Diagnostics", diagnostics::Deploy),
         MenuItem::separator(),
     ];
 
@@ -64,7 +67,6 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             disabled: false,
             items: vec![
                 MenuItem::action("About Zed", zed_actions::About),
-                MenuItem::action("Check for Updates", auto_update::Check),
                 MenuItem::separator(),
                 MenuItem::submenu(Menu::new("Settings").items([
                     MenuItem::action("Open Settings", zed_actions::OpenSettings),
@@ -251,31 +253,6 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             ],
         },
         Menu {
-            name: "Run".into(),
-            disabled: false,
-            items: vec![
-                MenuItem::action(
-                    "Spawn Task",
-                    zed_actions::Spawn::ViaModal {
-                        reveal_target: None,
-                    },
-                ),
-                MenuItem::action("Start Debugger", debugger_ui::Start),
-                MenuItem::separator(),
-                MenuItem::action("Edit tasks.json…", zed_actions::OpenProjectTasks),
-                MenuItem::action("Edit debug.json…", zed_actions::OpenProjectDebugTasks),
-                MenuItem::separator(),
-                MenuItem::action("Continue", debugger_ui::Continue),
-                MenuItem::action("Step Over", debugger_ui::StepOver),
-                MenuItem::action("Step Into", debugger_ui::StepInto),
-                MenuItem::action("Step Out", debugger_ui::StepOut),
-                MenuItem::separator(),
-                MenuItem::action("Toggle Breakpoint", editor::actions::ToggleBreakpoint),
-                MenuItem::action("Edit Breakpoint", editor::actions::EditLogBreakpoint),
-                MenuItem::action("Clear All Breakpoints", debugger_ui::ClearAllBreakpoints),
-            ],
-        },
-        Menu {
             name: "Window".into(),
             disabled: false,
             items: vec![
@@ -287,39 +264,12 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         Menu {
             name: "Help".into(),
             disabled: false,
-            items: vec![
-                MenuItem::action(
-                    "View Release Notes Locally",
-                    auto_update_ui::ViewReleaseNotesLocally,
-                ),
-                MenuItem::action("View Telemetry", zed_actions::OpenTelemetryLog),
-                MenuItem::action("View Dependency Licenses", zed_actions::OpenLicenses),
-                MenuItem::action("Show Welcome", onboarding::ShowWelcome),
-                MenuItem::separator(),
-                MenuItem::action("File Bug Report...", zed_actions::feedback::FileBugReport),
-                MenuItem::action("Request Feature...", zed_actions::feedback::RequestFeature),
-                MenuItem::action("Email Us...", zed_actions::feedback::EmailZed),
-                MenuItem::separator(),
-                MenuItem::action(
-                    "Documentation",
-                    super::OpenBrowser {
-                        url: "https://zed.dev/docs".into(),
-                    },
-                ),
-                MenuItem::action("Zed Repository", feedback::OpenZedRepo),
-                MenuItem::action(
-                    "Zed Twitter",
-                    super::OpenBrowser {
-                        url: "https://twitter.com/zeddotdev".into(),
-                    },
-                ),
-                MenuItem::action(
-                    "Join the Team",
-                    super::OpenBrowser {
-                        url: "https://zed.dev/jobs".into(),
-                    },
-                ),
-            ],
+            // Thock: Zed's telemetry, feedback, and marketing links have no
+            // place here (V12 de-Zed-ification).
+            items: vec![MenuItem::action(
+                "View Dependency Licenses",
+                zed_actions::OpenLicenses,
+            )],
         },
     ]
 }

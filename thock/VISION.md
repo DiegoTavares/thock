@@ -219,7 +219,7 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
 
 ### Milestone 4 — Onboarding & de-Zed-ification
 - [ ] **First-run onboarding** — point at a folder, connect an LLM, pick Routines, run first ritual in <10 min. _(planned)_
-- [ ] **Remove code-editor chrome** — disable git pane + subscription/billing surfaces that conflict with the life-OS framing. _(planned)_
+- [x] **Remove code-editor chrome** — the inherited Zed surface is off by default: no sign-in/user menu, no git/collab/debugger/diagnostics/LSP buttons, no tasks, Jupyter or gutter runnables, telemetry and auto-update off, no unconditional phone-home (extension update ping guarded, prettier-for-Markdown off so opening a note downloads nothing). Language servers are opt-in per language (TOML via auto-installed extension, JSON/JSONC/YAML kept for settings editing); the command palette hides the debugger/task/repl/collab/account namespaces; menus list the Thock panels and drop the Run menu and Zed marketing links. All setting-level flips and hides, never code removal, so rebases stay cheap. Spec `specs/v12-de-zed-ification.md`. _(shipped)_
 - [ ] **BYO-LLM cost visibility** — key/model choice, local vs cloud, graceful failure. _(planned)_
 
 ---

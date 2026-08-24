@@ -55,6 +55,9 @@ export ZED_RELEASE_CHANNEL="${channel}"
 popd
 
 export ZED_BUNDLE=true
+# Thock: baked in at compile time so a bundled build can never fetch Zed
+# release binaries, whatever the release channel (V12 de-Zed-ification).
+export ZED_UPDATE_EXPLANATION="Thock updates ship as new builds of the app; there is nothing to fetch from Zed."
 
 cargo_bundle_version=$(cargo -q bundle --help 2>&1 | head -n 1 || echo "")
 if [ "$cargo_bundle_version" != "cargo-bundle v0.6.1-zed" ]; then
