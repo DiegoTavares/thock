@@ -1,6 +1,6 @@
 # Thock V13 — The Inbox Routine: capture from anywhere, triage at the desk
 
-**Status:** Ready for implementation — every open assumption closed 2026-08-23 (§12)
+**Status:** Implemented (2026-08-23) — §14's drop directory deferred
 **Owner:** Diego · **Date:** 2026-08-23
 **Companion docs:** `../VISION.md` (§4.1 Your files forever, §4.4 Human-in-the-loop, §4.6 Modular life,
 §5.7 Inbox), `v9-gmail-backlog-capture.md` (the capture planner, dedup, poll loop, and status-row
