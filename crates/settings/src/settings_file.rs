@@ -133,6 +133,13 @@ pub fn test_settings() -> &'static str {
         #[cfg(not(target_os = "windows"))]
         util::merge_non_null_json_value_into(
             serde_json::json!({
+                // Thock: default.json disables language servers, tasks, gutter
+                // run/debug affordances (V12 de-Zed-ification), and AI (V5);
+                // upstream tests assume they are on.
+                "enable_language_server": true,
+                "tasks": { "enabled": true },
+                "gutter": { "runnables": true, "breakpoints": true },
+                "disable_ai": false,
                 "format_on_save": "on",
                 "ui_font_family": "Courier",
                 "ui_font_features": {},
@@ -149,6 +156,13 @@ pub fn test_settings() -> &'static str {
         #[cfg(target_os = "windows")]
         util::merge_non_null_json_value_into(
             serde_json::json!({
+                // Thock: default.json disables language servers, tasks, gutter
+                // run/debug affordances (V12 de-Zed-ification), and AI (V5);
+                // upstream tests assume they are on.
+                "enable_language_server": true,
+                "tasks": { "enabled": true },
+                "gutter": { "runnables": true, "breakpoints": true },
+                "disable_ai": false,
                 "format_on_save": "on",
                 "ui_font_family": "Courier New",
                 "ui_font_features": {},

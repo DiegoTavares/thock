@@ -21,6 +21,7 @@ pub mod routines_panel;
 pub mod vault;
 
 use anyhow::{Context as _, Result};
+use command_palette_hooks::CommandPaletteFilter;
 use editor::Editor;
 use gpui::{App, AppContext as _, AsyncWindowContext, Task, WeakEntity};
 use markdown_preview::markdown_preview_view::MarkdownPreviewView;
@@ -42,6 +43,44 @@ pub fn init(cx: &mut App) {
     calendar_service::init(cx);
     gmail_service::init(cx);
     markdown_conceal::init(cx);
+    hide_inherited_zed_actions(cx);
+}
+
+/// Hides command-palette actions for the Zed subsystems Thock turns off
+/// (V12 de-Zed-ification). The subsystems stay registered so upstream rebases
+/// stay cheap, but a note-taker never sees debugger, task, collab, or
+/// account commands.
+fn hide_inherited_zed_actions(cx: &mut App) {
+    use std::any::TypeId;
+    if CommandPaletteFilter::try_global(cx).is_none() {
+        // `update_global` silently no-ops without the global, which would
+        // resurface every hidden Zed command.
+        log::warn!(
+            "Thock: command palette filter not initialized; inherited Zed actions will stay visible"
+        );
+    }
+    CommandPaletteFilter::update_global(cx, |filter, _| {
+        for namespace in [
+            "call",
+            "channel",
+            "client",
+            "collab",
+            "collab_panel",
+            "debugger",
+            "dev",
+            "feedback",
+            "onboarding",
+            "repl",
+            "task",
+        ] {
+            filter.hide_namespace(namespace);
+        }
+        filter.hide_action_types(&[
+            TypeId::of::<zed_actions::OpenOnboarding>(),
+            TypeId::of::<zed_actions::OpenAccountSettings>(),
+            TypeId::of::<workspace::welcome::ShowWelcome>(),
+        ]);
+    });
 }
 
 /// Opens `path` and lands the user on a rendered markdown preview of it
@@ -125,4 +164,34 @@ pub fn open_startup_vault(app_state: Arc<AppState>, cx: &mut App) -> Task<Result
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn hides_inherited_zed_actions_from_the_command_palette(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            command_palette_hooks::init(cx);
+            hide_inherited_zed_actions(cx);
+
+            let filter = CommandPaletteFilter::try_global(cx)
+                .expect("command palette filter global should be set by init");
+
+            assert!(
+                filter.is_hidden(&zed_actions::feedback::FileBugReport),
+                "actions in hidden namespaces should be hidden"
+            );
+            assert!(filter.is_hidden(&zed_actions::OpenOnboarding));
+            assert!(filter.is_hidden(&zed_actions::OpenAccountSettings));
+            assert!(filter.is_hidden(&workspace::welcome::ShowWelcome));
+
+            assert!(
+                !filter.is_hidden(&routines_panel::OpenToday),
+                "Thock actions should stay visible"
+            );
+        });
+    }
 }

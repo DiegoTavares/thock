@@ -1844,7 +1844,8 @@ mod tests {
 
         assert_eq!(
             store.get::<AutoUpdateSetting>(None),
-            &AutoUpdateSetting { auto_update: true }
+            // Thock: default.json ships auto_update off (V12 de-Zed-ification).
+            &AutoUpdateSetting { auto_update: false }
         );
         assert_eq!(
             store.get::<ItemSettings>(None).close_position,

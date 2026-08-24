@@ -554,12 +554,14 @@
     "show_project_items": true,
     // Whether to show onboarding banners in the titlebar.
     "show_onboarding_banner": true,
+    // Thock: no accounts and no sign-in (V12 de-Zed-ification). Settings,
+    // keymap, and themes stay reachable from the app menu and command palette.
     // Whether to show user picture in the titlebar.
-    "show_user_picture": true,
+    "show_user_picture": false,
     // Whether to show the user menu in the titlebar.
-    "show_user_menu": true,
+    "show_user_menu": false,
     // Whether to show the sign in button in the titlebar.
-    "show_sign_in": true,
+    "show_sign_in": false,
     // Whether to show the menus in the titlebar.
     "show_menus": false,
     // The layout of window control buttons in the title bar (Linux only).
@@ -678,11 +680,13 @@
     // Whether to show line numbers in the gutter.
     "line_numbers": true,
     // Whether to show runnables buttons in the gutter.
-    "runnables": true,
+    // Thock: no code running in a vault (V12 de-Zed-ification).
+    "runnables": false,
     // Whether to show bookmarks in the gutter.
     "bookmarks": true,
     // Whether to show breakpoints in the gutter.
-    "breakpoints": true,
+    // Thock: no debugger in a vault (V12 de-Zed-ification).
+    "breakpoints": false,
     // Whether to show fold buttons in the gutter.
     "folds": true,
     // Minimum number of characters to reserve space for in the gutter.
@@ -971,7 +975,8 @@
   },
   "collaboration_panel": {
     // Whether to show the collaboration panel button in the status bar.
-    "button": true,
+    // Thock: no collaboration surface (V12 de-Zed-ification).
+    "button": false,
     // Where to dock the collaboration panel. Can be 'left' or 'right'.
     "dock": "left",
     // Default width of the collaboration panel.
@@ -979,7 +984,9 @@
   },
   "git_panel": {
     // Whether to show the git panel button in the status bar.
-    "button": true,
+    // Thock: versioning is invisible — the word "git" never appears in the UI
+    // (V12 de-Zed-ification).
+    "button": false,
     // Where to dock the git panel. Can be 'left' or 'right'.
     "dock": "left",
     // Default width of the git panel.
@@ -1286,7 +1293,11 @@
   // Whether the screen sharing icon is shown in the os status bar.
   "show_call_status_icon": true,
   // Whether to use language servers to provide code intelligence.
-  "enable_language_server": true,
+  //
+  // Thock: off globally so no language ever downloads a server binary behind
+  // the user's back; re-enabled per language (TOML, JSON, JSONC, YAML) in the
+  // "languages" map below (V12 de-Zed-ification).
+  "enable_language_server": false,
   // Whether to perform linked edits of associated ranges, if the language server supports it.
   // For example, when editing opening <html> tag, the contents of the closing </html> tag will be edited as well.
   "linked_edits": true,
@@ -1548,10 +1559,11 @@
   "word_diff_enabled": true,
   // Control what info is collected by Zed.
   "telemetry": {
+    // Thock: a private vault phones nobody home (V12 de-Zed-ification).
     // Send debug info like crash reports.
-    "diagnostics": true,
+    "diagnostics": false,
     // Send anonymized usage data like what languages you're using Zed with.
-    "metrics": true,
+    "metrics": false,
     // Allow sending requests to Anthropic models that cannot be offered with
     // Zero Data Retention
     "anthropic_retention": false,
@@ -1568,7 +1580,9 @@
   "disable_ai": true,
   // Automatically update Zed. This setting may be ignored on Linux if
   // installed through a package manager.
-  "auto_update": true,
+  //
+  // Thock: a fork must never fetch Zed release binaries (V12 de-Zed-ification).
+  "auto_update": false,
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
   // Possible values:
@@ -1589,7 +1603,8 @@
   // Diagnostics configuration.
   "diagnostics": {
     // Whether to show the project diagnostics button in the status bar.
-    "button": true,
+    // Thock: prose has no compile errors (V12 de-Zed-ification).
+    "button": false,
     // Whether to show warnings or not by default.
     //
     // Default: true
@@ -2093,7 +2108,8 @@
   // Settings related to running tasks.
   "tasks": {
     "variables": {},
-    "enabled": true,
+    // Thock: no task runner in a vault (V12 de-Zed-ification).
+    "enabled": false,
     // Use LSP tasks over Zed language extension ones.
     // If no LSP tasks are returned due to error/timeout or regular execution,
     // Zed language extension tasks will be used instead.
@@ -2148,7 +2164,10 @@
   // If you don't want any of these extensions, add this field to your settings
   // and change the value to `false`.
   "auto_install_extensions": {
-    "html": true,
+    // Thock: TOML powers routine.toml editing; html has no place in a vault
+    // (V12 de-Zed-ification).
+    "html": false,
+    "toml": true,
   },
   // The capabilities granted to extensions.
   //
@@ -2312,11 +2331,14 @@
       },
     },
     "JSON": {
+      // Thock: keep schema-aware editing for settings and keymap files.
+      "enable_language_server": true,
       "prettier": {
         "allowed": true,
       },
     },
     "JSONC": {
+      "enable_language_server": true,
       "prettier": {
         "allowed": true,
       },
@@ -2345,7 +2367,9 @@
         "words": "disabled",
       },
       "prettier": {
-        "allowed": true,
+        // Thock: opening a note must never npm-install prettier or download a
+        // Node runtime (V12 de-Zed-ification).
+        "allowed": false,
       },
     },
     "PHP": {
@@ -2410,6 +2434,10 @@
         "plugins": ["prettier-plugin-svelte"],
       },
     },
+    "TOML": {
+      // Thock: routine.toml is a first-class file (V12 de-Zed-ification).
+      "enable_language_server": true,
+    },
     "TSX": {
       "language_servers": ["!typescript-language-server", "vtsls", "..."],
       "prettier": {
@@ -2444,6 +2472,7 @@
       },
     },
     "YAML": {
+      "enable_language_server": true,
       "prettier": {
         "allowed": true,
       },
@@ -2562,7 +2591,8 @@
   // Common language server settings.
   "global_lsp_settings": {
     // Whether to show the LSP servers button in the status bar.
-    "button": true,
+    // Thock: hidden (V12 de-Zed-ification).
+    "button": false,
     // The maximum amount of time to wait for responses from language servers, in seconds.
     // A value of 0 will result in no timeout being applied.
     //
@@ -2611,7 +2641,8 @@
   },
   // Jupyter settings
   "jupyter": {
-    "enabled": true,
+    // Thock: no notebooks/REPL in a vault (V12 de-Zed-ification).
+    "enabled": false,
     "kernel_selections": {},
     // Specify the language name as the key and the kernel name as the value.
     // "kernel_selections": {
@@ -2777,7 +2808,8 @@
     "dock": "bottom",
     "log_dap_communications": true,
     "format_dap_log_messages": true,
-    "button": true,
+    // Thock: no debugger in a vault (V12 de-Zed-ification).
+    "button": false,
   },
   // Configures any number of settings profiles that are temporarily applied
   // when selected from `settings profile selector: toggle`.

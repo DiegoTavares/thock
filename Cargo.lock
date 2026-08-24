@@ -18755,6 +18755,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "command_palette_hooks",
  "editor",
  "fs",
  "futures 0.3.32",
@@ -18794,6 +18795,7 @@ dependencies = [
  "util",
  "which 6.0.3",
  "workspace",
+ "zed_actions",
  "zed_credentials_provider",
 ]
 

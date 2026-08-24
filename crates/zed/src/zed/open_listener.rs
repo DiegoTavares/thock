@@ -16,7 +16,6 @@ use futures::{FutureExt, StreamExt};
 use git_ui::{file_diff_view::FileDiffView, multi_diff_view::MultiDiffView};
 use gpui::{App, AsyncApp, Global, TaskExt, WindowHandle};
 use onboarding::FIRST_OPEN;
-use onboarding::show_onboarding_view;
 use recent_projects::{RemoteSettings, navigate_to_positions, open_remote_project};
 use remote::{RemoteConnectionOptions, WslConnectionOptions};
 use settings::Settings;
@@ -865,7 +864,10 @@ async fn open_workspaces(
         // If we have no paths to open, show the welcome screen if this is the first launch
         let kvp = cx.update(|cx| KeyValueStore::global(cx));
         if matches!(kvp.read_kvp(FIRST_OPEN), Ok(None)) {
-            cx.update(|cx| show_onboarding_view(app_state, cx).detach());
+            // Thock: first launch lands in the vault, never Zed onboarding
+            // (V12 de-Zed-ification). Mirrors the same change in main.rs.
+            cx.update(|cx| thock::open_startup_vault(app_state, cx))
+                .await?;
         }
         // If not the first launch, show an empty window with empty editor
         else {

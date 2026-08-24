@@ -394,7 +394,9 @@ impl ExtensionStore {
             }
             this.update(cx, |this, cx| this.auto_install_extensions(cx))
                 .ok();
-            this.update(cx, |this, cx| this.check_for_updates(cx)).ok();
+            // Thock: no unconditional update ping to the extension registry at
+            // startup (V12 de-Zed-ification). Extensions update on demand from
+            // the Extensions page instead.
         })
         .detach();
 
