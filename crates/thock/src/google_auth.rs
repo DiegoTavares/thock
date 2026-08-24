@@ -11,10 +11,19 @@ use gpui::AsyncApp;
 use http_client::{AsyncBody, HttpClient, Request, http};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::calendar::GoogleClientOverride;
 use crate::calendar_google::{CalendarListEntry, list_calendars};
+use crate::vault::VAULT_MARKER_DIR;
+
+/// `.thock/google.toml` (V13 §7.4): what belongs to the *connection* rather
+/// than to any feature — the account, and the optional `[google]` client
+/// override. Written by the connect flow; the per-feature files keep only
+/// their own keys.
+pub const GOOGLE_CONFIG_FILE: &str = "google.toml";
 
 /// Keychain slot for the unified refresh token: username is the account
 /// email, password is the token. No token ever touches the vault.
@@ -37,7 +46,8 @@ const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 /// The bundled Google *Desktop app* OAuth client, baked in at build time.
 /// Google's own guidance is that a desktop client secret is not confidential,
 /// which is why PKCE is mandatory here rather than optional. `[google]` in
-/// `.thock/calendar.toml` or `.thock/gmail.toml` overrides the pair.
+/// `.thock/google.toml` (or, for pre-V13 vaults, a feature's own config
+/// file) overrides the pair.
 const BUNDLED_CLIENT_ID: Option<&str> = option_env!("THOCK_GOOGLE_CLIENT_ID");
 const BUNDLED_CLIENT_SECRET: Option<&str> = option_env!("THOCK_GOOGLE_CLIENT_SECRET");
 
@@ -76,14 +86,14 @@ pub struct GoogleClient {
 
 impl GoogleClient {
     /// The bundled desktop client with any `[google]` override applied.
-    pub fn resolve(overrides: &crate::calendar::GoogleClientOverride) -> Result<Self> {
+    pub fn resolve(overrides: &GoogleClientOverride) -> Result<Self> {
         let client_id = overrides
             .client_id
             .clone()
             .or_else(|| BUNDLED_CLIENT_ID.map(str::to_string))
             .context(
                 "no Google OAuth client is available — add [google] client_id \
-                 to .thock/calendar.toml or .thock/gmail.toml",
+                 to .thock/google.toml",
             )?;
         let client_secret = overrides
             .client_secret
@@ -94,6 +104,77 @@ impl GoogleClient {
             client_secret,
         })
     }
+}
+
+/// The connection-level settings a Google-backed service resolves before it
+/// can poll: the account and any `[google]` client override.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GoogleSettings {
+    pub account: Option<String>,
+    pub google: GoogleClientOverride,
+}
+
+/// The account/override keys of any `.thock/*.toml`, read leniently: every
+/// other key is some feature's business.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct GoogleSettingsContent {
+    account: Option<String>,
+    google: GoogleOverrideContent,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct GoogleOverrideContent {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+}
+
+/// Resolves the account and client override for a service whose own config is
+/// `.thock/<own_file>` (V13 §7.4): `google.toml` first, then the service's
+/// own file, then the other Google config files in a fixed order. That last
+/// step is the migration — a pre-V13 vault with `account` in `calendar.toml`
+/// keeps working untouched. Legacy keys are read here, never rewritten and
+/// never deleted. Blocking I/O, same as the services' config reloads.
+pub fn resolve_google_settings(vault_root: &Path, own_file: &str) -> GoogleSettings {
+    let mut resolved = GoogleSettings::default();
+    let mut order = vec![GOOGLE_CONFIG_FILE, own_file];
+    for other in [
+        crate::calendar::CALENDAR_CONFIG_FILE,
+        crate::gmail::GMAIL_CONFIG_FILE,
+    ] {
+        if other != own_file {
+            order.push(other);
+        }
+    }
+    for file_name in order {
+        let path = vault_root.join(VAULT_MARKER_DIR).join(file_name);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(content) = toml::from_str::<GoogleSettingsContent>(&text) else {
+            // The owning service already warns about its own unparseable
+            // file; resolution just moves on.
+            continue;
+        };
+        if resolved.account.is_none() {
+            resolved.account = content
+                .account
+                .filter(|account| !account.trim().is_empty());
+        }
+        // The override resolves as a pair, so an id and a secret can never
+        // come from two different files.
+        if resolved.google.client_id.is_none() && content.google.client_id.is_some() {
+            resolved.google = GoogleClientOverride {
+                client_id: content.google.client_id,
+                client_secret: content.google.client_secret,
+            };
+        }
+        if resolved.account.is_some() && resolved.google.client_id.is_some() {
+            break;
+        }
+    }
+    resolved
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -395,6 +476,77 @@ mod tests {
         ] {
             assert!(url.contains(needle), "missing {needle} in {url}");
         }
+    }
+
+    /// The §7.4 migration matrix: `google.toml` only, legacy only, both,
+    /// neither, and conflicting values — resolved identically for every
+    /// service.
+    #[test]
+    fn google_settings_resolution_matrix() {
+        let write = |root: &Path, file: &str, text: &str| {
+            let dir = root.join(VAULT_MARKER_DIR);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(file), text).unwrap();
+        };
+
+        // Neither file: nothing resolves.
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = resolve_google_settings(dir.path(), "calendar.toml");
+        assert_eq!(resolved, GoogleSettings::default());
+
+        // google.toml only: both services see the same account.
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "google.toml",
+            "schema = 1\naccount = \"unified@example.com\"\n\n[google]\nclient_id = \"id-g\"\n",
+        );
+        for own in ["calendar.toml", "gmail.toml"] {
+            let resolved = resolve_google_settings(dir.path(), own);
+            assert_eq!(resolved.account.as_deref(), Some("unified@example.com"));
+            assert_eq!(resolved.google.client_id.as_deref(), Some("id-g"));
+        }
+
+        // Legacy only: the account in calendar.toml keeps working untouched,
+        // for the calendar service and (via the fixed cross-file order) for
+        // gmail too.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "calendar.toml", "account = \"legacy@example.com\"\n");
+        for own in ["calendar.toml", "gmail.toml"] {
+            let resolved = resolve_google_settings(dir.path(), own);
+            assert_eq!(resolved.account.as_deref(), Some("legacy@example.com"));
+        }
+
+        // Both, conflicting: google.toml wins and the stale legacy key is
+        // inert; the account and the override may still come from different
+        // files, but an override id/secret pair never splits across two.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "google.toml", "account = \"unified@example.com\"\n");
+        write(
+            dir.path(),
+            "calendar.toml",
+            "account = \"legacy@example.com\"\n\n[google]\nclient_id = \"id-c\"\nclient_secret = \"s-c\"\n",
+        );
+        write(
+            dir.path(),
+            "gmail.toml",
+            "account = \"other@example.com\"\n\n[google]\nclient_id = \"id-m\"\n",
+        );
+        let resolved = resolve_google_settings(dir.path(), "gmail.toml");
+        assert_eq!(resolved.account.as_deref(), Some("unified@example.com"));
+        // gmail's own file outranks calendar.toml for the override.
+        assert_eq!(resolved.google.client_id.as_deref(), Some("id-m"));
+        assert_eq!(resolved.google.client_secret, None);
+        let resolved = resolve_google_settings(dir.path(), "calendar.toml");
+        assert_eq!(resolved.google.client_id.as_deref(), Some("id-c"));
+        assert_eq!(resolved.google.client_secret.as_deref(), Some("s-c"));
+
+        // An unparseable file is skipped, never fatal.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "google.toml", "not [valid");
+        write(dir.path(), "gmail.toml", "account = \"fallback@example.com\"\n");
+        let resolved = resolve_google_settings(dir.path(), "gmail.toml");
+        assert_eq!(resolved.account.as_deref(), Some("fallback@example.com"));
     }
 
     #[test]

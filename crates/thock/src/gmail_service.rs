@@ -26,14 +26,15 @@ use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
 
 use crate::backlog::{DEFAULT_BACKLOG, apply_edits};
-use crate::calendar::GoogleClientOverride;
 use crate::calendar_service::SyncState;
 use crate::gmail::{
     GMAIL_CONFIG_FILE, GmailConfig, ImportMode, ImportRecord, MailFetched, MailProvider,
     archive_frontmatter_digest, parse_gmail_config, plan_capture,
 };
 use crate::gmail_google::GoogleMailProvider;
-use crate::google_auth::{AuthRevoked, GoogleClient};
+use crate::google_auth::{
+    AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings,
+};
 use crate::vault::{VAULT_CONFIG_FILE, VAULT_MARKER_DIR, Vault, VaultStatus};
 
 /// Same typing guard and backoff as the calendar service (V8 §9 guard 1).
@@ -168,15 +169,6 @@ impl GmailService {
         !matches!(self.state, SyncState::NoConfig)
     }
 
-    /// The `[google]` client override from `.thock/gmail.toml`, for the
-    /// connect flow when `calendar.toml` doesn't carry one.
-    pub fn google_override(&self) -> Option<GoogleClientOverride> {
-        self.config
-            .as_ref()
-            .map(|config| config.google.clone())
-            .filter(|overrides| overrides.client_id.is_some())
-    }
-
     /// The workspace connect flow started (it is owned by the calendar
     /// service): show progress here too.
     pub fn mark_connecting(&mut self, cx: &mut Context<Self>) {
@@ -268,10 +260,11 @@ impl GmailService {
             }
             project::Event::WorktreeUpdatedEntries(_, changes) => {
                 let gmail_config = format!("{VAULT_MARKER_DIR}/{GMAIL_CONFIG_FILE}");
+                let google_config = format!("{VAULT_MARKER_DIR}/{GOOGLE_CONFIG_FILE}");
                 let vault_config = format!("{VAULT_MARKER_DIR}/{VAULT_CONFIG_FILE}");
                 if changes.iter().any(|(path, _, _)| {
                     let path = path.as_unix_str();
-                    path == gmail_config || path == vault_config
+                    path == gmail_config || path == google_config || path == vault_config
                 }) {
                     self.reload(cx);
                 }
@@ -305,7 +298,14 @@ impl GmailService {
         let config = match std::fs::read_to_string(&config_path) {
             Err(_) => None,
             Ok(text) => match parse_gmail_config(&text) {
-                Ok(config) => Some(config),
+                Ok(mut config) => {
+                    // The account and client override resolve across the
+                    // Google config files (V13 §7.4), `google.toml` first.
+                    let settings = resolve_google_settings(&vault.root, GMAIL_CONFIG_FILE);
+                    config.account = settings.account;
+                    config.google = settings.google;
+                    Some(config)
+                }
                 Err(error) => {
                     // A hand-edited file that doesn't parse disables capture,
                     // never panics (spec §7).

@@ -32,7 +32,9 @@ use crate::calendar::{
 use crate::calendar_google::{self, CalendarListEntry, GoogleProvider};
 use crate::gmail::GMAIL_CONFIG_FILE;
 use crate::gmail_service::GmailService;
-use crate::google_auth::{self, AuthRevoked, GoogleClient};
+use crate::google_auth::{
+    self, AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings,
+};
 use crate::notes::NoteKind;
 use crate::vault::{VAULT_CONFIG_FILE, VAULT_MARKER_DIR, Vault, VaultStatus};
 
@@ -240,10 +242,11 @@ impl CalendarService {
             }
             project::Event::WorktreeUpdatedEntries(_, changes) => {
                 let calendar_config = format!("{VAULT_MARKER_DIR}/{CALENDAR_CONFIG_FILE}");
+                let google_config = format!("{VAULT_MARKER_DIR}/{GOOGLE_CONFIG_FILE}");
                 let vault_config = format!("{VAULT_MARKER_DIR}/{VAULT_CONFIG_FILE}");
                 if changes.iter().any(|(path, _, _)| {
                     let path = path.as_unix_str();
-                    path == calendar_config || path == vault_config
+                    path == calendar_config || path == google_config || path == vault_config
                 }) {
                     self.reload(cx);
                 }
@@ -282,7 +285,16 @@ impl CalendarService {
         let config = match std::fs::read_to_string(&config_path) {
             Err(_) => None,
             Ok(text) => match parse_calendar_config(&text, &vault.config.day_planner.heading) {
-                Ok(config) => Some(config),
+                Ok(mut config) => {
+                    // The account and client override belong to the
+                    // connection, resolved across the Google config files
+                    // (V13 §7.4) — `google.toml` first, then this file, then
+                    // the rest.
+                    let settings = resolve_google_settings(&vault.root, CALENDAR_CONFIG_FILE);
+                    config.account = settings.account;
+                    config.google = settings.google;
+                    Some(config)
+                }
                 Err(error) => {
                     // A hand-edited file that doesn't parse disables the
                     // syncer, never panics (spec §7.1).
@@ -597,17 +609,7 @@ impl CalendarService {
             return;
         };
         let vault_root = vault.root.clone();
-        let overrides = self
-            .config
-            .as_ref()
-            .map(|config| config.google.clone())
-            .filter(|overrides| overrides.client_id.is_some())
-            .or_else(|| {
-                gmail
-                    .as_ref()
-                    .and_then(|gmail| gmail.read(cx).google_override())
-            })
-            .unwrap_or_default();
+        let overrides = resolve_google_settings(&vault_root, CALENDAR_CONFIG_FILE).google;
         let existing_calendars = self
             .config
             .as_ref()
@@ -631,19 +633,23 @@ impl CalendarService {
                 } else {
                     existing_calendars
                 };
-                update_config_file(&fs, &vault_root, CALENDAR_CONFIG_FILE, {
-                    let email = email.clone();
-                    move |table| {
-                        table.insert("schema".into(), 1.into());
-                        table.insert("account".into(), email.into());
-                        if !table.contains_key("calendars") {
-                            table.insert(
-                                "calendars".into(),
-                                toml::Value::Array(
-                                    selected.into_iter().map(toml::Value::String).collect(),
-                                ),
-                            );
-                        }
+                // The account belongs to the connection, so it lands in
+                // `google.toml` and nowhere else (V13 §7.4) — the connect
+                // flow stopped writing the per-feature duplicates.
+                update_config_file(&fs, &vault_root, GOOGLE_CONFIG_FILE, move |table| {
+                    table.insert("schema".into(), 1.into());
+                    table.insert("account".into(), email.into());
+                })
+                .await?;
+                update_config_file(&fs, &vault_root, CALENDAR_CONFIG_FILE, move |table| {
+                    table.insert("schema".into(), 1.into());
+                    if !table.contains_key("calendars") {
+                        table.insert(
+                            "calendars".into(),
+                            toml::Value::Array(
+                                selected.into_iter().map(toml::Value::String).collect(),
+                            ),
+                        );
                     }
                 })
                 .await?;
@@ -652,7 +658,6 @@ impl CalendarService {
                 // Q2), and deleting gmail.toml turns the feature back off.
                 update_config_file(&fs, &vault_root, GMAIL_CONFIG_FILE, move |table| {
                     table.insert("schema".into(), 1.into());
-                    table.insert("account".into(), email.into());
                 })
                 .await?;
                 anyhow::Ok(connected)
