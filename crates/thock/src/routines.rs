@@ -16,6 +16,7 @@ use crate::notes::{NoteKind, TimelineEntry};
 use crate::vault::{OnboardingState, VAULT_MARKER_DIR, Vault, write_if_missing};
 
 pub const TIMELINE_ROUTINE_ID: &str = "timeline";
+pub const INBOX_ROUTINE_ID: &str = "inbox";
 /// Vault-visible home of Routine definitions: `routines/<id>/routine.toml`.
 pub const ROUTINES_DIR: &str = "routines";
 pub const ROUTINE_MANIFEST_FILE: &str = "routine.toml";
@@ -48,6 +49,12 @@ const TIMELINE_CONNECT_GOOGLE_WORKSPACE_SKILL: &str =
 const TIMELINE_DASHBOARD_HTML: &str = include_str!("../assets/routines/timeline/assets/index.html");
 const TIMELINE_DASHBOARD_SEED: &str =
     include_str!("../assets/routines/timeline/assets/data.seed.js");
+
+const INBOX_MANIFEST: &str = include_str!("../assets/routines/inbox/routine.toml");
+const INBOX_DOC: &str = include_str!("../assets/routines/inbox/doc.md");
+const INBOX_TRIAGE_POLICY: &str = include_str!("../assets/routines/inbox/triage-policy.md");
+const INBOX_TRIAGE_SKILL: &str = include_str!("../assets/routines/inbox/skills/triage-inbox.md");
+const INBOX_SETUP_SKILL: &str = include_str!("../assets/routines/inbox/skills/setup-inbox.md");
 
 /// The parsed shape of a `routine.toml` (V7 spec §6, schema 2). Parsing is
 /// lenient-forward: unknown keys are collected and warned about, never fatal,
@@ -688,24 +695,37 @@ impl CatalogRoutine {
 
 /// The app-shipped Routine catalog, in gallery order.
 pub fn catalog() -> Result<Vec<CatalogRoutine>> {
-    Ok(vec![CatalogRoutine {
-        manifest: parse_manifest(TIMELINE_MANIFEST)
-            .context("parsing the bundled Timeline Routine manifest")?,
-        manifest_toml: TIMELINE_MANIFEST,
-        assets: &[
-            ("doc.md", TIMELINE_DOC),
-            ("skills/week-review.md", TIMELINE_WEEK_REVIEW_SKILL),
-            ("skills/wrap-today.md", TIMELINE_WRAP_TODAY_SKILL),
-            ("skills/wrap-yesterday.md", TIMELINE_WRAP_YESTERDAY_SKILL),
-            ("skills/onboarding.md", TIMELINE_ONBOARDING_SKILL),
-            (
-                "skills/connect-google-workspace.md",
-                TIMELINE_CONNECT_GOOGLE_WORKSPACE_SKILL,
-            ),
-            ("assets/index.html", TIMELINE_DASHBOARD_HTML),
-            ("assets/data.seed.js", TIMELINE_DASHBOARD_SEED),
-        ],
-    }])
+    Ok(vec![
+        CatalogRoutine {
+            manifest: parse_manifest(TIMELINE_MANIFEST)
+                .context("parsing the bundled Timeline Routine manifest")?,
+            manifest_toml: TIMELINE_MANIFEST,
+            assets: &[
+                ("doc.md", TIMELINE_DOC),
+                ("skills/week-review.md", TIMELINE_WEEK_REVIEW_SKILL),
+                ("skills/wrap-today.md", TIMELINE_WRAP_TODAY_SKILL),
+                ("skills/wrap-yesterday.md", TIMELINE_WRAP_YESTERDAY_SKILL),
+                ("skills/onboarding.md", TIMELINE_ONBOARDING_SKILL),
+                (
+                    "skills/connect-google-workspace.md",
+                    TIMELINE_CONNECT_GOOGLE_WORKSPACE_SKILL,
+                ),
+                ("assets/index.html", TIMELINE_DASHBOARD_HTML),
+                ("assets/data.seed.js", TIMELINE_DASHBOARD_SEED),
+            ],
+        },
+        CatalogRoutine {
+            manifest: parse_manifest(INBOX_MANIFEST)
+                .context("parsing the bundled Inbox Routine manifest")?,
+            manifest_toml: INBOX_MANIFEST,
+            assets: &[
+                ("doc.md", INBOX_DOC),
+                ("triage-policy.md", INBOX_TRIAGE_POLICY),
+                ("skills/triage-inbox.md", INBOX_TRIAGE_SKILL),
+                ("skills/setup-inbox.md", INBOX_SETUP_SKILL),
+            ],
+        },
+    ])
 }
 
 pub fn catalog_routine(routine_id: &str) -> Result<Option<CatalogRoutine>> {
@@ -1806,9 +1826,54 @@ mod tests {
     }
 
     #[test]
+    fn inbox_catalog_routine_parses() {
+        let catalog = catalog().unwrap();
+        let routine = catalog
+            .iter()
+            .find(|routine| routine.manifest.id == INBOX_ROUTINE_ID)
+            .expect("the Inbox Routine ships in the catalog");
+        let manifest = &routine.manifest;
+        assert_eq!(manifest.schema, 2);
+        assert_eq!(manifest.icon.as_deref(), Some("envelope"));
+        assert_eq!(manifest.doc, "routines/inbox/Inbox.md");
+        assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
+        // The rail row runs triage (a verb); the log hides in a group; there
+        // is deliberately no row that opens inbox/ (V13 §12 #2).
+        assert_eq!(manifest.links.len(), 1);
+        assert_eq!(manifest.links[0].open, "archives/inbox/triage-log.md");
+        assert_eq!(manifest.links[0].group.as_deref(), Some("History"));
+        let skills: Vec<(&str, bool)> = manifest
+            .skills
+            .iter()
+            .map(|skill| (skill.id.as_str(), skill.kind.is_setup()))
+            .collect();
+        assert_eq!(skills, vec![("triage-inbox", false), ("setup-inbox", true)]);
+        // The landing zone is scaffolded even though capture doesn't depend
+        // on the Routine; the default policy ships as an editable file.
+        assert!(
+            manifest
+                .scaffold
+                .iter()
+                .any(|entry| matches!(entry, ScaffoldEntry::Dir { path } if path == "inbox"))
+        );
+        let onboarding = manifest.onboarding.as_ref().unwrap();
+        assert!(
+            manifest
+                .skills
+                .iter()
+                .any(|skill| skill.file == onboarding.skill)
+        );
+        for file in declared_files(manifest) {
+            if let Some(source) = &file.source {
+                assert!(routine.asset(source).is_some(), "missing asset {source:?}");
+            }
+        }
+    }
+
+    #[test]
     fn catalog_parses() {
         let catalog = catalog().unwrap();
-        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog.len(), 2);
         let manifest = &catalog[0].manifest;
         assert_eq!(manifest.id, TIMELINE_ROUTINE_ID);
         assert_eq!(manifest.schema, 2);
@@ -2075,10 +2140,11 @@ mod tests {
 
         let vault = detect(dir.path());
         let installed = &vault.config.routines.installed;
-        assert_eq!(installed.len(), 1);
+        assert_eq!(installed.len(), 2);
         assert_eq!(installed[0].id, TIMELINE_ROUTINE_ID);
-        assert!(installed[0].enabled);
-        assert_eq!(enabled_routine_manifests(&vault).len(), 1);
+        assert_eq!(installed[1].id, INBOX_ROUTINE_ID);
+        assert!(installed.iter().all(|entry| entry.enabled));
+        assert_eq!(enabled_routine_manifests(&vault).len(), 2);
     }
 
     #[test]
@@ -2140,6 +2206,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         scaffold_vault(dir.path()).unwrap();
         deactivate_routine(dir.path(), TIMELINE_ROUTINE_ID).unwrap();
+        deactivate_routine(dir.path(), INBOX_ROUTINE_ID).unwrap();
         fs::remove_dir_all(dir.path().join(".claude")).unwrap();
 
         let vault = detect(dir.path());
@@ -2210,20 +2277,27 @@ mod tests {
         assert!(!dir.path().join("routines/timeline/Timeline.md").is_file());
         assert!(!dir.path().join("routines/timeline/routine.toml").exists());
         assert!(!dir.path().join("weekly/site").exists());
-        // The generated bridges are unmodified, so removal deletes them and
-        // prunes the now-empty `.claude` tree.
-        assert!(!dir.path().join(".claude").exists());
-        assert!(!files_lock_path(dir.path(), TIMELINE_ROUTINE_ID).exists());
+        // The generated bridges are unmodified, so removal deletes them; the
+        // other pre-installed Routine's bridges stay.
+        assert!(!dir.path().join(".claude/skills/week-review").exists());
         assert!(
-            !dir.path()
-                .join(VAULT_MARKER_DIR)
-                .join(INSTALLED_ROUTINES_DIR)
-                .exists()
+            dir.path()
+                .join(".claude/skills/triage-inbox/SKILL.md")
+                .is_file()
         );
+        assert!(!files_lock_path(dir.path(), TIMELINE_ROUTINE_ID).exists());
+        assert!(!installed_routine_dir(dir.path(), TIMELINE_ROUTINE_ID).exists());
         assert!(dir.path().join(VAULT_MARKER_DIR).is_dir());
 
         let vault = detect(dir.path());
-        assert!(vault.config.routines.installed.is_empty());
+        let installed: Vec<&str> = vault
+            .config
+            .routines
+            .installed
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        assert_eq!(installed, vec![INBOX_ROUTINE_ID]);
         // Core config survives the registry rewrite.
         assert_eq!(vault.config.daily.dir, "daily");
     }
@@ -2250,14 +2324,18 @@ mod tests {
         deactivate_routine(dir.path(), TIMELINE_ROUTINE_ID).unwrap();
         let vault = detect(dir.path());
         assert!(!vault.config.routines.installed[0].enabled);
-        assert!(enabled_routine_manifests(&vault).is_empty());
+        assert!(
+            !enabled_routine_manifests(&vault)
+                .iter()
+                .any(|manifest| manifest.id == TIMELINE_ROUTINE_ID)
+        );
         // Files stay on disk.
         assert!(dir.path().join("routines/timeline/Timeline.md").is_file());
 
         install_routine(dir.path(), TIMELINE_ROUTINE_ID).unwrap();
         let vault = detect(dir.path());
         assert!(vault.config.routines.installed[0].enabled);
-        assert_eq!(vault.config.routines.installed.len(), 1);
+        assert_eq!(vault.config.routines.installed.len(), 2);
     }
 
     #[test]
@@ -2320,7 +2398,7 @@ summary = "Weekly sweep."
             .unwrap();
         assert_eq!(finance.manifest.as_ref().unwrap().name, "Finance");
         let vault = detect(dir.path());
-        assert_eq!(vault.config.routines.installed.len(), 1);
+        assert_eq!(vault.config.routines.installed.len(), 2);
 
         // Activation: registry, lockfile, bridges, scaffold dirs.
         let manifest = activate_routine(dir.path(), "finance").unwrap();
@@ -2769,7 +2847,13 @@ open = "weekly/site/index.html"
         assert!(!marker.exists(), "removal must clean the done marker");
         install_routine(dir.path(), TIMELINE_ROUTINE_ID).unwrap();
         let vault = detect(dir.path());
-        let entry = &vault.config.routines.installed[0];
+        let entry = vault
+            .config
+            .routines
+            .installed
+            .iter()
+            .find(|entry| entry.id == TIMELINE_ROUTINE_ID)
+            .unwrap();
         assert_eq!(entry.onboarding_state, Some(OnboardingState::Pending));
         assert!(entry.onboarding_installed_at.is_some());
     }

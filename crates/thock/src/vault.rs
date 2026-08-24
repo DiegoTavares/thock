@@ -33,6 +33,11 @@ file = "backlog.md"          # the Soon / Someday / Completed holding pen
 id      = "timeline"
 enabled = true
 version = 7
+
+[[routines.installed]]
+id      = "inbox"
+enabled = true
+version = 1
 "#;
 
 pub const DEFAULT_DAILY_TEMPLATE: &str = r#"# {{date:dddd, MMMM D, YYYY}}
@@ -753,9 +758,17 @@ pub fn scaffold_vault(root: &Path) -> Result<()> {
     )?;
     crate::routines::materialize_core_files(root)?;
     if install_default_routines {
-        let timeline = crate::routines::catalog_routine(crate::routines::TIMELINE_ROUTINE_ID)?
-            .context("the bundled Timeline Routine is missing from the catalog")?;
-        crate::routines::materialize_routine(root, &timeline)?;
+        // Timeline and Inbox ship pre-installed (V13 §12 #3): the front door
+        // exists from first run, so capture always has a ritual to point at.
+        for routine_id in [
+            crate::routines::TIMELINE_ROUTINE_ID,
+            crate::routines::INBOX_ROUTINE_ID,
+        ] {
+            let routine = crate::routines::catalog_routine(routine_id)?.with_context(|| {
+                format!("the bundled {routine_id} Routine is missing from the catalog")
+            })?;
+            crate::routines::materialize_routine(root, &routine)?;
+        }
     }
     Ok(())
 }
@@ -801,7 +814,19 @@ mod tests {
         assert_eq!(vault.config.history, VaultConfig::default().history);
         assert_eq!(
             vault.config.routines.installed,
-            vec![InstalledRoutine::new("timeline".to_string(), true, 7)]
+            vec![
+                InstalledRoutine::new("timeline".to_string(), true, 7),
+                InstalledRoutine::new("inbox".to_string(), true, 1),
+            ]
+        );
+        // The Inbox Routine's landing zone and files ship with the scaffold.
+        assert!(dir.path().join("inbox").is_dir());
+        assert!(dir.path().join("routines/inbox/routine.toml").is_file());
+        assert!(dir.path().join("routines/inbox/triage-policy.md").is_file());
+        assert!(
+            dir.path()
+                .join("routines/inbox/skills/triage-inbox.md")
+                .is_file()
         );
         assert!(dir.path().join("daily").is_dir());
         assert!(dir.path().join("weekly").is_dir());

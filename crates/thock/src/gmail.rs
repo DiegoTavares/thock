@@ -296,7 +296,7 @@ fn claim_stem(
     subject: &str,
     digest: &str,
 ) -> String {
-    let base = format!("{}-{}", email.date.format("%Y-%m-%d"), slug(subject));
+    let base = format!("{}-{}", email.date.format("%Y-%m-%d"), slug(subject, "email"));
     let short = digest.get(..4).unwrap_or(digest);
     for candidate in [
         base.clone(),
@@ -400,7 +400,7 @@ pub fn sanitize_subject(raw: &str) -> String {
     }
 }
 
-fn collapse_whitespace(text: &str) -> String {
+pub(crate) fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -411,7 +411,7 @@ fn escape_link_text(text: &str) -> String {
 }
 
 /// Breaks apart `[[` / `]]` so a subject cannot forge a wikilink (full mode).
-fn break_wikilinks(text: &str) -> String {
+pub(crate) fn break_wikilinks(text: &str) -> String {
     let mut text = text.to_string();
     while text.contains("[[") {
         text = text.replace("[[", "[ [");
@@ -422,12 +422,12 @@ fn break_wikilinks(text: &str) -> String {
     text
 }
 
-/// Lowercase ASCII alphanumerics and dashes, ≤ 60 chars, `email` when
-/// nothing survives (spec §5.3).
-fn slug(subject: &str) -> String {
+/// Lowercase ASCII alphanumerics and dashes, ≤ 60 chars, `fallback` when
+/// nothing survives (spec §5.3). Shared with the inbox planner (V13 §6).
+pub(crate) fn slug(text: &str, fallback: &str) -> String {
     let mut out = String::new();
     let mut last_dash = true;
-    for character in subject.chars() {
+    for character in text.chars() {
         if character.is_ascii_alphanumeric() {
             out.push(character.to_ascii_lowercase());
             last_dash = false;
@@ -440,7 +440,11 @@ fn slug(subject: &str) -> String {
         }
     }
     let out = out.trim_matches('-').to_string();
-    if out.is_empty() { "email".to_string() } else { out }
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
+    }
 }
 
 #[cfg(test)]
@@ -514,11 +518,11 @@ mod tests {
 
     #[test]
     fn slugs_are_bounded_and_safe() {
-        assert_eq!(slug("Invoice #4821 due Friday!"), "invoice-4821-due-friday");
-        assert_eq!(slug("¡Órale! ünïcode"), "rale-n-code");
-        assert_eq!(slug("!!!"), "email");
-        assert!(slug(&"long word ".repeat(50)).len() <= 60);
-        assert!(!slug(&"a ".repeat(60)).ends_with('-'));
+        assert_eq!(slug("Invoice #4821 due Friday!", "email"), "invoice-4821-due-friday");
+        assert_eq!(slug("¡Órale! ünïcode", "email"), "rale-n-code");
+        assert_eq!(slug("!!!", "email"), "email");
+        assert!(slug(&"long word ".repeat(50), "email").len() <= 60);
+        assert!(!slug(&"a ".repeat(60), "email").ends_with('-'));
     }
 
     #[test]

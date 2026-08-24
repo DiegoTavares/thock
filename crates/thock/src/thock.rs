@@ -12,6 +12,7 @@ pub mod gmail_google;
 pub mod gmail_service;
 pub mod google_auth;
 pub mod history;
+pub mod inbox;
 pub mod markdown_conceal;
 pub mod markdown_syntax;
 pub mod markdown_text;
