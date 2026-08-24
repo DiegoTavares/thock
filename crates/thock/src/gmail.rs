@@ -39,8 +39,13 @@ pub enum ImportMode {
 pub struct GmailConfig {
     pub account: Option<String>,
     /// The Gmail label that means "capture me", matched case-insensitively
-    /// by name.
+    /// against the label's full path name (`thock/backlog` is simply a label
+    /// whose name contains a slash).
     pub label: String,
+    /// Whether `label` is the built-in default rather than an explicit
+    /// config value. Only a default label is allowed the V9 legacy fallback
+    /// (V13 §7.1): a vault with an explicit `label` is unaffected either way.
+    pub label_is_default: bool,
     pub import: ImportMode,
     /// Vault-relative directory for archived emails (full mode).
     pub archive_dir: String,
@@ -52,7 +57,8 @@ impl Default for GmailConfig {
     fn default() -> Self {
         Self {
             account: None,
-            label: "backlog".to_string(),
+            label: "thock/backlog".to_string(),
+            label_is_default: true,
             import: ImportMode::Title,
             archive_dir: "archives/emails".to_string(),
             poll_interval: Duration::from_secs(300),
@@ -93,13 +99,14 @@ pub fn parse_gmail_config(text: &str) -> Result<GmailConfig> {
         Some(value) if value.eq_ignore_ascii_case("full") => ImportMode::Full,
         Some(other) => bail!("unknown import mode {other:?} — use \"title\" or \"full\""),
     };
+    let label = content
+        .label
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty());
     Ok(GmailConfig {
         account: content.account.filter(|account| !account.trim().is_empty()),
-        label: content
-            .label
-            .map(|label| label.trim().to_string())
-            .filter(|label| !label.is_empty())
-            .unwrap_or(defaults.label),
+        label_is_default: label.is_none(),
+        label: label.unwrap_or(defaults.label),
         import,
         archive_dir: content
             .archive_dir
@@ -129,7 +136,14 @@ pub struct CapturedEmail {
 /// A provider's answer for one poll.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MailFetched {
-    Emails(Vec<CapturedEmail>),
+    Emails {
+        emails: Vec<CapturedEmail>,
+        /// The configured label was absent but V9's flat `backlog` label
+        /// exists and was used — a visible transitional state, surfaced in
+        /// the status row with a rename hint (V13 §7.1), never a silent
+        /// alias.
+        legacy_label: bool,
+    },
     /// The configured label doesn't exist in the account — a holding state,
     /// not an error: creating the label is the last step of onboarding.
     LabelNotFound,
@@ -190,6 +204,9 @@ pub struct ImportRecord {
     pub digest: String,
     pub thread_id: String,
     pub subject: String,
+    /// Where the capture landed. The fast lane always writes `someday`
+    /// (V13 §7.1); pre-V13 state lines without the field load unchanged.
+    pub dest: &'static str,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -241,6 +258,7 @@ pub fn plan_capture(
             digest: digest.clone(),
             thread_id: email.thread_id.clone(),
             subject: sanitize_subject(&email.subject),
+            dest: "someday",
         };
         // Second guard (spec §5.2): a marker already in the backlog means the
         // state lost this thread — repair the state, never duplicate the line.
@@ -482,7 +500,8 @@ mod tests {
     fn config_defaults_and_overrides() {
         let config = parse_gmail_config("").unwrap();
         assert_eq!(config, GmailConfig::default());
-        assert_eq!(config.label, "backlog");
+        assert_eq!(config.label, "thock/backlog");
+        assert!(config.label_is_default);
         assert_eq!(config.import, ImportMode::Title);
         assert_eq!(config.archive_dir, "archives/emails");
         assert_eq!(config.poll_interval, Duration::from_secs(300));
@@ -495,6 +514,10 @@ mod tests {
         .unwrap();
         assert_eq!(config.account.as_deref(), Some("d@e.com"));
         assert_eq!(config.label, "To Backlog");
+        // An explicit label — even one spelled like the default — is never
+        // eligible for the legacy fallback.
+        assert!(!config.label_is_default);
+        assert!(!parse_gmail_config("label = \"thock/backlog\"").unwrap().label_is_default);
         assert_eq!(config.import, ImportMode::Full);
         assert_eq!(config.archive_dir, "mail/archive");
         // Clamped to the floor.

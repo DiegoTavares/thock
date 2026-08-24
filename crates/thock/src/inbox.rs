@@ -134,7 +134,10 @@ pub struct CapturedItem {
 /// What one poll asks a transport for (spec §7). Errors isolate per source.
 pub trait InboxSource: Send + Sync {
     fn id(&self) -> &'static str;
-    fn fetch(&self, cx: &AsyncApp) -> Task<Result<InboxFetched>>;
+    /// `skip` holds the digests the service already has, so an
+    /// already-captured item costs no per-item request (V9's optimization —
+    /// a source may ignore it; the planner dedups regardless).
+    fn fetch(&self, skip: &HashSet<String>, cx: &AsyncApp) -> Task<Result<InboxFetched>>;
 }
 
 /// A source's answer for one poll.

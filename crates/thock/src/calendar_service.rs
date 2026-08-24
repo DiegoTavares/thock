@@ -32,6 +32,7 @@ use crate::calendar::{
 use crate::calendar_google::{self, CalendarListEntry, GoogleProvider};
 use crate::gmail::GMAIL_CONFIG_FILE;
 use crate::gmail_service::GmailService;
+use crate::inbox_service::InboxService;
 use crate::google_auth::{
     self, AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings,
 };
@@ -51,14 +52,16 @@ actions!(
     thock,
     [
         /// Links your Google account so today's meetings appear in today's
-        /// note and emails you label become Backlog tasks.
+        /// note, emails you label become Backlog tasks, and things you send
+        /// from your phone land in the inbox.
         ConnectGoogleWorkspace,
         /// Chooses which of your calendars appear in today's note.
         ChooseCalendars,
         /// Brings today's meetings in the daily note up to date now.
         SyncCalendarNow,
-        /// Stops calendar sync and email capture and forgets the Google
-        /// sign-in. Everything already in your notes stays where it is.
+        /// Stops calendar sync, email capture, and inbox capture, and
+        /// forgets the Google sign-in. Everything already in your notes
+        /// stays where it is.
         DisconnectGoogleWorkspace,
     ]
 );
@@ -84,13 +87,14 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &ConnectGoogleWorkspace, window, cx| {
             let workspace_handle = workspace.weak_handle();
             let gmail = crate::gmail_service::service_for_project(workspace.project(), cx);
+            let inbox = crate::inbox_service::service_for_project(workspace.project(), cx);
             if let Some(service) = service_for_workspace(workspace, cx) {
                 if !service.read(cx).has_vault() {
                     show_no_vault_error(workspace, cx);
                     return;
                 }
                 service.update(cx, |service, cx| {
-                    service.connect(gmail, workspace_handle, window, cx)
+                    service.connect(gmail, inbox, workspace_handle, window, cx)
                 });
             }
         });
@@ -113,8 +117,9 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action(|workspace, _: &DisconnectGoogleWorkspace, _window, cx| {
             let gmail = crate::gmail_service::service_for_project(workspace.project(), cx);
+            let inbox = crate::inbox_service::service_for_project(workspace.project(), cx);
             if let Some(service) = service_for_workspace(workspace, cx) {
-                service.update(cx, |service, cx| service.disconnect(gmail, cx));
+                service.update(cx, |service, cx| service.disconnect(gmail, inbox, cx));
             }
         });
     })
@@ -594,13 +599,14 @@ impl CalendarService {
         .detach_and_log_err(cx);
     }
 
-    /// `thock::ConnectGoogleWorkspace` (spec v9 §6.1): one OAuth round in the
-    /// system browser granting Calendar + Gmail, then the calendar picker.
-    /// Writes the account into both `.thock/calendar.toml` and
-    /// `.thock/gmail.toml` and reloads the Gmail service alongside this one.
+    /// `thock::ConnectGoogleWorkspace` (V9 §6.1; V13 §7.3 adds Tasks): one
+    /// OAuth round in the system browser granting Calendar + Gmail + Tasks,
+    /// then the calendar picker. Writes the account into `.thock/google.toml`
+    /// and reloads the Gmail and Inbox services alongside this one.
     fn connect(
         &mut self,
         gmail: Option<Entity<GmailService>>,
+        inbox: Option<Entity<InboxService>>,
         workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -621,6 +627,9 @@ impl CalendarService {
         cx.notify();
         if let Some(gmail) = &gmail {
             gmail.update(cx, |gmail, cx| gmail.mark_connecting(cx));
+        }
+        if let Some(inbox) = &inbox {
+            inbox.update(cx, |inbox, cx| inbox.mark_connecting(cx));
         }
 
         self.connect_task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -660,6 +669,13 @@ impl CalendarService {
                     table.insert("schema".into(), 1.into());
                 })
                 .await?;
+                // Same for inbox capture (V13 §10.2): the file's existence
+                // arms the Google Tasks and thock/inbox transports, and
+                // deleting it turns them off while inbox/ stays a folder.
+                update_config_file(&fs, &vault_root, crate::inbox::INBOX_CONFIG_FILE, |table| {
+                    table.insert("schema".into(), 1.into());
+                })
+                .await?;
                 anyhow::Ok(connected)
             }
             .await;
@@ -674,6 +690,9 @@ impl CalendarService {
                     if let Some(gmail) = &gmail {
                         gmail.update(cx, |gmail, cx| gmail.reload_config(cx));
                     }
+                    if let Some(inbox) = &inbox {
+                        inbox.update(cx, |inbox, cx| inbox.reload_config(cx));
+                    }
                 }
                 Err(error) => {
                     log::warn!("Thock: connecting Google Workspace failed: {error:#}");
@@ -686,6 +705,9 @@ impl CalendarService {
                     .log_err();
                     if let Some(gmail) = &gmail {
                         gmail.update(cx, |gmail, cx| gmail.reload_config(cx));
+                    }
+                    if let Some(inbox) = &inbox {
+                        inbox.update(cx, |inbox, cx| inbox.reload_config(cx));
                     }
                 }
             }
@@ -795,9 +817,14 @@ impl CalendarService {
     }
 
     /// `thock::DisconnectGoogleWorkspace` (spec §6.4): deletes the keychain
-    /// entries and stops calendar sync and email capture. Never touches the
-    /// vault.
-    fn disconnect(&mut self, gmail: Option<Entity<GmailService>>, cx: &mut Context<Self>) {
+    /// entries and stops calendar sync, email capture, and inbox capture.
+    /// Never touches the vault.
+    fn disconnect(
+        &mut self,
+        gmail: Option<Entity<GmailService>>,
+        inbox: Option<Entity<InboxService>>,
+        cx: &mut Context<Self>,
+    ) {
         self.poll_task = None;
         self.provider = None;
         if self.config.is_some() {
@@ -806,6 +833,9 @@ impl CalendarService {
         cx.notify();
         if let Some(gmail) = gmail {
             gmail.update(cx, |gmail, cx| gmail.mark_signed_out(cx));
+        }
+        if let Some(inbox) = inbox {
+            inbox.update(cx, |inbox, cx| inbox.mark_signed_out(cx));
         }
         cx.spawn(async move |_, cx| google_auth::delete_refresh_token(cx).await)
             .detach_and_log_err(cx);

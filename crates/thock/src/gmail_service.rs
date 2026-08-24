@@ -106,7 +106,12 @@ pub fn service_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity
 }
 
 enum SyncOutcome {
-    Synced,
+    Synced {
+        /// Capture ran on V9's flat `backlog` label because the configured
+        /// one is absent (V13 §7.1) — shown in the status row with a rename
+        /// hint.
+        legacy_label: bool,
+    },
     Held(gpui::SharedString),
     Failed(anyhow::Error),
     AuthRevoked,
@@ -135,6 +140,8 @@ pub struct GmailService {
     /// apply work it spawns is awaited inside it, never stored separately.
     poll_task: Option<Task<()>>,
     dedup: Option<DedupState>,
+    /// The last sync ran on V9's flat `backlog` label (V13 §7.1).
+    legacy_label: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -149,6 +156,7 @@ impl GmailService {
             state: SyncState::NoConfig,
             poll_task: None,
             dedup: None,
+            legacy_label: false,
             _subscriptions: vec![project_subscription],
         };
         this.reload(cx);
@@ -161,6 +169,13 @@ impl GmailService {
 
     pub fn has_vault(&self) -> bool {
         self.vault.is_some()
+    }
+
+    /// Whether capture is running on the old flat `backlog` label — a
+    /// visible transitional state with a rename hint in the status row
+    /// (V13 §7.1).
+    pub fn using_legacy_label(&self) -> bool {
+        self.legacy_label
     }
 
     /// Whether the status row should be shown at all: only when the vault
@@ -374,6 +389,7 @@ impl GmailService {
             client,
             account,
             config.label.clone(),
+            config.label_is_default,
         )))
     }
 
@@ -409,8 +425,9 @@ impl GmailService {
     ) -> bool {
         let keep_going = match outcome {
             SyncOutcome::Aborted => false,
-            SyncOutcome::Synced => {
+            SyncOutcome::Synced { legacy_label } => {
                 self.state = SyncState::Synced { at: Instant::now() };
+                self.legacy_label = legacy_label;
                 *delay = interval;
                 true
             }
@@ -463,21 +480,28 @@ impl GmailService {
             Err(error) => return SyncOutcome::Failed(error),
         };
 
-        let emails = match provider.fetch_labeled(config.import, &dedup.imported, cx).await {
-            Err(error) if error.is::<AuthRevoked>() => return SyncOutcome::AuthRevoked,
-            Err(error) => return SyncOutcome::Failed(error),
-            Ok(MailFetched::LabelNotFound) => {
-                return SyncOutcome::Held(
-                    format!("label \"{}\" not found in Gmail", config.label).into(),
-                );
-            }
-            Ok(MailFetched::Emails(emails)) => emails,
-        };
+        let (emails, legacy_label) =
+            match provider.fetch_labeled(config.import, &dedup.imported, cx).await {
+                Err(error) if error.is::<AuthRevoked>() => return SyncOutcome::AuthRevoked,
+                Err(error) => return SyncOutcome::Failed(error),
+                Ok(MailFetched::LabelNotFound) => {
+                    return SyncOutcome::Held(
+                        format!("label \"{}\" not found in Gmail", config.label).into(),
+                    );
+                }
+                Ok(MailFetched::Emails {
+                    emails,
+                    legacy_label,
+                }) => (emails, legacy_label),
+            };
         if emails.is_empty() {
-            return SyncOutcome::Synced;
+            return SyncOutcome::Synced { legacy_label };
         }
 
-        Self::apply_capture(this, &fs, &vault, &config, &project, &emails, dedup, cx).await
+        match Self::apply_capture(this, &fs, &vault, &config, &project, &emails, dedup, cx).await {
+            SyncOutcome::Synced { .. } => SyncOutcome::Synced { legacy_label },
+            other => other,
+        }
     }
 
     /// The loaded dedup state, loading (or rebuilding, spec §4.3) it first
@@ -574,7 +598,9 @@ impl GmailService {
             &captured_at,
         );
         if plan.is_empty() {
-            return SyncOutcome::Synced;
+            return SyncOutcome::Synced {
+                legacy_label: false,
+            };
         }
 
         // Archives first (spec §9): a crash after this leaves harmless
@@ -626,7 +652,9 @@ impl GmailService {
             }
         })
         .ok();
-        SyncOutcome::Synced
+        SyncOutcome::Synced {
+            legacy_label: false,
+        }
     }
 
     /// The not-open path (spec §9): read-modify-write through the project
@@ -737,6 +765,7 @@ impl GmailService {
                 "digest": record.digest,
                 "thread": record.thread_id,
                 "subject": record.subject,
+                "dest": record.dest,
                 "at": captured_at,
             });
             contents.push_str(&entry.to_string());
@@ -958,7 +987,10 @@ mod tests {
         ) -> Task<Result<MailFetched>> {
             self.skips_seen.lock().unwrap().push(skip.clone());
             let emails = self.emails.lock().unwrap().clone();
-            Task::ready(Ok(MailFetched::Emails(emails)))
+            Task::ready(Ok(MailFetched::Emails {
+                emails,
+                legacy_label: false,
+            }))
         }
     }
 

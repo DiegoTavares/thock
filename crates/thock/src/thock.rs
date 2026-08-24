@@ -13,11 +13,13 @@ pub mod gmail_service;
 pub mod google_auth;
 pub mod history;
 pub mod inbox;
+pub mod inbox_service;
 pub mod markdown_conceal;
 pub mod markdown_syntax;
 pub mod markdown_text;
 pub mod notes;
 pub mod routines;
+pub mod tasks_google;
 pub mod routines_panel;
 pub mod vault;
 
@@ -43,6 +45,7 @@ pub fn init(cx: &mut App) {
     backlog_panel::init(cx);
     calendar_service::init(cx);
     gmail_service::init(cx);
+    inbox_service::init(cx);
     markdown_conceal::init(cx);
     hide_inherited_zed_actions(cx);
 }

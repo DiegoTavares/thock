@@ -31,6 +31,7 @@ use crate::backlog::{self, Backlog, BacklogTask, SectionKind, parse_backlog, spl
 use crate::calendar_service::{ConnectGoogleWorkspace, SyncState};
 use crate::day_plan::strip_trailing_comment;
 use crate::gmail_service::{self, GmailService, SyncGmailNow};
+use crate::inbox_service::{self, InboxService, OpenInbox, SyncInboxNow};
 use crate::markdown_text::{InlineSpan, parse_inline_links};
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
 use crate::vault::{Vault, VaultStatus};
@@ -135,6 +136,9 @@ pub struct BacklogPanel {
     /// The email-capture service, for the status row (spec v9 §10.3). The
     /// service lives independently of the panel; this is display only.
     gmail_service: Option<Entity<GmailService>>,
+    /// The inbox-capture service, for its status row (V13 §10.4) — display
+    /// only, like the Gmail one.
+    inbox_service: Option<Entity<InboxService>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -167,8 +171,12 @@ impl BacklogPanel {
                 }
             });
             let gmail_service = gmail_service::service_for_project(&project, cx);
+            let inbox_service = inbox_service::service_for_project(&project, cx);
             let mut subscriptions = vec![project_subscription];
             if let Some(service) = &gmail_service {
+                subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
+            }
+            if let Some(service) = &inbox_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
             }
             let mut this = Self {
@@ -189,6 +197,7 @@ impl BacklogPanel {
                 load_buffer_task: None,
                 reparse_task: None,
                 gmail_service,
+                inbox_service,
                 _subscriptions: subscriptions,
             };
             this.vault_status = this.detect_vault_status(cx);
@@ -1466,6 +1475,18 @@ impl BacklogPanel {
             )],
             SyncState::Connecting => vec![muted("Gmail · connecting…".to_string())],
             SyncState::Idle => vec![muted("Gmail · waiting for first check".to_string())],
+            // Running on V9's flat label: a visible transitional state with
+            // a rename hint, never a silent alias (V13 §7.1).
+            SyncState::Synced { .. } if service.using_legacy_label() => vec![
+                div()
+                    .id("thock-gmail-legacy-label")
+                    .tooltip(Tooltip::text(
+                        "Capture still works — rename the label to \"thock/backlog\" in Gmail \
+                         to finish the move.",
+                    ))
+                    .child(muted("Backlog · using the old \"backlog\" label".to_string()))
+                    .into_any_element(),
+            ],
             SyncState::Synced { at } => {
                 vec![muted(format!("Gmail · checked {}", format_ago(at.elapsed())))]
             }
@@ -1483,6 +1504,102 @@ impl BacklogPanel {
             SyncState::Disconnected => vec![
                 muted("Gmail · sign-in needed".to_string()),
                 connect_button("thock-reconnect-google-workspace", "Reconnect"),
+            ],
+        };
+        Some(
+            h_flex()
+                .px_2()
+                .py_1()
+                .gap_2()
+                .justify_between()
+                .border_b_1()
+                .border_color(cx.theme().colors().border_variant)
+                .children(content)
+                .into_any_element(),
+        )
+    }
+
+    /// The inbox-capture status row (V13 §10.4), shown only when the vault
+    /// has `.thock/inbox.toml`. A healthy row with items waiting is the way
+    /// into triage: activating it runs the Triage Inbox ritual, falling back
+    /// to revealing the folder when the Inbox Routine was removed.
+    fn render_inbox_status_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let service = self.inbox_service.as_ref()?.read(cx);
+        if !service.has_config() {
+            return None;
+        }
+        let muted = |text: String| {
+            Label::new(text)
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .into_any_element()
+        };
+        let vault_root = self.vault().map(|vault| vault.root.clone());
+        let content = match service.state() {
+            SyncState::NoConfig => return None,
+            SyncState::NeverConnected => {
+                // The Gmail row already offers the connect button when both
+                // configs exist; avoid two identical buttons.
+                if self
+                    .gmail_service
+                    .as_ref()
+                    .is_some_and(|gmail| gmail.read(cx).has_config())
+                {
+                    return None;
+                }
+                vec![
+                    Button::new("thock-connect-google-workspace-inbox", "Connect Google Workspace")
+                        .label_size(LabelSize::Small)
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(
+                                crate::calendar_service::ConnectGoogleWorkspace.boxed_clone(),
+                                cx,
+                            );
+                        })
+                        .into_any_element(),
+                ]
+            }
+            SyncState::Connecting => vec![muted("Inbox · connecting…".to_string())],
+            SyncState::Idle => vec![muted("Inbox · waiting for first check".to_string())],
+            SyncState::Synced { .. } if service.queue_depth() == 0 => {
+                vec![muted("Inbox · empty".to_string())]
+            }
+            SyncState::Synced { .. } => {
+                let depth = service.queue_depth();
+                vec![
+                    Button::new(
+                        "thock-triage-inbox",
+                        format!("Inbox · {depth} waiting — triage"),
+                    )
+                    .label_size(LabelSize::Small)
+                    .on_click(move |_, window, cx| {
+                        dispatch_triage(vault_root.clone(), window, cx);
+                    })
+                    .into_any_element(),
+                ]
+            }
+            SyncState::Holding { reason } => vec![muted(format!("Inbox · {reason}"))],
+            SyncState::Failing { error } => vec![
+                muted("Inbox · sync failed".to_string()),
+                Button::new("thock-retry-inbox-sync", "Retry")
+                    .label_size(LabelSize::Small)
+                    .tooltip(Tooltip::text(error.clone()))
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(SyncInboxNow.boxed_clone(), cx);
+                    })
+                    .into_any_element(),
+            ],
+            SyncState::Disconnected => vec![
+                muted("Inbox · sign-in expired".to_string()),
+                Button::new("thock-reconnect-google-workspace-inbox", "Reconnect")
+                    .label_size(LabelSize::Small)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(
+                            crate::calendar_service::ConnectGoogleWorkspace.boxed_clone(),
+                            cx,
+                        );
+                    })
+                    .into_any_element(),
             ],
         };
         Some(
@@ -1541,6 +1658,36 @@ impl BacklogPanel {
     }
 }
 
+/// Activating the Inbox row runs the Triage Inbox ritual (the generic
+/// `thock::RunSkill`, per the repo's rule about dynamic content). A vault
+/// whose Inbox Routine was removed must not get a dead row (V13 §10.4), so
+/// with no `triage-inbox` skill registered this falls back to
+/// `thock::OpenInbox`, which reveals the landing zone in the project panel.
+fn dispatch_triage(vault_root: Option<PathBuf>, window: &mut Window, cx: &mut App) {
+    let has_triage_skill = vault_root
+        .and_then(|root| match crate::vault::Vault::detect(&root) {
+            crate::vault::VaultStatus::Valid(vault) => Some(vault),
+            _ => None,
+        })
+        .is_some_and(|vault| {
+            crate::routines::enabled_routine_manifests(&vault)
+                .iter()
+                .flat_map(|manifest| &manifest.skills)
+                .any(|skill| skill.id == "triage-inbox")
+        });
+    if has_triage_skill {
+        window.dispatch_action(
+            crate::agent_panel::RunSkill {
+                skill: Some("triage-inbox".to_string()),
+            }
+            .boxed_clone(),
+            cx,
+        );
+    } else {
+        window.dispatch_action(OpenInbox.boxed_clone(), cx);
+    }
+}
+
 /// Re-attaches the trailing HTML comment `strip_trailing_comment` hid from
 /// the inline editor, so renaming a captured task keeps its identity marker.
 fn restore_hidden_suffix(original: &str, edited: &str) -> String {
@@ -1594,6 +1741,7 @@ impl Render for BacklogPanel {
             .on_action(cx.listener(Self::reveal_selected_task))
             .size_full()
             .children(self.render_status_row(cx))
+            .children(self.render_inbox_status_row(cx))
             .child(self.render_body(cx))
     }
 }

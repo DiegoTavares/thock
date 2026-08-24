@@ -34,10 +34,12 @@ pub const KEYCHAIN_URL: &str = "https://thock.local/google";
 /// Gmail never accepts it because it lacks the Gmail scope.
 const LEGACY_CALENDAR_KEYCHAIN_URL: &str = "https://thock.local/calendar/google";
 
-/// Everything one consent grants (spec §6.1, G6).
-pub const SCOPES: [&str; 2] = [
+/// Everything one consent grants (V9 §6.1; V13 §7.3 adds Tasks) — one
+/// screen, three read-only scopes, one refresh token.
+pub const SCOPES: [&str; 3] = [
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/tasks.readonly",
 ];
 
 const AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -322,6 +324,39 @@ async fn post_token_request(
     serde_json::from_str(&body).context("failed to parse Google token response")
 }
 
+/// Authorized GET returning the response body. 401 is typed as
+/// [`Unauthorized`] for the retry-once-behind-refresh path; a 403 for a token
+/// without the needed scope (a pre-V13 grant, say) is [`AuthRevoked`], so it
+/// degrades to a reconnect affordance instead of an endless retry.
+pub(crate) async fn api_get_json(
+    http: &Arc<dyn HttpClient>,
+    url: &str,
+    access_token: &str,
+    what: &str,
+) -> Result<String> {
+    let request = Request::builder()
+        .method(http::Method::GET)
+        .uri(url)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Accept", "application/json")
+        .body(AsyncBody::default())?;
+    let mut response = http.send(request).await?;
+    if response.status() == http::StatusCode::UNAUTHORIZED {
+        return Err(anyhow!(Unauthorized));
+    }
+    let mut body = String::new();
+    response.body_mut().read_to_string(&mut body).await?;
+    if response.status() == http::StatusCode::FORBIDDEN
+        && body.to_lowercase().contains("insufficient")
+    {
+        return Err(anyhow!(AuthRevoked));
+    }
+    if !response.status().is_success() {
+        bail!("{what} request failed with status {}: {body}", response.status());
+    }
+    Ok(body)
+}
+
 pub(crate) fn token_lifetime(expires_in: Option<u64>) -> Duration {
     // A one-minute safety margin so a token is never used mid-expiry.
     Duration::from_secs(expires_in.unwrap_or(3600).saturating_sub(60).max(60))
@@ -467,7 +502,8 @@ mod tests {
         for needle in [
             "client_id=client-123",
             "redirect_uri=http%3A%2F%2F127.0.0.1%3A9000%2Fcallback",
-            "calendar.readonly+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.readonly",
+            "calendar.readonly+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.readonly\
+             +https%3A%2F%2Fwww.googleapis.com%2Fauth%2Ftasks.readonly",
             "code_challenge=chal",
             "code_challenge_method=S256",
             "access_type=offline",
