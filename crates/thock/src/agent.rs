@@ -53,25 +53,86 @@ pub enum CommandSource {
     Global,
 }
 
+/// What a skill asks of the model that runs it — an abstract tier, never a
+/// model name, so shipped Routines stay agent-agnostic. The mapping to a real
+/// command lives with the agent settings ([`ConnectedAgent::fast_command`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ModelTier {
+    #[default]
+    Default,
+    /// Mechanical work (triage, filing) that doesn't need the big model.
+    Fast,
+}
+
+impl ModelTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Fast => "fast",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnectedAgent {
     pub command: String,
+    /// The `[agent] fast_command` override for `ModelTier::Fast` skills,
+    /// resolved with the same vault-over-global precedence as `command`.
+    pub fast_command: Option<String>,
     pub source: CommandSource,
+}
+
+impl ConnectedAgent {
+    /// The launch command for a skill's tier: fast skills get
+    /// `fast_command`, else a derived fast default for a known CLI, else the
+    /// normal command — a missing mapping never blocks a launch.
+    pub fn command_for(&self, tier: ModelTier) -> String {
+        match tier {
+            ModelTier::Default => self.command.clone(),
+            ModelTier::Fast => self
+                .fast_command
+                .clone()
+                .or_else(|| derived_fast_command(&self.command))
+                .unwrap_or_else(|| self.command.clone()),
+        }
+    }
+}
+
+/// The built-in fast mapping for CLIs whose flags Thock knows: `claude` gets
+/// `--model haiku`. Anything else (or a command that already pins a model)
+/// returns `None`, so the `[agent] fast_command` setting is the only other
+/// way to opt in — never a guessed flag on a CLI we can't vouch for.
+fn derived_fast_command(command: &str) -> Option<String> {
+    if command.contains("--model") {
+        return None;
+    }
+    let program = shlex::split(command)?.into_iter().next()?;
+    let program = Path::new(&program).file_name()?.to_str()?;
+    (program == "claude").then(|| format!("{command} --model haiku"))
 }
 
 /// Resolves the launch command: the vault's `[agent] command` override if set,
 /// otherwise the user-level default. `None` means the user isn't connected.
-/// Reads the global settings file — call from a background thread when
-/// latency matters.
+/// The fast-tier override resolves the same way, independently, so a vault
+/// can pin a `fast_command` while inheriting the global `command` (and vice
+/// versa). Reads the global settings file — call from a background thread
+/// when latency matters.
 pub fn resolved_command(vault: Option<&Vault>) -> Option<ConnectedAgent> {
-    if let Some(command) = vault.and_then(|vault| vault.config.agent.command.clone()) {
+    let vault_agent = vault.map(|vault| &vault.config.agent);
+    let global_fast = || load_global_agent_field("fast_command");
+    let fast_command = vault_agent
+        .and_then(|agent| agent.fast_command.clone())
+        .or_else(global_fast);
+    if let Some(command) = vault_agent.and_then(|agent| agent.command.clone()) {
         return Some(ConnectedAgent {
             command,
+            fast_command,
             source: CommandSource::Vault,
         });
     }
     load_global_command().map(|command| ConnectedAgent {
         command,
+        fast_command,
         source: CommandSource::Global,
     })
 }
@@ -145,24 +206,28 @@ fn load_global_settings(path: &Path) -> Result<toml::Table> {
     toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
-fn load_global_command_from(path: &Path) -> Result<Option<String>> {
+fn load_global_agent_field_from(path: &Path, key: &str) -> Result<Option<String>> {
     Ok(load_global_settings(path)?
         .get("agent")
         .and_then(|agent| agent.as_table())
-        .and_then(|agent| agent.get("command"))
-        .and_then(|command| command.as_str())
+        .and_then(|agent| agent.get(key))
+        .and_then(|value| value.as_str())
         .map(str::trim)
-        .filter(|command| !command.is_empty())
+        .filter(|value| !value.is_empty())
         .map(String::from))
+}
+
+fn load_global_agent_field(key: &str) -> Option<String> {
+    load_global_agent_field_from(&global_settings_path(), key)
+        .map_err(|error| log::error!("Thock: couldn't read the agent settings: {error:?}"))
+        .ok()
+        .flatten()
 }
 
 /// The user-level default launch command, if configured. Read errors are
 /// logged and treated as not-connected.
 pub fn load_global_command() -> Option<String> {
-    load_global_command_from(&global_settings_path())
-        .map_err(|error| log::error!("Thock: couldn't read the agent settings: {error:?}"))
-        .ok()
-        .flatten()
+    load_global_agent_field("command")
 }
 
 fn save_global_command_to(path: &Path, command: &str) -> Result<()> {
@@ -253,17 +318,17 @@ mod tests {
     fn global_command_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
-        assert_eq!(load_global_command_from(&path).unwrap(), None);
+        assert_eq!(load_global_agent_field_from(&path, "command").unwrap(), None);
 
         save_global_command_to(&path, "claude").unwrap();
         assert_eq!(
-            load_global_command_from(&path).unwrap(),
+            load_global_agent_field_from(&path, "command").unwrap(),
             Some("claude".to_string())
         );
 
         save_global_command_to(&path, "gemini --yolo").unwrap();
         assert_eq!(
-            load_global_command_from(&path).unwrap(),
+            load_global_agent_field_from(&path, "command").unwrap(),
             Some("gemini --yolo".to_string())
         );
     }
@@ -278,7 +343,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            load_global_command_from(&path).unwrap(),
+            load_global_agent_field_from(&path, "command").unwrap(),
             Some("claude".to_string())
         );
 
@@ -286,7 +351,7 @@ mod tests {
         // by a newer one.
         save_global_command_to(&path, "gemini").unwrap();
         assert_eq!(
-            load_global_command_from(&path).unwrap(),
+            load_global_agent_field_from(&path, "command").unwrap(),
             Some("gemini".to_string())
         );
         let raw = fs::read_to_string(&path).unwrap();
@@ -300,7 +365,65 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
         fs::write(&path, "[agent]\ncommand = \"  \"\n").unwrap();
-        assert_eq!(load_global_command_from(&path).unwrap(), None);
+        assert_eq!(load_global_agent_field_from(&path, "command").unwrap(), None);
+    }
+
+    #[test]
+    fn fast_tier_prefers_the_mapping_then_derives_then_falls_back() {
+        let agent = |command: &str, fast_command: Option<&str>| ConnectedAgent {
+            command: command.to_string(),
+            fast_command: fast_command.map(str::to_string),
+            source: CommandSource::Global,
+        };
+
+        // The default tier never touches the fast mapping.
+        assert_eq!(
+            agent("claude", Some("claude --model haiku")).command_for(ModelTier::Default),
+            "claude"
+        );
+        // A configured fast_command wins for any CLI.
+        assert_eq!(
+            agent("gemini", Some("gemini --model flash")).command_for(ModelTier::Fast),
+            "gemini --model flash"
+        );
+        // claude derives --model haiku when nothing is configured, flags and
+        // paths included.
+        assert_eq!(
+            agent("claude", None).command_for(ModelTier::Fast),
+            "claude --model haiku"
+        );
+        assert_eq!(
+            agent("/usr/local/bin/claude --continue", None).command_for(ModelTier::Fast),
+            "/usr/local/bin/claude --continue --model haiku"
+        );
+        // A command that already pins a model is the user's explicit choice.
+        assert_eq!(
+            agent("claude --model opus", None).command_for(ModelTier::Fast),
+            "claude --model opus"
+        );
+        // Unknown CLIs never get guessed flags — fast falls back to normal.
+        assert_eq!(agent("codex", None).command_for(ModelTier::Fast), "codex");
+    }
+
+    #[test]
+    fn global_fast_command_reads_from_the_agent_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        fs::write(
+            &path,
+            "[agent]\ncommand = \"claude\"\nfast_command = \"claude --model haiku\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_global_agent_field_from(&path, "fast_command").unwrap(),
+            Some("claude --model haiku".to_string())
+        );
+        // Saving the command keeps the fast mapping (raw-table settings).
+        save_global_command_to(&path, "gemini").unwrap();
+        assert_eq!(
+            load_global_agent_field_from(&path, "fast_command").unwrap(),
+            Some("claude --model haiku".to_string())
+        );
     }
 
     #[test]

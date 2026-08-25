@@ -78,6 +78,10 @@ name    = "Friday Finance"
 file    = "routines/finance/skills/friday-finance.md"
 summary = "Pull live data, compute the sweep, log the outcome."
 icon    = "flame"               # optional; see the icon note below
+# model = "fast" marks mechanical work (triage, filing) that doesn't need
+# the big model. It's an abstract tier — the user's agent settings map it to
+# a real command ([agent] fast_command), never a model name in the Routine.
+# Default: "default".
 reads   = ["finance/**"]
 writes  = ["finance/plan_2026.md (edit, confirmed)", "daily/<today>.md (append)"]
 

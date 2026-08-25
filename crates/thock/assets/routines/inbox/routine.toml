@@ -1,7 +1,7 @@
 schema  = 2
 id      = "inbox"
 name    = "Inbox"
-version = 1
+version = 2
 summary = "A front door for the vault — capture anywhere, decide at the desk."
 icon    = "envelope"
 doc     = "routines/inbox/Inbox.md"
@@ -30,6 +30,9 @@ source = "triage-policy.md"
 id      = "triage-inbox"
 name    = "Triage Inbox"
 file    = "routines/inbox/skills/triage-inbox.md"
+# Filing against an explicit policy is mechanical work — run it on the
+# agent's fast model (the [agent] fast_command mapping, or its default).
+model   = "fast"
 summary = "Go through what you captured and file it — you confirm every move."
 reads   = ["inbox/**", "routines/inbox/triage-policy.md", "backlog.md", "daily/<today>.md"]
 writes  = ["backlog.md (append)", "daily/<today>.md (append)", "archives/inbox/triage-log.md (append)", "inbox/** (move, delete on confirm)"]

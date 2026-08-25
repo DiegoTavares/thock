@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::agent::ModelTier;
 use crate::notes::{NoteKind, TimelineEntry};
 use crate::vault::{OnboardingState, VAULT_MARKER_DIR, Vault, write_if_missing};
 
@@ -253,6 +254,7 @@ struct RoutineSkillContent {
     name: String,
     file: String,
     kind: Option<String>,
+    model: Option<String>,
     summary: Option<String>,
     icon: Option<String>,
     #[serde(default)]
@@ -278,11 +280,24 @@ impl RoutineSkillContent {
                 SkillKind::Ritual
             }
         };
+        let model = match self.model.as_deref() {
+            None | Some("default") => ModelTier::Default,
+            Some("fast") => ModelTier::Fast,
+            Some(other) => {
+                warnings.push(format!(
+                    "unknown skill model {other:?} on {:?} (expected default | fast); \
+                     using the default model",
+                    self.name
+                ));
+                ModelTier::Default
+            }
+        };
         RoutineSkill {
             id: self.id,
             name: self.name,
             file: self.file,
             kind,
+            model,
             summary: self.summary.unwrap_or_default(),
             icon: self.icon.filter(|icon| !icon.is_empty()),
             reads: self.reads,
@@ -428,6 +443,10 @@ pub struct RoutineSkill {
     pub file: String,
     /// Recurring ritual (the default) or one-time setup step.
     pub kind: SkillKind,
+    /// The model tier the launch command resolves against
+    /// (`crate::agent::ConnectedAgent::command_for`); `model = "fast"` in
+    /// the manifest marks mechanical skills.
+    pub model: ModelTier,
     pub summary: String,
     /// Named icon overriding the row default; `None` or an unknown name
     /// falls back to the skill default (the panel owns the mapping).
@@ -481,6 +500,8 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
         file: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         kind: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<&'a str>,
         #[serde(skip_serializing_if = "str::is_empty")]
         summary: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -567,6 +588,7 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
                 // The default stays absent so a re-rendered definition keeps
                 // reading like the hand-written one.
                 kind: skill.kind.is_setup().then(|| skill.kind.as_str()),
+                model: (skill.model != ModelTier::Default).then(|| skill.model.as_str()),
                 summary: &skill.summary,
                 icon: skill.icon.as_deref(),
                 reads: &skill.reads,
@@ -1848,6 +1870,10 @@ mod tests {
             .map(|skill| (skill.id.as_str(), skill.kind.is_setup()))
             .collect();
         assert_eq!(skills, vec![("triage-inbox", false), ("setup-inbox", true)]);
+        // Triage is mechanical filing against an explicit policy — it runs
+        // on the fast tier; setup is judgment and stays on the default.
+        assert_eq!(manifest.skills[0].model, ModelTier::Fast);
+        assert_eq!(manifest.skills[1].model, ModelTier::Default);
         // The landing zone is scaffolded even though capture doesn't depend
         // on the Routine; the default policy ships as an editable file.
         assert!(
@@ -1991,6 +2017,62 @@ mod tests {
         assert!(!rendered.contains(r#"kind = "ritual""#));
         assert!(rendered.contains(r#"kind = "setup""#));
         assert_eq!(parse_manifest(&rendered).unwrap(), manifest);
+    }
+
+    #[test]
+    fn skill_model_tiers_parse_and_round_trip() {
+        let manifest = parse_manifest(
+            r#"
+            schema = 2
+            id = "inbox"
+            name = "Inbox"
+            doc = "routines/inbox/Inbox.md"
+            [[skill]]
+            id = "triage"
+            name = "Triage"
+            model = "fast"
+            file = "routines/inbox/skills/triage.md"
+            [[skill]]
+            id = "review"
+            name = "Review"
+            file = "routines/inbox/skills/review.md"
+            "#,
+        )
+        .unwrap();
+        assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
+        assert_eq!(manifest.skills[0].model, ModelTier::Fast);
+        assert_eq!(manifest.skills[1].model, ModelTier::Default);
+
+        let rendered = render_manifest_toml(&manifest).unwrap();
+        // The default tier stays absent, like the default skill kind.
+        assert!(rendered.contains(r#"model = "fast""#));
+        assert!(!rendered.contains(r#"model = "default""#));
+        assert_eq!(parse_manifest(&rendered).unwrap(), manifest);
+    }
+
+    #[test]
+    fn an_unknown_skill_model_warns_and_uses_the_default() {
+        let manifest = parse_manifest(
+            r#"
+            schema = 2
+            id = "inbox"
+            name = "Inbox"
+            doc = "routines/inbox/Inbox.md"
+            [[skill]]
+            id = "triage"
+            name = "Triage"
+            model = "haiku"
+            file = "routines/inbox/skills/triage.md"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(manifest.skills[0].model, ModelTier::Default);
+        assert_eq!(manifest.warnings.len(), 1);
+        assert!(
+            manifest.warnings[0].contains("haiku"),
+            "{:?}",
+            manifest.warnings
+        );
     }
 
     #[test]

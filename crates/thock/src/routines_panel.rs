@@ -121,6 +121,7 @@ fn new_routine_launch_request() -> crate::agent_panel::LaunchRequest {
         kickoff: Some(crate::agent::run_skill_kickoff(
             routines::NEW_ROUTINE_SKILL_PATH,
         )),
+        tier: crate::agent::ModelTier::Default,
     }
 }
 
@@ -866,6 +867,7 @@ impl RoutinesPanel {
         &mut self,
         title: String,
         file: String,
+        tier: crate::agent::ModelTier,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -876,6 +878,7 @@ impl RoutinesPanel {
                     crate::agent_panel::LaunchRequest {
                         title,
                         kickoff: Some(crate::agent::run_skill_kickoff(&file)),
+                        tier,
                     },
                     window,
                     cx,
@@ -1013,7 +1016,13 @@ impl RoutinesPanel {
                     let title = format!("{routine_name} setup");
                     if connected {
                         this.update_in(cx, |this, window, cx| {
-                            this.run_skill(title, onboarding_file, window, cx);
+                            this.run_skill(
+                                title,
+                                onboarding_file,
+                                crate::agent::ModelTier::Default,
+                                window,
+                                cx,
+                            );
                         })?;
                     } else {
                         let answer = cx.update(|window, cx| {
@@ -1033,7 +1042,13 @@ impl RoutinesPanel {
                             // connect flow first, then continues into this
                             // session.
                             this.update_in(cx, |this, window, cx| {
-                                this.run_skill(title, onboarding_file, window, cx);
+                                this.run_skill(
+                                title,
+                                onboarding_file,
+                                crate::agent::ModelTier::Default,
+                                window,
+                                cx,
+                            );
                             })?;
                         }
                     }
@@ -1332,6 +1347,7 @@ impl RoutinesPanel {
                                     panel.run_skill(
                                         title.clone(),
                                         onboarding_file.clone(),
+                                        crate::agent::ModelTier::Default,
                                         window,
                                         cx,
                                     );
@@ -1685,7 +1701,7 @@ impl RoutinesPanel {
             NavRowKind::Link(link) => self.open_link(row.routine_id, link, window, cx),
             NavRowKind::Skill(skill) => {
                 let title = self.skill_run_title(&row.routine_id, &skill);
-                self.run_skill(title, skill.file, window, cx);
+                self.run_skill(title, skill.file, skill.model, window, cx);
             }
             NavRowKind::Group(label) => self.toggle_group(&row.routine_id, &label, cx),
         }
@@ -1942,8 +1958,9 @@ impl RoutinesPanel {
         )
         .on_click(cx.listener({
             let file = skill.file.clone();
+            let tier = skill.model;
             move |this, _, window, cx| {
-                this.run_skill(title.clone(), file.clone(), window, cx);
+                this.run_skill(title.clone(), file.clone(), tier, window, cx);
             }
         }))
         .into_any_element()
@@ -2412,6 +2429,7 @@ mod tests {
             name: "Row".into(),
             file: "routines/x/skills/row.md".into(),
             kind,
+            model: crate::agent::ModelTier::Default,
             summary: String::new(),
             icon: icon.map(str::to_string),
             reads: Vec::new(),
@@ -2467,6 +2485,7 @@ mod tests {
             name: id.into(),
             file: format!("routines/x/skills/{id}.md"),
             kind,
+            model: crate::agent::ModelTier::Default,
             summary: String::new(),
             icon: None,
             reads: Vec::new(),

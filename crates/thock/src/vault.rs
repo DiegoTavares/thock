@@ -186,17 +186,22 @@ impl Default for BacklogConfig {
 struct AgentConfigContent {
     #[serde(skip_serializing_if = "Option::is_none")]
     command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fast_command: Option<String>,
 }
 
 impl AgentConfigContent {
     fn resolve(self) -> AgentConfig {
         AgentConfig {
             command: self.command.filter(|command| !command.trim().is_empty()),
+            fast_command: self
+                .fast_command
+                .filter(|command| !command.trim().is_empty()),
         }
     }
 
     fn is_unset(&self) -> bool {
-        self.command.is_none()
+        self.command.is_none() && self.fast_command.is_none()
     }
 }
 
@@ -232,12 +237,15 @@ impl Default for MarkdownConfig {
     }
 }
 
-/// The `[agent]` table: this vault's launch-command override for the user's
-/// CLI agent. When absent, the user-level default applies (see
+/// The `[agent]` table: this vault's launch-command overrides for the user's
+/// CLI agent. When absent, the user-level defaults apply (see
 /// `crate::agent`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AgentConfig {
     pub command: Option<String>,
+    /// The command for skills that declare `model = "fast"` — where
+    /// CLI-specific model flags belong, so Routines never carry them.
+    pub fast_command: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]

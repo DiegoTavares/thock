@@ -109,7 +109,7 @@ fn run_skill_by_id(
     match skill {
         Some(skill) => AgentPanel::launch_in_workspace(
             workspace,
-            LaunchRequest::run_skill(&skill.name, &skill.file),
+            LaunchRequest::run_skill(&skill.name, &skill.file, skill.model),
             window,
             cx,
         ),
@@ -129,6 +129,9 @@ pub struct LaunchRequest {
     /// The kickoff prompt passed as a launch argument. `None` for ad-hoc
     /// conversations: the CLI starts idle.
     pub kickoff: Option<String>,
+    /// The model tier the skill declared; conversations and onboarding run
+    /// on the default tier.
+    pub tier: agent::ModelTier,
 }
 
 impl LaunchRequest {
@@ -136,13 +139,19 @@ impl LaunchRequest {
         Self {
             title: "Conversation".to_string(),
             kickoff: None,
+            tier: agent::ModelTier::Default,
         }
     }
 
-    pub fn run_skill(skill_name: &str, vault_relative_path: &str) -> Self {
+    pub fn run_skill(
+        skill_name: &str,
+        vault_relative_path: &str,
+        tier: agent::ModelTier,
+    ) -> Self {
         Self {
             title: skill_name.to_string(),
             kickoff: Some(agent::run_skill_kickoff(vault_relative_path)),
+            tier,
         }
     }
 }
@@ -321,7 +330,10 @@ impl AgentPanel {
             return;
         };
         self.connected = Some(connected.clone());
-        let launch = match agent::build_launch(&connected.command, request.kickoff.as_deref()) {
+        let launch = match agent::build_launch(
+            &connected.command_for(request.tier),
+            request.kickoff.as_deref(),
+        ) {
             Ok(launch) => launch,
             Err(error) => {
                 self.show_error(format!("Couldn't launch the agent: {error}"), cx);
@@ -895,6 +907,7 @@ struct RunnableSkill {
     skill_name: String,
     /// Vault-relative skill file path.
     file: String,
+    tier: agent::ModelTier,
     summary: String,
 }
 
@@ -907,6 +920,7 @@ fn runnable_skills(vault: &Vault) -> Vec<RunnableSkill> {
                 label: format!("{} — {}", skill.name, routine_name),
                 skill_name: skill.name,
                 file: skill.file,
+                tier: skill.model,
                 summary: skill.summary,
             })
         })
@@ -1073,7 +1087,7 @@ impl PickerDelegate for RunSkillDelegate {
             .matches
             .get(self.selected_index)
             .and_then(|mat| self.skills.get(mat.candidate_id))
-            .map(|skill| LaunchRequest::run_skill(&skill.skill_name, &skill.file));
+            .map(|skill| LaunchRequest::run_skill(&skill.skill_name, &skill.file, skill.tier));
         if let Some(request) = request {
             self.workspace
                 .update(cx, |workspace, cx| {
