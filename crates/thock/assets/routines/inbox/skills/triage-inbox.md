@@ -55,9 +55,24 @@ Carried over
 
 ## 4. Wait
 
-Do not touch anything before the user answers. Accept `all`, a selection (`1,3`), a
-re-assignment (`2 → soon`, `3 → today`), `leave 4` (defer), `drop 6` (discard), or plain
-prose. Anything not confirmed is left exactly where it is.
+Do not touch anything before the user answers. Present the proposed batch through the
+harness's structured question tool (AskUserQuestion in Claude Code) as a single question —
+never one question per item. The user can confirm `all`, a selection (`1,3`), re-assign a
+destination (`2 → soon`, `3 → today`), `leave 4` (defer), `drop 6` (discard), or answer in
+plain prose. Anything not confirmed is left exactly where it is.
+
+When calling AskUserQuestion:
+
+- `question`: "Where should these items go? Confirm with all, a selection like 1,3, or
+  adjust with 1 → destination." (or similar)
+- `header`: "Triage" or "Destinations"
+- `multiSelect`: false (single answer per batch)
+- `options`: provide at least two meaningful default selections like:
+  - "Accept all" (description: "File all items to their proposed destinations")
+  - "Skip" (description: "Leave all items in inbox and defer")
+- The built-in "Other" option is where re-assignments, selections, and plain prose land.
+
+If the harness has no structured question tool, ask the same question as plain text and wait.
 
 ## 5. Apply the confirmed batch
 
