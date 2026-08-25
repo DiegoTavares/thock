@@ -13,10 +13,17 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::gmail::{CapturedEmail, ImportMode, MailFetched, MailProvider, thread_marker_id};
+use crate::gmail::{
+    CapturedEmail, ImportMode, MailFetched, MailProvider, gmail_thread_url, thread_marker_id,
+};
 use crate::google_auth::{AuthRevoked, GoogleClient, TokenKeeper, Unauthorized};
+use crate::inbox::{CapturedItem, InboxFetched, InboxSource, capture_digest};
 
 const API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
+
+/// V9's flat default label, honored as a visible transitional fallback when
+/// the configured default (`thock/backlog`) is absent (V13 §7.1).
+const LEGACY_BACKLOG_LABEL: &str = "backlog";
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -109,6 +116,7 @@ struct MessagePart {
 struct GmailMessage {
     id: String,
     thread_id: String,
+    label_ids: Vec<String>,
     /// Milliseconds since the epoch, as a string.
     internal_date: Option<String>,
     payload: MessagePart,
@@ -420,18 +428,27 @@ struct MailInner {
     keeper: TokenKeeper,
     account: String,
     label: String,
-    label_id: Mutex<Option<String>>,
+    /// Only a default label may fall back to V9's flat `backlog` (V13 §7.1).
+    label_is_default: bool,
+    /// `(label id, used the legacy fallback)`.
+    label_id: Mutex<Option<(String, bool)>>,
 }
 
 impl GoogleMailProvider {
-    pub fn new(http: Arc<dyn HttpClient>, client: GoogleClient, account: String, label: String) -> Self {
+    pub fn new(
+        http: Arc<dyn HttpClient>,
+        client: GoogleClient,
+        account: String,
+        label: String,
+        label_is_default: bool,
+    ) -> Self {
         Self {
             inner: Arc::new(MailInner {
                 http,
                 keeper: TokenKeeper::new(client),
                 account,
                 label,
-
+                label_is_default,
                 label_id: Mutex::new(None),
             }),
         }
@@ -479,7 +496,7 @@ impl MailInner {
         skip: &HashSet<String>,
         access_token: &str,
     ) -> Result<MailFetched> {
-        let Some(label_id) = self.resolve_label_id(access_token).await? else {
+        let Some((label_id, legacy_label)) = self.resolve_label_id(access_token).await? else {
             return Ok(MailFetched::LabelNotFound);
         };
         let refs = match list_label_messages(&self.http, access_token, &label_id).await {
@@ -512,24 +529,214 @@ impl MailInner {
             let message = get_message(&self.http, access_token, &reference.id, mode).await?;
             emails.push(captured_email(&message, mode, &reference.thread_id));
         }
-        Ok(MailFetched::Emails(emails))
+        Ok(MailFetched::Emails {
+            emails,
+            legacy_label,
+        })
     }
 
-    async fn resolve_label_id(&self, access_token: &str) -> Result<Option<String>> {
+    /// Resolves the configured label by its full path name; when it is the
+    /// built-in default and absent, falls back to V9's flat `backlog` label
+    /// (V13 §7.1). The fallback runs only after `labels.list` *succeeded* —
+    /// a transient error must never silently reroute capture.
+    async fn resolve_label_id(&self, access_token: &str) -> Result<Option<(String, bool)>> {
         if let Ok(cached) = self.label_id.lock()
-            && let Some(id) = cached.clone()
+            && let Some(resolved) = cached.clone()
         {
-            return Ok(Some(id));
+            return Ok(Some(resolved));
         }
         let labels = list_labels(&self.http, access_token).await?;
-        let id = labels
-            .into_iter()
-            .find(|label| label.name.eq_ignore_ascii_case(&self.label))
-            .map(|label| label.id);
-        if let (Ok(mut cached), Some(id)) = (self.label_id.lock(), &id) {
-            *cached = Some(id.clone());
+        // Full-path match only: matching the last segment would collide with
+        // any other `*/backlog` label the user keeps.
+        let find = |name: &str| {
+            labels
+                .iter()
+                .find(|label| label.name.eq_ignore_ascii_case(name))
+                .map(|label| label.id.clone())
+        };
+        let resolved = match find(&self.label) {
+            Some(id) => Some((id, false)),
+            None if self.label_is_default => find(LEGACY_BACKLOG_LABEL).map(|id| (id, true)),
+            None => None,
+        };
+        if let (Ok(mut cached), Some(resolved)) = (self.label_id.lock(), &resolved) {
+            *cached = Some(resolved.clone());
         }
-        Ok(id)
+        Ok(resolved)
+    }
+}
+
+/// [`InboxSource`] over the same REST client (V13 §7.1): threads carrying
+/// the `thock/inbox` label become inbox notes. A thread that *also* carries
+/// the backlog fast-lane label is excluded here, so a both-labels thread is
+/// captured exactly once, by the fast lane. Read-only toward Google, like
+/// everything else in this file.
+pub struct GmailInboxSource {
+    inner: Arc<InboxMailInner>,
+}
+
+struct InboxMailInner {
+    http: Arc<dyn HttpClient>,
+    keeper: TokenKeeper,
+    account: String,
+    label: String,
+    /// The fast lane's `(label, is_default)` from `.thock/gmail.toml`, when
+    /// email-to-backlog capture is configured — resolved with the same
+    /// legacy fallback so exclusion tracks whatever the fast lane reads.
+    fast_lane: Option<(String, bool)>,
+    /// `(inbox label id, fast-lane label id)`.
+    label_ids: Mutex<Option<(String, Option<String>)>>,
+}
+
+impl GmailInboxSource {
+    pub fn new(
+        http: Arc<dyn HttpClient>,
+        client: GoogleClient,
+        account: String,
+        label: String,
+        fast_lane: Option<(String, bool)>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(InboxMailInner {
+                http,
+                keeper: TokenKeeper::new(client),
+                account,
+                label,
+                fast_lane,
+                label_ids: Mutex::new(None),
+            }),
+        }
+    }
+}
+
+impl InboxSource for GmailInboxSource {
+    fn id(&self) -> &'static str {
+        "gmail"
+    }
+
+    fn fetch(&self, skip: &HashSet<String>, cx: &AsyncApp) -> Task<Result<InboxFetched>> {
+        let inner = self.inner.clone();
+        let skip = skip.clone();
+        cx.spawn(async move |cx| {
+            let token = inner.keeper.valid_access_token(&inner.http, cx).await?;
+            match inner.fetch_with_token(&skip, &token).await {
+                Err(error) if error.is::<Unauthorized>() => {
+                    inner.keeper.invalidate_access_token();
+                    let token = inner.keeper.valid_access_token(&inner.http, cx).await?;
+                    match inner.fetch_with_token(&skip, &token).await {
+                        Err(error) if error.is::<Unauthorized>() => Err(anyhow!(AuthRevoked)),
+                        other => other,
+                    }
+                }
+                other => other,
+            }
+        })
+    }
+}
+
+impl InboxMailInner {
+    async fn fetch_with_token(
+        &self,
+        skip: &HashSet<String>,
+        access_token: &str,
+    ) -> Result<InboxFetched> {
+        let Some((label_id, fast_lane_id)) = self.resolve_label_ids(access_token).await? else {
+            return Ok(InboxFetched::Holding(format!(
+                "label \"{}\" not found in Gmail",
+                self.label
+            )));
+        };
+        let refs = match list_label_messages(&self.http, access_token, &label_id).await {
+            Ok(refs) => refs,
+            Err(error) => {
+                // The cached label may have been deleted; re-resolve next poll.
+                if let Ok(mut cached) = self.label_ids.lock() {
+                    *cached = None;
+                }
+                return Err(error);
+            }
+        };
+
+        let mut seen_threads = HashSet::new();
+        let mut wanted = Vec::new();
+        for reference in refs {
+            if !seen_threads.insert(reference.thread_id.clone()) {
+                continue;
+            }
+            if skip.contains(&capture_digest(&self.account, "gmail", &reference.thread_id)) {
+                continue;
+            }
+            wanted.push(reference);
+        }
+
+        let mut items = Vec::with_capacity(wanted.len());
+        for reference in wanted {
+            let message =
+                get_message(&self.http, access_token, &reference.id, ImportMode::Full).await?;
+            // The both-labels thread takes the backlog fast lane (V13 §7.1).
+            if let Some(fast_lane_id) = &fast_lane_id
+                && message.label_ids.iter().any(|id| id == fast_lane_id)
+            {
+                continue;
+            }
+            items.push(captured_item(&message, &self.account, &reference.thread_id));
+        }
+        Ok(InboxFetched::Items(items))
+    }
+
+    /// Resolves the inbox label and, when the fast lane is configured, its
+    /// label too (with the fast lane's own legacy fallback, so exclusion
+    /// tracks what `GoogleMailProvider` actually reads). Full-path matching
+    /// only, and never on a failed `labels.list`.
+    async fn resolve_label_ids(
+        &self,
+        access_token: &str,
+    ) -> Result<Option<(String, Option<String>)>> {
+        if let Ok(cached) = self.label_ids.lock()
+            && let Some(resolved) = cached.clone()
+        {
+            return Ok(Some(resolved));
+        }
+        let labels = list_labels(&self.http, access_token).await?;
+        let find = |name: &str| {
+            labels
+                .iter()
+                .find(|label| label.name.eq_ignore_ascii_case(name))
+                .map(|label| label.id.clone())
+        };
+        let Some(inbox_id) = find(&self.label) else {
+            return Ok(None);
+        };
+        let fast_lane_id = self.fast_lane.as_ref().and_then(|(label, is_default)| {
+            find(label).or_else(|| {
+                if *is_default {
+                    find(LEGACY_BACKLOG_LABEL)
+                } else {
+                    None
+                }
+            })
+        });
+        let resolved = (inbox_id, fast_lane_id);
+        if let Ok(mut cached) = self.label_ids.lock() {
+            *cached = Some(resolved.clone());
+        }
+        Ok(Some(resolved))
+    }
+}
+
+/// One labeled thread as an inbox item: the email's text and a link back to
+/// the thread (V13 §5) — `link`, never `url`.
+fn captured_item(message: &GmailMessage, account: &str, thread_id: &str) -> CapturedItem {
+    let email = captured_email(message, ImportMode::Full, thread_id);
+    CapturedItem {
+        source: "gmail",
+        external_id: thread_id.to_string(),
+        title: crate::gmail::sanitize_subject(&email.subject),
+        url: None,
+        link: Some(gmail_thread_url(account, thread_id)),
+        body: email.body,
+        occurred_at: Some(email.date.fixed_offset()),
+        due: None,
     }
 }
 
@@ -688,24 +895,19 @@ mod tests {
         });
         let http: Arc<dyn HttpClient> = http;
 
-        let inner = MailInner {
-            http,
-            keeper: TokenKeeper::new(GoogleClient {
-                client_id: "id".to_string(),
-                client_secret: None,
-            }),
-            account: "diego@example.com".to_string(),
-            label: "backlog".to_string(),
-            label_id: Mutex::new(None),
-        };
+        let inner = test_inner(http, "backlog", false);
         let skip: HashSet<String> =
             [thread_marker_id("diego@example.com", "t-old")].into_iter().collect();
         let fetched =
             block_on(inner.fetch_with_token(ImportMode::Title, &skip, "token")).unwrap();
         match fetched {
-            MailFetched::Emails(emails) => {
+            MailFetched::Emails {
+                emails,
+                legacy_label,
+            } => {
                 // t-new fetched once (newest message), t-old skipped without
                 // a message request (the fake panics on /messages/m1).
+                assert!(!legacy_label);
                 assert_eq!(emails.len(), 1);
                 assert_eq!(emails[0].thread_id, "t-new");
                 assert_eq!(emails[0].subject, "Café plans");
@@ -713,6 +915,20 @@ mod tests {
                 assert_eq!(emails[0].body, None);
             }
             MailFetched::LabelNotFound => panic!("expected emails"),
+        }
+    }
+
+    fn test_inner(http: Arc<dyn HttpClient>, label: &str, label_is_default: bool) -> MailInner {
+        MailInner {
+            http,
+            keeper: TokenKeeper::new(GoogleClient {
+                client_id: "id".to_string(),
+                client_secret: None,
+            }),
+            account: "diego@example.com".to_string(),
+            label: label.to_string(),
+            label_is_default,
+            label_id: Mutex::new(None),
         }
     }
 
@@ -727,19 +943,74 @@ mod tests {
                 .unwrap())
         });
         let http: Arc<dyn HttpClient> = http;
-        let inner = MailInner {
-            http,
-            keeper: TokenKeeper::new(GoogleClient {
-                client_id: "id".to_string(),
-                client_secret: None,
-            }),
-            account: "diego@example.com".to_string(),
-            label: "backlog".to_string(),
-            label_id: Mutex::new(None),
-        };
+        let inner = test_inner(http, "backlog", false);
         let fetched =
             block_on(inner.fetch_with_token(ImportMode::Title, &HashSet::new(), "token")).unwrap();
         assert_eq!(fetched, MailFetched::LabelNotFound);
+    }
+
+    /// V13 §7.1: the default `thock/backlog` falls back to V9's flat
+    /// `backlog` when absent — visibly — while an explicit label never does,
+    /// and matching is against the full path, never the last segment.
+    #[test]
+    fn legacy_label_fallback_applies_to_the_default_only() {
+        fn labels_only_http() -> Arc<dyn HttpClient> {
+            FakeHttpClient::create(|request| async move {
+                let uri = request.uri().to_string();
+                let body = if uri.contains("/labels") {
+                    r#"{"labels": [
+                        {"id": "Label_9", "name": "Backlog"},
+                        {"id": "Label_8", "name": "work/backlog"}
+                    ]}"#
+                } else if uri.contains("labelIds=Label_9") {
+                    r#"{"messages": []}"#
+                } else {
+                    panic!("unexpected request to {uri}");
+                };
+                Ok(Response::builder()
+                    .status(200)
+                    .body(AsyncBody::from(body.as_bytes().to_vec()))
+                    .unwrap())
+            })
+        }
+
+        // The default label is missing and flat `backlog` exists: fall back,
+        // and say so. `work/backlog` never matches on its last segment.
+        let inner = test_inner(labels_only_http(), "thock/backlog", true);
+        let fetched =
+            block_on(inner.fetch_with_token(ImportMode::Title, &HashSet::new(), "token")).unwrap();
+        assert_eq!(
+            fetched,
+            MailFetched::Emails {
+                emails: Vec::new(),
+                legacy_label: true,
+            }
+        );
+
+        // An explicit `thock/backlog` in config is unaffected either way.
+        let inner = test_inner(labels_only_http(), "thock/backlog", false);
+        let fetched =
+            block_on(inner.fetch_with_token(ImportMode::Title, &HashSet::new(), "token")).unwrap();
+        assert_eq!(fetched, MailFetched::LabelNotFound);
+    }
+
+    /// The fallback must not fire when the configured label merely *failed
+    /// to fetch* — a transient error propagates instead of silently
+    /// rerouting capture (V13 §11).
+    #[test]
+    fn transient_labels_error_never_falls_back() {
+        let http = FakeHttpClient::create(|_| async move {
+            Ok(Response::builder()
+                .status(503)
+                .body(AsyncBody::from(b"unavailable".to_vec()))
+                .unwrap())
+        });
+        let http: Arc<dyn HttpClient> = http;
+        let inner = test_inner(http, "thock/backlog", true);
+        let error =
+            block_on(inner.fetch_with_token(ImportMode::Title, &HashSet::new(), "token"))
+                .unwrap_err();
+        assert!(error.to_string().contains("503"), "{error:#}");
     }
 
     #[test]

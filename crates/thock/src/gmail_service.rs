@@ -26,14 +26,15 @@ use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
 
 use crate::backlog::{DEFAULT_BACKLOG, apply_edits};
-use crate::calendar::GoogleClientOverride;
-use crate::calendar_service::SyncState;
+use crate::calendar_service::{ManualSyncFinished, SyncState, show_sync_toast};
 use crate::gmail::{
     GMAIL_CONFIG_FILE, GmailConfig, ImportMode, ImportRecord, MailFetched, MailProvider,
     archive_frontmatter_digest, parse_gmail_config, plan_capture,
 };
 use crate::gmail_google::GoogleMailProvider;
-use crate::google_auth::{AuthRevoked, GoogleClient};
+use crate::google_auth::{
+    AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings,
+};
 use crate::vault::{VAULT_CONFIG_FILE, VAULT_MARKER_DIR, Vault, VaultStatus};
 
 /// Same typing guard and backoff as the calendar service (V8 §9 guard 1).
@@ -63,6 +64,10 @@ pub fn init(cx: &mut App) {
             return;
         }
         let service = cx.new(|cx| GmailService::new(project.clone(), cx));
+        cx.subscribe(&service, |workspace, _, event: &ManualSyncFinished, cx| {
+            show_sync_toast(workspace, event, cx);
+        })
+        .detach();
         let project_id = project.entity_id();
         cx.default_global::<GlobalGmailServices>()
             .0
@@ -105,7 +110,12 @@ pub fn service_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity
 }
 
 enum SyncOutcome {
-    Synced,
+    Synced {
+        /// Capture ran on V9's flat `backlog` label because the configured
+        /// one is absent (V13 §7.1) — shown in the status row with a rename
+        /// hint.
+        legacy_label: bool,
+    },
     Held(gpui::SharedString),
     Failed(anyhow::Error),
     AuthRevoked,
@@ -134,8 +144,15 @@ pub struct GmailService {
     /// apply work it spawns is awaited inside it, never stored separately.
     poll_task: Option<Task<()>>,
     dedup: Option<DedupState>,
+    /// The last sync ran on V9's flat `backlog` label (V13 §7.1).
+    legacy_label: bool,
+    /// Set by `sync_now` so the next completed sync announces itself
+    /// ([`ManualSyncFinished`]); background polls stay quiet.
+    announce_next_sync: bool,
     _subscriptions: Vec<Subscription>,
 }
+
+impl EventEmitter<ManualSyncFinished> for GmailService {}
 
 impl GmailService {
     fn new(project: Entity<Project>, cx: &mut Context<Self>) -> Self {
@@ -148,6 +165,8 @@ impl GmailService {
             state: SyncState::NoConfig,
             poll_task: None,
             dedup: None,
+            legacy_label: false,
+            announce_next_sync: false,
             _subscriptions: vec![project_subscription],
         };
         this.reload(cx);
@@ -162,19 +181,17 @@ impl GmailService {
         self.vault.is_some()
     }
 
+    /// Whether capture is running on the old flat `backlog` label — a
+    /// visible transitional state with a rename hint in the status row
+    /// (V13 §7.1).
+    pub fn using_legacy_label(&self) -> bool {
+        self.legacy_label
+    }
+
     /// Whether the status row should be shown at all: only when the vault
     /// carries a Gmail config (spec §10.3, G5).
     pub fn has_config(&self) -> bool {
         !matches!(self.state, SyncState::NoConfig)
-    }
-
-    /// The `[google]` client override from `.thock/gmail.toml`, for the
-    /// connect flow when `calendar.toml` doesn't carry one.
-    pub fn google_override(&self) -> Option<GoogleClientOverride> {
-        self.config
-            .as_ref()
-            .map(|config| config.google.clone())
-            .filter(|overrides| overrides.client_id.is_some())
     }
 
     /// The workspace connect flow started (it is owned by the calendar
@@ -206,6 +223,7 @@ impl GmailService {
     /// `thock::SyncGmailNow`: restarts the loop, which checks immediately.
     fn sync_now(&mut self, cx: &mut Context<Self>) {
         if self.provider.is_some() {
+            self.announce_next_sync = true;
             self.start_poll(cx);
         }
     }
@@ -268,10 +286,11 @@ impl GmailService {
             }
             project::Event::WorktreeUpdatedEntries(_, changes) => {
                 let gmail_config = format!("{VAULT_MARKER_DIR}/{GMAIL_CONFIG_FILE}");
+                let google_config = format!("{VAULT_MARKER_DIR}/{GOOGLE_CONFIG_FILE}");
                 let vault_config = format!("{VAULT_MARKER_DIR}/{VAULT_CONFIG_FILE}");
                 if changes.iter().any(|(path, _, _)| {
                     let path = path.as_unix_str();
-                    path == gmail_config || path == vault_config
+                    path == gmail_config || path == google_config || path == vault_config
                 }) {
                     self.reload(cx);
                 }
@@ -305,7 +324,14 @@ impl GmailService {
         let config = match std::fs::read_to_string(&config_path) {
             Err(_) => None,
             Ok(text) => match parse_gmail_config(&text) {
-                Ok(config) => Some(config),
+                Ok(mut config) => {
+                    // The account and client override resolve across the
+                    // Google config files (V13 §7.4), `google.toml` first.
+                    let settings = resolve_google_settings(&vault.root, GMAIL_CONFIG_FILE);
+                    config.account = settings.account;
+                    config.google = settings.google;
+                    Some(config)
+                }
                 Err(error) => {
                     // A hand-edited file that doesn't parse disables capture,
                     // never panics (spec §7).
@@ -374,6 +400,7 @@ impl GmailService {
             client,
             account,
             config.label.clone(),
+            config.label_is_default,
         )))
     }
 
@@ -407,10 +434,24 @@ impl GmailService {
         delay: &mut Duration,
         cx: &mut Context<Self>,
     ) -> bool {
+        let announcement = std::mem::take(&mut self.announce_next_sync)
+            .then(|| match &outcome {
+                SyncOutcome::Aborted => None,
+                SyncOutcome::Synced { .. } => Some("Gmail synced".into()),
+                SyncOutcome::Held(reason) => Some(format!("Gmail sync held — {reason}").into()),
+                SyncOutcome::Failed(error) => {
+                    Some(format!("Gmail sync failed — {error:#}").into())
+                }
+                SyncOutcome::AuthRevoked => {
+                    Some("Google sign-in expired — reconnect to sync Gmail".into())
+                }
+            })
+            .flatten();
         let keep_going = match outcome {
             SyncOutcome::Aborted => false,
-            SyncOutcome::Synced => {
+            SyncOutcome::Synced { legacy_label } => {
                 self.state = SyncState::Synced { at: Instant::now() };
+                self.legacy_label = legacy_label;
                 *delay = interval;
                 true
             }
@@ -434,6 +475,12 @@ impl GmailService {
                 false
             }
         };
+        if let Some(message) = announcement {
+            cx.emit(ManualSyncFinished {
+                message,
+                icon: IconName::Envelope,
+            });
+        }
         cx.notify();
         keep_going
     }
@@ -463,21 +510,28 @@ impl GmailService {
             Err(error) => return SyncOutcome::Failed(error),
         };
 
-        let emails = match provider.fetch_labeled(config.import, &dedup.imported, cx).await {
-            Err(error) if error.is::<AuthRevoked>() => return SyncOutcome::AuthRevoked,
-            Err(error) => return SyncOutcome::Failed(error),
-            Ok(MailFetched::LabelNotFound) => {
-                return SyncOutcome::Held(
-                    format!("label \"{}\" not found in Gmail", config.label).into(),
-                );
-            }
-            Ok(MailFetched::Emails(emails)) => emails,
-        };
+        let (emails, legacy_label) =
+            match provider.fetch_labeled(config.import, &dedup.imported, cx).await {
+                Err(error) if error.is::<AuthRevoked>() => return SyncOutcome::AuthRevoked,
+                Err(error) => return SyncOutcome::Failed(error),
+                Ok(MailFetched::LabelNotFound) => {
+                    return SyncOutcome::Held(
+                        format!("label \"{}\" not found in Gmail", config.label).into(),
+                    );
+                }
+                Ok(MailFetched::Emails {
+                    emails,
+                    legacy_label,
+                }) => (emails, legacy_label),
+            };
         if emails.is_empty() {
-            return SyncOutcome::Synced;
+            return SyncOutcome::Synced { legacy_label };
         }
 
-        Self::apply_capture(this, &fs, &vault, &config, &project, &emails, dedup, cx).await
+        match Self::apply_capture(this, &fs, &vault, &config, &project, &emails, dedup, cx).await {
+            SyncOutcome::Synced { .. } => SyncOutcome::Synced { legacy_label },
+            other => other,
+        }
     }
 
     /// The loaded dedup state, loading (or rebuilding, spec §4.3) it first
@@ -574,7 +628,9 @@ impl GmailService {
             &captured_at,
         );
         if plan.is_empty() {
-            return SyncOutcome::Synced;
+            return SyncOutcome::Synced {
+                legacy_label: false,
+            };
         }
 
         // Archives first (spec §9): a crash after this leaves harmless
@@ -626,7 +682,9 @@ impl GmailService {
             }
         })
         .ok();
-        SyncOutcome::Synced
+        SyncOutcome::Synced {
+            legacy_label: false,
+        }
     }
 
     /// The not-open path (spec §9): read-modify-write through the project
@@ -737,6 +795,7 @@ impl GmailService {
                 "digest": record.digest,
                 "thread": record.thread_id,
                 "subject": record.subject,
+                "dest": record.dest,
                 "at": captured_at,
             });
             contents.push_str(&entry.to_string());
@@ -958,7 +1017,10 @@ mod tests {
         ) -> Task<Result<MailFetched>> {
             self.skips_seen.lock().unwrap().push(skip.clone());
             let emails = self.emails.lock().unwrap().clone();
-            Task::ready(Ok(MailFetched::Emails(emails)))
+            Task::ready(Ok(MailFetched::Emails {
+                emails,
+                legacy_label: false,
+            }))
         }
     }
 

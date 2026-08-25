@@ -1,0 +1,50 @@
+schema  = 2
+id      = "inbox"
+name    = "Inbox"
+version = 2
+summary = "A front door for the vault — capture anywhere, decide at the desk."
+icon    = "envelope"
+doc     = "routines/inbox/Inbox.md"
+
+# The queue is reached by running triage; browsing raw captures is what the
+# project panel is for, so there is deliberately no row that opens inbox/.
+[[link]]
+name  = "Triage log"
+open  = "archives/inbox/triage-log.md"
+group = "History"
+
+# The landing zone. Capture writes here whether or not this Routine is
+# installed; the Routine provides the ritual, the policy, and the docs.
+[[scaffold]]
+kind = "dir"
+path = "inbox"
+
+# The editable judgment the triage ritual follows. Set Up Inbox rewrites it
+# from your answers; editing it by hand changes the ritual with no re-setup.
+[[scaffold]]
+kind   = "file"
+path   = "routines/inbox/triage-policy.md"
+source = "triage-policy.md"
+
+[[skill]]
+id      = "triage-inbox"
+name    = "Triage Inbox"
+file    = "routines/inbox/skills/triage-inbox.md"
+# Filing against an explicit policy is mechanical work — run it on the
+# agent's fast model (the [agent] fast_command mapping, or its default).
+model   = "fast"
+summary = "Go through what you captured and file it — you confirm every move."
+reads   = ["inbox/**", "routines/inbox/triage-policy.md", "backlog.md", "daily/<today>.md"]
+writes  = ["backlog.md (append)", "daily/<today>.md (append)", "archives/inbox/triage-log.md (append)", "inbox/** (move, delete on confirm)"]
+
+[[skill]]
+id      = "setup-inbox"
+name    = "Set Up Inbox"
+kind    = "setup"
+file    = "routines/inbox/skills/setup-inbox.md"
+summary = "Six questions that teach triage where things go in this vault."
+reads   = ["routines/**", ".thock/config.toml", "the vault's folder layout"]
+writes  = ["routines/inbox/triage-policy.md", ".thock/state/onboarded/inbox"]
+
+[onboarding]
+skill = "routines/inbox/skills/setup-inbox.md"

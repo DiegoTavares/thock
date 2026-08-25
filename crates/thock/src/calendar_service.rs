@@ -14,6 +14,7 @@ use gpui::{
     Window, actions,
 };
 use language::Buffer;
+use notifications::status_toast::StatusToast;
 use picker::{Picker, PickerDelegate};
 use project::Project;
 use std::collections::{HashMap, HashSet};
@@ -32,7 +33,10 @@ use crate::calendar::{
 use crate::calendar_google::{self, CalendarListEntry, GoogleProvider};
 use crate::gmail::GMAIL_CONFIG_FILE;
 use crate::gmail_service::GmailService;
-use crate::google_auth::{self, AuthRevoked, GoogleClient};
+use crate::inbox_service::InboxService;
+use crate::google_auth::{
+    self, AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings,
+};
 use crate::notes::NoteKind;
 use crate::vault::{VAULT_CONFIG_FILE, VAULT_MARKER_DIR, Vault, VaultStatus};
 
@@ -49,14 +53,16 @@ actions!(
     thock,
     [
         /// Links your Google account so today's meetings appear in today's
-        /// note and emails you label become Backlog tasks.
+        /// note, emails you label become Backlog tasks, and things you send
+        /// from your phone land in the inbox.
         ConnectGoogleWorkspace,
         /// Chooses which of your calendars appear in today's note.
         ChooseCalendars,
         /// Brings today's meetings in the daily note up to date now.
         SyncCalendarNow,
-        /// Stops calendar sync and email capture and forgets the Google
-        /// sign-in. Everything already in your notes stays where it is.
+        /// Stops calendar sync, email capture, and inbox capture, and
+        /// forgets the Google sign-in. Everything already in your notes
+        /// stays where it is.
         DisconnectGoogleWorkspace,
     ]
 );
@@ -68,6 +74,10 @@ pub fn init(cx: &mut App) {
             return;
         }
         let service = cx.new(|cx| CalendarService::new(project.clone(), cx));
+        cx.subscribe(&service, |workspace, _, event: &ManualSyncFinished, cx| {
+            show_sync_toast(workspace, event, cx);
+        })
+        .detach();
         let project_id = project.entity_id();
         cx.default_global::<GlobalCalendarServices>()
             .0
@@ -82,13 +92,14 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &ConnectGoogleWorkspace, window, cx| {
             let workspace_handle = workspace.weak_handle();
             let gmail = crate::gmail_service::service_for_project(workspace.project(), cx);
+            let inbox = crate::inbox_service::service_for_project(workspace.project(), cx);
             if let Some(service) = service_for_workspace(workspace, cx) {
                 if !service.read(cx).has_vault() {
                     show_no_vault_error(workspace, cx);
                     return;
                 }
                 service.update(cx, |service, cx| {
-                    service.connect(gmail, workspace_handle, window, cx)
+                    service.connect(gmail, inbox, workspace_handle, window, cx)
                 });
             }
         });
@@ -111,8 +122,9 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action(|workspace, _: &DisconnectGoogleWorkspace, _window, cx| {
             let gmail = crate::gmail_service::service_for_project(workspace.project(), cx);
+            let inbox = crate::inbox_service::service_for_project(workspace.project(), cx);
             if let Some(service) = service_for_workspace(workspace, cx) {
-                service.update(cx, |service, cx| service.disconnect(gmail, cx));
+                service.update(cx, |service, cx| service.disconnect(gmail, inbox, cx));
             }
         });
     })
@@ -169,6 +181,26 @@ pub enum SyncState {
     Disconnected,
 }
 
+/// A user-triggered `Sync*Now` finished. Only manual syncs emit this — a
+/// background poll announcing itself every few minutes would be noise — and
+/// subscribers show it as a status toast, like the git push confirmation.
+pub struct ManualSyncFinished {
+    pub message: SharedString,
+    pub icon: IconName,
+}
+
+pub(crate) fn show_sync_toast(
+    workspace: &mut Workspace,
+    event: &ManualSyncFinished,
+    cx: &mut Context<Workspace>,
+) {
+    let icon = event.icon;
+    let status_toast = StatusToast::new(event.message.clone(), cx, move |this, _cx| {
+        this.icon(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+    });
+    workspace.toggle_status_toast(status_toast, cx);
+}
+
 enum SyncOutcome {
     Synced { diverged: Vec<Divergence> },
     Held(SharedString),
@@ -191,8 +223,13 @@ pub struct CalendarService {
     /// Divergences already written to the log, so a frozen line is recorded
     /// once and not on every poll.
     logged_divergences: HashSet<String>,
+    /// Set by `sync_now` so the next completed sync announces itself
+    /// ([`ManualSyncFinished`]); background polls stay quiet.
+    announce_next_sync: bool,
     _subscriptions: Vec<Subscription>,
 }
+
+impl EventEmitter<ManualSyncFinished> for CalendarService {}
 
 impl CalendarService {
     fn new(project: Entity<Project>, cx: &mut Context<Self>) -> Self {
@@ -206,6 +243,7 @@ impl CalendarService {
             poll_task: None,
             connect_task: None,
             logged_divergences: HashSet::new(),
+            announce_next_sync: false,
             _subscriptions: vec![project_subscription],
         };
         this.reload(cx);
@@ -240,10 +278,11 @@ impl CalendarService {
             }
             project::Event::WorktreeUpdatedEntries(_, changes) => {
                 let calendar_config = format!("{VAULT_MARKER_DIR}/{CALENDAR_CONFIG_FILE}");
+                let google_config = format!("{VAULT_MARKER_DIR}/{GOOGLE_CONFIG_FILE}");
                 let vault_config = format!("{VAULT_MARKER_DIR}/{VAULT_CONFIG_FILE}");
                 if changes.iter().any(|(path, _, _)| {
                     let path = path.as_unix_str();
-                    path == calendar_config || path == vault_config
+                    path == calendar_config || path == google_config || path == vault_config
                 }) {
                     self.reload(cx);
                 }
@@ -282,7 +321,16 @@ impl CalendarService {
         let config = match std::fs::read_to_string(&config_path) {
             Err(_) => None,
             Ok(text) => match parse_calendar_config(&text, &vault.config.day_planner.heading) {
-                Ok(config) => Some(config),
+                Ok(mut config) => {
+                    // The account and client override belong to the
+                    // connection, resolved across the Google config files
+                    // (V13 §7.4) — `google.toml` first, then this file, then
+                    // the rest.
+                    let settings = resolve_google_settings(&vault.root, CALENDAR_CONFIG_FILE);
+                    config.account = settings.account;
+                    config.google = settings.google;
+                    Some(config)
+                }
                 Err(error) => {
                     // A hand-edited file that doesn't parse disables the
                     // syncer, never panics (spec §7.1).
@@ -379,6 +427,21 @@ impl CalendarService {
         delay: &mut Duration,
         cx: &mut Context<Self>,
     ) -> bool {
+        let announcement = std::mem::take(&mut self.announce_next_sync)
+            .then(|| match &outcome {
+                SyncOutcome::Aborted => None,
+                SyncOutcome::Synced { .. } => Some("Calendar synced".into()),
+                SyncOutcome::Held(reason) => {
+                    Some(format!("Calendar sync held — {reason}").into())
+                }
+                SyncOutcome::Failed(error) => {
+                    Some(format!("Calendar sync failed — {error:#}").into())
+                }
+                SyncOutcome::AuthRevoked => {
+                    Some("Google sign-in expired — reconnect to sync your calendar".into())
+                }
+            })
+            .flatten();
         let keep_going = match outcome {
             SyncOutcome::Aborted => false,
             SyncOutcome::Synced { diverged } => {
@@ -407,6 +470,12 @@ impl CalendarService {
                 false
             }
         };
+        if let Some(message) = announcement {
+            cx.emit(ManualSyncFinished {
+                message,
+                icon: IconName::Clock,
+            });
+        }
         cx.notify();
         keep_going
     }
@@ -582,13 +651,14 @@ impl CalendarService {
         .detach_and_log_err(cx);
     }
 
-    /// `thock::ConnectGoogleWorkspace` (spec v9 §6.1): one OAuth round in the
-    /// system browser granting Calendar + Gmail, then the calendar picker.
-    /// Writes the account into both `.thock/calendar.toml` and
-    /// `.thock/gmail.toml` and reloads the Gmail service alongside this one.
+    /// `thock::ConnectGoogleWorkspace` (V9 §6.1; V13 §7.3 adds Tasks): one
+    /// OAuth round in the system browser granting Calendar + Gmail + Tasks,
+    /// then the calendar picker. Writes the account into `.thock/google.toml`
+    /// and reloads the Gmail and Inbox services alongside this one.
     fn connect(
         &mut self,
         gmail: Option<Entity<GmailService>>,
+        inbox: Option<Entity<InboxService>>,
         workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -597,17 +667,7 @@ impl CalendarService {
             return;
         };
         let vault_root = vault.root.clone();
-        let overrides = self
-            .config
-            .as_ref()
-            .map(|config| config.google.clone())
-            .filter(|overrides| overrides.client_id.is_some())
-            .or_else(|| {
-                gmail
-                    .as_ref()
-                    .and_then(|gmail| gmail.read(cx).google_override())
-            })
-            .unwrap_or_default();
+        let overrides = resolve_google_settings(&vault_root, CALENDAR_CONFIG_FILE).google;
         let existing_calendars = self
             .config
             .as_ref()
@@ -620,6 +680,9 @@ impl CalendarService {
         if let Some(gmail) = &gmail {
             gmail.update(cx, |gmail, cx| gmail.mark_connecting(cx));
         }
+        if let Some(inbox) = &inbox {
+            inbox.update(cx, |inbox, cx| inbox.mark_connecting(cx));
+        }
 
         self.connect_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = async {
@@ -631,19 +694,23 @@ impl CalendarService {
                 } else {
                     existing_calendars
                 };
-                update_config_file(&fs, &vault_root, CALENDAR_CONFIG_FILE, {
-                    let email = email.clone();
-                    move |table| {
-                        table.insert("schema".into(), 1.into());
-                        table.insert("account".into(), email.into());
-                        if !table.contains_key("calendars") {
-                            table.insert(
-                                "calendars".into(),
-                                toml::Value::Array(
-                                    selected.into_iter().map(toml::Value::String).collect(),
-                                ),
-                            );
-                        }
+                // The account belongs to the connection, so it lands in
+                // `google.toml` and nowhere else (V13 §7.4) — the connect
+                // flow stopped writing the per-feature duplicates.
+                update_config_file(&fs, &vault_root, GOOGLE_CONFIG_FILE, move |table| {
+                    table.insert("schema".into(), 1.into());
+                    table.insert("account".into(), email.into());
+                })
+                .await?;
+                update_config_file(&fs, &vault_root, CALENDAR_CONFIG_FILE, move |table| {
+                    table.insert("schema".into(), 1.into());
+                    if !table.contains_key("calendars") {
+                        table.insert(
+                            "calendars".into(),
+                            toml::Value::Array(
+                                selected.into_iter().map(toml::Value::String).collect(),
+                            ),
+                        );
                     }
                 })
                 .await?;
@@ -652,7 +719,13 @@ impl CalendarService {
                 // Q2), and deleting gmail.toml turns the feature back off.
                 update_config_file(&fs, &vault_root, GMAIL_CONFIG_FILE, move |table| {
                     table.insert("schema".into(), 1.into());
-                    table.insert("account".into(), email.into());
+                })
+                .await?;
+                // Same for inbox capture (V13 §10.2): the file's existence
+                // arms the Google Tasks and thock/inbox transports, and
+                // deleting it turns them off while inbox/ stays a folder.
+                update_config_file(&fs, &vault_root, crate::inbox::INBOX_CONFIG_FILE, |table| {
+                    table.insert("schema".into(), 1.into());
                 })
                 .await?;
                 anyhow::Ok(connected)
@@ -669,6 +742,9 @@ impl CalendarService {
                     if let Some(gmail) = &gmail {
                         gmail.update(cx, |gmail, cx| gmail.reload_config(cx));
                     }
+                    if let Some(inbox) = &inbox {
+                        inbox.update(cx, |inbox, cx| inbox.reload_config(cx));
+                    }
                 }
                 Err(error) => {
                     log::warn!("Thock: connecting Google Workspace failed: {error:#}");
@@ -681,6 +757,9 @@ impl CalendarService {
                     .log_err();
                     if let Some(gmail) = &gmail {
                         gmail.update(cx, |gmail, cx| gmail.reload_config(cx));
+                    }
+                    if let Some(inbox) = &inbox {
+                        inbox.update(cx, |inbox, cx| inbox.reload_config(cx));
                     }
                 }
             }
@@ -785,14 +864,20 @@ impl CalendarService {
     /// `thock::SyncCalendarNow`: restarts the loop, which syncs immediately.
     fn sync_now(&mut self, cx: &mut Context<Self>) {
         if self.provider.is_some() {
+            self.announce_next_sync = true;
             self.start_poll(cx);
         }
     }
 
     /// `thock::DisconnectGoogleWorkspace` (spec §6.4): deletes the keychain
-    /// entries and stops calendar sync and email capture. Never touches the
-    /// vault.
-    fn disconnect(&mut self, gmail: Option<Entity<GmailService>>, cx: &mut Context<Self>) {
+    /// entries and stops calendar sync, email capture, and inbox capture.
+    /// Never touches the vault.
+    fn disconnect(
+        &mut self,
+        gmail: Option<Entity<GmailService>>,
+        inbox: Option<Entity<InboxService>>,
+        cx: &mut Context<Self>,
+    ) {
         self.poll_task = None;
         self.provider = None;
         if self.config.is_some() {
@@ -801,6 +886,9 @@ impl CalendarService {
         cx.notify();
         if let Some(gmail) = gmail {
             gmail.update(cx, |gmail, cx| gmail.mark_signed_out(cx));
+        }
+        if let Some(inbox) = inbox {
+            inbox.update(cx, |inbox, cx| inbox.mark_signed_out(cx));
         }
         cx.spawn(async move |_, cx| google_auth::delete_refresh_token(cx).await)
             .detach_and_log_err(cx);
