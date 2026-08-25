@@ -10,8 +10,8 @@ use anyhow::{Context as _, Result};
 use chrono::Local;
 use fs::Fs;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EntityId, Global, Subscription, Task,
-    WeakEntity, actions,
+    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, Subscription,
+    Task, WeakEntity, actions,
 };
 use project::Project;
 use std::collections::HashSet;
@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 use gpui::TaskExt as _;
 use workspace::Workspace;
 
-use crate::calendar_service::SyncState;
+use ui::IconName;
+
+use crate::calendar_service::{ManualSyncFinished, SyncState, show_sync_toast};
 use crate::gmail::{GMAIL_CONFIG_FILE, parse_gmail_config};
 use crate::gmail_google::GmailInboxSource;
 use crate::google_auth::{
@@ -58,6 +60,10 @@ pub fn init(cx: &mut App) {
             return;
         }
         let service = cx.new(|cx| InboxService::new(project.clone(), cx));
+        cx.subscribe(&service, |workspace, _, event: &ManualSyncFinished, cx| {
+            show_sync_toast(workspace, event, cx);
+        })
+        .detach();
         let project_id = project.entity_id();
         cx.default_global::<GlobalInboxServices>()
             .0
@@ -99,7 +105,10 @@ pub fn service_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity
 }
 
 enum SyncOutcome {
-    Synced,
+    Synced {
+        /// Items landed in the inbox by this poll, for the manual-sync toast.
+        captured: usize,
+    },
     Held(gpui::SharedString),
     Failed(anyhow::Error),
     AuthRevoked,
@@ -136,8 +145,13 @@ pub struct InboxService {
     /// landing zone); cancel-by-replace is correct here because only the
     /// newest count matters.
     depth_task: Option<Task<()>>,
+    /// Set by `sync_now` so the next completed sync announces itself
+    /// ([`ManualSyncFinished`]); background polls stay quiet.
+    announce_next_sync: bool,
     _subscriptions: Vec<Subscription>,
 }
+
+impl EventEmitter<ManualSyncFinished> for InboxService {}
 
 impl InboxService {
     fn new(project: Entity<Project>, cx: &mut Context<Self>) -> Self {
@@ -153,6 +167,7 @@ impl InboxService {
             imported: None,
             queue_depth: 0,
             depth_task: None,
+            announce_next_sync: false,
             _subscriptions: vec![project_subscription],
         };
         this.reload(cx);
@@ -203,6 +218,7 @@ impl InboxService {
     /// `thock::SyncInboxNow`: restarts the loop, which checks immediately.
     fn sync_now(&mut self, cx: &mut Context<Self>) {
         if !self.sources.is_empty() {
+            self.announce_next_sync = true;
             self.start_poll(cx);
         }
     }
@@ -456,9 +472,26 @@ impl InboxService {
         delay: &mut Duration,
         cx: &mut Context<Self>,
     ) -> bool {
+        let announcement = std::mem::take(&mut self.announce_next_sync)
+            .then(|| match &outcome {
+                SyncOutcome::Aborted => None,
+                SyncOutcome::Synced { captured } => Some(match captured {
+                    0 => "Inbox synced — nothing new".into(),
+                    1 => "Inbox synced — 1 new item".into(),
+                    n => format!("Inbox synced — {n} new items").into(),
+                }),
+                SyncOutcome::Held(reason) => Some(format!("Inbox sync held — {reason}").into()),
+                SyncOutcome::Failed(error) => {
+                    Some(format!("Inbox sync failed — {error:#}").into())
+                }
+                SyncOutcome::AuthRevoked => {
+                    Some("Google sign-in expired — reconnect to sync the inbox".into())
+                }
+            })
+            .flatten();
         let keep_going = match outcome {
             SyncOutcome::Aborted => false,
-            SyncOutcome::Synced => {
+            SyncOutcome::Synced { .. } => {
                 self.state = SyncState::Synced { at: Instant::now() };
                 *delay = interval;
                 true
@@ -483,6 +516,12 @@ impl InboxService {
                 false
             }
         };
+        if let Some(message) = announcement {
+            cx.emit(ManualSyncFinished {
+                message,
+                icon: IconName::Envelope,
+            });
+        }
         cx.notify();
         keep_going
     }
@@ -543,6 +582,7 @@ impl InboxService {
             }
         }
 
+        let mut captured = 0;
         if !items.is_empty() {
             let captured_at = Local::now().to_rfc3339();
             let plan = plan_inbox_capture(
@@ -554,18 +594,20 @@ impl InboxService {
                 &config,
                 &captured_at,
             );
-            if !plan.is_empty()
-                && let Err(error) =
+            if !plan.is_empty() {
+                captured = plan.files.len();
+                if let Err(error) =
                     Self::apply_plan(this, &fs, &vault, plan, &captured_at, cx).await
-            {
-                return SyncOutcome::Failed(error);
+                {
+                    return SyncOutcome::Failed(error);
+                }
             }
         }
 
         match (failed, holding) {
             (Some(error), _) => SyncOutcome::Failed(error),
             (None, Some(reason)) => SyncOutcome::Held(reason.into()),
-            (None, None) => SyncOutcome::Synced,
+            (None, None) => SyncOutcome::Synced { captured },
         }
     }
 
@@ -849,6 +891,57 @@ mod tests {
         assert_eq!(notes.len(), 2);
         let skips = source.skips_seen.lock().unwrap();
         assert!(skips.last().unwrap().contains(&digest));
+    }
+
+    #[gpui::test]
+    async fn only_a_manual_sync_announces_completion(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(Path::new("/vault")).await.unwrap();
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+
+        let service = cx.new(|cx| InboxService::new(project.clone(), cx));
+        let announcements = Arc::new(Mutex::new(Vec::new()));
+        let _subscription = cx.update({
+            let announcements = announcements.clone();
+            |cx| {
+                cx.subscribe(&service, move |_, event: &ManualSyncFinished, _| {
+                    announcements.lock().unwrap().push(event.message.to_string());
+                })
+            }
+        });
+        let source = Arc::new(StubSource {
+            items: Mutex::new(vec![item("task-1", "Ship it")]),
+            skips_seen: Mutex::new(Vec::new()),
+        });
+        service.update(cx, |service, cx| {
+            service.configure_for_test(
+                test_vault(),
+                InboxConfig::default(),
+                "diego@example.com".to_string(),
+                vec![source.clone()],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        // The background poll captured an item but stayed quiet.
+        assert_eq!(*announcements.lock().unwrap(), Vec::<String>::new());
+
+        // A manual sync announces what it found.
+        source.items.lock().unwrap().push(item("task-2", "Call back"));
+        service.update(cx, |service, cx| service.sync_now(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            *announcements.lock().unwrap(),
+            vec!["Inbox synced — 1 new item".to_string()]
+        );
+
+        // And only that one sync: the poll loop it restarted stays quiet.
+        cx.executor().advance_clock(Duration::from_secs(301));
+        cx.run_until_parked();
+        assert_eq!(announcements.lock().unwrap().len(), 1);
     }
 
     #[gpui::test]

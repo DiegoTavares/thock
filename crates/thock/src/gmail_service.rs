@@ -26,7 +26,7 @@ use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
 
 use crate::backlog::{DEFAULT_BACKLOG, apply_edits};
-use crate::calendar_service::SyncState;
+use crate::calendar_service::{ManualSyncFinished, SyncState, show_sync_toast};
 use crate::gmail::{
     GMAIL_CONFIG_FILE, GmailConfig, ImportMode, ImportRecord, MailFetched, MailProvider,
     archive_frontmatter_digest, parse_gmail_config, plan_capture,
@@ -64,6 +64,10 @@ pub fn init(cx: &mut App) {
             return;
         }
         let service = cx.new(|cx| GmailService::new(project.clone(), cx));
+        cx.subscribe(&service, |workspace, _, event: &ManualSyncFinished, cx| {
+            show_sync_toast(workspace, event, cx);
+        })
+        .detach();
         let project_id = project.entity_id();
         cx.default_global::<GlobalGmailServices>()
             .0
@@ -142,8 +146,13 @@ pub struct GmailService {
     dedup: Option<DedupState>,
     /// The last sync ran on V9's flat `backlog` label (V13 §7.1).
     legacy_label: bool,
+    /// Set by `sync_now` so the next completed sync announces itself
+    /// ([`ManualSyncFinished`]); background polls stay quiet.
+    announce_next_sync: bool,
     _subscriptions: Vec<Subscription>,
 }
+
+impl EventEmitter<ManualSyncFinished> for GmailService {}
 
 impl GmailService {
     fn new(project: Entity<Project>, cx: &mut Context<Self>) -> Self {
@@ -157,6 +166,7 @@ impl GmailService {
             poll_task: None,
             dedup: None,
             legacy_label: false,
+            announce_next_sync: false,
             _subscriptions: vec![project_subscription],
         };
         this.reload(cx);
@@ -213,6 +223,7 @@ impl GmailService {
     /// `thock::SyncGmailNow`: restarts the loop, which checks immediately.
     fn sync_now(&mut self, cx: &mut Context<Self>) {
         if self.provider.is_some() {
+            self.announce_next_sync = true;
             self.start_poll(cx);
         }
     }
@@ -423,6 +434,19 @@ impl GmailService {
         delay: &mut Duration,
         cx: &mut Context<Self>,
     ) -> bool {
+        let announcement = std::mem::take(&mut self.announce_next_sync)
+            .then(|| match &outcome {
+                SyncOutcome::Aborted => None,
+                SyncOutcome::Synced { .. } => Some("Gmail synced".into()),
+                SyncOutcome::Held(reason) => Some(format!("Gmail sync held — {reason}").into()),
+                SyncOutcome::Failed(error) => {
+                    Some(format!("Gmail sync failed — {error:#}").into())
+                }
+                SyncOutcome::AuthRevoked => {
+                    Some("Google sign-in expired — reconnect to sync Gmail".into())
+                }
+            })
+            .flatten();
         let keep_going = match outcome {
             SyncOutcome::Aborted => false,
             SyncOutcome::Synced { legacy_label } => {
@@ -451,6 +475,12 @@ impl GmailService {
                 false
             }
         };
+        if let Some(message) = announcement {
+            cx.emit(ManualSyncFinished {
+                message,
+                icon: IconName::Envelope,
+            });
+        }
         cx.notify();
         keep_going
     }

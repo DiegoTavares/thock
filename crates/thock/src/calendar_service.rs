@@ -14,6 +14,7 @@ use gpui::{
     Window, actions,
 };
 use language::Buffer;
+use notifications::status_toast::StatusToast;
 use picker::{Picker, PickerDelegate};
 use project::Project;
 use std::collections::{HashMap, HashSet};
@@ -73,6 +74,10 @@ pub fn init(cx: &mut App) {
             return;
         }
         let service = cx.new(|cx| CalendarService::new(project.clone(), cx));
+        cx.subscribe(&service, |workspace, _, event: &ManualSyncFinished, cx| {
+            show_sync_toast(workspace, event, cx);
+        })
+        .detach();
         let project_id = project.entity_id();
         cx.default_global::<GlobalCalendarServices>()
             .0
@@ -176,6 +181,26 @@ pub enum SyncState {
     Disconnected,
 }
 
+/// A user-triggered `Sync*Now` finished. Only manual syncs emit this — a
+/// background poll announcing itself every few minutes would be noise — and
+/// subscribers show it as a status toast, like the git push confirmation.
+pub struct ManualSyncFinished {
+    pub message: SharedString,
+    pub icon: IconName,
+}
+
+pub(crate) fn show_sync_toast(
+    workspace: &mut Workspace,
+    event: &ManualSyncFinished,
+    cx: &mut Context<Workspace>,
+) {
+    let icon = event.icon;
+    let status_toast = StatusToast::new(event.message.clone(), cx, move |this, _cx| {
+        this.icon(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+    });
+    workspace.toggle_status_toast(status_toast, cx);
+}
+
 enum SyncOutcome {
     Synced { diverged: Vec<Divergence> },
     Held(SharedString),
@@ -198,8 +223,13 @@ pub struct CalendarService {
     /// Divergences already written to the log, so a frozen line is recorded
     /// once and not on every poll.
     logged_divergences: HashSet<String>,
+    /// Set by `sync_now` so the next completed sync announces itself
+    /// ([`ManualSyncFinished`]); background polls stay quiet.
+    announce_next_sync: bool,
     _subscriptions: Vec<Subscription>,
 }
+
+impl EventEmitter<ManualSyncFinished> for CalendarService {}
 
 impl CalendarService {
     fn new(project: Entity<Project>, cx: &mut Context<Self>) -> Self {
@@ -213,6 +243,7 @@ impl CalendarService {
             poll_task: None,
             connect_task: None,
             logged_divergences: HashSet::new(),
+            announce_next_sync: false,
             _subscriptions: vec![project_subscription],
         };
         this.reload(cx);
@@ -396,6 +427,21 @@ impl CalendarService {
         delay: &mut Duration,
         cx: &mut Context<Self>,
     ) -> bool {
+        let announcement = std::mem::take(&mut self.announce_next_sync)
+            .then(|| match &outcome {
+                SyncOutcome::Aborted => None,
+                SyncOutcome::Synced { .. } => Some("Calendar synced".into()),
+                SyncOutcome::Held(reason) => {
+                    Some(format!("Calendar sync held — {reason}").into())
+                }
+                SyncOutcome::Failed(error) => {
+                    Some(format!("Calendar sync failed — {error:#}").into())
+                }
+                SyncOutcome::AuthRevoked => {
+                    Some("Google sign-in expired — reconnect to sync your calendar".into())
+                }
+            })
+            .flatten();
         let keep_going = match outcome {
             SyncOutcome::Aborted => false,
             SyncOutcome::Synced { diverged } => {
@@ -424,6 +470,12 @@ impl CalendarService {
                 false
             }
         };
+        if let Some(message) = announcement {
+            cx.emit(ManualSyncFinished {
+                message,
+                icon: IconName::Clock,
+            });
+        }
         cx.notify();
         keep_going
     }
@@ -812,6 +864,7 @@ impl CalendarService {
     /// `thock::SyncCalendarNow`: restarts the loop, which syncs immediately.
     fn sync_now(&mut self, cx: &mut Context<Self>) {
         if self.provider.is_some() {
+            self.announce_next_sync = true;
             self.start_poll(cx);
         }
     }
