@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::calendar::{
-    CalendarEvent, CalendarProvider, EventFilters, Fetched, event_marker_id,
+    CalendarEvent, CalendarProvider, EventFilters, EventKind, Fetched, event_marker_id,
 };
 use crate::google_auth::{
     AuthRevoked, GoogleClient, Unauthorized, read_refresh_token_allowing_legacy,
@@ -99,6 +99,9 @@ pub struct GoogleEvent {
     pub end: GoogleEventTime,
     pub attendees: Vec<GoogleAttendee>,
     pub organizer: Option<GoogleOrganizer>,
+    /// `default`, `focusTime`, `outOfOffice`, `workingLocation`, … — absent
+    /// on older API responses, which means `default`.
+    pub event_type: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -267,6 +270,11 @@ pub fn normalize_events(
             id: event_marker_id(calendar_id, &item.id),
             title,
             time: time.into_timed(),
+            kind: item
+                .event_type
+                .as_deref()
+                .map(EventKind::from_google)
+                .unwrap_or_default(),
         });
     }
     events
@@ -544,6 +552,7 @@ mod tests {
             },
             attendees: Vec::new(),
             organizer: Some(GoogleOrganizer { is_self: true }),
+            event_type: None,
         }
     }
 
@@ -650,6 +659,24 @@ mod tests {
             events.iter().find(|event| event.title == "Holiday").unwrap().time,
             None
         );
+    }
+
+    #[test]
+    fn google_event_types_map_to_event_kinds() {
+        let with_type = |event_type: Option<&str>| {
+            let mut item = timed_event("id", "Focus time", &local(9, 0), &local(17, 0));
+            item.event_type = event_type.map(str::to_string);
+            normalize_events(&[item], "primary", date(), &EventFilters::default())
+                .first()
+                .map(|event| event.kind)
+        };
+        assert_eq!(with_type(Some("focusTime")), Some(EventKind::FocusTime));
+        assert_eq!(with_type(Some("outOfOffice")), Some(EventKind::OutOfOffice));
+        assert_eq!(with_type(Some("workingLocation")), Some(EventKind::Default));
+        assert_eq!(with_type(Some("default")), Some(EventKind::Default));
+        // Absent on older responses, and on anything Google adds later.
+        assert_eq!(with_type(None), Some(EventKind::Default));
+        assert_eq!(with_type(Some("somethingNew")), Some(EventKind::Default));
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub enum SpanKind {
     LinkLabel,
     /// A task list item's `[ ]` / `[x]` marker, drawn as a checkbox.
     Checkbox(bool),
+    /// The text between a pair of `~~` delimiters, drawn struck through.
+    Strikethrough,
 }
 
 /// A byte range of the scanned text and how it should display.
@@ -54,6 +56,28 @@ pub fn conceal_spans(text: &str) -> Vec<ConcealSpan> {
         scan_line(line, line_start, &mut spans);
     });
     spans
+}
+
+/// The well-formed links on a single line, in order, with byte ranges into
+/// that line. Honours the inline exclusions `conceal_spans` applies — nothing
+/// inside inline code or an HTML comment, and no images or embeds — but not
+/// the block ones, since fence and front-matter state belongs to a whole
+/// document rather than to a lone line.
+pub fn inline_links(line: &str) -> Vec<InlineLink> {
+    let excluded = inline_exclusions(line);
+    let mut links = Vec::new();
+    each_inline_link(line, 0, &excluded, |link| {
+        links.push(link);
+        true
+    });
+    links
+}
+
+/// The `~~struck~~` runs on a single line, in order, with byte ranges into
+/// that line. Honours the same inline exclusions as `inline_links`, and never
+/// reads a `~~` that sits inside a link construct as a delimiter.
+pub fn inline_strikethroughs(line: &str) -> Vec<InlineStrikethrough> {
+    each_strikethrough(line, 0, &strikethrough_exclusions(line))
 }
 
 /// A `[[wikilink]]` located under a cursor: the full construct's byte range
@@ -246,7 +270,26 @@ fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
     }
 
     let excluded: Vec<Range<usize>> = code_spans.into_iter().chain(comments).collect();
-    scan_inline(line, inline_from, line_start, &excluded, spans);
+    let link_ranges = scan_inline(line, inline_from, line_start, &excluded, spans);
+
+    // A `~~` inside a link construct belongs to its destination or label, not
+    // to a strikethrough — and folding one would overlap the link's own folds.
+    let struck_excluded: Vec<Range<usize>> =
+        excluded.into_iter().chain(link_ranges).collect();
+    for run in each_strikethrough(line, inline_from, &struck_excluded) {
+        spans.push(ConcealSpan::new(
+            line_start + run.range.start..line_start + run.text.start,
+            SpanKind::Marker,
+        ));
+        spans.push(ConcealSpan::new(
+            line_start + run.text.start..line_start + run.text.end,
+            SpanKind::Strikethrough,
+        ));
+        spans.push(ConcealSpan::new(
+            line_start + run.text.end..line_start + run.range.end,
+            SpanKind::Marker,
+        ));
+    }
 }
 
 /// The ranges of inline code spans in `line`, delimiters included. Backtick
@@ -347,13 +390,16 @@ fn overlaps_excluded(excluded: &[Range<usize>], range: &Range<usize>) -> bool {
         .any(|other| other.start < range.end && range.start < other.end)
 }
 
+/// Pushes the spans of every link on `line`, returning their line-relative
+/// construct ranges.
 fn scan_inline(
     line: &str,
     from: usize,
     line_start: usize,
     excluded: &[Range<usize>],
     spans: &mut Vec<ConcealSpan>,
-) {
+) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
     each_inline_link(line, from, excluded, |link| {
         let kind = if link.wikilink_target.is_some() {
             SpanKind::WikilinkLabel
@@ -372,18 +418,24 @@ fn scan_inline(
             line_start + link.label.end..line_start + link.range.end,
             SpanKind::Marker,
         ));
+        ranges.push(link.range);
         true
     });
+    ranges
 }
 
 /// A well-formed link parsed from a single line, all ranges line-relative.
-struct ParsedLink {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineLink {
     /// The full construct: `[[...]]` or `[text](dest)`.
-    range: Range<usize>,
+    pub range: Range<usize>,
     /// The displayed text — the wikilink target or alias, or the link label.
-    label: Range<usize>,
+    pub label: Range<usize>,
     /// The note a `[[wikilink]]` points at; `None` for `[text](dest)` links.
-    wikilink_target: Option<Range<usize>>,
+    pub wikilink_target: Option<Range<usize>>,
+    /// The destination of a `[text](dest)` link, which may carry a trailing
+    /// title; `None` for wikilinks.
+    pub destination: Option<Range<usize>>,
 }
 
 /// Walks the well-formed links of `line` from `from`, skipping images,
@@ -393,7 +445,7 @@ fn each_inline_link(
     line: &str,
     from: usize,
     excluded: &[Range<usize>],
-    mut visit: impl FnMut(ParsedLink) -> bool,
+    mut visit: impl FnMut(InlineLink) -> bool,
 ) {
     let bytes = line.as_bytes();
     let mut cursor = from;
@@ -428,7 +480,7 @@ fn each_inline_link(
 }
 
 /// Parses `[[target]]` or `[[target|alias]]` at `open`.
-fn parse_wikilink(line: &str, open: usize) -> Option<ParsedLink> {
+fn parse_wikilink(line: &str, open: usize) -> Option<InlineLink> {
     let inner_start = open + 2;
     let close = line[inner_start..].find("]]")? + inner_start;
     let inner = &line[inner_start..close];
@@ -446,16 +498,98 @@ fn parse_wikilink(line: &str, open: usize) -> Option<ParsedLink> {
         }
         None => (inner_start..close, inner_start..close),
     };
-    Some(ParsedLink {
+    Some(InlineLink {
         range: open..end,
         label,
         wikilink_target: Some(target),
+        destination: None,
+    })
+}
+
+/// A `~~struck~~` run parsed from a single line, all ranges line-relative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineStrikethrough {
+    /// The full construct, `~~` delimiters included.
+    pub range: Range<usize>,
+    /// The struck text between the delimiters.
+    pub text: Range<usize>,
+}
+
+/// The ranges a `~~` delimiter may not sit inside: inline code, HTML
+/// comments, and whole link constructs.
+fn strikethrough_exclusions(line: &str) -> Vec<Range<usize>> {
+    let inline = inline_exclusions(line);
+    let mut excluded = inline.clone();
+    each_inline_link(line, 0, &inline, |link| {
+        excluded.push(link.range);
+        true
+    });
+    excluded
+}
+
+/// Walks the `~~struck~~` runs of `line` from `from`. A run whose delimiters
+/// overlap an excluded range is skipped without consuming its text, so a
+/// later well-formed run on the same line is still found.
+fn each_strikethrough(
+    line: &str,
+    from: usize,
+    excluded: &[Range<usize>],
+) -> Vec<InlineStrikethrough> {
+    let bytes = line.as_bytes();
+    let mut runs = Vec::new();
+    let mut cursor = from;
+    while let Some(relative) = line[cursor..].find("~~") {
+        let open = cursor + relative;
+        cursor = open + 2;
+        // A longer tilde run opens a fence or is literal text, and a
+        // backslash escapes the construct (C3/C4).
+        if bytes.get(open + 2) == Some(&b'~')
+            || (open > 0 && matches!(bytes[open - 1], b'~' | b'\\'))
+        {
+            continue;
+        }
+        let Some(run) = parse_strikethrough(line, open) else {
+            continue;
+        };
+        let delimiters = [
+            run.range.start..run.text.start,
+            run.text.end..run.range.end,
+        ];
+        if delimiters
+            .iter()
+            .any(|delimiter| overlaps_excluded(excluded, delimiter))
+        {
+            continue;
+        }
+        cursor = run.range.end;
+        runs.push(run);
+    }
+    runs
+}
+
+/// Parses `~~struck~~` at `open`. The text may not be empty or start or end
+/// with whitespace, and the closing run must be exactly two tildes — anything
+/// else stays literal (C3).
+fn parse_strikethrough(line: &str, open: usize) -> Option<InlineStrikethrough> {
+    let text_start = open + 2;
+    let close = line[text_start..].find("~~")? + text_start;
+    let text = line.get(text_start..close)?;
+    if text.is_empty()
+        || text.starts_with(char::is_whitespace)
+        || text.ends_with(char::is_whitespace)
+        || line.as_bytes().get(close + 2) == Some(&b'~')
+    {
+        return None;
+    }
+    Some(InlineStrikethrough {
+        range: open..close + 2,
+        text: text_start..close,
     })
 }
 
 /// Parses `[text](dest)` at `open`. `dest` may contain balanced parens, as
 /// real URLs do.
-fn parse_inline_link(line: &str, open: usize) -> Option<ParsedLink> {
+fn parse_inline_link(line: &str, open: usize) -> Option<InlineLink> {
     let text_start = open + 1;
     let text_end = line[text_start..].find(']')? + text_start;
     let text = &line[text_start..text_end];
@@ -485,10 +619,11 @@ fn parse_inline_link(line: &str, open: usize) -> Option<ParsedLink> {
     }
     let close = close?;
     let end = close + 1;
-    Some(ParsedLink {
+    Some(InlineLink {
         range: open..end,
         label: text_start..text_end,
         wikilink_target: None,
+        destination: Some(dest_start..close),
     })
 }
 
@@ -732,6 +867,117 @@ mod tests {
                 ("](c)", SpanKind::Marker),
             ]
         );
+    }
+
+    /// The `(construct, label, target-or-destination)` slices of every link
+    /// on `line`.
+    fn links(line: &str) -> Vec<(&str, &str, Option<&str>)> {
+        inline_links(line)
+            .into_iter()
+            .map(|link| {
+                let dest = link
+                    .wikilink_target
+                    .or(link.destination)
+                    .map(|range| &line[range]);
+                (&line[link.range], &line[link.label], dest)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inline_links_reports_both_link_forms_with_their_destinations() {
+        assert_eq!(
+            links("see [[notes/spec|the spec]] and [docs](https://a.example \"T\")"),
+            vec![
+                ("[[notes/spec|the spec]]", "the spec", Some("notes/spec")),
+                (
+                    "[docs](https://a.example \"T\")",
+                    "docs",
+                    Some("https://a.example \"T\"")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_links_skips_excluded_and_malformed_constructs() {
+        assert_eq!(
+            links("a `[[x]]` b <!-- [y](z) --> [[ok]]"),
+            vec![("[[ok]]", "ok", Some("ok"))]
+        );
+        assert_eq!(links("![[embed]] ![alt](src) [[unclosed"), vec![]);
+    }
+
+    /// The `(construct, struck text)` slices of every strikethrough on `line`.
+    fn struck(line: &str) -> Vec<(&str, &str)> {
+        inline_strikethroughs(line)
+            .into_iter()
+            .map(|run| (&line[run.range], &line[run.text]))
+            .collect()
+    }
+
+    #[test]
+    fn strikethrough_conceals_its_delimiters_and_marks_the_text() {
+        assert_eq!(
+            slices("drop ~~this plan~~ today"),
+            vec![
+                ("~~", SpanKind::Marker),
+                ("this plan", SpanKind::Strikethrough),
+                ("~~", SpanKind::Marker),
+            ]
+        );
+        assert_eq!(
+            struck("~~one~~ and ~~two~~"),
+            vec![("~~one~~", "one"), ("~~two~~", "two")]
+        );
+    }
+
+    #[test]
+    fn malformed_strikethroughs_are_left_alone() {
+        for line in [
+            "~~unclosed",
+            "~~~~",
+            "~~ padded ~~",
+            "~~trailing space ~~",
+            "~~~three~~~",
+            "\\~~escaped~~",
+            "a `~~code~~` b",
+            "<!-- ~~comment~~ -->",
+            "tilde ~ alone",
+        ] {
+            assert_eq!(struck(line), vec![], "{line:?}");
+        }
+    }
+
+    #[test]
+    fn strikethrough_spans_a_link_but_never_reads_one_as_a_delimiter() {
+        assert_eq!(
+            struck("~~see [docs](https://a.example)~~"),
+            vec![("~~see [docs](https://a.example)~~", "see [docs](https://a.example)")]
+        );
+        // The `~~` here is part of the destination, not a delimiter.
+        assert_eq!(struck("[a](https://a.example/~~x~~)"), vec![]);
+    }
+
+    #[test]
+    fn a_struck_task_line_keeps_its_checkbox_and_links() {
+        assert_eq!(
+            slices("- [ ] ~~read [[notes/spec]]~~\n"),
+            vec![
+                ("[ ]", SpanKind::Checkbox(false)),
+                ("[[", SpanKind::Marker),
+                ("notes/spec", SpanKind::WikilinkLabel),
+                ("]]", SpanKind::Marker),
+                ("~~", SpanKind::Marker),
+                ("read [[notes/spec]]", SpanKind::Strikethrough),
+                ("~~", SpanKind::Marker),
+            ]
+        );
+    }
+
+    #[test]
+    fn tilde_fences_are_not_strikethroughs() {
+        assert_eq!(spans("~~~\n~~struck~~\n~~~\n"), vec![]);
     }
 
     /// The `(construct, target)` slices of the wikilink at `offset`.

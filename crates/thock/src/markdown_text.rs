@@ -1,87 +1,124 @@
 //! Inline Markdown for panel rows. A vault's task lines are Markdown, so
-//! `[name](url)` should read as a link in a pane instead of as syntax — but the
-//! file keeps the raw text, and so does the inline editor. Pure functions over
-//! strings — no GPUI.
+//! `[name](url)` and `[[wikilinks]]` should read as links in a pane, and
+//! `~~text~~` as struck through, instead of as syntax — but the file keeps the
+//! raw text, and so does the inline editor.
+//! Parsing delegates to `markdown_syntax`, so a pane and the Markdown editor
+//! agree on what a link is; the colours below are the same ones the editor
+//! paints (spec V10 §7.1), minus the underline a dense row can't afford.
 
-/// A run of a line: literal text, or an inline link.
-#[derive(Debug, Clone, PartialEq)]
-pub enum InlineSpan {
-    Text(String),
-    Link { text: String, url: String },
+use gpui::{
+    AnyElement, App, ElementId, Entity, HighlightStyle, Hsla, InteractiveText, IntoElement as _,
+    SharedString, StrikethroughStyle, StyledText, TaskExt as _, WeakEntity, px,
+};
+use project::{Project, ProjectPath};
+use ui::ActiveTheme as _;
+use util::ResultExt as _;
+use workspace::Workspace;
+
+use crate::markdown_conceal::resolve_wikilink_target;
+use crate::markdown_syntax;
+
+/// A run of a line as it should display: literal or linked text, struck
+/// through or not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineSpan {
+    pub text: String,
+    /// Where the run points, when it is a link label.
+    pub target: Option<LinkTarget>,
+    /// Whether the run sits inside a `~~strikethrough~~`.
+    pub struck: bool,
 }
 
-/// Splits `text` into literal runs and `[name](url)` links. Anything that isn't
-/// a well-formed link to an absolute URL stays literal, so a half-typed bracket
-/// renders as exactly what the user typed and a relative path never becomes a
-/// link that opens nothing.
-pub fn parse_inline_links(text: &str) -> Vec<InlineSpan> {
+/// Where an inline link points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// An absolute URL, handed to the system handler.
+    Url(String),
+    /// A note named by a `[[wikilink]]` or by a relative destination,
+    /// resolved against the vault when clicked.
+    Note(String),
+}
+
+/// A construct that displays as something other than its source: a link,
+/// shown as its label, or a `~~` delimiter, shown as nothing.
+enum Atom {
+    Link {
+        label: std::ops::Range<usize>,
+        target: LinkTarget,
+    },
+    StrikeOpen,
+    StrikeClose,
+}
+
+/// Splits `text` into the runs a row displays. Anything that isn't a
+/// well-formed construct stays literal, so a half-typed bracket renders as
+/// exactly what the user typed.
+pub fn parse_inline_spans(text: &str) -> Vec<InlineSpan> {
+    let mut atoms = Vec::new();
+    for link in markdown_syntax::inline_links(text) {
+        let Some(target) = link_target(text, &link) else {
+            // Nothing to point at — leave the construct as literal text.
+            continue;
+        };
+        atoms.push((
+            link.range,
+            Atom::Link {
+                label: link.label,
+                target,
+            },
+        ));
+    }
+    for run in markdown_syntax::inline_strikethroughs(text) {
+        atoms.push((run.range.start..run.text.start, Atom::StrikeOpen));
+        atoms.push((run.text.end..run.range.end, Atom::StrikeClose));
+    }
+    // Links and delimiters never overlap, so start order is a total order.
+    atoms.sort_by_key(|(range, _)| range.start);
+
     let mut spans = Vec::new();
     let mut literal_start = 0;
-    let mut cursor = 0;
-    while let Some(offset) = text[cursor..].find('[') {
-        let open = cursor + offset;
-        match parse_link_at(text, open) {
-            Some((link, end)) => {
-                if literal_start < open {
-                    spans.push(InlineSpan::Text(text[literal_start..open].to_string()));
-                }
-                spans.push(link);
-                cursor = end;
-                literal_start = end;
-            }
-            None => cursor = open + 1,
+    let mut struck = false;
+    for (range, atom) in atoms {
+        if literal_start < range.start {
+            spans.push(InlineSpan {
+                text: text[literal_start..range.start].to_string(),
+                target: None,
+                struck,
+            });
         }
+        match atom {
+            Atom::Link { label, target } => spans.push(InlineSpan {
+                text: text[label].to_string(),
+                target: Some(target),
+                struck,
+            }),
+            Atom::StrikeOpen => struck = true,
+            Atom::StrikeClose => struck = false,
+        }
+        literal_start = range.end;
     }
     if literal_start < text.len() {
-        spans.push(InlineSpan::Text(text[literal_start..].to_string()));
+        spans.push(InlineSpan {
+            text: text[literal_start..].to_string(),
+            target: None,
+            struck,
+        });
     }
     spans
 }
 
-/// Parses `[name](url)` at `open`, returning the link and the byte offset just
-/// past its closing paren.
-fn parse_link_at(text: &str, open: usize) -> Option<(InlineSpan, usize)> {
-    let label_start = open + 1;
-    let label_end = text[label_start..].find(']')? + label_start;
-    let url_start = label_end + 1;
-    if !text[url_start..].starts_with('(') {
-        return None;
+fn link_target(text: &str, link: &markdown_syntax::InlineLink) -> Option<LinkTarget> {
+    if let Some(target) = &link.wikilink_target {
+        return Some(LinkTarget::Note(text[target.clone()].to_string()));
     }
-    let url_start = url_start + 1;
-    let url_end = closing_paren(text, url_start)?;
-    let label = &text[label_start..label_end];
     // A title (`[name](url "title")`) has nowhere to go in a one-line row, so
-    // the URL is the first word and the title is dropped.
-    let url = text[url_start..url_end].split_whitespace().next()?;
-    if label.is_empty() || !is_absolute_url(url) {
-        return None;
-    }
-    Some((
-        InlineSpan::Link {
-            text: label.to_string(),
-            url: url.to_string(),
-        },
-        url_end + 1,
-    ))
-}
-
-/// The `)` closing the paren opened just before `start`, allowing for the
-/// balanced parens that show up in real URLs (`…/Foo_(disambiguation)`).
-fn closing_paren(text: &str, start: usize) -> Option<usize> {
-    let mut depth = 1usize;
-    for (offset, character) in text[start..].char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(start + offset);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    // the destination is the first word and the title is dropped.
+    let destination = text[link.destination.clone()?].split_whitespace().next()?;
+    Some(if is_absolute_url(destination) {
+        LinkTarget::Url(destination.to_string())
+    } else {
+        LinkTarget::Note(destination.to_string())
+    })
 }
 
 fn is_absolute_url(url: &str) -> bool {
@@ -95,25 +132,171 @@ fn is_absolute_url(url: &str) -> bool {
         })
 }
 
+/// The colour a `[[wikilink]]` label takes in the Markdown editor.
+pub fn wikilink_color(cx: &App) -> Hsla {
+    cx.theme().colors().text_accent
+}
+
+/// The colour a `[name](url)` label takes in the Markdown editor.
+pub fn external_link_color(cx: &App) -> Hsla {
+    cx.theme()
+        .syntax()
+        .style_for_name("link_uri")
+        .and_then(|style| style.color)
+        .unwrap_or_else(|| cx.theme().colors().text_accent)
+}
+
+/// One row of Markdown rendered for a panel: link labels lose their syntax,
+/// take the editor's link colours, and open on click, and `~~struck~~` text
+/// loses its delimiters and takes the line. Returns the text element only —
+/// the caller wraps it in the `Label`/`LabelLike` that carries the row's
+/// size, colour and truncation.
+pub fn render_markdown_row(
+    id: ElementId,
+    text: &str,
+    project: &Entity<Project>,
+    workspace: &WeakEntity<Workspace>,
+    cx: &App,
+) -> AnyElement {
+    let spans = parse_inline_spans(text);
+    if spans
+        .iter()
+        .all(|span| span.target.is_none() && !span.struck)
+    {
+        return SharedString::from(text.to_string()).into_any_element();
+    }
+    let mut display = String::new();
+    let mut highlights = Vec::new();
+    let mut link_ranges = Vec::new();
+    let mut targets = Vec::new();
+    for span in spans {
+        let start = display.len();
+        display.push_str(&span.text);
+        let range = start..display.len();
+        let color = span.target.as_ref().map(|target| match target {
+            LinkTarget::Url(_) => external_link_color(cx),
+            LinkTarget::Note(_) => wikilink_color(cx),
+        });
+        if color.is_some() || span.struck {
+            highlights.push((
+                range.clone(),
+                HighlightStyle {
+                    color,
+                    strikethrough: span.struck.then(|| StrikethroughStyle {
+                        thickness: px(1.),
+                        color: None,
+                    }),
+                    ..Default::default()
+                },
+            ));
+        }
+        if let Some(target) = span.target {
+            link_ranges.push(range);
+            targets.push(target);
+        }
+    }
+    if link_ranges.is_empty() {
+        return StyledText::new(display)
+            .with_highlights(highlights)
+            .into_any_element();
+    }
+    let project = project.downgrade();
+    let workspace = workspace.clone();
+    InteractiveText::new(id, StyledText::new(display).with_highlights(highlights))
+        .on_click(link_ranges, move |index, window, cx| {
+            let followed = match targets.get(index) {
+                Some(LinkTarget::Url(url)) => {
+                    cx.open_url(url);
+                    true
+                }
+                Some(LinkTarget::Note(target)) => project
+                    .upgrade()
+                    .and_then(|project| note_project_path(&project, target, cx))
+                    .map(|path| {
+                        // Deferred: the click is dispatched from inside the
+                        // panel's element tree, and opening reaches back into
+                        // the workspace that may already be leased.
+                        let workspace = workspace.clone();
+                        window.defer(cx, move |window, cx| {
+                            workspace
+                                .update(cx, |workspace, cx| {
+                                    workspace
+                                        .open_path(path, None, true, window, cx)
+                                        .detach_and_log_err(cx);
+                                })
+                                .log_err();
+                        });
+                    })
+                    .is_some(),
+                None => false,
+            };
+            // Without this the row's own click handler fires too, and the
+            // panel acts on the row the user just navigated away from. A link
+            // that led nowhere falls through, so the row still responds.
+            if followed {
+                cx.stop_propagation();
+            }
+        })
+        .into_any_element()
+}
+
+/// The vault file a note link names, resolved against the project's visible
+/// worktrees. `None` when nothing matches — a link to a note that doesn't
+/// exist does nothing rather than creating a file.
+fn note_project_path(project: &Entity<Project>, target: &str, cx: &App) -> Option<ProjectPath> {
+    let project = project.read(cx);
+    project.visible_worktrees(cx).find_map(|worktree| {
+        let worktree = worktree.read(cx);
+        let path = resolve_wikilink_target(
+            target,
+            worktree.files(false, 0).map(|entry| entry.path.as_ref()),
+        )?;
+        Some(ProjectPath {
+            worktree_id: worktree.id(),
+            path: path.into(),
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn text(value: &str) -> InlineSpan {
-        InlineSpan::Text(value.to_string())
+        InlineSpan {
+            text: value.to_string(),
+            target: None,
+            struck: false,
+        }
     }
 
-    fn link(value: &str, url: &str) -> InlineSpan {
-        InlineSpan::Link {
+    fn url(value: &str, url: &str) -> InlineSpan {
+        InlineSpan {
             text: value.to_string(),
-            url: url.to_string(),
+            target: Some(LinkTarget::Url(url.to_string())),
+            struck: false,
+        }
+    }
+
+    fn note(value: &str, target: &str) -> InlineSpan {
+        InlineSpan {
+            text: value.to_string(),
+            target: Some(LinkTarget::Note(target.to_string())),
+            struck: false,
+        }
+    }
+
+    fn struck(span: InlineSpan) -> InlineSpan {
+        InlineSpan {
+            struck: true,
+            ..span
         }
     }
 
     #[test]
     fn plain_text_is_one_span() {
         assert_eq!(
-            parse_inline_links("Review the planner"),
+            parse_inline_spans("Review the planner"),
             vec![text("Review the planner")]
         );
     }
@@ -121,10 +304,10 @@ mod tests {
     #[test]
     fn splits_text_around_links() {
         assert_eq!(
-            parse_inline_links("See [chat](https://chat.example.com/room) before Friday"),
+            parse_inline_spans("See [chat](https://chat.example.com/room) before Friday"),
             vec![
                 text("See "),
-                link("chat", "https://chat.example.com/room"),
+                url("chat", "https://chat.example.com/room"),
                 text(" before Friday"),
             ]
         );
@@ -133,10 +316,10 @@ mod tests {
     #[test]
     fn parses_adjacent_links() {
         assert_eq!(
-            parse_inline_links("[a](https://a.example)[b](mailto:b@example.com)"),
+            parse_inline_spans("[a](https://a.example)[b](mailto:b@example.com)"),
             vec![
-                link("a", "https://a.example"),
-                link("b", "mailto:b@example.com"),
+                url("a", "https://a.example"),
+                url("b", "mailto:b@example.com"),
             ]
         );
     }
@@ -144,36 +327,106 @@ mod tests {
     #[test]
     fn allows_balanced_parens_in_the_url() {
         assert_eq!(
-            parse_inline_links("[wiki](https://example.com/Foo_(bar))!"),
-            vec![link("wiki", "https://example.com/Foo_(bar)"), text("!")]
+            parse_inline_spans("[wiki](https://example.com/Foo_(bar))!"),
+            vec![url("wiki", "https://example.com/Foo_(bar)"), text("!")]
         );
     }
 
     #[test]
     fn drops_a_link_title() {
         assert_eq!(
-            parse_inline_links("[a](https://a.example \"Title\")"),
-            vec![link("a", "https://a.example")]
+            parse_inline_spans("[a](https://a.example \"Title\")"),
+            vec![url("a", "https://a.example")]
         );
     }
 
     #[test]
-    fn malformed_or_relative_links_stay_literal() {
+    fn wikilinks_become_note_links() {
+        assert_eq!(
+            parse_inline_spans("Pay [[2026-08-18-invoice]] today"),
+            vec![
+                text("Pay "),
+                note("2026-08-18-invoice", "2026-08-18-invoice"),
+                text(" today"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_wikilink_alias_shows_the_alias_and_opens_the_target() {
+        assert_eq!(
+            parse_inline_spans("[[projects/thock|the app]]"),
+            vec![note("the app", "projects/thock")]
+        );
+    }
+
+    #[test]
+    fn a_relative_destination_is_a_note_link() {
+        assert_eq!(
+            parse_inline_spans("[note](daily/2026-08-17.md)"),
+            vec![note("note", "daily/2026-08-17.md")]
+        );
+    }
+
+    #[test]
+    fn malformed_links_stay_literal() {
         for line in [
             "an [unclosed link",
             "[no parens] here",
             "[empty]()",
             "[](https://a.example)",
-            "[note](./daily/2026-08-17.md)",
+            "[[unclosed",
+            "[[]]",
+            "![[embedded]]",
+            "![alt](https://a.example/x.png)",
         ] {
-            assert_eq!(parse_inline_links(line), vec![text(line)], "{line}");
+            assert_eq!(parse_inline_spans(line), vec![text(line)], "{line}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_link_before_a_good_one_stays_literal() {
+        assert_eq!(
+            parse_inline_spans("[empty]() then [[note]]"),
+            vec![text("[empty]() then "), note("note", "note")]
+        );
+    }
+
+    #[test]
+    fn strikethrough_drops_its_delimiters_and_marks_the_run() {
+        assert_eq!(
+            parse_inline_spans("Skip ~~the standup~~ today"),
+            vec![
+                text("Skip "),
+                struck(text("the standup")),
+                text(" today"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_struck_link_stays_a_link() {
+        assert_eq!(
+            parse_inline_spans("~~read [[notes/spec]] first~~"),
+            vec![
+                struck(text("read ")),
+                struck(note("notes/spec", "notes/spec")),
+                struck(text(" first")),
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_strikethroughs_stay_literal() {
+        for line in ["~~unclosed", "~~ padded ~~", "a ~ b"] {
+            assert_eq!(parse_inline_spans(line), vec![text(line)], "{line}");
         }
     }
 
     #[test]
     fn a_bare_url_is_not_a_link() {
         assert_eq!(
-            parse_inline_links("Fill https://example.com/sheet"),
+            parse_inline_spans("Fill https://example.com/sheet"),
             vec![text("Fill https://example.com/sheet")]
         );
     }

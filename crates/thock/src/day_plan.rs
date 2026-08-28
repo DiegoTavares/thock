@@ -49,11 +49,27 @@ pub enum ItemTiming {
     Unscheduled,
 }
 
+/// How much of the grid an item claims. A calendar *status* block — Google's
+/// focus time or out of office — is a container for hours of the day rather
+/// than a thing to do, so it lays out in its own narrow lane instead of
+/// splitting the width of every real block it happens to span.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ItemWeight {
+    #[default]
+    Normal,
+    Status,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanItem {
     /// 0-based buffer row of the checkbox line, for reveal-on-click.
     pub row: u32,
     pub done: bool,
+    /// Which lane the item lays out in, from the sync marker's event kind.
+    pub weight: ItemWeight,
+    /// Whether the whole label is `~~struck through~~` — a task the user
+    /// crossed out rather than ticked. The panel treats it as finished.
+    pub struck: bool,
     /// Task text with any leading time token and trailing HTML comment removed.
     pub label: String,
     pub timing: ItemTiming,
@@ -125,19 +141,46 @@ pub fn parse_day_plan(text: &str, config: &DayPlannerConfig) -> DayPlan {
         let Some((done, task_text)) = parse_task_line(line) else {
             continue;
         };
+        // The event kind lives in the sync marker, so it is read before the
+        // trailing comment comes off.
+        let weight = if crate::calendar::line_event_kind(line).is_status() {
+            ItemWeight::Status
+        } else {
+            ItemWeight::Normal
+        };
+        // A crossed-out task may wrap its time token (`~~09:00 Meeting~~`) or
+        // only its text (`09:00 ~~Meeting~~`), so the wrapper comes off on
+        // both sides of the time parse — a struck task still belongs on the
+        // grid at its hour.
+        let (task_text, struck_line) = unwrap_strikethrough(strip_trailing_comment(task_text));
         let (timing, label) = match parse_leading_time(task_text, config.default_duration) {
             Some((start_min, end_min, rest)) => (ItemTiming::Timed { start_min, end_min }, rest),
             None => (ItemTiming::Unscheduled, task_text),
         };
+        let (label, struck_label) = unwrap_strikethrough(label);
         items.push(PlanItem {
             row: row as u32,
             done,
-            label: strip_trailing_comment(label.trim()).to_string(),
+            weight,
+            struck: struck_line || struck_label,
+            label: label.to_string(),
             timing,
             section: current_section.clone(),
         });
     }
     DayPlan { items }
+}
+
+/// Trims `text` and, when the whole of it is one `~~strikethrough~~` run,
+/// unwraps it — reporting that the task was crossed out. A partly struck text
+/// (`Call ~~Bob~~ Alice`) is left as written and is still an open task: only
+/// crossing the whole thing out means the user dropped it.
+fn unwrap_strikethrough(text: &str) -> (&str, bool) {
+    let trimmed = text.trim();
+    match crate::markdown_syntax::inline_strikethroughs(trimmed).as_slice() {
+        [run] if run.range == (0..trimmed.len()) => (trimmed[run.text.clone()].trim(), true),
+        _ => (trimmed, false),
+    }
 }
 
 /// Removes one trailing HTML comment (`<!-- … -->` at end of line) from a
@@ -364,16 +407,35 @@ pub struct PlacedBlock {
     pub column_count: usize,
 }
 
-/// Places every timed item into overlap clusters and columns.
+/// Places every timed item into overlap clusters and columns. The two lanes
+/// are laid out independently, so a focus-time block spanning the day never
+/// costs a real meeting half its width; `column`/`column_count` are relative
+/// to the item's own lane.
+///
 /// `min_visual_minutes` is the minute-equivalent of the minimum block height:
 /// blocks too short to render at true scale still occupy that much vertical
 /// space, so overlap is computed against this visual extent — otherwise two
 /// back-to-back 5-minute tasks would draw on top of each other.
 pub fn layout_blocks(plan: &DayPlan, min_visual_minutes: u32) -> Vec<PlacedBlock> {
+    let mut blocks = layout_lane(plan, ItemWeight::Normal, min_visual_minutes);
+    blocks.extend(layout_lane(plan, ItemWeight::Status, min_visual_minutes));
+    blocks
+}
+
+/// Whether the plan has a timed item in the status lane — the panel only
+/// reserves the lane's width when something is in it.
+pub fn has_status_blocks(plan: &DayPlan) -> bool {
+    plan.items.iter().any(|item| {
+        item.weight == ItemWeight::Status && matches!(item.timing, ItemTiming::Timed { .. })
+    })
+}
+
+fn layout_lane(plan: &DayPlan, weight: ItemWeight, min_visual_minutes: u32) -> Vec<PlacedBlock> {
     let mut blocks: Vec<PlacedBlock> = plan
         .items
         .iter()
         .enumerate()
+        .filter(|(_, item)| item.weight == weight)
         .filter_map(|(item_index, item)| match item.timing {
             ItemTiming::Timed { start_min, end_min } => Some(PlacedBlock {
                 item_index,
@@ -460,6 +522,8 @@ mod tests {
                 PlanItem {
                     row: 0,
                     done: false,
+                    weight: ItemWeight::Normal,
+                    struck: false,
                     label: "Evaluate the plan".to_string(),
                     timing: timed(480, 660),
                     section: None,
@@ -467,6 +531,8 @@ mod tests {
                 PlanItem {
                     row: 1,
                     done: false,
+                    weight: ItemWeight::Normal,
+                    struck: false,
                     label: "Standup".to_string(),
                     timing: timed(570, 600),
                     section: None,
@@ -474,6 +540,8 @@ mod tests {
                 PlanItem {
                     row: 2,
                     done: false,
+                    weight: ItemWeight::Normal,
+                    struck: false,
                     label: "Workout".to_string(),
                     timing: ItemTiming::Unscheduled,
                     section: None,
@@ -508,6 +576,33 @@ mod tests {
         assert_eq!(
             plan.items.iter().map(|item| item.done).collect::<Vec<_>>(),
             vec![true, true, false]
+        );
+    }
+
+    #[test]
+    fn a_wholly_struck_task_is_unwrapped_and_marked_struck() {
+        let plan = parse_day_plan(
+            "- [ ] ~~09:00 – 10:00 Dropped meeting~~\n\
+             - [ ] 09:00 ~~Dropped standup~~ <!--gcal:1-->\n\
+             - [ ] ~~Dropped errand~~\n\
+             - [ ] Call ~~Bob~~ Alice\n\
+             - [ ] Plain task\n",
+            &config(),
+        );
+        assert_eq!(
+            plan.items
+                .iter()
+                .map(|item| (item.label.as_str(), item.struck, item.timing))
+                .collect::<Vec<_>>(),
+            vec![
+                // A strikethrough around the time token still keeps the task
+                // on the grid at its hour.
+                ("Dropped meeting", true, timed(540, 600)),
+                ("Dropped standup", true, timed(540, 570)),
+                ("Dropped errand", true, ItemTiming::Unscheduled),
+                ("Call ~~Bob~~ Alice", false, ItemTiming::Unscheduled),
+                ("Plain task", false, ItemTiming::Unscheduled),
+            ]
         );
     }
 
@@ -802,6 +897,63 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, 2), (1, 2), (0, 2)]
         );
+    }
+
+    #[test]
+    fn status_blocks_lay_out_in_their_own_lane() {
+        // The focus block spans both meetings; without its own lane it would
+        // halve the width of every one of them.
+        let plan = parse_day_plan(
+            "- [ ] 09:00 – 17:00 Focus time <!--gcal:aaaaaaaaaaaa:focus-->\n\
+             - [ ] 09:00 – 10:00 Standup <!--gcal:bbbbbbbbbbbb-->\n\
+             - [ ] 14:00 – 17:00 Implement licensing\n",
+            &config(),
+        );
+        assert_eq!(
+            plan.items
+                .iter()
+                .map(|item| item.weight)
+                .collect::<Vec<_>>(),
+            vec![ItemWeight::Status, ItemWeight::Normal, ItemWeight::Normal]
+        );
+        assert!(has_status_blocks(&plan));
+
+        let blocks = layout_blocks(&plan, 0);
+        assert_eq!(blocks.len(), 3);
+        for block in &blocks {
+            assert_eq!(
+                (block.column, block.column_count),
+                (0, 1),
+                "item {} should own its lane's full width",
+                block.item_index
+            );
+        }
+    }
+
+    #[test]
+    fn overlapping_status_blocks_share_their_own_lane() {
+        let plan = parse_day_plan(
+            "- [ ] 09:00 – 17:00 Focus time <!--gcal:aaaaaaaaaaaa:focus-->\n\
+             - [ ] 13:00 – 18:00 Out of office <!--gcal:bbbbbbbbbbbb:ooo-->\n\
+             - [ ] 10:00 – 10:30 Standup\n",
+            &config(),
+        );
+        let blocks = layout_blocks(&plan, 0);
+        let column_counts: Vec<_> = blocks
+            .iter()
+            .map(|block| (block.item_index, block.column, block.column_count))
+            .collect();
+        // The two status blocks split the status lane; the meeting keeps the
+        // whole main lane.
+        assert!(column_counts.contains(&(2, 0, 1)), "{column_counts:?}");
+        assert!(column_counts.contains(&(0, 0, 2)), "{column_counts:?}");
+        assert!(column_counts.contains(&(1, 1, 2)), "{column_counts:?}");
+    }
+
+    #[test]
+    fn a_day_without_status_blocks_reports_none() {
+        let plan = parse_day_plan("- [ ] 09:00 – 10:00 Standup\n", &config());
+        assert!(!has_status_blocks(&plan));
     }
 
     #[test]

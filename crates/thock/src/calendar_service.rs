@@ -1113,7 +1113,7 @@ impl PickerDelegate for CalendarPickerDelegate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calendar::CalendarEvent;
+    use crate::calendar::{CalendarEvent, EventKind};
     use crate::vault::VaultConfig;
     use fs::FakeFs;
     use gpui::TestAppContext;
@@ -1163,6 +1163,7 @@ mod tests {
                 id: "aaaaaaaaaaaa".to_string(),
                 title: "Standup".to_string(),
                 time: Some((600, 630)),
+                kind: EventKind::Default,
             }]),
         });
         let vault = Vault {
@@ -1204,6 +1205,7 @@ mod tests {
             id: "aaaaaaaaaaaa".to_string(),
             title: "Standup".to_string(),
             time: Some((660, 690)),
+            kind: EventKind::Default,
         }];
         cx.executor().advance_clock(Duration::from_secs(301));
         cx.run_until_parked();
@@ -1248,6 +1250,7 @@ mod tests {
                 id: "aaaaaaaaaaaa".to_string(),
                 title: "Standup".to_string(),
                 time: Some((600, 630)),
+                kind: EventKind::Default,
             }]),
         });
         let vault = Vault {

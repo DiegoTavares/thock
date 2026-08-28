@@ -19,7 +19,7 @@ use project::Project;
 use std::time::Duration;
 use text::{Bias, Point};
 use ui::prelude::*;
-use ui::{Icon, IconSize, Label};
+use ui::{Icon, IconSize, Label, LabelLike};
 use util::ResultExt as _;
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -28,6 +28,7 @@ use crate::calendar_service::{
     self, CalendarService, ConnectGoogleWorkspace, SyncCalendarNow, SyncState,
 };
 use crate::day_plan::{self, DayPlan, PlacedBlock, PlanItem, parse_day_plan};
+use crate::markdown_text::render_markdown_row;
 use crate::notes::{NoteKind, format_date};
 use crate::vault::VaultStatus;
 
@@ -37,6 +38,9 @@ const MIN_BLOCK_PX: f32 = 18.0;
 const BLOCK_CAPTION_PX: f32 = 18.0;
 const BLOCK_LABEL_LINE_PX: f32 = 16.0;
 const GUTTER_WIDTH: f32 = 44.0;
+/// Width of the lane that holds calendar status blocks (focus time, out of
+/// office). Narrow on purpose: they mark hours, they don't compete for them.
+const STATUS_LANE_WIDTH: f32 = 52.0;
 const REPARSE_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Marker type isolating the panel's transient reveal highlight from other
@@ -58,6 +62,40 @@ pub fn init(cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// How a plan item reads in the panel. A struck-through item is finished the
+/// same way a ticked one is, but takes the dimmer disabled tone so a dropped
+/// task stays distinguishable from a completed one.
+#[derive(Clone, Copy, PartialEq)]
+enum ItemState {
+    Open,
+    Done,
+    Struck,
+}
+
+impl ItemState {
+    fn of(item: &PlanItem) -> Self {
+        match (item.struck, item.done) {
+            (true, _) => Self::Struck,
+            (false, true) => Self::Done,
+            (false, false) => Self::Open,
+        }
+    }
+
+    fn finished(self) -> bool {
+        self != Self::Open
+    }
+
+    /// The muted colour a finished item's label and icon take; `None` while
+    /// the item is still open.
+    fn finished_color(self) -> Option<Color> {
+        match self {
+            Self::Open => None,
+            Self::Done => Some(Color::Muted),
+            Self::Struck => Some(Color::Disabled),
+        }
+    }
 }
 
 /// Where the mirrored note's text comes from: the active editor when it is
@@ -635,27 +673,41 @@ impl DayPlannerPanel {
         )
     }
 
+    /// An item's label with its Markdown links rendered as clickable labels.
+    /// An empty label still needs something to show, so it falls back to an
+    /// ellipsis the way a bare chip always has.
+    fn render_item_label(
+        &self,
+        id: ElementId,
+        item: &PlanItem,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        if item.label.is_empty() {
+            return SharedString::from("…").into_any_element();
+        }
+        render_markdown_row(id, &item.label, &self.project, &self.workspace, cx)
+    }
+
     fn render_chip(&self, item_index: usize, item: &PlanItem, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
         let selected = self.selected_item == Some(item_index);
+        let state = ItemState::of(item);
         // A chip carries the same border colour as its section's blocks so
         // they read as one group (spec v8 §11.3).
-        let section_border = (!item.done)
+        let section_border = (!state.finished())
             .then(|| self.item_section_color(item, cx))
             .flatten()
             .map(|color| color.opacity(0.4));
-        let label = Label::new(if item.label.is_empty() {
-            "…".to_string()
-        } else {
-            item.label.clone()
-        })
-        .size(LabelSize::Small)
-        .truncate();
-        let label = if item.done {
-            label.strikethrough().color(Color::Muted)
-        } else {
-            label
+        let label = LabelLike::new().size(LabelSize::Small).truncate();
+        let label = match state.finished_color() {
+            Some(color) => label.strikethrough().color(color),
+            None => label,
         };
+        let label = label.child(self.render_item_label(
+            ElementId::Name(format!("thock-day-planner-chip-text-{item_index}").into()),
+            item,
+            cx,
+        ));
         h_flex()
             .id(("thock-day-planner-chip", item_index))
             .max_w_full()
@@ -672,13 +724,13 @@ impl DayPlannerPanel {
             .bg(colors.element_background)
             .cursor_pointer()
             .child(
-                Icon::new(if item.done {
+                Icon::new(if state.finished() {
                     IconName::TodoComplete
                 } else {
                     IconName::TodoPending
                 })
                 .size(IconSize::XSmall)
-                .color(Color::Muted),
+                .color(state.finished_color().unwrap_or(Color::Muted)),
             )
             .child(label)
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -735,16 +787,43 @@ impl DayPlannerPanel {
                 );
         }
 
+        // Status blocks own a narrow lane of their own, so the day's real
+        // blocks lay out as if a focus-time container weren't there.
+        let lane_width = if day_plan::has_status_blocks(plan) {
+            STATUS_LANE_WIDTH
+        } else {
+            0.0
+        };
+        let lane_blocks = |weight: day_plan::ItemWeight| {
+            blocks.iter().filter_map(move |block| {
+                let item = plan.items.get(block.item_index)?;
+                (item.weight == weight).then_some((block, item))
+            })
+        };
+        if lane_width > 0.0 {
+            body = body.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(GUTTER_WIDTH))
+                    .w(px(lane_width))
+                    .children(
+                        lane_blocks(day_plan::ItemWeight::Status)
+                            .map(|(block, item)| self.render_block(block, item, grid_start, cx)),
+                    ),
+            );
+        }
         let block_area = div()
             .absolute()
             .top_0()
             .bottom_0()
-            .left(px(GUTTER_WIDTH))
+            .left(px(GUTTER_WIDTH + lane_width))
             .right_0()
-            .children(blocks.iter().filter_map(|block| {
-                let item = plan.items.get(block.item_index)?;
-                Some(self.render_block(block, item, grid_start, cx))
-            }));
+            .children(
+                lane_blocks(day_plan::ItemWeight::Normal)
+                    .map(|(block, item)| self.render_block(block, item, grid_start, cx)),
+            );
         body = body.child(block_area);
 
         if let Some(now_minutes) = self.now_line_minutes(config, date)
@@ -812,12 +891,14 @@ impl DayPlannerPanel {
         );
         let width = 1.0 / block.column_count as f32;
         let left = block.column as f32 * width;
+        let status = item.weight == day_plan::ItemWeight::Status;
         // The label wins over the time caption when the block is too short
         // for both: the caption is dropped unless it fits alongside at least
         // one line of label text (blocks with no label keep the caption).
+        // The status lane is too narrow for a caption at any height.
         let has_label = !item.label.is_empty();
-        let show_caption = !has_label
-            || f32::from(height) >= BLOCK_CAPTION_PX + BLOCK_LABEL_LINE_PX;
+        let show_caption = !status
+            && (!has_label || f32::from(height) >= BLOCK_CAPTION_PX + BLOCK_LABEL_LINE_PX);
         // Lines of wrapped label text that fit in the remaining height, so
         // the last visible line gets an ellipsis instead of a hard clip.
         let label_height = if show_caption {
@@ -828,12 +909,16 @@ impl DayPlannerPanel {
         let label_lines = ((label_height / BLOCK_LABEL_LINE_PX).floor() as usize).max(1);
         // Sectioned items take their subsection's hue with the exact alpha
         // treatment root items get from the accent, so visual weight is
-        // unchanged; done stays muted regardless (spec v8 §11.3).
+        // unchanged; a finished item stays muted regardless (spec v8 §11.3).
         let base = self.item_section_color(item, cx).unwrap_or(accent);
-        let (fill, border) = if item.done {
-            (colors.text_muted.opacity(0.08), colors.border_variant)
-        } else {
-            (base.opacity(0.15), base.opacity(0.4))
+        let state = ItemState::of(item);
+        let (fill, border) = match state {
+            // A status block is background, not foreground: it never takes a
+            // section hue, however it is filed in the note.
+            _ if status => (colors.text_muted.opacity(0.06), colors.border_variant),
+            ItemState::Open => (base.opacity(0.15), base.opacity(0.4)),
+            ItemState::Done => (colors.text_muted.opacity(0.08), colors.border_variant),
+            ItemState::Struck => (colors.text_disabled.opacity(0.08), colors.border_variant),
         };
         let caption = format!(
             "{} – {}",
@@ -842,15 +927,25 @@ impl DayPlannerPanel {
         );
 
         let label = (!item.label.is_empty()).then(|| {
-            let label = Label::new(item.label.clone()).size(LabelSize::Small);
-            let label = if item.done {
-                label.strikethrough().color(Color::Muted)
-            } else {
-                label
+            // `LabelLike::line_clamp` supplies the "…" affix; `line_clamp`
+            // alone silently drops overflowing lines.
+            let label = LabelLike::new()
+                .size(if status {
+                    LabelSize::XSmall
+                } else {
+                    LabelSize::Small
+                })
+                .line_clamp(label_lines);
+            let label = match (state.finished_color(), status) {
+                (Some(color), _) => label.strikethrough().color(color),
+                (None, true) => label.color(Color::Muted),
+                (None, false) => label,
             };
-            // text_ellipsis supplies the "…" affix; line_clamp alone
-            // silently drops overflowing lines.
-            div().line_clamp(label_lines).text_ellipsis().child(label)
+            label.child(self.render_item_label(
+                ElementId::Name(format!("thock-day-planner-block-text-{item_index}").into()),
+                item,
+                cx,
+            ))
         });
 
         div()

@@ -147,7 +147,7 @@ Rules:
 ### 5.2 The synced line grammar
 
 ```
-- [<state>] <HH:MM> - <HH:MM> <title> <!--gcal:<id>-->
+- [<state>] <HH:MM> - <HH:MM> <title> <!--gcal:<id>[:<kind>]-->
 ```
 
 - Deliberately a strict subset of V4 §5.1/§5.3, so every synced line is already a valid timed task.
@@ -158,6 +158,12 @@ Rules:
 - `<id>` is the first 12 hex characters of `sha256(calendar_id + "\0" + event_id)`. Google event ids
   are long and recurring instances carry a timestamp suffix; a short digest keeps the line readable
   while staying stable across renames, moves, and reschedules. `sha2` is already a crate dependency.
+- `<kind>` records Google's `eventType` when it is one the planner lays out differently: `focus`
+  (`focusTime`) or `ooo` (`outOfOffice`). Ordinary events carry no suffix, so their markers are byte
+  for byte what V8 wrote. A line written before this existed has its marker upgraded in place on the
+  next sync — the time token, title, checkbox, and any user trailing text are untouched. A suffix
+  this build doesn't recognize still identifies the line (no duplicate insert) and is left alone
+  rather than reset, so an older build can't fight a newer one.
 - The marker is the **last** thing on the line. Exactly one space precedes it.
 - The title has any occurrence of `<!--` stripped and internal newlines collapsed, so a hostile
   calendar entry cannot forge a marker or break the line.

@@ -175,6 +175,24 @@ Google-Calendar-style side-by-side placement:
 
 Two blocks with identical times get two columns (each half width), never stacked/hidden. This guarantees Definition-of-Done #4.
 
+### 7.7 The status lane
+
+Google's *calendar status* events — focus time (`eventType: focusTime`) and out of office
+(`outOfOffice`) — are containers for hours of the day, not things to do: a single 09:00–17:00 focus
+block overlaps everything and, in the plain column algorithm, halves the width of every real meeting
+it spans. Those items lay out in a **separate lane**: steps 1–4 above run twice, once per lane, so
+`column`/`column_count` are relative to the item's own lane and the main lane places blocks as if
+the status block weren't there.
+
+The lane is a fixed 52px strip between the hour gutter and the block area, present only on days that
+have a timed status item. Its blocks are drawn quietly — muted fill, no section hue, no time caption
+(the strip is too narrow), an XSmall label — and stay clickable, so reveal-on-click still works.
+Status items with no time are ordinary unscheduled chips.
+
+Detection is the sync marker's kind suffix (v8 §5.2), so it survives the round trip through the
+note and requires no heuristics: a hand-written 09:00–17:00 block is still a normal block, because
+the user wrote it as one.
+
 ## 8. Interaction: reveal-on-click (the one interaction)
 
 Clicking a block or chip reveals its source line in the active editor. Implementation uses the confirmed editor API surface:
