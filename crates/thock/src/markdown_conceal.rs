@@ -1,19 +1,22 @@
 //! Concealed markup in the Markdown editor (spec V10). While the cursor is
 //! elsewhere, a vault note's markup renders the way it would in preview:
-//! heading markers, link syntax and HTML comments are folded away behind an
-//! invisible placeholder, headings and link labels are coloured, a task
+//! heading markers, link syntax, `~~` delimiters and HTML comments are folded
+//! away behind an invisible placeholder, headings and link labels are
+//! coloured, struck text takes its line, a task
 //! list's `[ ]` draws as a checkbox, and a `___` line as a rule. Putting the cursor on a line restores that whole line's
 //! source (§4.2). Everything here is display-only — folds and highlights live
 //! in the `DisplayMap` and no code path writes to the buffer (§4.3).
 
 use crate::markdown_syntax::{self, SpanKind};
+use crate::markdown_text;
 use crate::vault::{Vault, VaultStatus};
 use editor::actions::GoToDefinition;
 use editor::display_map::Crease;
 use editor::{Editor, EditorEvent, EditorMode, FoldPlaceholder, HighlightKey};
 use gpui::{
     App, AppContext as _, Context, Empty, Entity, HighlightStyle, Hsla, IntoElement as _,
-    ParentElement as _, Styled as _, Subscription, Task, TaskExt as _, WeakEntity, Window, div, px,
+    ParentElement as _, StrikethroughStyle, Styled as _, Subscription, Task, TaskExt as _,
+    WeakEntity, Window, div, px,
 };
 use multi_buffer::{Anchor, MultiBufferOffset, MultiBufferSnapshot, ToOffset as _, ToPoint as _};
 use project::ProjectPath;
@@ -232,7 +235,7 @@ fn wikilink_destination(
 /// vault-relative path (as written, or with `.md` appended) wins, otherwise
 /// the first file anywhere in the vault the target names — Obsidian-style
 /// basename linking.
-fn resolve_wikilink_target<'a>(
+pub(crate) fn resolve_wikilink_target<'a>(
     target: &str,
     files: impl Iterator<Item = &'a RelPath>,
 ) -> Option<&'a RelPath> {
@@ -534,7 +537,16 @@ fn rule_placeholder(editor: WeakEntity<Editor>) -> FoldPlaceholder {
     }
 }
 
-/// The highlight slot for a colourable span. Links get the higher-priority
+/// The number of highlight slots: two link colours, three heading colours,
+/// and the strikethrough.
+const HIGHLIGHT_SLOTS: usize = 6;
+
+/// The slot strikethrough spans take. It is the last one so its style merges
+/// over the colour slots, and it carries no colour of its own — a struck link
+/// keeps its link colour and gains the line.
+const STRIKETHROUGH_SLOT: usize = HIGHLIGHT_SLOTS - 1;
+
+/// The highlight slot for a styled span. Links get the higher-priority
 /// slots so a link label inside a heading keeps its link colour.
 fn highlight_slot(kind: SpanKind) -> Option<usize> {
     match kind {
@@ -543,20 +555,32 @@ fn highlight_slot(kind: SpanKind) -> Option<usize> {
         // Levels 4–6 reuse level 3 — three signals are enough to read
         // structure at a glance (§7.1).
         SpanKind::Heading(level) => Some(1 + (level.clamp(1, 3) as usize)),
+        SpanKind::Strikethrough => Some(STRIKETHROUGH_SLOT),
         SpanKind::Marker | SpanKind::Rule | SpanKind::Checkbox(_) => None,
+    }
+}
+
+fn slot_style(slot: usize, cx: &App) -> HighlightStyle {
+    if slot == STRIKETHROUGH_SLOT {
+        return HighlightStyle {
+            strikethrough: Some(StrikethroughStyle {
+                thickness: px(1.),
+                color: None,
+            }),
+            ..Default::default()
+        };
+    }
+    HighlightStyle {
+        color: Some(slot_color(slot, cx)),
+        ..Default::default()
     }
 }
 
 fn slot_color(slot: usize, cx: &App) -> Hsla {
     let colors = cx.theme().colors();
     match slot {
-        0 => colors.text_accent,
-        1 => cx
-            .theme()
-            .syntax()
-            .style_for_name("link_uri")
-            .and_then(|style| style.color)
-            .unwrap_or(colors.text_accent),
+        0 => markdown_text::wikilink_color(cx),
+        1 => markdown_text::external_link_color(cx),
         _ => {
             let players = &cx.theme().players().0;
             // Slot 0 of the player palette is the local-user colour; heading
@@ -579,7 +603,7 @@ fn apply_highlights(editor: &mut Editor, cx: &mut Context<Editor>) {
     let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
         return;
     };
-    let mut by_slot: [Vec<Range<Anchor>>; 5] = Default::default();
+    let mut by_slot: [Vec<Range<Anchor>>; HIGHLIGHT_SLOTS] = Default::default();
     if addon.enabled {
         for span in &addon.spans {
             if let Some(slot) = highlight_slot(span.kind) {
@@ -590,10 +614,7 @@ fn apply_highlights(editor: &mut Editor, cx: &mut Context<Editor>) {
     for (slot, ranges) in by_slot.into_iter().enumerate() {
         editor.clear_highlights(HighlightKey::ThockMarkdownConceal(slot), cx);
         if !ranges.is_empty() {
-            let style = HighlightStyle {
-                color: Some(slot_color(slot, cx)),
-                ..Default::default()
-            };
+            let style = slot_style(slot, cx);
             editor.highlight_text(HighlightKey::ThockMarkdownConceal(slot), ranges, style, cx);
         }
     }
@@ -787,6 +808,34 @@ mod tests {
             display_text(&editor, &mut cx),
             "- [ ] open <!--id:7-->\n- ☑ done\nplain tail\n"
         );
+    }
+
+    #[gpui::test]
+    async fn strikethrough_delimiters_conceal_and_reveal(cx: &mut TestAppContext) {
+        let note = "- [ ] ~~dropped~~ task\nplain tail\n";
+        let (editor, mut cx) = setup(cx, note).await;
+        move_cursor_to(&editor, 1, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "- ☐  dropped  task\nplain tail\n"
+        );
+
+        move_cursor_to(&editor, 0, &mut cx);
+        assert_eq!(display_text(&editor, &mut cx), note);
+    }
+
+    #[gpui::test]
+    async fn struck_text_is_highlighted_without_a_colour_of_its_own(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "~~gone [[wiki]]~~\n").await;
+        editor.update_in(&mut cx, |editor, _, cx| {
+            let (style, ranges) = editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(STRIKETHROUGH_SLOT), cx)
+                .expect("the struck run is highlighted");
+            assert_eq!(ranges.len(), 1);
+            assert!(style.strikethrough.is_some());
+            // A struck link keeps its link colour (§7.1).
+            assert_eq!(style.color, None);
+        });
     }
 
     #[gpui::test]

@@ -137,6 +137,7 @@ no async syntax-tree availability. `markdown_text.rs` is the precedent for this 
 | Thematic break | `^ {0,3}_{3,}[ \t]*$` | the entire line's text | — (drawn, see §7.3) |
 | Task checkbox | `^[ \t]*[-*+][ \t]+\[( \|x\|X)\]([ \t]\|$)` | the `[ ]` / `[x]` brackets | — (drawn, see §7.4) |
 | HTML comment | `<!-- … -->`, opened and closed on one line | the whole comment, delimiters included | — |
+| Strikethrough | `~~text~~` | both `~~` delimiters | — (struck, see §7.5) |
 
 Rules that apply to all of them:
 
@@ -157,6 +158,11 @@ Rules that apply to all of them:
   it, which is a different (and lossier) gesture than hiding markup.
 - **C8** — Markup inside a concealed comment is not scanned separately: a `[[wikilink]]` in a
   comment neither colours nor resolves. Concealed comments join inline code as an exclusion zone.
+- **C9** — A `~~` delimiter must sit outside every link construct: a `~~` in a URL belongs to the
+  URL, and folding it would overlap the link's own folds. A strikethrough may still *span* a link
+  (`~~see [docs](url)~~`), which keeps its link colour and gains the line. Delimiter runs are
+  exactly two tildes (`~~~` opens a fence), and the struck text may not be empty or start or end
+  with whitespace — anything else is malformed and stays literal (C3).
 
 ## 7. Colour and drawing
 
@@ -191,6 +197,17 @@ in the accent colour when the task is done, so a note's tasks read the way they 
 Thock surface. The list bullet is left alone — it is the user's text, and hiding it would change
 what the line *is*, not just how its markup looks. The box is display-only; ticking a checkbox by
 clicking it would be a buffer write and belongs with the Day Planner's task actions, not here.
+
+### 7.5 Strikethrough
+
+The delimiters fold and the text between them takes a strikethrough highlight with no colour of its
+own, so a struck link keeps its link colour and a struck heading its level colour. The panels
+(Backlog, Day Planner) render the same treatment through `markdown_text::render_markdown_row`, and
+the Day Planner goes one step further: a task whose whole text is crossed out
+(`- [ ] ~~09:00 Meeting~~`, or `- [ ] 09:00 ~~Meeting~~`) reads as finished — the completed icon,
+the muted block fill — in `text_disabled` rather than `text_muted`, so a dropped task stays
+distinguishable from a done one. The strikethrough may wrap the time token without knocking the
+task off the grid. A partly struck task (`Call ~~Bob~~ Alice`) is still open.
 
 ## 8. Architecture
 
@@ -420,3 +437,7 @@ comments** (`<!-- … -->` disappears entirely). Comments matter because Thock i
 the Gmail capture's `<!--gmail:…-->` markers (V9) live at the end of backlog lines, and the Backlog
 panel already hides them in its rows; the editor now agrees. Both honour the reveal rule and every
 exclusion (C1–C3), and comments became an exclusion zone of their own (C8).
+
+**Strikethrough** joined the set next (§7.5, C9), in the editor and in the Backlog and Day Planner
+rows alike, and gave the Day Planner a third item state: a task crossed out rather than ticked
+reads as finished in its own dimmer tone.

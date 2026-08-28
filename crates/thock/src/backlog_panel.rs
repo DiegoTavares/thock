@@ -11,8 +11,8 @@ use chrono::Local;
 use editor::{Editor, EditorEvent, SelectionEffects, scroll::Autoscroll};
 use gpui::{
     Action, AnyElement, App, AsyncWindowContext, ClipboardItem, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, HighlightStyle, Hsla, InteractiveText, KeyContext, Pixels, StyledText,
-    Subscription, Task, UnderlineStyle, WeakEntity, Window, actions, div, px,
+    FocusHandle, Focusable, Hsla, KeyContext, Pixels, Subscription, Task, WeakEntity, Window,
+    actions, div, px,
 };
 use language::{Buffer, BufferEvent};
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
@@ -32,7 +32,7 @@ use crate::calendar_service::{ConnectGoogleWorkspace, SyncState};
 use crate::day_plan::strip_trailing_comment;
 use crate::gmail_service::{self, GmailService, SyncGmailNow};
 use crate::inbox_service::{self, InboxService, OpenInbox, SyncInboxNow};
-use crate::markdown_text::{InlineSpan, parse_inline_links};
+use crate::markdown_text::render_markdown_row;
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
 use crate::vault::{Vault, VaultStatus};
 
@@ -1089,58 +1089,15 @@ impl BacklogPanel {
         )
     }
 
-    /// A task's text with `[name](url)` rendered as a clickable link. Returns
-    /// the text element only — the caller wraps it in the `LabelLike` that
-    /// carries the row's size, color and truncation.
+    /// A task's text with its Markdown links rendered as clickable labels.
+    /// Returns the text element only — the caller wraps it in the `LabelLike`
+    /// that carries the row's size, color and truncation.
     fn render_task_text(&self, id: ElementId, text: &str, cx: &Context<Self>) -> AnyElement {
         // A trailing `<!-- … -->` (e.g. a capture marker) is identity, not
         // content — hidden here exactly as the Day Planner hides it (v8
         // §11.4); the file keeps it.
         let text = strip_trailing_comment(text);
-        let spans = parse_inline_links(text);
-        if !spans
-            .iter()
-            .any(|span| matches!(span, InlineSpan::Link { .. }))
-        {
-            return SharedString::from(text.to_string()).into_any_element();
-        }
-        let mut display = String::new();
-        let mut link_ranges = Vec::new();
-        let mut urls = Vec::new();
-        for span in spans {
-            match span {
-                InlineSpan::Text(literal) => display.push_str(&literal),
-                InlineSpan::Link { text, url } => {
-                    let start = display.len();
-                    display.push_str(&text);
-                    link_ranges.push(start..display.len());
-                    urls.push(url);
-                }
-            }
-        }
-        let link_style = HighlightStyle {
-            color: Some(cx.theme().colors().text_accent),
-            underline: Some(UnderlineStyle {
-                thickness: px(1.),
-                color: None,
-                wavy: false,
-            }),
-            ..Default::default()
-        };
-        let highlights: Vec<_> = link_ranges
-            .iter()
-            .map(|range| (range.clone(), link_style))
-            .collect();
-        InteractiveText::new(id, StyledText::new(display).with_highlights(highlights))
-            .on_click(link_ranges, move |index, _window, cx| {
-                if let Some(url) = urls.get(index) {
-                    cx.open_url(url);
-                }
-                // Without this the row's click-to-edit fires too, and the
-                // inline editor opens over the link the user just followed.
-                cx.stop_propagation();
-            })
-            .into_any_element()
+        render_markdown_row(id, text, &self.project, &self.workspace, cx)
     }
 
     /// A row's background: the copy flash outranks the selection highlight, so

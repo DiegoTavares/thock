@@ -26,8 +26,8 @@ const MARKER_PREFIX: &str = "<!--gcal:";
 const MARKER_SUFFIX: &str = "-->";
 const CANCELLED_SUFFIX: &str = "~~ (cancelled)";
 
-/// A normalized event: a time, a title, and an id — nothing else survives
-/// normalization (spec §3).
+/// A normalized event: a time, a title, an id, and Google's event type —
+/// nothing else survives normalization (spec §3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarEvent {
     /// The short digest id that travels in the line marker
@@ -37,6 +37,55 @@ pub struct CalendarEvent {
     /// Local minutes since midnight, clamped to the day; `None` for all-day
     /// events, which are written without a time token.
     pub time: Option<(u32, u32)>,
+    pub kind: EventKind,
+}
+
+/// Google's `eventType`, narrowed to the distinction the planner acts on.
+/// Focus time and out of office are *status* blocks: wide containers for the
+/// day rather than things to do, so the Day Planner gives them their own
+/// narrow lane instead of letting them squeeze every real block.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EventKind {
+    #[default]
+    Default,
+    FocusTime,
+    OutOfOffice,
+}
+
+impl EventKind {
+    /// Maps a Google `eventType` value. Types the planner treats like any
+    /// meeting (`default`, `birthday`, `fromGmail`, `workingLocation`, and
+    /// anything Google adds later) all land on `Default`.
+    pub fn from_google(event_type: &str) -> Self {
+        match event_type {
+            "focusTime" => Self::FocusTime,
+            "outOfOffice" => Self::OutOfOffice,
+            _ => Self::Default,
+        }
+    }
+
+    /// The marker suffix that records this kind in the note. `Default` has
+    /// none, so an ordinary line's marker stays exactly as V8 wrote it.
+    fn marker_suffix(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::FocusTime => Some("focus"),
+            Self::OutOfOffice => Some("ooo"),
+        }
+    }
+
+    fn from_marker_suffix(suffix: &str) -> Option<Self> {
+        match suffix {
+            "focus" => Some(Self::FocusTime),
+            "ooo" => Some(Self::OutOfOffice),
+            _ => None,
+        }
+    }
+
+    /// Whether the Day Planner lays this out in its low-weight lane.
+    pub fn is_status(self) -> bool {
+        self != Self::Default
+    }
 }
 
 /// A provider's answer for one day.
@@ -190,6 +239,54 @@ pub fn event_marker_id(calendar_id: &str, event_id: &str) -> String {
         })
 }
 
+/// The marker a synced line ends with: the event id, plus a suffix for the
+/// kinds the planner lays out differently (`<!--gcal:9f2c1ab4e7d0:focus-->`).
+fn render_marker(id: &str, kind: EventKind) -> String {
+    let mut marker = String::from(MARKER_PREFIX);
+    marker.push_str(id);
+    if let Some(suffix) = kind.marker_suffix() {
+        marker.push(':');
+        marker.push_str(suffix);
+    }
+    marker.push_str(MARKER_SUFFIX);
+    marker
+}
+
+/// The `(id, kind suffix)` of a well-formed marker payload. The id must be
+/// hex; an unrecognized suffix is returned verbatim so a marker written by a
+/// newer build still identifies its line instead of being re-inserted.
+fn parse_marker_payload(payload: &str) -> Option<(&str, Option<&str>)> {
+    let (id, suffix) = match payload.split_once(':') {
+        Some((id, suffix)) => (id, Some(suffix)),
+        None => (payload, None),
+    };
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    if suffix.is_some_and(|suffix| {
+        suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_lowercase())
+    }) {
+        return None;
+    }
+    Some((id, suffix))
+}
+
+/// The event kind recorded in a line's trailing sync marker. Lines the syncer
+/// never wrote — a hand-typed task — are `Default`, so the planner can ask
+/// this of any line.
+pub fn line_event_kind(line: &str) -> EventKind {
+    let trimmed = line.trim_end();
+    let Some(marker_start) = trimmed.rfind(MARKER_PREFIX) else {
+        return EventKind::default();
+    };
+    trimmed[marker_start + MARKER_PREFIX.len()..]
+        .strip_suffix(MARKER_SUFFIX)
+        .and_then(parse_marker_payload)
+        .and_then(|(_, suffix)| suffix)
+        .and_then(EventKind::from_marker_suffix)
+        .unwrap_or_default()
+}
+
 /// One edit to the note, in the note's *original* row coordinates.
 /// `Insert` places a new line before original row `row` (`row == line count`
 /// appends at the end); `Replace` rewrites that row. There is deliberately no
@@ -249,6 +346,7 @@ pub fn reconcile(note: &str, events: &[CalendarEvent], config: &CalendarConfig) 
             id: event.id.clone(),
             title: sanitize_title(&event.title),
             time: event.time,
+            kind: event.kind,
         })
         .collect();
 
@@ -427,7 +525,7 @@ fn render_synced_line(event: &CalendarEvent) -> String {
         line.push_str(&event.title);
         line.push(' ');
     }
-    let _ = write!(line, "{MARKER_PREFIX}{}{MARKER_SUFFIX}", event.id);
+    line.push_str(&render_marker(&event.id, event.kind));
     line
 }
 
@@ -516,16 +614,21 @@ struct SyncedLine {
     /// Byte span of the text between the time token (or checkbox) and the
     /// marker, trimmed.
     text_span: Range<usize>,
+    /// Byte span of the whole `<!--gcal:…-->` marker.
+    marker_span: Range<usize>,
+    /// The marker's kind suffix as written, `None` when it has none. Kept raw
+    /// so a suffix this build doesn't know is left alone rather than reset.
+    marker_suffix: Option<String>,
 }
 
 impl SyncedLine {
     fn parse(row: usize, line: &str) -> Option<Self> {
         let trimmed = line.trim_end();
         let marker_start = trimmed.rfind(MARKER_PREFIX)?;
-        let id = trimmed[marker_start + MARKER_PREFIX.len()..].strip_suffix(MARKER_SUFFIX)?;
-        if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
-            return None;
-        }
+        let payload =
+            trimmed[marker_start + MARKER_PREFIX.len()..].strip_suffix(MARKER_SUFFIX)?;
+        let (id, marker_suffix) = parse_marker_payload(payload)?;
+        let marker_span = marker_start..trimmed.len();
 
         let text_offset = checkbox_text_offset(line)?;
         let before_marker = &line[text_offset..marker_start];
@@ -546,7 +649,23 @@ impl SyncedLine {
             sort_start,
             token_span,
             text_span: text_start..text_end,
+            marker_span,
+            marker_suffix: marker_suffix.map(str::to_string),
         })
+    }
+
+    /// The marker to write for `kind`, or `None` when the line's marker
+    /// already says that — including the case of a suffix this build doesn't
+    /// recognize, which is left exactly as the note has it.
+    fn marker_update_for(&self, kind: EventKind) -> Option<String> {
+        let current = self.marker_suffix.as_deref();
+        if current == kind.marker_suffix() {
+            return None;
+        }
+        if current.is_some_and(|suffix| EventKind::from_marker_suffix(suffix).is_none()) {
+            return None;
+        }
+        Some(render_marker(&self.id, kind))
     }
 
     fn text(&self) -> &str {
@@ -584,27 +703,47 @@ impl SyncedLine {
     /// current line means nothing to do.
     fn updated_for(&self, event: &CalendarEvent) -> Option<String> {
         let expected_token = event.time.map(|(start, end)| format_time_token(start, end));
+        // A line written before this build knew about event types gets its
+        // marker upgraded in place, without touching the user's text.
+        let marker = self.marker_update_for(event.kind);
         if let Some((_, trailing)) = self.cancelled_parts() {
             // A re-created event with the same id un-marks the cancellation.
             let mut text = event.title.clone();
             text.push_str(trailing);
-            return Some(self.with_text_region(expected_token.as_deref(), text.trim_end()));
+            return Some(self.rebuilt(
+                expected_token.as_deref(),
+                text.trim_end(),
+                marker.as_deref(),
+            ));
         }
         let trailing = title_trailing(self.text(), &event.title)?;
         if self.token() == expected_token.as_deref() {
-            return Some(self.line.clone());
+            return Some(match marker.as_deref() {
+                Some(marker) => self.rebuilt(self.token(), self.text(), Some(marker)),
+                None => self.line.clone(),
+            });
         }
         // Time moved: replace the time token only; checkbox, title, and
         // trailing text stay untouched (spec §8.2).
         let mut text = event.title.clone();
         text.push_str(trailing);
-        Some(self.with_text_region(expected_token.as_deref(), text.trim_end()))
+        Some(self.rebuilt(
+            expected_token.as_deref(),
+            text.trim_end(),
+            marker.as_deref(),
+        ))
     }
 
     /// Rebuilds the line with the region between the checkbox and the marker
     /// replaced by `token` + `text`; everything outside it (indent, bullet,
     /// checkbox, marker, spacing at the edges) is spliced through verbatim.
     fn with_text_region(&self, token: Option<&str>, text: &str) -> String {
+        self.rebuilt(token, text, None)
+    }
+
+    /// `with_text_region` plus an optional replacement marker; `None` keeps
+    /// the line's own marker byte for byte.
+    fn rebuilt(&self, token: Option<&str>, text: &str, marker: Option<&str>) -> String {
         let content_start = self
             .token_span
             .as_ref()
@@ -619,10 +758,12 @@ impl SyncedLine {
         }
         content.push_str(text);
         format!(
-            "{}{}{}",
+            "{}{}{}{}{}",
             &self.line[..content_start],
             content,
-            &self.line[self.text_span.end..]
+            &self.line[self.text_span.end..self.marker_span.start],
+            marker.unwrap_or(&self.line[self.marker_span.clone()]),
+            &self.line[self.marker_span.end..]
         )
     }
 }
@@ -695,6 +836,14 @@ mod tests {
             id: id.to_string(),
             title: title.to_string(),
             time: Some((start, end)),
+            kind: EventKind::Default,
+        }
+    }
+
+    fn focus_event(id: &str, title: &str, start: u32, end: u32) -> CalendarEvent {
+        CalendarEvent {
+            kind: EventKind::FocusTime,
+            ..event(id, title, start, end)
         }
     }
 
@@ -703,6 +852,7 @@ mod tests {
             id: id.to_string(),
             title: title.to_string(),
             time: None,
+            kind: EventKind::Default,
         }
     }
 
@@ -751,6 +901,63 @@ mod tests {
         assert_eq!(id, event_marker_id("primary", "abc123"));
         assert_ne!(id, event_marker_id("other", "abc123"));
         assert_ne!(id, event_marker_id("primary", "abc124"));
+    }
+
+    #[test]
+    fn focus_time_lines_carry_their_kind_in_the_marker() {
+        let note = "# Day planner\n\n## Calendar\n\n";
+        let (applied, _) = run(note, &[focus_event("aaaaaaaaaaaa", "Focus time", 540, 1020)]);
+        assert!(
+            applied.contains("- [ ] 09:00 - 17:00 Focus time <!--gcal:aaaaaaaaaaaa:focus-->"),
+            "{applied}"
+        );
+        assert_eq!(
+            line_event_kind("- [ ] 09:00 - 17:00 Focus time <!--gcal:aaaaaaaaaaaa:focus-->"),
+            EventKind::FocusTime
+        );
+        assert_eq!(
+            line_event_kind("- [ ] 10:00 - 10:30 Standup <!--gcal:aaaaaaaaaaaa-->"),
+            EventKind::Default
+        );
+        assert_eq!(line_event_kind("- [ ] A task of my own"), EventKind::Default);
+    }
+
+    #[test]
+    fn an_existing_line_gets_its_kind_added_without_touching_the_text() {
+        // Written by a build that didn't know about event types, and renamed
+        // by the user since — the marker still upgrades, the rename survives.
+        let note = "# Day planner\n\n## Calendar\n\n\
+                    - [x] 09:00 - 17:00 Focus time (deep work) <!--gcal:aaaaaaaaaaaa-->\n";
+        let (applied, diverged) = run(note, &[focus_event("aaaaaaaaaaaa", "Focus time", 540, 1020)]);
+        assert_eq!(
+            applied,
+            "# Day planner\n\n## Calendar\n\n\
+             - [x] 09:00 - 17:00 Focus time (deep work) <!--gcal:aaaaaaaaaaaa:focus-->\n"
+        );
+        assert!(diverged.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_marker_suffix_identifies_its_line_and_is_left_alone() {
+        let note = "# Day planner\n\n## Calendar\n\n\
+                    - [ ] 10:00 - 10:30 Standup <!--gcal:aaaaaaaaaaaa:brunch-->\n";
+        let (applied, _) = run(note, &[event("aaaaaaaaaaaa", "Standup", 600, 630)]);
+        assert_eq!(applied, note, "no duplicate insert, no marker rewrite");
+    }
+
+    #[test]
+    fn a_malformed_marker_is_not_a_synced_line() {
+        for payload in ["", "zz:focus", "aaaaaaaaaaaa:", "aaaaaaaaaaaa:Focus"] {
+            assert_eq!(parse_marker_payload(payload), None, "{payload:?}");
+        }
+        assert_eq!(
+            parse_marker_payload("aaaaaaaaaaaa"),
+            Some(("aaaaaaaaaaaa", None))
+        );
+        assert_eq!(
+            parse_marker_payload("aaaaaaaaaaaa:focus"),
+            Some(("aaaaaaaaaaaa", Some("focus")))
+        );
     }
 
     #[test]
