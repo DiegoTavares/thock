@@ -442,6 +442,7 @@ pub enum ContextServerSettingsContent {
         ///
         /// Consult the documentation for the context server to see what settings
         /// are supported.
+        #[serde(default)]
         settings: serde_json::Value,
     },
 }
