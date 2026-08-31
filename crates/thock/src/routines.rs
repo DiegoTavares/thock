@@ -18,6 +18,7 @@ use crate::vault::{OnboardingState, VAULT_MARKER_DIR, Vault, write_if_missing};
 
 pub const TIMELINE_ROUTINE_ID: &str = "timeline";
 pub const INBOX_ROUTINE_ID: &str = "inbox";
+pub const LIFESTYLE_ROUTINE_ID: &str = "lifestyle";
 /// Vault-visible home of Routine definitions: `routines/<id>/routine.toml`.
 pub const ROUTINES_DIR: &str = "routines";
 pub const ROUTINE_MANIFEST_FILE: &str = "routine.toml";
@@ -56,6 +57,22 @@ const INBOX_DOC: &str = include_str!("../assets/routines/inbox/doc.md");
 const INBOX_TRIAGE_POLICY: &str = include_str!("../assets/routines/inbox/triage-policy.md");
 const INBOX_TRIAGE_SKILL: &str = include_str!("../assets/routines/inbox/skills/triage-inbox.md");
 const INBOX_SETUP_SKILL: &str = include_str!("../assets/routines/inbox/skills/setup-inbox.md");
+
+const LIFESTYLE_MANIFEST: &str = include_str!("../assets/routines/lifestyle/routine.toml");
+const LIFESTYLE_DOC: &str = include_str!("../assets/routines/lifestyle/doc.md");
+const LIFESTYLE_COACH: &str = include_str!("../assets/routines/lifestyle/coach.md");
+const LIFESTYLE_MONEY_RITUAL_SKILL: &str =
+    include_str!("../assets/routines/lifestyle/skills/money-ritual.md");
+const LIFESTYLE_PLAN_RECHECK_SKILL: &str =
+    include_str!("../assets/routines/lifestyle/skills/plan-recheck.md");
+const LIFESTYLE_CONNECT_FINANCE_DATA_SKILL: &str =
+    include_str!("../assets/routines/lifestyle/skills/connect-finance-data.md");
+const LIFESTYLE_SETUP_SKILL: &str =
+    include_str!("../assets/routines/lifestyle/skills/set-up-lifestyle.md");
+const LIFESTYLE_DASHBOARD_HTML: &str =
+    include_str!("../assets/routines/lifestyle/assets/index.html");
+const LIFESTYLE_DASHBOARD_SEED: &str =
+    include_str!("../assets/routines/lifestyle/assets/data.seed.js");
 
 /// The parsed shape of a `routine.toml` (V7 spec §6, schema 2). Parsing is
 /// lenient-forward: unknown keys are collected and warned about, never fatal,
@@ -745,6 +762,24 @@ pub fn catalog() -> Result<Vec<CatalogRoutine>> {
                 ("triage-policy.md", INBOX_TRIAGE_POLICY),
                 ("skills/triage-inbox.md", INBOX_TRIAGE_SKILL),
                 ("skills/setup-inbox.md", INBOX_SETUP_SKILL),
+            ],
+        },
+        CatalogRoutine {
+            manifest: parse_manifest(LIFESTYLE_MANIFEST)
+                .context("parsing the bundled Lifestyle Routine manifest")?,
+            manifest_toml: LIFESTYLE_MANIFEST,
+            assets: &[
+                ("doc.md", LIFESTYLE_DOC),
+                ("coach.md", LIFESTYLE_COACH),
+                ("skills/money-ritual.md", LIFESTYLE_MONEY_RITUAL_SKILL),
+                ("skills/plan-recheck.md", LIFESTYLE_PLAN_RECHECK_SKILL),
+                (
+                    "skills/connect-finance-data.md",
+                    LIFESTYLE_CONNECT_FINANCE_DATA_SKILL,
+                ),
+                ("skills/set-up-lifestyle.md", LIFESTYLE_SETUP_SKILL),
+                ("assets/index.html", LIFESTYLE_DASHBOARD_HTML),
+                ("assets/data.seed.js", LIFESTYLE_DASHBOARD_SEED),
             ],
         },
     ])
@@ -1897,9 +1932,76 @@ mod tests {
     }
 
     #[test]
+    fn lifestyle_catalog_routine_parses() {
+        let catalog = catalog().unwrap();
+        let routine = catalog
+            .iter()
+            .find(|routine| routine.manifest.id == LIFESTYLE_ROUTINE_ID)
+            .expect("the Lifestyle Routine ships in the catalog");
+        let manifest = &routine.manifest;
+        assert_eq!(manifest.schema, 2);
+        assert_eq!(manifest.icon.as_deref(), Some("person"));
+        assert_eq!(manifest.doc, "routines/lifestyle/Lifestyle.md");
+        assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
+        // The coach is the agent_doc AND a scaffolded file: the scaffold
+        // entry is what gives the agent_doc destination a shipped asset.
+        assert_eq!(
+            manifest.agent_doc.as_deref(),
+            Some("routines/lifestyle/coach.md")
+        );
+        assert!(manifest.scaffold.iter().any(|entry| matches!(
+            entry,
+            ScaffoldEntry::File { path, .. } if path == "routines/lifestyle/coach.md"
+        )));
+        // Plan and dashboard in reach; the Vision demoted to "The long view";
+        // log.md deliberately gets no row (V14 §13.2).
+        let links: Vec<(&str, Option<&str>)> = manifest
+            .links
+            .iter()
+            .map(|link| (link.open.as_str(), link.group.as_deref()))
+            .collect();
+        assert_eq!(
+            links,
+            vec![
+                ("lifestyle/plan.md", None),
+                ("lifestyle/vision.md", Some("The long view")),
+                ("lifestyle/site/index.html", None),
+            ]
+        );
+        assert_eq!(manifest.links[2].kind, LinkKind::Browser);
+        // Every skill here is judgment, not filing — no fast tier anywhere.
+        let skills: Vec<(&str, bool, ModelTier)> = manifest
+            .skills
+            .iter()
+            .map(|skill| (skill.id.as_str(), skill.kind.is_setup(), skill.model))
+            .collect();
+        assert_eq!(
+            skills,
+            vec![
+                ("money-ritual", false, ModelTier::Default),
+                ("plan-recheck", false, ModelTier::Default),
+                ("connect-finance-data", true, ModelTier::Default),
+                ("set-up-lifestyle", true, ModelTier::Default),
+            ]
+        );
+        let onboarding = manifest.onboarding.as_ref().unwrap();
+        assert!(
+            manifest
+                .skills
+                .iter()
+                .any(|skill| skill.file == onboarding.skill)
+        );
+        for file in declared_files(manifest) {
+            if let Some(source) = &file.source {
+                assert!(routine.asset(source).is_some(), "missing asset {source:?}");
+            }
+        }
+    }
+
+    #[test]
     fn catalog_parses() {
         let catalog = catalog().unwrap();
-        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog.len(), 3);
         let manifest = &catalog[0].manifest;
         assert_eq!(manifest.id, TIMELINE_ROUTINE_ID);
         assert_eq!(manifest.schema, 2);

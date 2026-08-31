@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Money Dashboard</title>
+<style>
+  /* Zed One-Dark inspired palette */
+  :root {
+    --bg: #0d0f13;
+    --panel: #15181f;
+    --panel2: #1c202a;
+    --border: #262b36;
+    --text: #d7dce5;
+    --muted: #828b9c;
+    --accent: #61afef;
+    --green: #98c379;
+    --amber: #e5c07b;
+    --red: #e06c75;
+    --purple: #c678dd;
+    --cyan: #56b6c2;
+    --focus: #61afef;
+    --radius: 12px;
+    --font: "Inter", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f6f8;
+      --panel: #ffffff;
+      --panel2: #eef0f4;
+      --border: #e0e3ea;
+      --text: #1f2329;
+      --muted: #6a7280;
+      --accent: #3b7edd;
+      --green: #4a9c3f;
+      --amber: #b0851f;
+      --red: #d0475a;
+      --purple: #9450c4;
+      --cyan: #2b96a3;
+      --focus: #3b7edd;
+    }
+  }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  :root[data-theme="light"] { color-scheme: light; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(1200px 500px at 50% -200px, color-mix(in srgb, var(--accent) 6%, transparent), transparent),
+      var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    padding: 26px 22px 90px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  ::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+
+  /* ── header / nav ─────────────────────────── */
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    margin-bottom: 18px; padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .brand { display: flex; align-items: center; gap: 11px; }
+  .brand .logo {
+    width: 26px; height: 26px; border-radius: 7px; flex: none;
+    background: linear-gradient(140deg, var(--green), var(--cyan));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--green) 40%, transparent), 0 6px 18px -6px var(--green);
+  }
+  header h1 { font-size: 19px; font-weight: 600; letter-spacing: -.2px; }
+  header h1 span { color: var(--muted); font-weight: 400; }
+  .pnav { display: flex; align-items: center; gap: 8px; }
+  .pnav button {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    width: 36px; height: 36px; border-radius: 9px; font-size: 17px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; transition: .12s;
+  }
+  .pnav button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--panel2)); }
+  .pnav button:disabled { opacity: .3; cursor: default; }
+  .pnav .current { text-align: center; min-width: 220px; }
+  .pnav .current .plabel { font-weight: 650; font-size: 17px; letter-spacing: -.2px; }
+  .pnav .current .prange { color: var(--muted); font-size: 13px; font-family: var(--mono); }
+  .badge {
+    display: inline-block; font-size: 10.5px; font-weight: 600; padding: 2px 8px;
+    border-radius: 20px; vertical-align: 2px; margin-left: 8px; letter-spacing: .2px;
+  }
+  .badge.partial { background: color-mix(in srgb, var(--amber) 18%, transparent); color: var(--amber); }
+  .badge.manual { background: color-mix(in srgb, var(--purple) 18%, transparent); color: var(--purple); }
+  .badge.amended { background: color-mix(in srgb, var(--cyan) 18%, transparent); color: var(--cyan); }
+
+  /* ── stat cards ───────────────────────────── */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); gap: 13px; margin-bottom: 22px; }
+  .stat {
+    --c: var(--accent);
+    position: relative; overflow: hidden;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--c) 7%, var(--panel)), var(--panel));
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 13px 15px 10px;
+    transition: .15s;
+  }
+  .stat::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--c); opacity: .9;
+  }
+  .stat:hover { border-color: color-mix(in srgb, var(--c) 45%, var(--border)); transform: translateY(-1px); }
+  .stat .caprow { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .stat .cap {
+    color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .7px; font-family: var(--mono);
+  }
+  .stat .num { font-size: 28px; font-weight: 700; line-height: 1.1; margin-top: 3px; letter-spacing: -.8px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .stat .num small { font-size: 15px; color: var(--muted); font-weight: 500; letter-spacing: 0; }
+  .stat .delta { font-size: 11px; font-weight: 600; font-family: var(--mono); }
+  .stat .delta.up { color: var(--green); }
+  .stat .delta.down { color: var(--red); }
+  .stat .delta.flat { color: var(--muted); }
+
+  /* ── panels ───────────────────────────────── */
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid .full { grid-column: 1 / -1; }
+  @media (max-width: 780px) { .grid { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px 20px;
+  }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin-bottom: 14px; font-weight: 650; }
+  .empty { color: var(--muted); font-style: italic; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+
+  /* burn chart */
+  .burn svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .burn .grid-line { stroke: var(--border); stroke-width: 1; }
+  .burn .seg { fill: none; stroke: var(--red); stroke-width: 2; stroke-linecap: round; }
+  .burn .seg.est { stroke-dasharray: 4 5; }
+  .burn .seg.inc { stroke: var(--green); }
+  .burn .dot { fill: var(--red); }
+  .burn .dot.inc { fill: var(--green); }
+  .burn .dot.est { fill: var(--panel); stroke-width: 2; }
+  .burn .dot.active { stroke: var(--text); stroke-width: 1.5; }
+  .burn .hit { fill: transparent; cursor: pointer; }
+  .burn .ylab { fill: var(--muted); font-size: 10px; font-family: var(--mono); }
+  .burn .xlab { fill: var(--muted); font-size: 10px; font-family: var(--mono); text-anchor: middle; }
+  .burnkey { display: flex; gap: 14px; font-size: 11.5px; color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
+  .burnkey i { display: inline-block; width: 14px; height: 0; border-top: 2px solid; margin-right: 5px; vertical-align: 3px; }
+  .burnkey .k-spend i { border-color: var(--red); }
+  .burnkey .k-income i { border-color: var(--green); }
+  .burnkey .k-est i { border-color: var(--muted); border-top-style: dashed; }
+
+  /* tooltip */
+  .tip {
+    position: fixed; z-index: 60; pointer-events: none; display: none;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 10px; font-size: 12px; line-height: 1.5;
+    box-shadow: 0 10px 30px -12px #000;
+    font-family: var(--mono); white-space: nowrap;
+  }
+  .tip b { font-weight: 650; }
+  .tip .m { color: var(--muted); }
+
+  /* targets */
+  .target { padding: 8px 4px 10px; border-radius: 6px; }
+  .target .trow { display: flex; align-items: baseline; gap: 10px; }
+  .target .tname { font-size: 13.5px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .target .tnums { font-size: 12.5px; color: var(--muted); font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .target .tnums b { color: var(--text); font-weight: 650; }
+  .target .track { height: 8px; border-radius: 6px; background: var(--panel2); overflow: hidden; margin-top: 6px; }
+  .target .track i { display: block; height: 100%; background: var(--green); border-radius: 6px; transition: width .4s; }
+  .target.behind .track i { background: var(--amber); }
+  .target .eta { font-size: 11.5px; color: var(--muted); margin-top: 4px; font-family: var(--mono); }
+  .target .eta .late { color: var(--amber); }
+  .target .eta .ontime { color: var(--green); }
+
+  /* categories */
+  .cat { display: flex; align-items: center; gap: 10px; padding: 5px 4px; border-radius: 6px; }
+  .cat .cname { flex: 0 0 130px; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cat .track { flex: 1; height: 14px; background: var(--panel2); border-radius: 4px; overflow: hidden; }
+  .cat .track i { display: block; height: 100%; border-radius: 4px; background: color-mix(in srgb, var(--accent) 75%, transparent); }
+  .cat .amt { flex: 0 0 76px; text-align: right; font-size: 12.5px; color: var(--text); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .cat .drift { flex: 0 0 92px; text-align: right; font-size: 11.5px; font-weight: 600; font-family: var(--mono); }
+  .cat .drift.up { color: var(--red); }
+  .cat .drift.down { color: var(--green); }
+  .cat .drift.flat { color: var(--muted); }
+
+  /* lists (outliers, actions, balances) */
+  .li { display: flex; gap: 10px; padding: 5px 4px; font-size: 13.5px; align-items: baseline; border-radius: 6px; }
+  .li .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--amber); position: relative; top: 7px; }
+  .li.act .dot { background: var(--green); }
+  .li .txt { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .li .txt .cat-tag { color: var(--muted); font-size: 11.5px; margin-left: 6px; }
+  .li .amt { color: var(--text); font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .bal { display: flex; justify-content: space-between; gap: 10px; padding: 4px 4px; font-size: 13px; border-radius: 6px; }
+  .bal .amt { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .bal .amt.neg { color: var(--red); }
+
+  footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 28px; }
+
+  /* ── vim navigation ───────────────────────── */
+  .vfocus {
+    outline: 2px solid var(--focus) !important;
+    outline-offset: 1px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--focus) 12%, transparent) !important;
+    scroll-margin: 90px;
+  }
+
+  /* status bar */
+  .statusbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    display: flex; align-items: center; gap: 18px;
+    padding: 7px 16px;
+    background: color-mix(in srgb, var(--panel) 85%, transparent);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border-top: 1px solid var(--border);
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+  }
+  .statusbar .mode { color: var(--bg); background: var(--green); font-weight: 700; padding: 1px 9px; border-radius: 5px; letter-spacing: .5px; }
+  .statusbar .hint { display: flex; gap: 6px; align-items: center; }
+  .statusbar kbd {
+    font-family: var(--mono); font-size: 11px; color: var(--text);
+    background: var(--panel2); border: 1px solid var(--border); border-bottom-width: 2px;
+    border-radius: 4px; padding: 0 5px; min-width: 16px; text-align: center;
+  }
+  .statusbar .spacer { flex: 1; }
+  .statusbar .pos { color: var(--text); }
+  .statusbar .help-open { cursor: pointer; }
+  .statusbar .help-open:hover { color: var(--accent); }
+  @media (max-width: 720px) { .statusbar .hint.opt { display: none; } }
+
+  /* help overlay */
+  .overlay {
+    position: fixed; inset: 0; z-index: 50; display: none;
+    align-items: center; justify-content: center;
+    background: color-mix(in srgb, #000 55%, transparent);
+    backdrop-filter: blur(3px);
+  }
+  .overlay.show { display: flex; }
+  .help {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 22px 26px; width: min(440px, 90vw);
+    box-shadow: 0 24px 60px -20px #000;
+  }
+  .help h3 { font-size: 15px; margin-bottom: 4px; letter-spacing: -.2px; }
+  .help .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 16px; font-family: var(--mono); }
+  .help .krow { display: flex; align-items: center; gap: 12px; padding: 6px 0; font-size: 13.5px; }
+  .help .krow .keys { display: flex; gap: 5px; flex: 0 0 96px; }
+  .help kbd {
+    font-family: var(--mono); font-size: 12px; color: var(--text);
+    background: var(--panel2); border: 1px solid var(--border); border-bottom-width: 2px;
+    border-radius: 5px; padding: 1px 7px; min-width: 20px; text-align: center;
+  }
+  .help .krow .desc { color: var(--muted); }
+  .help .close { margin-top: 16px; text-align: center; color: var(--muted); font-size: 12px; font-family: var(--mono); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <span class="logo"></span>
+      <h1>Money <span>· dashboard</span></h1>
+    </div>
+    <div class="pnav">
+      <button id="prev" title="Previous period (h)">‹</button>
+      <div class="current">
+        <div class="plabel" id="pLabel"></div>
+        <div class="prange" id="pRange"></div>
+      </div>
+      <button id="next" title="Next period (l)">›</button>
+    </div>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="grid">
+    <div class="panel full burn" id="burnPanel">
+      <h2>Burn vs Income</h2>
+      <div id="burn"></div>
+      <div class="burnkey">
+        <span class="k-spend"><i></i>spend</span>
+        <span class="k-income"><i></i>income</span>
+        <span class="k-est"><i></i>partial / manual (hollow = not measured)</span>
+      </div>
+    </div>
+    <div class="panel full" id="targetsPanel">
+      <h2>Plan Targets</h2>
+      <div id="targets"></div>
+    </div>
+    <div class="panel full" id="catPanel">
+      <h2>Categories · drift vs trailing average</h2>
+      <div id="cats"></div>
+    </div>
+    <div class="panel" id="outlierPanel">
+      <h2>Outliers &amp; Actions</h2>
+      <div id="outliers"></div>
+    </div>
+    <div class="panel" id="balPanel">
+      <h2>Balances</h2>
+      <div id="balances"></div>
+    </div>
+  </div>
+
+  <footer>Recorded by the Money Ritual · data in <code>data.js</code> · the vision stays in <code>vision.md</code>, where it is read deliberately</footer>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<div class="statusbar">
+  <span class="mode">NORMAL</span>
+  <span class="hint"><kbd>h</kbd><kbd>l</kbd> period</span>
+  <span class="hint"><kbd>j</kbd><kbd>k</kbd> move</span>
+  <span class="hint opt"><kbd>g</kbd><kbd>g</kbd>/<kbd>G</kbd> ends</span>
+  <span class="spacer"></span>
+  <span class="pos" id="statusPos"></span>
+  <span class="help-open" id="helpOpen">? help</span>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="help">
+    <h3>Keyboard navigation</h3>
+    <div class="sub">vim motions · press ? or Esc to close</div>
+    <div class="krow"><span class="keys"><kbd>h</kbd><kbd>l</kbd></span><span class="desc">previous / next period</span></div>
+    <div class="krow"><span class="keys"><kbd>j</kbd><kbd>k</kbd></span><span class="desc">move focus down / up</span></div>
+    <div class="krow"><span class="keys"><kbd>g</kbd><kbd>g</kbd></span><span class="desc">jump to first period</span></div>
+    <div class="krow"><span class="keys"><kbd>G</kbd></span><span class="desc">jump to latest period</span></div>
+    <div class="krow"><span class="keys"><kbd>Esc</kbd></span><span class="desc">clear focus / close</span></div>
+    <div class="close">? or Esc to dismiss</div>
+  </div>
+</div>
+
+<script src="data.js"></script>
+<script>
+(function () {
+  const PERIODS = Array.isArray(window.PERIODS) ? window.PERIODS.slice() : [];
+  const PLAN = window.PLAN || null;
+  const CURRENCY = (window.CONFIG && window.CONFIG.currency) || "";
+
+  // Empty-feed guard: the seed data.js ships with no periods; the first
+  // Money Ritual run appends one.
+  if (PERIODS.length === 0) {
+    document.querySelector(".wrap").innerHTML =
+      '<header><div class="brand"><span class="logo"></span>' +
+      '<h1>Money <span>· dashboard</span></h1></div></header>' +
+      '<p class="empty" style="margin-top:20px">No periods recorded yet. ' +
+      'Run the Money Ritual to append the first entry to <code>data.js</code>, then reload this page.</p>';
+    const statusbar = document.querySelector(".statusbar");
+    if (statusbar) statusbar.remove();
+    return;
+  }
+
+  PERIODS.sort((a, b) => String(a.period.start).localeCompare(String(b.period.start)));
+  const $ = id => document.getElementById(id);
+
+  const fmt = n => {
+    if (n == null || isNaN(n)) return "—";
+    const rounded = Math.round(n);
+    const s = Math.abs(rounded).toLocaleString("en-US");
+    return (rounded < 0 ? "−" : "") + s;
+  };
+  const money = n => (n == null || isNaN(n)) ? "—" : fmt(n) + (CURRENCY ? " " + CURRENCY : "");
+  const pct = n => (n == null || isNaN(n)) ? "—" : Math.round(n * 100) + "%";
+  const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const spendOf = p => (p.spend && p.spend.total) != null ? p.spend.total : null;
+  const gapOf = p => (p.income != null && spendOf(p) != null) ? p.income - spendOf(p) : null;
+  const rateOf = p => (p.income > 0 && gapOf(p) != null) ? gapOf(p) / p.income : null;
+  const measured = p => p.quality === "measured";
+  const prettyDate = iso => {
+    const d = new Date(iso + "T00:00:00");
+    return isNaN(d) ? iso : d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  };
+  const kindLabel = { week: "week", month: "month", statement: "statement" };
+
+  let idx = PERIODS.length - 1;
+
+  // ── stat cards ────────────────────────────────
+  function renderStats(p) {
+    // Deltas compare like with like: the previous period of the same kind.
+    const prior = PERIODS.slice(0, PERIODS.indexOf(p)).filter(q => q.period.kind === p.period.kind);
+    const prev = prior.length ? prior[prior.length - 1] : null;
+    const delta = (cur, before, goodWhenUp) => {
+      if (cur == null || before == null) return "";
+      const d = cur - before;
+      if (Math.abs(d) < 1) return '<span class="delta flat">— flat</span>';
+      const up = d > 0;
+      const cls = up === goodWhenUp ? "up" : "down";
+      return `<span class="delta ${cls}">${up ? "▲" : "▼"} ${fmt(Math.abs(d))}</span>`;
+    };
+    const cards = [
+      { cap: "Income", c: "var(--green)", val: money(p.income), d: delta(p.income, prev && prev.income, true) },
+      { cap: "Burn", c: "var(--red)", val: money(spendOf(p)), d: delta(spendOf(p), prev && spendOf(prev), false) },
+      { cap: "The gap", c: "var(--accent)", val: money(gapOf(p)), d: delta(gapOf(p), prev && gapOf(prev), true) },
+      { cap: "Savings rate", c: "var(--purple)", val: pct(rateOf(p)), d: "" },
+    ];
+    $("stats").innerHTML = cards.map(card => `
+      <div class="stat" style="--c:${card.c}">
+        <div class="caprow"><span class="cap">${card.cap}</span>${card.d}</div>
+        <div class="num">${card.val}</div>
+      </div>`).join("");
+  }
+
+  // ── burn vs income chart ──────────────────────
+  // One series per measure, drawn per-segment so a segment touching a
+  // non-measured period renders dashed; non-measured dots are hollow.
+  function renderBurn(active) {
+    const W = 940, H = 180, padL = 56, padR = 14, padT = 12, padB = 26;
+    const xs = PERIODS.length === 1
+      ? [ (padL + W - padR) / 2 ]
+      : PERIODS.map((_, i) => padL + i * (W - padR - padL) / (PERIODS.length - 1));
+    const vals = PERIODS.flatMap(p => [spendOf(p), p.income]).filter(v => v != null);
+    const max = Math.max(...vals, 1);
+    const y = v => padT + (H - padT - padB) * (1 - v / max);
+    let svg = "";
+    for (const frac of [0, 0.5, 1]) {
+      const gy = y(max * frac);
+      svg += `<line class="grid-line" x1="${padL}" y1="${gy}" x2="${W - padR}" y2="${gy}"></line>`;
+      svg += `<text class="ylab" x="${padL - 8}" y="${gy + 3}" text-anchor="end">${fmt(max * frac)}</text>`;
+    }
+    const series = [
+      { get: spendOf, cls: "" },
+      { get: p => p.income, cls: "inc" },
+    ];
+    for (const s of series) {
+      for (let i = 1; i < PERIODS.length; i++) {
+        const a = s.get(PERIODS[i - 1]), b = s.get(PERIODS[i]);
+        if (a == null || b == null) continue;
+        const est = !measured(PERIODS[i - 1]) || !measured(PERIODS[i]);
+        svg += `<line class="seg ${s.cls} ${est ? "est" : ""}" x1="${xs[i - 1]}" y1="${y(a)}" x2="${xs[i]}" y2="${y(b)}"></line>`;
+      }
+      PERIODS.forEach((p, i) => {
+        const v = s.get(p);
+        if (v == null) return;
+        const hollow = !measured(p);
+        const stroke = s.cls === "inc" ? "var(--green)" : "var(--red)";
+        svg += `<circle class="dot ${s.cls} ${hollow ? "est" : ""} ${i === active ? "active" : ""}"
+          cx="${xs[i]}" cy="${y(v)}" r="${i === active ? 5 : 4}"
+          ${hollow ? `style="stroke:${stroke}"` : ""}></circle>`;
+      });
+    }
+    PERIODS.forEach((p, i) => {
+      if (PERIODS.length > 10 && i % 2 === 1 && i !== active) return;
+      svg += `<text class="xlab" x="${xs[i]}" y="${H - 6}">${esc(p.id)}</text>`;
+    });
+    // Hover hit zones, one column per period (bigger than the marks).
+    const half = PERIODS.length > 1 ? (xs[1] - xs[0]) / 2 : (W - padL - padR) / 2;
+    PERIODS.forEach((p, i) => {
+      svg += `<rect class="hit" data-i="${i}" x="${xs[i] - half}" y="0" width="${half * 2}" height="${H}"></rect>`;
+    });
+    $("burn").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Burn vs income across periods">${svg}</svg>`;
+
+    const tip = $("tip");
+    $("burn").querySelectorAll(".hit").forEach(hit => {
+      hit.addEventListener("mousemove", e => {
+        const p = PERIODS[+hit.dataset.i];
+        tip.innerHTML = `<b>${esc(p.id)}</b> <span class="m">· ${esc(p.quality)}</span><br>` +
+          `spend ${money(spendOf(p))}<br>income ${money(p.income)}<br>gap ${money(gapOf(p))}`;
+        tip.style.display = "block";
+        tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 190) + "px";
+        tip.style.top = (e.clientY + 14) + "px";
+      });
+      hit.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+      hit.addEventListener("click", () => { idx = +hit.dataset.i; render(); });
+    });
+  }
+
+  // ── plan targets ──────────────────────────────
+  function renderTargets(p) {
+    if (!PLAN || !Array.isArray(PLAN.targets) || PLAN.targets.length === 0) {
+      $("targets").innerHTML = '<div class="empty">No plan recorded yet. Set Up Lifestyle (or Plan Re-check) writes the targets here.</div>';
+      return;
+    }
+    const withProgress = PERIODS.filter(q => q.progress);
+    const html = PLAN.targets.map(t => {
+      const points = withProgress
+        .filter(q => q.progress[t.id] != null)
+        .map(q => ({ date: q.period.end, value: q.progress[t.id] }));
+      const current = points.length ? points[points.length - 1].value : null;
+      const isRate = t.unit === "rate";
+      const show = v => isRate ? pct(v) : money(v);
+      // A pay-down-to-zero target fills as the balance shrinks toward 0
+      // (measured from the first recorded value); an accumulation target
+      // fills as current approaches the target.
+      const startVal = points.length ? points[0].value : null;
+      let share = null;
+      if (current != null) {
+        if (t.target === 0 && startVal) share = 1 - current / startVal;
+        else if (t.target) share = current / t.target;
+      }
+      const clamped = share == null ? 0 : Math.max(0, Math.min(1, share));
+      // Landing date at the observed rate between first and last progress points.
+      let eta = "";
+      if (t.by && points.length >= 2 && current != null && current !== t.target) {
+        const first = points[0], last = points[points.length - 1];
+        const days = (new Date(last.date) - new Date(first.date)) / 86400000;
+        const perDay = days > 0 ? (last.value - first.value) / days : 0;
+        const remaining = t.target - last.value;
+        if (perDay !== 0 && Math.sign(remaining) === Math.sign(perDay)) {
+          const land = new Date(new Date(last.date).getTime() + (remaining / perDay) * 86400000);
+          const late = land > new Date(t.by + "T00:00:00");
+          eta = `<div class="eta">lands ~<span class="${late ? "late" : "ontime"}">${prettyDate(land.toISOString().slice(0, 10))}</span> at the current rate · due ${prettyDate(t.by)}</div>`;
+        } else {
+          eta = `<div class="eta"><span class="late">not moving toward this target</span> · due ${prettyDate(t.by)}</div>`;
+        }
+      } else if (t.by) {
+        eta = `<div class="eta">due ${prettyDate(t.by)}${points.length < 2 ? " · needs two recorded periods to project" : ""}</div>`;
+      }
+      const done = share != null && share >= 1;
+      return `
+        <div class="target ${done ? "" : "behind"}" data-nav>
+          <div class="trow">
+            <span class="tname">${esc(t.label)}</span>
+            <span class="tnums"><b>${show(current)}</b> / ${show(t.target)}</span>
+          </div>
+          <div class="track"><i style="width:${Math.round(clamped * 100)}%"></i></div>
+          ${eta}
+        </div>`;
+    }).join("");
+    const head = PLAN.annual_cost_of_vision != null
+      ? `<div class="note" style="margin:0 0 10px">The Tuesday costs ${money(PLAN.annual_cost_of_vision)}/yr` +
+        (PLAN.assumption ? ` <span>· assumes ${esc(PLAN.assumption)}</span>` : "") +
+        (PLAN.revised ? ` · plan revised ${prettyDate(PLAN.revised)}` : "") + `</div>`
+      : "";
+    $("targets").innerHTML = head + html;
+  }
+
+  // ── category drift ────────────────────────────
+  function renderCats(p) {
+    const cats = (p.spend && p.spend.categories) || {};
+    const names = Object.keys(cats);
+    if (names.length === 0) {
+      $("cats").innerHTML = '<div class="empty">No category totals recorded for this period.</div>';
+      return;
+    }
+    // Trailing average over up to six earlier periods of the same kind —
+    // compare like with like, never a week against a month.
+    const trail = PERIODS.slice(0, PERIODS.indexOf(p))
+      .filter(q => q.period.kind === p.period.kind && q.spend && q.spend.categories)
+      .slice(-6);
+    const avg = name => {
+      const vals = trail.map(q => q.spend.categories[name]).filter(v => v != null);
+      return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    };
+    const max = Math.max(...names.map(n => cats[n]), 1);
+    const rows = names.map(name => {
+      const a = avg(name);
+      const d = a != null && a > 0 ? (cats[name] - a) / a : null;
+      return { name, amount: cats[name], drift: d };
+    }).sort((x, y) => Math.abs(y.drift ?? 0) - Math.abs(x.drift ?? 0) || y.amount - x.amount);
+    $("cats").innerHTML = rows.map(r => {
+      let drift;
+      if (r.drift == null) drift = '<span class="drift flat">no history</span>';
+      else if (Math.abs(r.drift) < 0.05) drift = '<span class="drift flat">— steady</span>';
+      else drift = `<span class="drift ${r.drift > 0 ? "up" : "down"}">${r.drift > 0 ? "▲" : "▼"} ${Math.round(Math.abs(r.drift) * 100)}%</span>`;
+      return `
+        <div class="cat" data-nav title="${esc(r.name)}: ${money(r.amount)}${r.drift != null ? " · trailing avg " + money(r.amount / (1 + r.drift)) : ""}">
+          <span class="cname">${esc(r.name)}</span>
+          <span class="track"><i style="width:${Math.round(r.amount / max * 100)}%"></i></span>
+          <span class="amt">${money(r.amount)}</span>
+          ${drift}
+        </div>`;
+    }).join("") + (trail.length ? "" : '<div class="note">Drift appears once earlier periods of the same kind exist.</div>');
+  }
+
+  // ── outliers, actions, balances ───────────────
+  function renderLists(p) {
+    const outliers = (p.outliers || []).map(o => `
+      <div class="li" data-nav>
+        <span class="dot"></span>
+        <span class="txt">${esc(o.label)}${o.category ? `<span class="cat-tag">${esc(o.category)}</span>` : ""}</span>
+        <span class="amt">${money(o.amount)}</span>
+      </div>`).join("");
+    const actions = (p.actions || []).map(a => `
+      <div class="li act" data-nav>
+        <span class="dot"></span>
+        <span class="txt">${esc(a.label)}</span>
+        <span class="amt">${money(a.amount)}</span>
+      </div>`).join("");
+    $("outliers").innerHTML =
+      (outliers || '<div class="empty">No outliers flagged.</div>') +
+      (actions ? `<h2 style="margin:14px 0 8px">Confirmed actions</h2>${actions}` : "");
+    const balances = p.balances || {};
+    const keys = Object.keys(balances);
+    $("balances").innerHTML = keys.length
+      ? keys.map(k => `
+          <div class="bal" data-nav>
+            <span>${esc(k)}</span>
+            <span class="amt ${balances[k] < 0 ? "neg" : ""}">${money(balances[k])}</span>
+          </div>`).join("")
+      : '<div class="empty">No balances recorded.</div>';
+  }
+
+  // ── period header ─────────────────────────────
+  function renderHeader(p) {
+    let badge = "";
+    if (p.quality === "partial") badge = '<span class="badge partial">PARTIAL</span>';
+    if (p.quality === "manual") badge = '<span class="badge manual">SELF-REPORTED</span>';
+    if (p.amended) badge += ` <span class="badge amended" title="Corrected ${esc(p.amended)}">AMENDED</span>`;
+    $("pLabel").innerHTML = esc(p.id) + badge;
+    $("pRange").textContent =
+      `${prettyDate(p.period.start)} – ${prettyDate(p.period.end)} · ${kindLabel[p.period.kind] || p.period.kind}`;
+    $("prev").disabled = idx === 0;
+    $("next").disabled = idx === PERIODS.length - 1;
+    $("statusPos").textContent = `${idx + 1}/${PERIODS.length} · ${p.id}`;
+  }
+
+  // ── vim navigation ────────────────────────────
+  let focusables = [], fidx = -1;
+  function collectFocusables() {
+    focusables = Array.from(document.querySelectorAll("[data-nav]"));
+    fidx = -1;
+  }
+  function setFocus(i) {
+    focusables.forEach(el => el.classList.remove("vfocus"));
+    fidx = i;
+    if (fidx >= 0 && fidx < focusables.length) {
+      const el = focusables[fidx];
+      el.classList.add("vfocus");
+      el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }
+  let pendingG = false;
+  document.addEventListener("keydown", e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const overlay = $("overlay");
+    if (overlay.classList.contains("show")) {
+      if (e.key === "?" || e.key === "Escape") overlay.classList.remove("show");
+      return;
+    }
+    switch (e.key) {
+      case "h": if (idx > 0) { idx--; render(); } break;
+      case "l": if (idx < PERIODS.length - 1) { idx++; render(); } break;
+      case "j": setFocus(Math.min(fidx + 1, focusables.length - 1)); break;
+      case "k": setFocus(Math.max(fidx - 1, 0)); break;
+      case "g": if (pendingG) { idx = 0; render(); pendingG = false; } else { pendingG = true; setTimeout(() => pendingG = false, 600); } return;
+      case "G": idx = PERIODS.length - 1; render(); break;
+      case "?": overlay.classList.add("show"); break;
+      case "Escape": setFocus(-1); break;
+      default: return;
+    }
+  });
+  $("helpOpen").addEventListener("click", () => $("overlay").classList.add("show"));
+  $("overlay").addEventListener("click", e => { if (e.target === e.currentTarget) e.currentTarget.classList.remove("show"); });
+  $("prev").addEventListener("click", () => { if (idx > 0) { idx--; render(); } });
+  $("next").addEventListener("click", () => { if (idx < PERIODS.length - 1) { idx++; render(); } });
+
+  function render() {
+    const p = PERIODS[idx];
+    renderHeader(p);
+    renderStats(p);
+    renderBurn(idx);
+    renderTargets(p);
+    renderCats(p);
+    renderLists(p);
+    collectFocusables();
+  }
+  render();
+})();
+</script>
+</body>
+</html>

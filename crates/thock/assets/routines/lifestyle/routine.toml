@@ -1,0 +1,95 @@
+schema  = 2
+id      = "lifestyle"
+name    = "Lifestyle"
+version = 1
+summary = "Money in the service of a life you named — a vision, a plan, and a weekly ritual."
+icon    = "person"
+doc     = "routines/lifestyle/Lifestyle.md"
+
+# Every skill in this Routine answers as the coach this file describes. It is
+# the routine's character — editing it changes every ritual's behavior.
+agent_doc = "routines/lifestyle/coach.md"
+
+[[link]]
+id   = "plan"
+name = "Plan"
+open = "lifestyle/plan.md"
+kind = "editor"
+
+[[link]]
+id    = "vision"
+name  = "Vision"
+open  = "lifestyle/vision.md"
+kind  = "editor"
+group = "The long view"
+
+[[link]]
+id   = "money-dashboard"
+name = "Money Dashboard"
+open = "lifestyle/site/index.html"
+kind = "browser"
+
+# log.md deliberately gets no row — it is reached from the daily note's
+# pointer or the project panel, and the rail is worth more than the archive.
+
+[[scaffold]]
+kind = "dir"
+path = "lifestyle"
+
+[[scaffold]]
+kind = "dir"
+path = "lifestyle/statements"
+
+[[scaffold]]
+kind   = "file"
+path   = "lifestyle/site/index.html"
+source = "assets/index.html"
+
+[[scaffold]]
+kind   = "file"
+path   = "lifestyle/site/data.js"
+source = "assets/data.seed.js"
+
+[[scaffold]]
+kind   = "file"
+path   = "routines/lifestyle/coach.md"
+source = "coach.md"
+
+[[skill]]
+id      = "money-ritual"
+name    = "Money Ritual"
+file    = "routines/lifestyle/skills/money-ritual.md"
+summary = "Read the numbers, propose the moves, tie them back to the life, log what you did."
+reads   = ["lifestyle/**", "routines/lifestyle/**", "the sources sources.md names"]
+writes  = ["lifestyle/site/data.js (append or amend)", "lifestyle/log.md (append)", "daily/<today>.md (append, if daily notes exist)"]
+
+[[skill]]
+id      = "plan-recheck"
+name    = "Plan Re-check"
+file    = "routines/lifestyle/skills/plan-recheck.md"
+summary = "Has the life changed? Revise the plan against it."
+reads   = ["lifestyle/**", "routines/lifestyle/**"]
+writes  = ["lifestyle/plan.md (append a revision)", "lifestyle/site/data.js (window.PLAN)"]
+
+[[skill]]
+id      = "connect-finance-data"
+name    = "Connect Finance Data"
+kind    = "setup"
+file    = "routines/lifestyle/skills/connect-finance-data.md"
+summary = "Wire up where the numbers come from — an MCP server, a folder of statements, or you."
+reads   = ["routines/lifestyle/sources.md", "lifestyle/statements/**"]
+writes  = ["routines/lifestyle/sources.md", "routines/lifestyle/accounts.md", ".thock/state/onboarded/lifestyle/{source,accounts}"]
+
+[[skill]]
+id      = "set-up-lifestyle"
+name    = "Set Up Lifestyle"
+kind    = "setup"
+file    = "routines/lifestyle/skills/set-up-lifestyle.md"
+summary = "Ten questions about the life you want, then a plan built backwards from it."
+reads   = ["lifestyle/**", "routines/lifestyle/**", ".thock/config.toml"]
+writes  = ["lifestyle/vision.md", "lifestyle/plan.md", "routines/lifestyle/{sources,accounts}.md", "lifestyle/site/data.js (window.PLAN)", ".thockignore (append)", ".thock/state/onboarded/lifestyle/*"]
+
+# No model = "fast" anywhere: every skill here is judgment, not filing.
+
+[onboarding]
+skill = "routines/lifestyle/skills/set-up-lifestyle.md"
