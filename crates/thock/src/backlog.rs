@@ -23,6 +23,22 @@ pub const DEFAULT_BACKLOG: &str = r#"# Backlog
 ## Completed
 "#;
 
+/// The landing folder whose notes flow into the backlog (spec v15 §4.3):
+/// when Gmail sync lands an email note here, [`email_capture_line`] is
+/// appended to Someday. Integration attaches to the folder, not the label —
+/// any label mapped onto this path takes the fast lane.
+pub const EMAIL_ARCHIVE_DIR: &str = "archives/emails";
+
+/// The Someday line for a landed email note. `title` must already be
+/// sanitized (wikilinks broken, markers stripped) by the capture planner.
+pub fn email_capture_line(title: &str, stem: &str, digest: &str) -> String {
+    format!(
+        "- [ ] {title} [[{stem}]] {}{digest}{}",
+        crate::gmail::MARKER_PREFIX,
+        crate::gmail::MARKER_SUFFIX
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionKind {
     Soon,

@@ -9,7 +9,7 @@ use anyhow::{Context as _, Result, anyhow};
 use chrono::Local;
 use fs::Fs;
 use gpui::{
-    Action as _, App, AppContext as _, AsyncApp, Context, DismissEvent, Entity, EntityId,
+    App, AppContext as _, AsyncApp, Context, DismissEvent, Entity, EntityId,
     EventEmitter, FocusHandle, Focusable, Global, SharedString, Subscription, Task, WeakEntity,
     Window, actions,
 };
@@ -718,7 +718,7 @@ impl CalendarService {
                 // defaults; an absent Gmail label costs nothing (spec v9 §12
                 // Q2), and deleting gmail.toml turns the feature back off.
                 update_config_file(&fs, &vault_root, GMAIL_CONFIG_FILE, move |table| {
-                    table.insert("schema".into(), 1.into());
+                    table.insert("schema".into(), 2.into());
                 })
                 .await?;
                 // Same for inbox capture (V13 §10.2): the file's existence
@@ -736,7 +736,7 @@ impl CalendarService {
                 Ok(connected) => {
                     this.update_in(cx, |service, window, cx| {
                         service.reload(cx);
-                        service.open_picker(workspace, connected.calendars, true, window, cx);
+                        service.open_picker(workspace, connected.calendars, window, cx);
                     })
                     .log_err();
                     if let Some(gmail) = &gmail {
@@ -800,7 +800,7 @@ impl CalendarService {
             match result {
                 Ok(calendars) => {
                     this.update_in(cx, |service, window, cx| {
-                        service.open_picker(workspace, calendars, false, window, cx);
+                        service.open_picker(workspace, calendars, window, cx);
                     })
                     .log_err();
                 }
@@ -826,7 +826,6 @@ impl CalendarService {
         &mut self,
         workspace: WeakEntity<Workspace>,
         entries: Vec<CalendarListEntry>,
-        offer_email_import: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -853,7 +852,6 @@ impl CalendarService {
                         entries,
                         selected,
                         selected_index: 0,
-                        offer_email_import,
                     };
                     CalendarPicker::new(delegate, window, cx)
                 });
@@ -969,10 +967,6 @@ pub struct CalendarPickerDelegate {
     matches: Vec<usize>,
     selected: HashSet<String>,
     selected_index: usize,
-    /// Set by the connect flow (spec v9 §6.1): after this picker saves, the
-    /// email import-mode picker opens, so the capture style is a deliberate
-    /// choice instead of an invisible default.
-    offer_email_import: bool,
 }
 
 impl PickerDelegate for CalendarPickerDelegate {
@@ -1042,14 +1036,7 @@ impl PickerDelegate for CalendarPickerDelegate {
         cx.notify();
     }
 
-    fn dismissed(&mut self, window: &mut Window, cx: &mut Context<Picker<Self>>) {
-        if self.offer_email_import {
-            // Deferred internally, so it runs after this modal is gone.
-            window.dispatch_action(
-                crate::gmail_service::ChooseEmailImportMode.boxed_clone(),
-                cx,
-            );
-        }
+    fn dismissed(&mut self, _window: &mut Window, cx: &mut Context<Picker<Self>>) {
         let calendars: Vec<String> = self
             .entries
             .iter()

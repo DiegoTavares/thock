@@ -153,6 +153,7 @@ fn captured_item(task: &GoogleTask) -> CapturedItem {
         source: "google-tasks",
         external_id: task.id.clone(),
         title: task.title.clone(),
+        from: None,
         url: task_url(task),
         link: None,
         body: task

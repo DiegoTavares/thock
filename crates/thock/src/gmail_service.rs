@@ -1,39 +1,40 @@
-//! The Gmail capture service (spec `v9-gmail-backlog-capture.md` §9–§10): one
-//! GPUI entity per local project that polls for labeled threads, plans the
-//! capture, and applies it in crash-safe order — archive files first, then
-//! the backlog append (through the open buffer as one undoable transaction
-//! when `backlog.md` is open), then the dedup state. It lives independently
-//! of the Backlog panel; the panel only displays the status this service
-//! exposes.
+//! The unified Gmail sync service (spec `v15-unified-gmail-sync.md` §7): one
+//! GPUI entity per local project that polls every mapped label, lands one
+//! note per thread in the mapping's folder, and applies everything in
+//! crash-safe order — note files first, then landing integrations (the
+//! backlog append), then the dedup state. It lives independently of the
+//! Backlog panel; the panel only displays the status this service exposes.
 
 use anyhow::{Context as _, Result, anyhow};
 use chrono::Local;
 use fs::Fs;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, DismissEvent, Entity, EntityId, EventEmitter,
-    FocusHandle, Focusable, Global, Subscription, Task, WeakEntity, Window, actions,
+    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, Subscription,
+    Task, WeakEntity, actions,
 };
-use language::Buffer;
-use picker::{Picker, PickerDelegate};
 use project::Project;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use ui::prelude::*;
-use ui::{Icon, ListItem, ListItemSpacing};
-use util::ResultExt as _;
-use workspace::{ModalView, Workspace};
+use ui::IconName;
+use workspace::Workspace;
 
-use crate::backlog::{DEFAULT_BACKLOG, apply_edits};
+use crate::backlog::{
+    DEFAULT_BACKLOG, EMAIL_ARCHIVE_DIR, SectionKind, append_to_section_edit, apply_edits,
+    email_capture_line,
+};
 use crate::calendar_service::{ManualSyncFinished, SyncState, show_sync_toast};
 use crate::gmail::{
-    GMAIL_CONFIG_FILE, GmailConfig, ImportMode, ImportRecord, MailFetched, MailProvider,
-    archive_frontmatter_digest, parse_gmail_config, plan_capture,
+    GMAIL_CONFIG_FILE, GmailConfig, MailTransport, MappingFetched, archive_frontmatter_digest,
+    parse_gmail_config, scan_backlog_markers,
 };
-use crate::gmail_google::GoogleMailProvider;
+use crate::gmail_google::GmailTransport;
 use crate::google_auth::{
     AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings,
+};
+use crate::inbox::{
+    ImportRecord, TRIAGE_LOG_PATH, inbox_note_digest, plan_inbox_capture, scan_triage_log_markers,
 };
 use crate::vault::{VAULT_CONFIG_FILE, VAULT_MARKER_DIR, Vault, VaultStatus};
 
@@ -44,16 +45,16 @@ const BACKOFF_CEILING: Duration = Duration::from_secs(60 * 60);
 
 const STATE_DIR: &str = "state/gmail";
 const STATE_FILE: &str = "imported.jsonl";
+/// Read for its digests during dedup (pre-V15 Gmail captures were recorded
+/// there); never written by this service.
+const INBOX_STATE_DIR: &str = "state/inbox";
 
 actions!(
     thock,
     [
-        /// Checks Gmail for newly labeled emails and captures them into the
-        /// Backlog now.
+        /// Checks Gmail for newly labeled emails and lands them in their
+        /// mapped folders now.
         SyncGmailNow,
-        /// Chooses whether emails you label are captured as a link to Gmail
-        /// or archived into the vault.
-        ChooseEmailImportMode,
     ]
 );
 
@@ -84,14 +85,6 @@ pub fn init(cx: &mut App) {
                 service.update(cx, |service, cx| service.sync_now(cx));
             }
         });
-        workspace.register_action(|workspace, _: &ChooseEmailImportMode, window, cx| {
-            let workspace_handle = workspace.weak_handle();
-            if let Some(service) = service_for_project(workspace.project(), cx) {
-                service.update(cx, |service, cx| {
-                    service.choose_import_mode(workspace_handle, window, cx)
-                });
-            }
-        });
     })
     .detach();
 }
@@ -101,7 +94,7 @@ struct GlobalGmailServices(HashMap<EntityId, Entity<GmailService>>);
 
 impl Global for GlobalGmailServices {}
 
-/// The capture service for `project`, if one is running.
+/// The sync service for `project`, if one is running.
 pub fn service_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity<GmailService>> {
     cx.try_global::<GlobalGmailServices>()?
         .0
@@ -111,10 +104,8 @@ pub fn service_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity
 
 enum SyncOutcome {
     Synced {
-        /// Capture ran on V9's flat `backlog` label because the configured
-        /// one is absent (V13 §7.1) — shown in the status row with a rename
-        /// hint.
-        legacy_label: bool,
+        /// Notes landed by this poll, for the manual-sync toast.
+        captured: usize,
     },
     Held(gpui::SharedString),
     Failed(anyhow::Error),
@@ -123,29 +114,39 @@ enum SyncOutcome {
     Aborted,
 }
 
-/// What the vault remembers about already-captured threads, loaded once per
-/// provider start — the state file when it exists, rebuilt from backlog
-/// markers and archive frontmatter when it doesn't (spec §4.3).
-#[derive(Default, Clone)]
-struct DedupState {
-    imported: HashSet<String>,
-    /// Archive filename stems on disk → owning thread digest, for the
-    /// collision handling of spec §5.3.
-    archive_stems: HashMap<String, String>,
+/// One mapped folder's on-disk answer, fresh every poll — triage moves files
+/// out of `inbox/` between polls, so a cached scan would go stale.
+#[derive(Default)]
+struct DirScan {
+    stems: HashSet<String>,
+    /// Digest → stem, for the crash-window repair of the backlog line
+    /// (spec §7.2) and stem-collision handling.
+    digest_stems: HashMap<String, String>,
+}
+
+/// What one poll learned from the vault before fetching (spec §4.4).
+#[derive(Default)]
+struct VaultScan {
+    /// Index-aligned with the configured mappings.
+    dirs: Vec<DirScan>,
+    backlog_markers: HashSet<String>,
+    /// Every digest recorded anywhere in the vault: `capture:` and legacy
+    /// `thread:` frontmatter in mapped folders, plus triage-log markers.
+    digests: HashSet<String>,
 }
 
 pub struct GmailService {
     project: Entity<Project>,
     vault: Option<Vault>,
     config: Option<GmailConfig>,
-    provider: Option<Arc<dyn MailProvider>>,
+    transport: Option<Arc<dyn MailTransport>>,
     state: SyncState,
     /// The one poll loop. Replacing it on reload cancels the old loop; the
     /// apply work it spawns is awaited inside it, never stored separately.
     poll_task: Option<Task<()>>,
-    dedup: Option<DedupState>,
-    /// The last sync ran on V9's flat `backlog` label (V13 §7.1).
-    legacy_label: bool,
+    /// Digests from the state files, loaded once per transport start. The
+    /// vault-side record is re-scanned per poll instead.
+    imported: Option<HashSet<String>>,
     /// Set by `sync_now` so the next completed sync announces itself
     /// ([`ManualSyncFinished`]); background polls stay quiet.
     announce_next_sync: bool,
@@ -161,11 +162,10 @@ impl GmailService {
             project,
             vault: None,
             config: None,
-            provider: None,
+            transport: None,
             state: SyncState::NoConfig,
             poll_task: None,
-            dedup: None,
-            legacy_label: false,
+            imported: None,
             announce_next_sync: false,
             _subscriptions: vec![project_subscription],
         };
@@ -177,19 +177,8 @@ impl GmailService {
         &self.state
     }
 
-    pub fn has_vault(&self) -> bool {
-        self.vault.is_some()
-    }
-
-    /// Whether capture is running on the old flat `backlog` label — a
-    /// visible transitional state with a rename hint in the status row
-    /// (V13 §7.1).
-    pub fn using_legacy_label(&self) -> bool {
-        self.legacy_label
-    }
-
     /// Whether the status row should be shown at all: only when the vault
-    /// carries a Gmail config (spec §10.3, G5).
+    /// carries a Gmail config (V9 §10.3, G5).
     pub fn has_config(&self) -> bool {
         !matches!(self.state, SyncState::NoConfig)
     }
@@ -203,11 +192,11 @@ impl GmailService {
         }
     }
 
-    /// The workspace sign-out ran: stop polling and forget the provider. The
-    /// vault — tasks, archives, state — is never touched.
+    /// The workspace sign-out ran: stop polling and forget the transport.
+    /// The vault — notes, backlog, state — is never touched.
     pub fn mark_signed_out(&mut self, cx: &mut Context<Self>) {
         self.poll_task = None;
-        self.provider = None;
+        self.transport = None;
         if self.config.is_some() {
             self.state = SyncState::NeverConnected;
         }
@@ -215,63 +204,17 @@ impl GmailService {
     }
 
     /// Re-reads `.thock/gmail.toml` — the connect flow calls this after
-    /// writing the account into it.
+    /// writing `google.toml`.
     pub fn reload_config(&mut self, cx: &mut Context<Self>) {
         self.reload(cx);
     }
 
     /// `thock::SyncGmailNow`: restarts the loop, which checks immediately.
     fn sync_now(&mut self, cx: &mut Context<Self>) {
-        if self.provider.is_some() {
+        if self.transport.is_some() {
             self.announce_next_sync = true;
             self.start_poll(cx);
         }
-    }
-
-    /// `thock::ChooseEmailImportMode` (spec v9 §6.1): the two-option picker
-    /// deciding whether captured emails link to Gmail or are archived into
-    /// the vault. Also the connect flow's final step, so the choice is made
-    /// deliberately instead of inherited from a default nobody knows exists.
-    fn choose_import_mode(
-        &mut self,
-        workspace: WeakEntity<Workspace>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(vault) = &self.vault else {
-            return;
-        };
-        let vault_root = vault.root.clone();
-        let current = self
-            .config
-            .as_ref()
-            .map(|config| config.import)
-            .unwrap_or(ImportMode::Title);
-        let fs = self.project.read(cx).fs().clone();
-        let service = cx.weak_entity();
-        // This runs from a workspace action handler (and from the calendar
-        // picker's dismissal), so the workspace may be mid-update: defer the
-        // modal.
-        window.defer(cx, move |window, cx| {
-            workspace
-                .update(cx, |workspace, cx| {
-                    workspace.toggle_modal(window, cx, |window, cx| {
-                        let delegate = ImportModePickerDelegate {
-                            picker_entity: cx.entity().downgrade(),
-                            service,
-                            fs,
-                            vault_root,
-                            selected_index: match current {
-                                ImportMode::Title => 0,
-                                ImportMode::Full => 1,
-                            },
-                            current,
-                        };
-                        ImportModePicker::new(delegate, window, cx)
-                    });
-                })
-                .log_err();
-        });
     }
 
     fn handle_project_event(
@@ -299,8 +242,8 @@ impl GmailService {
         }
     }
 
-    /// Re-resolves the vault and `.thock/gmail.toml`, rebuilding the provider
-    /// and poll loop when the configuration actually changed.
+    /// Re-resolves the vault and `.thock/gmail.toml`, rebuilding the
+    /// transport and poll loop when the configuration actually changed.
     fn reload(&mut self, cx: &mut Context<Self>) {
         let vault = self
             .project
@@ -333,10 +276,10 @@ impl GmailService {
                     Some(config)
                 }
                 Err(error) => {
-                    // A hand-edited file that doesn't parse disables capture,
-                    // never panics (spec §7).
+                    // A hand-edited file that doesn't parse disables sync,
+                    // never panics (spec §6).
                     log::warn!(
-                        "Thock: couldn't parse {}: {error:#}; email capture is off",
+                        "Thock: couldn't parse {}: {error:#}; Gmail sync is off",
                         config_path.display()
                     );
                     self.vault = Some(vault);
@@ -354,20 +297,20 @@ impl GmailService {
             None => self.clear_sync(SyncState::NoConfig),
             Some(config) if config.account.is_none() => {
                 self.config = Some(config);
-                self.provider = None;
+                self.transport = None;
                 self.poll_task = None;
                 self.state = SyncState::NeverConnected;
             }
             Some(config) => {
-                let unchanged = self.config.as_ref() == Some(&config) && self.provider.is_some();
+                let unchanged = self.config.as_ref() == Some(&config) && self.transport.is_some();
                 if !unchanged {
                     self.config = Some(config);
                     // The account (and so every digest) may have changed:
                     // reload the dedup state from disk on the next poll.
-                    self.dedup = None;
-                    match self.build_provider(cx) {
-                        Ok(provider) => {
-                            self.provider = Some(provider);
+                    self.imported = None;
+                    match self.build_transport(cx) {
+                        Ok(transport) => {
+                            self.transport = Some(transport);
                             self.state = SyncState::Idle;
                             self.start_poll(cx);
                         }
@@ -385,27 +328,26 @@ impl GmailService {
 
     fn clear_sync(&mut self, state: SyncState) {
         self.config = None;
-        self.provider = None;
+        self.transport = None;
         self.poll_task = None;
-        self.dedup = None;
+        self.imported = None;
         self.state = state;
     }
 
-    fn build_provider(&self, cx: &App) -> Result<Arc<dyn MailProvider>> {
+    fn build_transport(&self, cx: &App) -> Result<Arc<dyn MailTransport>> {
         let config = self.config.as_ref().context("no gmail config")?;
         let account = config.account.clone().context("no account connected")?;
         let client = GoogleClient::resolve(&config.google)?;
-        Ok(Arc::new(GoogleMailProvider::new(
+        Ok(Arc::new(GmailTransport::new(
             cx.http_client(),
             client,
             account,
-            config.label.clone(),
-            config.label_is_default,
+            config.mappings.clone(),
         )))
     }
 
     /// (Re)starts the poll loop: an immediate check, then one tick per
-    /// `poll_seconds`, doubling up to an hour on transport errors (§10.2).
+    /// `poll_seconds`, doubling up to an hour on transport errors.
     fn start_poll(&mut self, cx: &mut Context<Self>) {
         let Some(interval) = self.config.as_ref().map(|config| config.poll_interval) else {
             return;
@@ -437,7 +379,11 @@ impl GmailService {
         let announcement = std::mem::take(&mut self.announce_next_sync)
             .then(|| match &outcome {
                 SyncOutcome::Aborted => None,
-                SyncOutcome::Synced { .. } => Some("Gmail synced".into()),
+                SyncOutcome::Synced { captured } => Some(match captured {
+                    0 => "Gmail synced — nothing new".into(),
+                    1 => "Gmail synced — 1 new email".into(),
+                    n => format!("Gmail synced — {n} new emails").into(),
+                }),
                 SyncOutcome::Held(reason) => Some(format!("Gmail sync held — {reason}").into()),
                 SyncOutcome::Failed(error) => {
                     Some(format!("Gmail sync failed — {error:#}").into())
@@ -449,9 +395,8 @@ impl GmailService {
             .flatten();
         let keep_going = match outcome {
             SyncOutcome::Aborted => false,
-            SyncOutcome::Synced { legacy_label } => {
+            SyncOutcome::Synced { .. } => {
                 self.state = SyncState::Synced { at: Instant::now() };
-                self.legacy_label = legacy_label;
                 *delay = interval;
                 true
             }
@@ -461,7 +406,7 @@ impl GmailService {
                 true
             }
             SyncOutcome::Failed(error) => {
-                log::warn!("Thock email capture failed: {error:#}");
+                log::warn!("Thock Gmail sync failed: {error:#}");
                 self.state = SyncState::Failing {
                     error: format!("{error:#}").into(),
                 };
@@ -471,7 +416,7 @@ impl GmailService {
             }
             SyncOutcome::AuthRevoked => {
                 self.state = SyncState::Disconnected;
-                self.provider = None;
+                self.transport = None;
                 false
             }
         };
@@ -488,9 +433,9 @@ impl GmailService {
     async fn sync_once(this: &WeakEntity<Self>, cx: &mut AsyncApp) -> SyncOutcome {
         let context = this
             .read_with(cx, |service, _| {
-                match (&service.provider, &service.config, &service.vault) {
-                    (Some(provider), Some(config), Some(vault)) => Some((
-                        provider.clone(),
+                match (&service.transport, &service.config, &service.vault) {
+                    (Some(transport), Some(config), Some(vault)) => Some((
+                        transport.clone(),
                         config.clone(),
                         vault.clone(),
                         service.project.clone(),
@@ -500,239 +445,265 @@ impl GmailService {
             })
             .ok()
             .flatten();
-        let Some((provider, config, vault, project)) = context else {
+        let Some((transport, config, vault, project)) = context else {
             return SyncOutcome::Aborted;
         };
+        let account = config.account.clone().unwrap_or_default();
         let fs = project.read_with(cx, |project, _| project.fs().clone());
 
-        let dedup = match Self::dedup_state(this, &fs, &vault, &config, cx).await {
-            Ok(dedup) => dedup,
+        let imported = match Self::imported_state(this, &fs, &vault, cx).await {
+            Ok(imported) => imported,
             Err(error) => return SyncOutcome::Failed(error),
         };
+        let scan = scan_vault(&fs, &vault, &config).await;
 
-        let (emails, legacy_label) =
-            match provider.fetch_labeled(config.import, &dedup.imported, cx).await {
-                Err(error) if error.is::<AuthRevoked>() => return SyncOutcome::AuthRevoked,
-                Err(error) => return SyncOutcome::Failed(error),
-                Ok(MailFetched::LabelNotFound) => {
-                    return SyncOutcome::Held(
-                        format!("label \"{}\" not found in Gmail", config.label).into(),
-                    );
-                }
-                Ok(MailFetched::Emails {
-                    emails,
-                    legacy_label,
-                }) => (emails, legacy_label),
+        // Everything already recorded anywhere — state, mapped folders,
+        // backlog markers, triage log — is skipped at the transport, so a
+        // captured thread costs no per-message request (spec §7.1).
+        let mut skip = imported.clone();
+        skip.extend(scan.digests.iter().cloned());
+        skip.extend(scan.backlog_markers.iter().cloned());
+
+        let fetched = match transport.fetch(&skip, cx).await {
+            Err(error) if error.is::<AuthRevoked>() => return SyncOutcome::AuthRevoked,
+            Err(error) => return SyncOutcome::Failed(error),
+            Ok(fetched) => fetched,
+        };
+
+        // Digests present in the vault record mean "repair the state, don't
+        // write a second file" (spec §4.4); backlog markers count — a line
+        // whose archive the user deleted stays deleted.
+        let mut vault_digests = scan.digests.clone();
+        vault_digests.extend(scan.backlog_markers.iter().cloned());
+
+        let captured_at = Local::now().to_rfc3339();
+        let mut holding: Vec<&str> = Vec::new();
+        let mut plans = Vec::new();
+        // Two mappings may share a folder: stems claimed by an earlier plan
+        // must be taken for the later one.
+        let mut stems_by_path: HashMap<&str, HashSet<String>> = HashMap::new();
+        for (index, mapping) in config.mappings.iter().enumerate() {
+            if let Some(scanned) = scan.dirs.get(index) {
+                stems_by_path
+                    .entry(mapping.path.as_str())
+                    .or_default()
+                    .extend(scanned.stems.iter().cloned());
+            }
+        }
+        for (index, fetch) in fetched.mappings.iter().enumerate() {
+            let Some(mapping) = config.mappings.get(index) else {
+                continue;
             };
-        if emails.is_empty() {
-            return SyncOutcome::Synced { legacy_label };
-        }
-
-        match Self::apply_capture(this, &fs, &vault, &config, &project, &emails, dedup, cx).await {
-            SyncOutcome::Synced { .. } => SyncOutcome::Synced { legacy_label },
-            other => other,
-        }
-    }
-
-    /// The loaded dedup state, loading (or rebuilding, spec §4.3) it first
-    /// when this is the provider's first poll.
-    async fn dedup_state(
-        this: &WeakEntity<Self>,
-        fs: &Arc<dyn Fs>,
-        vault: &Vault,
-        config: &GmailConfig,
-        cx: &mut AsyncApp,
-    ) -> Result<DedupState> {
-        if let Some(dedup) = this.read_with(cx, |service, _| service.dedup.clone())? {
-            return Ok(dedup);
-        }
-
-        let mut dedup = DedupState::default();
-        match fs.load(&state_file_path(vault)).await {
-            Ok(contents) => {
-                for line in contents.lines() {
-                    if let Ok(record) = serde_json::from_str::<serde_json::Value>(line)
-                        && let Some(digest) = record.get("digest").and_then(|value| value.as_str())
-                    {
-                        dedup.imported.insert(digest.to_string());
+            match fetch {
+                MappingFetched::LabelNotFound => holding.push(&mapping.label),
+                MappingFetched::Items(items) if items.is_empty() => {}
+                MappingFetched::Items(items) => {
+                    let taken = stems_by_path.entry(mapping.path.as_str()).or_default();
+                    let plan = plan_inbox_capture(
+                        items,
+                        &account,
+                        &imported,
+                        &vault_digests,
+                        taken,
+                        &mapping.path,
+                        &captured_at,
+                    );
+                    taken.extend(plan.files.iter().map(|file| file.stem.clone()));
+                    if !plan.is_empty() {
+                        plans.push((index, plan));
                     }
                 }
             }
-            Err(_) => {
-                // No state file: the vault is the record. Backlog markers
-                // rejoin `imported` lazily through the planner's marker guard;
-                // only the archives need scanning here, both for state and
-                // for the stem-collision map.
-                if let Ok(text) = fs.load(&vault.backlog_path()).await {
-                    dedup.imported.extend(crate::gmail::scan_backlog_markers(&text));
-                }
+        }
+
+        let mut captured = 0;
+        if !plans.is_empty() {
+            captured = plans.iter().map(|(_, plan)| plan.files.len()).sum();
+            if let Err(error) =
+                Self::apply_plans(this, &fs, &vault, &config, &project, &scan, plans, &captured_at, cx)
+                    .await
+            {
+                return SyncOutcome::Failed(error);
             }
         }
 
-        let archive_dir = vault.root.join(&config.archive_dir);
-        if let Ok(mut entries) = fs.read_dir(&archive_dir).await {
-            use futures::StreamExt as _;
-            while let Some(entry) = entries.next().await {
-                let Ok(path) = entry else { continue };
-                if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
-                    continue;
-                }
-                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                    continue;
-                };
-                let Ok(content) = fs.load(&path).await else {
-                    continue;
-                };
-                if let Some(digest) = archive_frontmatter_digest(&content) {
-                    dedup.imported.insert(digest.clone());
-                    dedup.archive_stems.insert(stem.to_string(), digest);
-                }
-            }
+        if let Some(reason) = hold_reason(&holding) {
+            return SyncOutcome::Held(reason.into());
         }
-
-        this.update(cx, |service, _| service.dedup = Some(dedup.clone()))?;
-        Ok(dedup)
+        SyncOutcome::Synced { captured }
     }
 
-    async fn apply_capture(
+    /// The state-file digests, loaded once per transport start (spec §4.4).
+    /// Pre-V15 Gmail captures recorded in the inbox state file are read too,
+    /// so nothing the old stack imported is ever captured twice (spec §9).
+    async fn imported_state(
+        this: &WeakEntity<Self>,
+        fs: &Arc<dyn Fs>,
+        vault: &Vault,
+        cx: &mut AsyncApp,
+    ) -> Result<HashSet<String>> {
+        if let Some(imported) = this.read_with(cx, |service, _| service.imported.clone())? {
+            return Ok(imported);
+        }
+        let mut imported = HashSet::new();
+        for state_dir in [STATE_DIR, INBOX_STATE_DIR] {
+            let path = vault
+                .root
+                .join(VAULT_MARKER_DIR)
+                .join(state_dir)
+                .join(STATE_FILE);
+            let Ok(contents) = fs.load(&path).await else {
+                continue;
+            };
+            for line in contents.lines() {
+                if let Ok(record) = serde_json::from_str::<serde_json::Value>(line)
+                    && let Some(digest) = record.get("digest").and_then(|value| value.as_str())
+                {
+                    imported.insert(digest.to_string());
+                }
+            }
+        }
+        this.update(cx, |service, _| service.imported = Some(imported.clone()))?;
+        Ok(imported)
+    }
+
+    /// Applies the mapped plans in crash-safe order (spec §7.2): note files
+    /// first, create-if-missing, then the backlog landing integration, then
+    /// the state append. A crash at any boundary re-plans next poll into a
+    /// state repair, never a duplicate.
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_plans(
         this: &WeakEntity<Self>,
         fs: &Arc<dyn Fs>,
         vault: &Vault,
         config: &GmailConfig,
         project: &Entity<Project>,
-        emails: &[crate::gmail::CapturedEmail],
-        dedup: DedupState,
+        scan: &VaultScan,
+        plans: Vec<(usize, crate::inbox::InboxPlan)>,
+        captured_at: &str,
         cx: &mut AsyncApp,
-    ) -> SyncOutcome {
+    ) -> Result<()> {
+        for (_, plan) in &plans {
+            for file in &plan.files {
+                let path = vault.root.join(&file.rel_path);
+                if fs.is_file(&path).await {
+                    continue;
+                }
+                if let Some(parent) = path.parent() {
+                    fs.create_dir(parent).await?;
+                }
+                fs.atomic_write(path, file.content.clone()).await?;
+            }
+        }
+
+        // The landing integration (spec §4.3): notes in the email archive
+        // folder get a Someday line. A record whose digest is already in the
+        // backlog is settled; one that isn't is either fresh or the repair
+        // of a crash between landing and appending — its stem comes from
+        // this plan or from the folder scan.
+        let mut lines: Vec<(String, String)> = Vec::new();
+        for (index, plan) in &plans {
+            let Some(mapping) = config.mappings.get(*index) else {
+                continue;
+            };
+            if mapping.path != EMAIL_ARCHIVE_DIR {
+                continue;
+            }
+            for record in &plan.newly_imported {
+                if scan.backlog_markers.contains(&record.digest) {
+                    continue;
+                }
+                let stem = plan
+                    .files
+                    .iter()
+                    .find(|file| file.digest == record.digest)
+                    .map(|file| file.stem.clone())
+                    .or_else(|| {
+                        scan.dirs
+                            .get(*index)
+                            .and_then(|dir| dir.digest_stems.get(&record.digest).cloned())
+                    });
+                if let Some(stem) = stem {
+                    lines.push((
+                        record.digest.clone(),
+                        email_capture_line(&record.title, &stem, &record.digest),
+                    ));
+                }
+            }
+        }
+        if !lines.is_empty() {
+            Self::append_backlog_lines(fs, vault, project, lines, cx).await?;
+        }
+
+        let records: Vec<(&str, &ImportRecord)> = plans
+            .iter()
+            .flat_map(|(index, plan)| {
+                let path = config
+                    .mappings
+                    .get(*index)
+                    .map(|mapping| mapping.path.as_str())
+                    .unwrap_or("");
+                plan.newly_imported.iter().map(move |record| (path, record))
+            })
+            .collect();
+        Self::append_state(fs, vault, &records, captured_at).await?;
+        this.update(cx, |service, _| {
+            if let Some(imported) = service.imported.as_mut() {
+                imported.extend(records.iter().map(|(_, record)| record.digest.clone()));
+            }
+        })
+        .ok();
+        Ok(())
+    }
+
+    /// Appends the pending Someday lines, marker-guarded so retries and
+    /// crash repairs never duplicate: through the open buffer as one
+    /// finalized transaction behind the typing guard when `backlog.md` is
+    /// open (undoable with one `u`, cannot clobber unsaved keystrokes),
+    /// read-modify-write through the project `Fs` otherwise.
+    async fn append_backlog_lines(
+        fs: &Arc<dyn Fs>,
+        vault: &Vault,
+        project: &Entity<Project>,
+        lines: Vec<(String, String)>,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
         let backlog_path = vault.backlog_path();
         let buffer = project.update(cx, |project, cx| {
             project
                 .project_path_for_absolute_path(&backlog_path, cx)
                 .and_then(|path| project.get_open_buffer(&path, cx))
         });
-        let backlog_text = match &buffer {
-            Some(buffer) => buffer.read_with(cx, |buffer, _| buffer.text()),
-            None => fs
+
+        let pending_block = |text: &str| {
+            let markers = scan_backlog_markers(text);
+            let mut block = String::new();
+            for (digest, line) in &lines {
+                if markers.contains(digest) {
+                    continue;
+                }
+                block.push_str(line);
+                block.push('\n');
+            }
+            block
+        };
+
+        let Some(buffer) = buffer else {
+            // A missing file is created from the scaffold — the backlog is a
+            // core scaffolded file, not a user gesture like the daily note.
+            let text = fs
                 .load(&backlog_path)
                 .await
-                .unwrap_or_else(|_| DEFAULT_BACKLOG.to_string()),
+                .unwrap_or_else(|_| DEFAULT_BACKLOG.to_string());
+            let block = pending_block(&text);
+            if block.is_empty() {
+                return Ok(());
+            }
+            let edit = append_to_section_edit(&text, SectionKind::Someday, &block);
+            fs.atomic_write(backlog_path, apply_edits(&text, vec![edit])).await?;
+            return Ok(());
         };
 
-        let captured_at = Local::now().to_rfc3339();
-        let plan = plan_capture(
-            &backlog_text,
-            emails,
-            &dedup.imported,
-            &dedup.archive_stems,
-            config,
-            &captured_at,
-        );
-        if plan.is_empty() {
-            return SyncOutcome::Synced {
-                legacy_label: false,
-            };
-        }
-
-        // Archives first (spec §9): a crash after this leaves harmless
-        // orphans, and the planner reuses them by digest on the next poll.
-        for archive in &plan.archives {
-            let path = vault.root.join(&archive.rel_path);
-            if fs.is_file(&path).await {
-                continue;
-            }
-            let write = async {
-                if let Some(parent) = path.parent() {
-                    fs.create_dir(parent).await?;
-                }
-                fs.atomic_write(path.clone(), archive.content.clone()).await
-            };
-            if let Err(error) = write.await {
-                return SyncOutcome::Failed(error);
-            }
-        }
-
-        let outcome = match buffer {
-            Some(buffer) => {
-                Self::apply_via_buffer(buffer, emails, config, &dedup, &captured_at, cx).await
-            }
-            None => {
-                Self::apply_via_fs(fs, &backlog_path, emails, config, &dedup, &captured_at).await
-            }
-        };
-        let records = match outcome {
-            Ok(records) => records,
-            Err(error) => return SyncOutcome::Failed(error),
-        };
-
-        // State last (spec §9): a crash before this line re-plans next poll
-        // and the marker guard turns it into a state repair, not a duplicate.
-        if let Err(error) = Self::append_state(fs, vault, &records, &captured_at).await {
-            return SyncOutcome::Failed(error);
-        }
-        this.update(cx, |service, _| {
-            if let Some(dedup) = service.dedup.as_mut() {
-                dedup
-                    .imported
-                    .extend(records.iter().map(|record| record.digest.clone()));
-                for archive in &plan.archives {
-                    dedup
-                        .archive_stems
-                        .insert(archive.stem.clone(), archive.digest.clone());
-                }
-            }
-        })
-        .ok();
-        SyncOutcome::Synced {
-            legacy_label: false,
-        }
-    }
-
-    /// The not-open path (spec §9): read-modify-write through the project
-    /// `Fs`, re-reading (and re-planning) after the fetch. A missing file is
-    /// created from the scaffold — the backlog is a core scaffolded file, not
-    /// a user gesture like the daily note (spec §13 #6).
-    async fn apply_via_fs(
-        fs: &Arc<dyn Fs>,
-        backlog_path: &Path,
-        emails: &[crate::gmail::CapturedEmail],
-        config: &GmailConfig,
-        dedup: &DedupState,
-        captured_at: &str,
-    ) -> Result<Vec<ImportRecord>> {
-        let text = fs
-            .load(backlog_path)
-            .await
-            .unwrap_or_else(|_| DEFAULT_BACKLOG.to_string());
-        let plan = plan_capture(
-            &text,
-            emails,
-            &dedup.imported,
-            &dedup.archive_stems,
-            config,
-            captured_at,
-        );
-        if let Some(edit) = &plan.backlog_edit {
-            fs.atomic_write(
-                backlog_path.to_path_buf(),
-                apply_edits(&text, vec![edit.clone()]),
-            )
-            .await?;
-        }
-        Ok(plan.newly_imported)
-    }
-
-    /// The open-buffer path (spec §9): waits for a quiet window (typing
-    /// guard), then applies the append as a minimal diff in one finalized
-    /// transaction — undoable with one `u`, and it cannot clobber unsaved
-    /// keystrokes because it edits the live buffer.
-    async fn apply_via_buffer(
-        buffer: Entity<Buffer>,
-        emails: &[crate::gmail::CapturedEmail],
-        config: &GmailConfig,
-        dedup: &DedupState,
-        captured_at: &str,
-        cx: &mut AsyncApp,
-    ) -> Result<Vec<ImportRecord>> {
         for _ in 0..TYPING_GUARD_MAX_TRIES {
             let version = buffer.read_with(cx, |buffer, _| buffer.version());
             cx.background_executor().timer(TYPING_GUARD_QUIET).await;
@@ -742,23 +713,16 @@ impl GmailService {
         }
 
         // The buffer can change between computing the diff and applying it;
-        // `apply_diff` refuses stale diffs, so just recompute. The planner is
-        // deterministic, so a re-plan against fresh text picks the same
-        // stems and lines.
+        // `apply_diff` refuses stale diffs, so just recompute — the marker
+        // guard makes a re-run against fresh text converge.
         for _ in 0..3 {
             let text = buffer.read_with(cx, |buffer, _| buffer.text());
-            let plan = plan_capture(
-                &text,
-                emails,
-                &dedup.imported,
-                &dedup.archive_stems,
-                config,
-                captured_at,
-            );
-            let Some(edit) = &plan.backlog_edit else {
-                return Ok(plan.newly_imported);
-            };
-            let new_text = apply_edits(&text, vec![edit.clone()]);
+            let block = pending_block(&text);
+            if block.is_empty() {
+                return Ok(());
+            }
+            let edit = append_to_section_edit(&text, SectionKind::Someday, &block);
+            let new_text = apply_edits(&text, vec![edit]);
             let diff = buffer
                 .read_with(cx, |buffer, cx| buffer.diff(new_text, cx))
                 .await;
@@ -771,18 +735,18 @@ impl GmailService {
                 applied
             });
             if applied {
-                return Ok(plan.newly_imported);
+                return Ok(());
             }
         }
         Err(anyhow!("the buffer kept changing while applying captured emails"))
     }
 
     /// Appends the captured threads to `.thock/state/gmail/imported.jsonl`
-    /// (spec §4.3).
+    /// (spec §7.2).
     async fn append_state(
         fs: &Arc<dyn Fs>,
         vault: &Vault,
-        records: &[ImportRecord],
+        records: &[(&str, &ImportRecord)],
         captured_at: &str,
     ) -> Result<()> {
         if records.is_empty() {
@@ -790,12 +754,12 @@ impl GmailService {
         }
         let path = state_file_path(vault);
         let mut contents = fs.load(&path).await.unwrap_or_default();
-        for record in records {
+        for (mapping_path, record) in records {
             let entry = serde_json::json!({
                 "digest": record.digest,
-                "thread": record.thread_id,
-                "subject": record.subject,
-                "dest": record.dest,
+                "thread": record.external_id,
+                "title": record.title,
+                "path": mapping_path,
                 "at": captured_at,
             });
             contents.push_str(&entry.to_string());
@@ -812,13 +776,13 @@ impl GmailService {
         &mut self,
         vault: Vault,
         config: GmailConfig,
-        provider: Arc<dyn MailProvider>,
+        transport: Arc<dyn MailTransport>,
         cx: &mut Context<Self>,
     ) {
         self.vault = Some(vault);
         self.config = Some(config);
-        self.provider = Some(provider);
-        self.dedup = None;
+        self.transport = Some(transport);
+        self.imported = None;
         self.state = SyncState::Idle;
         self.start_poll(cx);
     }
@@ -832,195 +796,96 @@ fn state_file_path(vault: &Vault) -> PathBuf {
         .join(STATE_FILE)
 }
 
-pub struct ImportModePicker {
-    picker: Entity<Picker<ImportModePickerDelegate>>,
-}
-
-impl ImportModePicker {
-    fn new(delegate: ImportModePickerDelegate, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let picker = cx.new(|cx| Picker::nonsearchable_uniform_list(delegate, window, cx));
-        Self { picker }
+fn hold_reason(missing_labels: &[&str]) -> Option<String> {
+    match missing_labels {
+        [] => None,
+        [label] => Some(format!("label \"{label}\" not found in Gmail")),
+        labels => Some(format!(
+            "labels {} not found in Gmail",
+            labels
+                .iter()
+                .map(|label| format!("\"{label}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
     }
 }
 
-impl ModalView for ImportModePicker {}
-impl EventEmitter<DismissEvent> for ImportModePicker {}
-
-impl Focusable for ImportModePicker {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.picker.focus_handle(cx)
-    }
-}
-
-impl Render for ImportModePicker {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .key_context("ImportModePicker")
-            .w(rems(34.))
-            .child(self.picker.clone())
-    }
-}
-
-/// The two capture styles, in `ImportMode` order.
-const IMPORT_MODE_OPTIONS: [(ImportMode, &str, &str); 2] = [
-    (
-        ImportMode::Title,
-        "Link to Gmail",
-        "Captured tasks link back to the email in Gmail",
-    ),
-    (
-        ImportMode::Full,
-        "Archive into the vault",
-        "The email's text is saved under archives/emails and linked from the task",
-    ),
-];
-
-/// Enter picks a capture style and saves it to `.thock/gmail.toml`; escape
-/// keeps the current one.
-pub struct ImportModePickerDelegate {
-    picker_entity: WeakEntity<ImportModePicker>,
-    service: WeakEntity<GmailService>,
-    fs: Arc<dyn Fs>,
-    vault_root: PathBuf,
-    selected_index: usize,
-    current: ImportMode,
-}
-
-impl PickerDelegate for ImportModePickerDelegate {
-    type ListItem = ListItem;
-
-    fn name() -> &'static str {
-        "choose email import mode"
-    }
-
-    fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
-        "How should labeled emails land in the Backlog?".into()
-    }
-
-    fn match_count(&self) -> usize {
-        IMPORT_MODE_OPTIONS.len()
-    }
-
-    fn selected_index(&self) -> usize {
-        self.selected_index
-    }
-
-    fn set_selected_index(
-        &mut self,
-        index: usize,
-        _window: &mut Window,
-        _cx: &mut Context<Picker<Self>>,
-    ) {
-        self.selected_index = index.min(IMPORT_MODE_OPTIONS.len() - 1);
-    }
-
-    fn update_matches(
-        &mut self,
-        _query: String,
-        _window: &mut Window,
-        _cx: &mut Context<Picker<Self>>,
-    ) -> Task<()> {
-        Task::ready(())
-    }
-
-    fn confirm(&mut self, _secondary: bool, _window: &mut Window, cx: &mut Context<Picker<Self>>) {
-        let Some((mode, _, _)) = IMPORT_MODE_OPTIONS.get(self.selected_index) else {
-            return;
-        };
-        let mode = *mode;
-        if mode != self.current {
-            let fs = self.fs.clone();
-            let vault_root = self.vault_root.clone();
-            let service = self.service.clone();
-            cx.spawn(async move |_, cx| {
-                crate::calendar_service::update_config_file(
-                    &fs,
-                    &vault_root,
-                    GMAIL_CONFIG_FILE,
-                    move |table| {
-                        let value = match mode {
-                            ImportMode::Title => "title",
-                            ImportMode::Full => "full",
-                        };
-                        table.insert("import".into(), value.into());
-                    },
-                )
-                .await?;
-                service.update(cx, |service, cx| service.reload_config(cx))
-            })
-            .detach_and_log_err(cx);
+/// One pass over every mapped folder, the backlog, and the triage log: stems
+/// and digest→stem for collision and repair handling, and the vault-side
+/// dedup record (spec §4.4). Legacy `thread:` frontmatter counts alongside
+/// `capture:` (spec §9). A missing folder is an empty state, not an error.
+async fn scan_vault(fs: &Arc<dyn Fs>, vault: &Vault, config: &GmailConfig) -> VaultScan {
+    use futures::StreamExt as _;
+    let mut scan = VaultScan::default();
+    for mapping in &config.mappings {
+        let mut dir_scan = DirScan::default();
+        let dir = vault.root.join(&mapping.path);
+        if let Ok(mut entries) = fs.read_dir(&dir).await {
+            while let Some(entry) = entries.next().await {
+                let Ok(path) = entry else { continue };
+                if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                    continue;
+                };
+                if stem.starts_with('.') {
+                    continue;
+                }
+                dir_scan.stems.insert(stem.to_string());
+                let Ok(content) = fs.load(&path).await else {
+                    continue;
+                };
+                if let Some(digest) =
+                    inbox_note_digest(&content).or_else(|| archive_frontmatter_digest(&content))
+                {
+                    scan.digests.insert(digest.clone());
+                    dir_scan.digest_stems.insert(digest, stem.to_string());
+                }
+            }
         }
-        self.picker_entity
-            .update(cx, |_, cx| cx.emit(DismissEvent))
-            .log_err();
+        scan.dirs.push(dir_scan);
     }
-
-    fn dismissed(&mut self, _window: &mut Window, _cx: &mut Context<Picker<Self>>) {}
-
-    fn render_match(
-        &self,
-        index: usize,
-        selected: bool,
-        _window: &mut Window,
-        _cx: &mut Context<Picker<Self>>,
-    ) -> Option<Self::ListItem> {
-        let (mode, title, description) = IMPORT_MODE_OPTIONS.get(index)?;
-        let is_current = *mode == self.current;
-        Some(
-            ListItem::new(index)
-                .inset(true)
-                .spacing(ListItemSpacing::Sparse)
-                .toggle_state(selected)
-                .start_slot(
-                    Icon::new(if is_current {
-                        IconName::Check
-                    } else {
-                        IconName::Circle
-                    })
-                    .size(IconSize::Small)
-                    .color(if is_current { Color::Accent } else { Color::Muted }),
-                )
-                .child(
-                    v_flex()
-                        .child(Label::new(*title))
-                        .child(
-                            Label::new(*description)
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                        ),
-                ),
-        )
+    if let Ok(text) = fs.load(&vault.backlog_path()).await {
+        scan.backlog_markers = scan_backlog_markers(&text);
     }
+    if let Ok(log) = fs.load(&vault.root.join(TRIAGE_LOG_PATH)).await {
+        scan.digests.extend(scan_triage_log_markers(&log));
+    }
+    scan
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gmail::{CapturedEmail, ImportMode, thread_marker_id};
-    use chrono::TimeZone as _;
+    use crate::gmail::{GmailFetched, thread_marker_id};
+    use crate::inbox::{CapturedItem, capture_digest};
+    use chrono::{FixedOffset, TimeZone as _};
     use fs::FakeFs;
     use gpui::TestAppContext;
     use settings::SettingsStore;
+    use std::path::Path;
     use std::sync::Mutex;
 
-    struct StubProvider {
-        emails: Mutex<Vec<CapturedEmail>>,
+    struct StubTransport {
+        /// Items per mapping, index-aligned.
+        items: Mutex<Vec<Vec<CapturedItem>>>,
         skips_seen: Mutex<Vec<HashSet<String>>>,
     }
 
-    impl MailProvider for StubProvider {
-        fn fetch_labeled(
-            &self,
-            _mode: ImportMode,
-            skip: &HashSet<String>,
-            _cx: &AsyncApp,
-        ) -> Task<Result<MailFetched>> {
+    impl MailTransport for StubTransport {
+        fn fetch(&self, skip: &HashSet<String>, _cx: &AsyncApp) -> Task<Result<GmailFetched>> {
             self.skips_seen.lock().unwrap().push(skip.clone());
-            let emails = self.emails.lock().unwrap().clone();
-            Task::ready(Ok(MailFetched::Emails {
-                emails,
-                legacy_label: false,
-            }))
+            let mappings = self
+                .items
+                .lock()
+                .unwrap()
+                .clone()
+                .into_iter()
+                .map(MappingFetched::Items)
+                .collect();
+            Task::ready(Ok(GmailFetched { mappings }))
         }
     }
 
@@ -1031,20 +896,30 @@ mod tests {
         });
     }
 
-    fn email(thread_id: &str, subject: &str, body: Option<&str>) -> CapturedEmail {
-        CapturedEmail {
-            thread_id: thread_id.to_string(),
-            subject: subject.to_string(),
-            from: "Ana <ana@example.com>".to_string(),
-            date: Local.with_ymd_and_hms(2026, 8, 18, 9, 30, 0).unwrap(),
-            body: body.map(str::to_string),
+    fn email(thread_id: &str, title: &str, body: &str) -> CapturedItem {
+        CapturedItem {
+            source: "gmail",
+            external_id: thread_id.to_string(),
+            title: title.to_string(),
+            from: Some("Ana <ana@example.com>".to_string()),
+            url: None,
+            link: Some(format!(
+                "https://mail.google.com/mail/u/diego@example.com/#all/{thread_id}"
+            )),
+            body: Some(body.to_string()),
+            occurred_at: Some(
+                FixedOffset::west_opt(7 * 3600)
+                    .unwrap()
+                    .with_ymd_and_hms(2026, 8, 18, 9, 30, 0)
+                    .unwrap(),
+            ),
+            due: None,
         }
     }
 
-    fn test_config(import: ImportMode) -> GmailConfig {
+    fn test_config() -> GmailConfig {
         GmailConfig {
             account: Some("diego@example.com".to_string()),
-            import,
             ..GmailConfig::default()
         }
     }
@@ -1057,7 +932,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn title_capture_creates_backlog_and_dedups(cx: &mut TestAppContext) {
+    async fn mapped_capture_lands_notes_and_the_backlog_line(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         fs.create_dir(Path::new("/vault")).await.unwrap();
@@ -1065,35 +940,51 @@ mod tests {
         cx.run_until_parked();
 
         let service = cx.new(|cx| GmailService::new(project.clone(), cx));
-        let provider = Arc::new(StubProvider {
-            emails: Mutex::new(vec![
-                email("t-invoice", "Re: Invoice #4821", None),
-                email("t-offsite", "Offsite planning", None),
+        let transport = Arc::new(StubTransport {
+            items: Mutex::new(vec![
+                vec![email("t-invoice", "Invoice #4821", "Pay up.")],
+                vec![email("t-idea", "An idea from the road", "Two thoughts.")],
             ]),
             skips_seen: Mutex::new(Vec::new()),
         });
         service.update(cx, |service, cx| {
-            service.configure_for_test(
-                test_vault(),
-                test_config(ImportMode::Title),
-                provider.clone(),
-                cx,
-            )
+            service.configure_for_test(test_vault(), test_config(), transport.clone(), cx)
         });
         cx.run_until_parked();
 
-        // backlog.md was created from the scaffold with both captures in
-        // Someday, linked to Gmail and marked.
-        let text = fs.load(Path::new("/vault/backlog.md")).await.unwrap();
-        let digest = thread_marker_id("diego@example.com", "t-invoice");
-        assert!(text.starts_with("# Backlog\n"), "{text}");
+        // The backlog mapping landed an archive note in the V13 note format…
+        let digest = capture_digest("diego@example.com", "gmail", "t-invoice");
+        let archive_path =
+            Path::new("/vault/archives/emails/2026-08-18-0930-invoice-4821.md");
+        let archive = fs.load(archive_path).await.unwrap();
+        assert!(archive.contains(&format!("capture:  {digest}")), "{archive}");
+        assert!(archive.contains("from:     Ana <ana@example.com>"), "{archive}");
+        assert!(archive.contains("Pay up."), "{archive}");
+        // …and its line in Someday, linked to the archive and marked.
+        let backlog = fs.load(Path::new("/vault/backlog.md")).await.unwrap();
+        assert!(backlog.starts_with("# Backlog\n"), "{backlog}");
         assert!(
-            text.contains(&format!(
-                "- [ ] [Invoice #4821](https://mail.google.com/mail/u/diego@example.com/#all/t-invoice) <!--gmail:{digest}-->"
+            backlog.contains(&format!(
+                "- [ ] Invoice #4821 [[2026-08-18-0930-invoice-4821]] <!--gmail:{digest}-->"
             )),
-            "{text}"
+            "{backlog}"
         );
-        assert!(text.contains("- [ ] [Offsite planning]("), "{text}");
+        // The inbox mapping landed a plain note and touched nothing else.
+        let inbox_note = fs
+            .load(Path::new("/vault/inbox/2026-08-18-0930-an-idea-from-the-road.md"))
+            .await
+            .unwrap();
+        assert!(inbox_note.contains("Two thoughts."), "{inbox_note}");
+        assert!(!backlog.contains("An idea from the road"), "{backlog}");
+
+        // The state recorded both, with their mapping paths.
+        let state = fs
+            .load(Path::new("/vault/.thock/state/gmail/imported.jsonl"))
+            .await
+            .unwrap();
+        assert_eq!(state.lines().count(), 2);
+        assert!(state.contains("\"path\":\"archives/emails\""), "{state}");
+        assert!(state.contains("\"path\":\"inbox\""), "{state}");
         service.read_with(cx, |service, _| {
             assert!(
                 matches!(service.state(), SyncState::Synced { .. }),
@@ -1102,60 +993,66 @@ mod tests {
             );
         });
 
-        // The state file recorded both threads.
-        let state = fs
-            .load(Path::new("/vault/.thock/state/gmail/imported.jsonl"))
-            .await
-            .unwrap();
-        assert_eq!(state.lines().count(), 2);
-
-        // The next poll passes the digests to the provider and appends
-        // nothing new.
+        // The next poll passes every digest to the transport and changes
+        // nothing.
         cx.executor().advance_clock(Duration::from_secs(301));
         cx.run_until_parked();
-        let after = fs.load(Path::new("/vault/backlog.md")).await.unwrap();
-        assert_eq!(text, after);
-        let skips = provider.skips_seen.lock().unwrap();
-        let last_skip = skips.last().unwrap();
-        assert!(last_skip.contains(&digest));
+        assert_eq!(fs.load(Path::new("/vault/backlog.md")).await.unwrap(), backlog);
+        let skips = transport.skips_seen.lock().unwrap();
+        assert!(skips.last().unwrap().contains(&digest));
     }
 
     #[gpui::test]
-    async fn full_capture_archives_and_survives_state_loss(cx: &mut TestAppContext) {
+    async fn legacy_v9_records_and_state_loss_never_duplicate(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
-        fs.create_dir(Path::new("/vault")).await.unwrap();
+        fs.create_dir(Path::new("/vault/archives/emails")).await.unwrap();
+        // A V9-format archive with `thread:` frontmatter and its old-digest
+        // backlog line.
+        let legacy_digest = thread_marker_id("diego@example.com", "t-legacy");
+        fs.insert_file(
+            Path::new("/vault/archives/emails/2026-08-01-old-invoice.md"),
+            format!(
+                "---\nsubject: Old invoice\nthread: {legacy_digest}\n---\n\n# Old invoice\n"
+            )
+            .into_bytes(),
+        )
+        .await;
+        fs.insert_file(
+            Path::new("/vault/backlog.md"),
+            format!(
+                "# Backlog\n\n## Soon\n\n## Someday\n\n\
+                 - [ ] Old invoice [[2026-08-01-old-invoice]] <!--gmail:{legacy_digest}-->\n\n\
+                 ## Completed\n"
+            )
+            .into_bytes(),
+        )
+        .await;
         let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
         cx.run_until_parked();
 
         let service = cx.new(|cx| GmailService::new(project.clone(), cx));
-        let provider = Arc::new(StubProvider {
-            emails: Mutex::new(vec![email("t-invoice", "Invoice #4821", Some("Pay up."))]),
+        let transport = Arc::new(StubTransport {
+            items: Mutex::new(vec![vec![email("t-new", "Fresh thing", "body")], vec![]]),
             skips_seen: Mutex::new(Vec::new()),
         });
         service.update(cx, |service, cx| {
-            service.configure_for_test(
-                test_vault(),
-                test_config(ImportMode::Full),
-                provider.clone(),
-                cx,
-            )
+            service.configure_for_test(test_vault(), test_config(), transport.clone(), cx)
         });
         cx.run_until_parked();
 
-        let archive_path = Path::new("/vault/archives/emails/2026-08-18-invoice-4821.md");
-        let archive = fs.load(archive_path).await.unwrap();
-        assert!(archive.contains("subject: Invoice #4821"), "{archive}");
-        assert!(archive.contains("Pay up."), "{archive}");
+        // The transport was told about the legacy digest (it is the one who
+        // compares both constructions), and the fresh thread captured.
+        {
+            let skips = transport.skips_seen.lock().unwrap();
+            assert!(skips.last().unwrap().contains(&legacy_digest));
+        }
         let backlog = fs.load(Path::new("/vault/backlog.md")).await.unwrap();
-        assert!(
-            backlog.contains("- [ ] Invoice #4821 [[2026-08-18-invoice-4821]]"),
-            "{backlog}"
-        );
+        assert!(backlog.contains("- [ ] Fresh thing [["), "{backlog}");
+        assert_eq!(backlog.matches("Old invoice [[").count(), 1, "{backlog}");
 
-        // Crash story: the state file vanishes, the service restarts (dedup
-        // reloads from the vault). The archive and the marker keep the
-        // capture from duplicating; the state file is repaired.
+        // Crash story: the state file vanishes, the service restarts. The
+        // notes and markers keep every capture from duplicating.
         fs.remove_file(
             Path::new("/vault/.thock/state/gmail/imported.jsonl"),
             Default::default(),
@@ -1163,33 +1060,107 @@ mod tests {
         .await
         .unwrap();
         service.update(cx, |service, cx| {
-            service.configure_for_test(
-                test_vault(),
-                test_config(ImportMode::Full),
-                provider.clone(),
-                cx,
+            service.configure_for_test(test_vault(), test_config(), transport.clone(), cx)
+        });
+        cx.run_until_parked();
+        let after = fs.load(Path::new("/vault/backlog.md")).await.unwrap();
+        assert_eq!(backlog, after);
+    }
+
+    #[gpui::test]
+    async fn crash_between_landing_and_append_is_repaired(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(Path::new("/vault/archives/emails")).await.unwrap();
+        // The landed note exists (V15 format), but neither the backlog line
+        // nor the state made it — the crash window of spec §7.2.
+        let digest = capture_digest("diego@example.com", "gmail", "t-invoice");
+        fs.insert_file(
+            Path::new("/vault/archives/emails/2026-08-18-0930-invoice-4821.md"),
+            format!(
+                "---\nsource:   gmail\ncapture:  {digest}\n\
+                 captured: 2026-08-18T09:31:00-07:00\ntitle:    Invoice #4821\n---\n\n\
+                 # Invoice #4821\n\nPay up.\n"
             )
+            .into_bytes(),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+
+        let service = cx.new(|cx| GmailService::new(project.clone(), cx));
+        let transport = Arc::new(StubTransport {
+            // The stub keeps returning the thread (a real transport would
+            // skip it), so this also exercises the planner's vault-digest
+            // guard: repair, never a second file.
+            items: Mutex::new(vec![vec![email("t-invoice", "Invoice #4821", "Pay up.")], vec![]]),
+            skips_seen: Mutex::new(Vec::new()),
+        });
+        service.update(cx, |service, cx| {
+            service.configure_for_test(test_vault(), test_config(), transport.clone(), cx)
         });
         cx.run_until_parked();
 
-        let backlog_after = fs.load(Path::new("/vault/backlog.md")).await.unwrap();
-        assert_eq!(backlog, backlog_after);
-        assert_eq!(fs.load(archive_path).await.unwrap(), archive);
-        // The archive scan already knew the thread, so nothing new was
-        // fetched into the state file — but a fresh thread still captures.
-        provider
-            .emails
-            .lock()
-            .unwrap()
-            .push(email("t-new", "Another thing", Some("body")));
-        cx.executor().advance_clock(Duration::from_secs(301));
-        cx.run_until_parked();
-        let backlog_final = fs.load(Path::new("/vault/backlog.md")).await.unwrap();
-        assert!(backlog_final.contains("- [ ] Another thing [["), "{backlog_final}");
+        // One line appended, no second file, state repaired.
+        let backlog = fs.load(Path::new("/vault/backlog.md")).await.unwrap();
         assert_eq!(
-            backlog_final.matches("Invoice #4821 [[").count(),
+            backlog
+                .matches(&format!(
+                    "- [ ] Invoice #4821 [[2026-08-18-0930-invoice-4821]] <!--gmail:{digest}-->"
+                ))
+                .count(),
             1,
-            "{backlog_final}"
+            "{backlog}"
+        );
+        let state = fs
+            .load(Path::new("/vault/.thock/state/gmail/imported.jsonl"))
+            .await
+            .unwrap();
+        assert!(state.contains(&digest), "{state}");
+
+        // And it converges: another restart appends nothing new.
+        service.update(cx, |service, cx| {
+            service.configure_for_test(test_vault(), test_config(), transport.clone(), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(fs.load(Path::new("/vault/backlog.md")).await.unwrap(), backlog);
+    }
+
+    #[gpui::test]
+    async fn missing_labels_hold_with_their_names(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(Path::new("/vault")).await.unwrap();
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+
+        struct HoldingTransport;
+        impl MailTransport for HoldingTransport {
+            fn fetch(&self, _: &HashSet<String>, _cx: &AsyncApp) -> Task<Result<GmailFetched>> {
+                Task::ready(Ok(GmailFetched {
+                    mappings: vec![
+                        MappingFetched::LabelNotFound,
+                        MappingFetched::Items(Vec::new()),
+                    ],
+                }))
+            }
+        }
+
+        let service = cx.new(|cx| GmailService::new(project.clone(), cx));
+        service.update(cx, |service, cx| {
+            service.configure_for_test(test_vault(), test_config(), Arc::new(HoldingTransport), cx)
+        });
+        cx.run_until_parked();
+        service.read_with(cx, |service, _| match service.state() {
+            SyncState::Holding { reason } => {
+                assert!(reason.contains("thock/backlog"), "{reason}");
+            }
+            other => panic!("expected holding, got {other:?}"),
+        });
+        assert_eq!(hold_reason(&[]), None);
+        assert_eq!(
+            hold_reason(&["a", "b"]).unwrap(),
+            "labels \"a\", \"b\" not found in Gmail"
         );
     }
 }
