@@ -29,16 +29,14 @@ pub const TRIAGE_LOG_PATH: &str = "archives/inbox/triage-log.md";
 const MARKER_PREFIX: &str = "<!--inbox:";
 const MARKER_SUFFIX: &str = "-->";
 
-/// Resolved `.thock/inbox.toml` (spec §10.2).
+/// Resolved `.thock/inbox.toml` (spec §10.2). Gmail routing left for
+/// `.thock/gmail.toml`'s map in V15 — a `[gmail]` section here is now just
+/// an ignored unknown table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InboxConfig {
     /// Vault-relative landing zone.
     pub dir: String,
     pub poll_interval: Duration,
-    pub gmail_enabled: bool,
-    /// The Gmail label that means "capture into the inbox", matched
-    /// case-insensitively against the label's full path name.
-    pub gmail_label: String,
     pub tasks_enabled: bool,
     /// The Google Tasks list to capture from, by title; `None` means the
     /// account's default list.
@@ -50,8 +48,6 @@ impl Default for InboxConfig {
         Self {
             dir: "inbox".to_string(),
             poll_interval: Duration::from_secs(300),
-            gmail_enabled: true,
-            gmail_label: "thock/inbox".to_string(),
             tasks_enabled: true,
             tasks_list: None,
         }
@@ -64,15 +60,7 @@ struct InboxConfigContent {
     schema: Option<u32>,
     dir: Option<String>,
     poll_seconds: Option<u64>,
-    gmail: InboxGmailContent,
     tasks: InboxTasksContent,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct InboxGmailContent {
-    enabled: Option<bool>,
-    label: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -96,13 +84,6 @@ pub fn parse_inbox_config(text: &str) -> Result<InboxConfig> {
             .filter(|dir| !dir.is_empty())
             .unwrap_or(defaults.dir),
         poll_interval: Duration::from_secs(content.poll_seconds.unwrap_or(300).clamp(60, 3600)),
-        gmail_enabled: content.gmail.enabled.unwrap_or(defaults.gmail_enabled),
-        gmail_label: content
-            .gmail
-            .label
-            .map(|label| label.trim().to_string())
-            .filter(|label| !label.is_empty())
-            .unwrap_or(defaults.gmail_label),
         tasks_enabled: content.tasks.enabled.unwrap_or(defaults.tasks_enabled),
         tasks_list: content
             .tasks
@@ -119,6 +100,8 @@ pub struct CapturedItem {
     /// Gmail thread id, Google Tasks task id — stable per source.
     pub external_id: String,
     pub title: String,
+    /// The sender, when the source knows one (spec v15 §4.2).
+    pub from: Option<String>,
     /// The thing the item is *about*, when there is one.
     pub url: Option<String>,
     /// A back-link into the source (a Gmail thread URL); never a `url`.
@@ -218,17 +201,18 @@ impl InboxPlan {
 
 /// The capture planner (spec §8) — pure, no I/O. `imported` is the loaded
 /// state; `vault_digests` is the rebuild scan's answer (every `capture:` in
-/// an inbox note's frontmatter plus every `<!--inbox:…-->` marker in the
-/// triage log); `taken_stems` are the file stems already in the inbox dir.
-/// `captured_at` is an RFC 3339 timestamp stamped by the caller, also the
-/// filename fallback for items without their own moment.
+/// a landed note's frontmatter plus every `<!--inbox:…-->` marker in the
+/// triage log); `taken_stems` are the file stems already in `dir`, the
+/// vault-relative landing folder. `captured_at` is an RFC 3339 timestamp
+/// stamped by the caller, also the filename fallback for items without their
+/// own moment.
 pub fn plan_inbox_capture(
     items: &[CapturedItem],
     account: &str,
     imported: &HashSet<String>,
     vault_digests: &HashSet<String>,
     taken_stems: &HashSet<String>,
-    config: &InboxConfig,
+    dir: &str,
     captured_at: &str,
 ) -> InboxPlan {
     let mut items: Vec<&CapturedItem> = items.iter().collect();
@@ -276,7 +260,7 @@ pub fn plan_inbox_capture(
             .unwrap_or_else(|| format!("{base}-{digest}"));
         claimed_stems.insert(stem.clone());
         plan.files.push(InboxFile {
-            rel_path: format!("{}/{stem}.md", config.dir),
+            rel_path: format!("{dir}/{stem}.md"),
             stem,
             digest: digest.clone(),
             content: render_inbox_note(item, &title, &digest, captured_at),
@@ -298,6 +282,9 @@ fn render_inbox_note(item: &CapturedItem, title: &str, digest: &str, captured_at
     field("capture", digest);
     field("captured", captured_at);
     field("title", title);
+    if let Some(from) = &item.from {
+        field("from", &collapse_whitespace(from));
+    }
     if let Some(url) = &item.url {
         field("url", &collapse_whitespace(url));
     }
@@ -372,6 +359,7 @@ mod tests {
             source,
             external_id: id.to_string(),
             title: title.to_string(),
+            from: None,
             url: None,
             link: None,
             body: None,
@@ -397,7 +385,7 @@ mod tests {
             imported,
             vault_digests,
             taken,
-            &InboxConfig::default(),
+            "inbox",
             CAPTURED_AT,
         )
     }
@@ -407,11 +395,10 @@ mod tests {
         let config = parse_inbox_config("").unwrap();
         assert_eq!(config, InboxConfig::default());
         assert_eq!(config.dir, "inbox");
-        assert_eq!(config.gmail_label, "thock/inbox");
-        assert!(config.gmail_enabled);
         assert!(config.tasks_enabled);
         assert_eq!(config.tasks_list, None);
 
+        // A pre-V15 [gmail] section is just an unknown table now.
         let config = parse_inbox_config(
             "schema = 1\ndir = \"/drop/zone/\"\npoll_seconds = 10\n\n\
              [gmail]\nenabled = false\nlabel = \" thock/capture \"\n\n\
@@ -421,8 +408,6 @@ mod tests {
         assert_eq!(config.dir, "drop/zone");
         // Clamped to the floor.
         assert_eq!(config.poll_interval, Duration::from_secs(60));
-        assert!(!config.gmail_enabled);
-        assert_eq!(config.gmail_label, "thock/capture");
         assert!(config.tasks_enabled);
         assert_eq!(config.tasks_list.as_deref(), Some("Thock"));
 
@@ -501,6 +486,7 @@ mod tests {
         let mut captured = item("gmail", "t-1", "From the road");
         captured.body = Some("Two thoughts.\n\nAnd a third.\n".to_string());
         captured.link = Some("https://mail.google.com/mail/u/d@e.com/#all/t-1".to_string());
+        captured.from = Some("Ana <ana@example.com>".to_string());
         let plan = plan(
             &[captured],
             &HashSet::new(),
@@ -508,6 +494,7 @@ mod tests {
             &HashSet::new(),
         );
         let content = &plan.files[0].content;
+        assert!(content.contains("from:     Ana <ana@example.com>"), "{content}");
         assert!(content.contains("link:     https://mail.google.com/mail/u/d@e.com/#all/t-1"));
         assert!(!content.contains("url:"), "{content}");
         assert!(

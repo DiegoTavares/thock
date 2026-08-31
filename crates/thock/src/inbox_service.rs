@@ -24,8 +24,6 @@ use workspace::Workspace;
 use ui::IconName;
 
 use crate::calendar_service::{ManualSyncFinished, SyncState, show_sync_toast};
-use crate::gmail::{GMAIL_CONFIG_FILE, parse_gmail_config};
-use crate::gmail_google::GmailInboxSource;
 use crate::google_auth::{
     AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings,
 };
@@ -44,8 +42,8 @@ const STATE_FILE: &str = "imported.jsonl";
 actions!(
     thock,
     [
-        /// Checks Google Tasks and Gmail for newly captured items and lands
-        /// them in the inbox folder now.
+        /// Checks Google Tasks for newly captured items and lands them in
+        /// the inbox folder now.
         SyncInboxNow,
         /// Shows the inbox folder — where captured items wait for triage —
         /// in the project panel.
@@ -407,31 +405,15 @@ impl InboxService {
         self.state = state;
     }
 
+    /// Gmail left for the unified sync service's label map (spec v15);
+    /// Google Tasks is the one transport still living here.
     fn build_sources(&self, cx: &App) -> Result<Vec<Arc<dyn InboxSource>>> {
         let vault = self.vault.as_ref().context("no vault")?;
         let config = self.config.as_ref().context("no inbox config")?;
-        let account = self.account.clone().context("no account connected")?;
+        self.account.as_ref().context("no account connected")?;
         let settings = resolve_google_settings(&vault.root, INBOX_CONFIG_FILE);
         let client = GoogleClient::resolve(&settings.google)?;
         let mut sources: Vec<Arc<dyn InboxSource>> = Vec::new();
-        if config.gmail_enabled {
-            // The fast-lane label from `.thock/gmail.toml`, so a thread
-            // carrying both labels is excluded here and captured by the
-            // backlog lane (V13 §7.1). No gmail.toml means no fast lane.
-            let fast_lane = std::fs::read_to_string(
-                vault.root.join(VAULT_MARKER_DIR).join(GMAIL_CONFIG_FILE),
-            )
-            .ok()
-            .and_then(|text| parse_gmail_config(&text).ok())
-            .map(|gmail| (gmail.label, gmail.label_is_default));
-            sources.push(Arc::new(GmailInboxSource::new(
-                cx.http_client(),
-                client.clone(),
-                account,
-                config.gmail_label.clone(),
-                fast_lane,
-            )));
-        }
         if config.tasks_enabled {
             sources.push(Arc::new(GoogleTasksSource::new(
                 cx.http_client(),
@@ -591,7 +573,7 @@ impl InboxService {
                 &imported,
                 &scan.digests,
                 &scan.stems,
-                &config,
+                &config.dir,
                 &captured_at,
             );
             if !plan.is_empty() {
@@ -824,6 +806,7 @@ mod tests {
             source: "google-tasks",
             external_id: id.to_string(),
             title: title.to_string(),
+            from: None,
             url: Some("https://example.com/ship-it".to_string()),
             link: None,
             body: None,

@@ -1432,18 +1432,6 @@ impl BacklogPanel {
             )],
             SyncState::Connecting => vec![muted("Gmail · connecting…".to_string())],
             SyncState::Idle => vec![muted("Gmail · waiting for first check".to_string())],
-            // Running on V9's flat label: a visible transitional state with
-            // a rename hint, never a silent alias (V13 §7.1).
-            SyncState::Synced { .. } if service.using_legacy_label() => vec![
-                div()
-                    .id("thock-gmail-legacy-label")
-                    .tooltip(Tooltip::text(
-                        "Capture still works — rename the label to \"thock/backlog\" in Gmail \
-                         to finish the move.",
-                    ))
-                    .child(muted("Backlog · using the old \"backlog\" label".to_string()))
-                    .into_any_element(),
-            ],
             SyncState::Synced { at } => {
                 vec![muted(format!("Gmail · checked {}", format_ago(at.elapsed())))]
             }

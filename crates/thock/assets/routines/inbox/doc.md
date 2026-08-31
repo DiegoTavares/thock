@@ -40,6 +40,6 @@ can always answer "what happened to that thing I sent myself" — even with Thoc
 
 - `routines/inbox/triage-policy.md` — the judgment triage follows. **Set Up Inbox** writes it
   from six questions; editing the file by hand changes the ritual with no re-setup.
-- `.thock/inbox.toml` — the landing folder, poll interval, the Gmail label, and the Google
-  Tasks list. Delete the file and the network transports go away; `inbox/` keeps working as a
-  plain folder.
+- `.thock/inbox.toml` — the landing folder, poll interval, and the Google Tasks list. The
+  Gmail label lives in `.thock/gmail.toml`'s label → folder map instead. Delete either file and
+  that transport goes away; `inbox/` keeps working as a plain folder.
