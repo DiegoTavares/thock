@@ -1,4 +1,5 @@
 mod application_menu;
+#[cfg(feature = "call")]
 pub mod collab;
 mod onboarding_banner;
 mod plan_chip;
@@ -22,14 +23,19 @@ use crate::application_menu::{
 };
 
 use auto_update::AutoUpdateStatus;
+#[cfg(feature = "call")]
 use call::ActiveCall;
+#[cfg(feature = "call")]
+use gpui::TaskExt;
+#[cfg(feature = "call")]
+use ui::PopoverMenuHandle;
 use client::{Client, UserStore, zed_urls};
 use command_palette_hooks::CommandPaletteFilter;
 
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, Context, Element, Entity, Focusable,
     InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Subscription, TaskExt, WeakEntity, Window, actions, div,
+    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, actions, div,
     pulsating_between,
 };
 use onboarding_banner::OnboardingBanner;
@@ -47,7 +53,7 @@ use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
 use ui::{
     Avatar, ButtonLike, ContextMenu, ContextMenuEntry, IconWithIndicator, Indicator, PopoverMenu,
-    PopoverMenuHandle, TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
+    TintColor, Tooltip, prelude::*, utils::platform_title_bar_height,
 };
 use update_version::UpdateVersion;
 use util::ResultExt;
@@ -205,6 +211,7 @@ pub struct TitleBar {
     _subscriptions: Vec<Subscription>,
     banner: Option<Entity<OnboardingBanner>>,
     update_version: Entity<UpdateVersion>,
+    #[cfg(feature = "call")]
     screen_share_popover_handle: PopoverMenuHandle<ContextMenu>,
     _diagnostics_subscription: Option<gpui::Subscription>,
 }
@@ -334,6 +341,7 @@ impl Render for TitleBar {
                 .into_any_element(),
         );
 
+        #[cfg(feature = "call")]
         children.push(self.render_collaborator_list(window, cx).into_any_element());
 
         if title_bar_settings.show_onboarding_banner {
@@ -442,6 +450,7 @@ impl TitleBar {
         let git_store = project.read(cx).git_store().clone();
         let user_store = workspace.app_state().user_store.clone();
         let client = workspace.app_state().client.clone();
+        #[cfg(feature = "call")]
         let active_call = ActiveCall::global(cx);
 
         let platform_style = PlatformStyle::platform();
@@ -465,6 +474,7 @@ impl TitleBar {
             }),
         );
 
+        #[cfg(feature = "call")]
         subscriptions.push(cx.observe(&active_call, |this, _, cx| this.active_call_changed(cx)));
         subscriptions.push(cx.observe_window_activation(window, Self::window_activation_changed));
         subscriptions.push(
@@ -505,6 +515,7 @@ impl TitleBar {
 
         let banner = None;
 
+        #[cfg_attr(not(feature = "call"), allow(unused_mut))]
         let mut this = Self {
             platform_titlebar,
             application_menu,
@@ -516,10 +527,12 @@ impl TitleBar {
             _subscriptions: subscriptions,
             banner,
             update_version,
+            #[cfg(feature = "call")]
             screen_share_popover_handle: PopoverMenuHandle::default(),
             _diagnostics_subscription: None,
         };
 
+        #[cfg(feature = "call")]
         this.observe_diagnostics(cx);
 
         this
@@ -1100,6 +1113,7 @@ impl TitleBar {
     }
 
     fn window_activation_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "call")]
         if window.is_window_active() {
             ActiveCall::global(cx)
                 .update(cx, |call, cx| call.set_location(Some(&self.project), cx))
@@ -1116,11 +1130,13 @@ impl TitleBar {
             .ok();
     }
 
+    #[cfg(feature = "call")]
     fn active_call_changed(&mut self, cx: &mut Context<Self>) {
         self.observe_diagnostics(cx);
         cx.notify();
     }
 
+    #[cfg(feature = "call")]
     fn observe_diagnostics(&mut self, cx: &mut Context<Self>) {
         let diagnostics = ActiveCall::global(cx)
             .read(cx)
@@ -1134,6 +1150,7 @@ impl TitleBar {
         }
     }
 
+    #[cfg(feature = "call")]
     fn share_project(&mut self, cx: &mut Context<Self>) {
         let active_call = ActiveCall::global(cx);
         let project = self.project.clone();
@@ -1142,6 +1159,7 @@ impl TitleBar {
             .detach_and_log_err(cx);
     }
 
+    #[cfg(feature = "call")]
     fn unshare_project(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let active_call = ActiveCall::global(cx);
         let project = self.project.clone();
@@ -1440,5 +1458,16 @@ impl TitleBar {
                 .into()
             })
             .anchor(Anchor::TopRight)
+    }
+}
+
+#[cfg(not(feature = "call"))]
+impl TitleBar {
+    pub(crate) fn render_call_controls(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        gpui::IntoElement::into_any_element(gpui::Empty)
     }
 }

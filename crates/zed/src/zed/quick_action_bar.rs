@@ -1,4 +1,5 @@
 mod preview;
+#[cfg(feature = "repl")]
 mod repl_menu;
 
 use agent_settings::AgentSettings;
@@ -788,5 +789,12 @@ impl ToolbarItemView for QuickActionBar {
             }
         }
         self.get_toolbar_item_location()
+    }
+}
+
+#[cfg(not(feature = "repl"))]
+impl QuickActionBar {
+    fn render_repl_menu(&self, _cx: &mut gpui::Context<Self>) -> Option<gpui::AnyElement> {
+        None
     }
 }

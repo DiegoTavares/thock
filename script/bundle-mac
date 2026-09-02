@@ -337,6 +337,10 @@ upload_debug_symbols
 
 cp target/${target_triple}/${target_dir}/thock "${app_path}/Contents/MacOS/thock"
 cp target/${target_triple}/${target_dir}/cli "${app_path}/Contents/MacOS/cli"
+# Ship stripped binaries; symbolication uses the unstripped binaries left in
+# target/ (and the .dwarf files produced above when the Sentry upload ran).
+strip "${app_path}/Contents/MacOS/thock"
+strip "${app_path}/Contents/MacOS/cli"
 sign_app_binaries
 
 sign_binary "target/$target_triple/release/remote_server"

@@ -24,6 +24,7 @@ use assets::Assets;
 use breadcrumbs::Breadcrumbs;
 use client::zed_urls;
 use collections::VecDeque;
+#[cfg(feature = "debugger")]
 use debugger_ui::debugger_panel::DebugPanel;
 use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
@@ -53,6 +54,7 @@ use language_tools::lsp_log_view::LspLogToolbarItemView;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use migrate::{MigrationBanner, MigrationEvent, MigrationNotification, MigrationType};
 use migrator::migrate_keymap;
+#[cfg(feature = "onboarding")]
 use onboarding::multibuffer_hint::MultibufferHint;
 pub use open_listener::*;
 use outline_panel::OutlinePanel;
@@ -784,8 +786,10 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
+        #[cfg(feature = "collab")]
         let channels_panel =
             collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
+        #[cfg(feature = "debugger")]
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -820,10 +824,12 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
             initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
+        #[cfg(feature = "collab")]
+        add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()).await;
+        #[cfg(feature = "debugger")]
+        add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()).await;
 
         // Thock: default the left dock to the timeline panel in vaults.
         workspace_handle
@@ -936,6 +942,15 @@ fn register_actions(
     _: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
+    #[cfg(feature = "collab")]
+    workspace.register_action(
+        |workspace: &mut Workspace,
+         _: &collab_ui::collab_panel::ToggleFocus,
+         window: &mut Window,
+         cx: &mut Context<Workspace>| {
+            workspace.toggle_panel_focus::<collab_ui::collab_panel::CollabPanel>(window, cx);
+        },
+    );
     workspace
         .register_action(|_, _: &OpenDocs, _, cx| cx.open_url(DOCS_URL))
         .register_action(|_, _: &OpenStatusPage, _, cx| cx.open_url(STATUS_URL))
@@ -1274,14 +1289,6 @@ fn register_actions(
         )
         .register_action(
             |workspace: &mut Workspace,
-             _: &collab_ui::collab_panel::ToggleFocus,
-             window: &mut Window,
-             cx: &mut Context<Workspace>| {
-                workspace.toggle_panel_focus::<collab_ui::collab_panel::CollabPanel>(window, cx);
-            },
-        )
-        .register_action(
-            |workspace: &mut Workspace,
              _: &terminal_panel::ToggleFocus,
              window: &mut Window,
              cx: &mut Context<Workspace>| {
@@ -1434,8 +1441,11 @@ fn initialize_pane(
     let workspace_handle = cx.weak_entity();
     pane.update(cx, |pane, cx| {
         pane.toolbar().update(cx, |toolbar, cx| {
-            let multibuffer_hint = cx.new(|_| MultibufferHint::new());
-            toolbar.add_item(multibuffer_hint, window, cx);
+            #[cfg(feature = "onboarding")]
+            {
+                let multibuffer_hint = cx.new(|_| MultibufferHint::new());
+                toolbar.add_item(multibuffer_hint, window, cx);
+            }
             let solo_diff_style_toolbar = cx.new(SoloDiffStyleToolbar::new);
             toolbar.add_item(solo_diff_style_toolbar, window, cx);
             let breadcrumbs = cx.new(|_| Breadcrumbs::new());
@@ -1457,8 +1467,11 @@ fn initialize_pane(
             toolbar.add_item(project_search_bar, window, cx);
             let lsp_log_item = cx.new(|_| LspLogToolbarItemView::new());
             toolbar.add_item(lsp_log_item, window, cx);
-            let dap_log_item = cx.new(|_| debugger_tools::DapLogToolbarItemView::new());
-            toolbar.add_item(dap_log_item, window, cx);
+            #[cfg(feature = "debugger")]
+            {
+                let dap_log_item = cx.new(|_| debugger_tools::DapLogToolbarItemView::new());
+                toolbar.add_item(dap_log_item, window, cx);
+            }
             let acp_tools_item = cx.new(|_| acp_tools::AcpToolsToolbarItemView::new());
             toolbar.add_item(acp_tools_item, window, cx);
             let telemetry_log_item =
@@ -2326,32 +2339,57 @@ pub fn load_default_keymap(cx: &mut App) {
     }
 
     cx.bind_keys(filter_disabled_ai_bindings(
-        KeymapFile::load_asset(DEFAULT_KEYMAP_PATH, Some(KeybindSource::Default), cx).unwrap(),
+        load_builtin_keymap(DEFAULT_KEYMAP_PATH, KeybindSource::Default, cx),
         cx,
     ));
 
     if let Some(asset_path) = base_keymap.asset_path() {
         cx.bind_keys(filter_disabled_ai_bindings(
-            KeymapFile::load_asset(asset_path, Some(KeybindSource::Base), cx).unwrap(),
+            load_builtin_keymap(asset_path, KeybindSource::Base, cx),
             cx,
         ));
     }
 
     if VimModeSetting::get_global(cx).0 || vim_mode_setting::HelixModeSetting::get_global(cx).0 {
         cx.bind_keys(filter_disabled_ai_bindings(
-            KeymapFile::load_asset(VIM_KEYMAP_PATH, Some(KeybindSource::Vim), cx).unwrap(),
+            load_builtin_keymap(VIM_KEYMAP_PATH, KeybindSource::Vim, cx),
             cx,
         ));
     }
 
-    cx.bind_keys(
-        KeymapFile::load_asset(
-            SPECIFIC_OVERRIDES_KEYMAP_PATH,
-            Some(KeybindSource::Default),
-            cx,
-        )
-        .unwrap(),
-    );
+    cx.bind_keys(load_builtin_keymap(
+        SPECIFIC_OVERRIDES_KEYMAP_PATH,
+        KeybindSource::Default,
+        cx,
+    ));
+}
+
+/// Loads a built-in keymap asset. When Zed subsystems are compiled out (see the
+/// feature list in crates/zed/Cargo.toml), the shipped keymaps still contain
+/// bindings for their actions; those bindings are skipped instead of fatal.
+fn load_builtin_keymap(asset_path: &str, source: KeybindSource, cx: &App) -> Vec<KeyBinding> {
+    #[cfg(all(
+        feature = "collab",
+        feature = "debugger",
+        feature = "onboarding",
+        feature = "repl",
+    ))]
+    return KeymapFile::load_asset(asset_path, Some(source), cx).unwrap();
+
+    #[cfg(not(all(
+        feature = "collab",
+        feature = "debugger",
+        feature = "onboarding",
+        feature = "repl",
+    )))]
+    {
+        let mut key_bindings = KeymapFile::load_asset_allow_partial_failure(asset_path, cx)
+            .expect("Failed to load built-in keymap");
+        for key_binding in &mut key_bindings {
+            key_binding.set_meta(source.meta());
+        }
+        key_bindings
+    }
 }
 
 /// Namespaces of actions that are part of an AI feature. When the user opts out

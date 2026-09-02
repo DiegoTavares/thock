@@ -14,8 +14,10 @@ doctest = false
 
 [features]
 default = []
+call = ["dep:call", "dep:channel", "dep:livekit_client"]
 
 test-support = [
+    "call",
     "call/test-support",
     "client/test-support",
 
@@ -34,8 +36,8 @@ anyhow.workspace = true
 auto_update.workspace = true
 fs.workspace = true
 platform_title_bar.workspace = true
-call.workspace = true
-channel.workspace = true
+call = { workspace = true, optional = true }
+channel = { workspace = true, optional = true }
 chrono.workspace = true
 client.workspace = true
 cloud_api_types.workspace = true
@@ -45,7 +47,7 @@ db.workspace = true
 git_ui.workspace = true
 gpui = { workspace = true, features = ["screen-capture"] }
 icons.workspace = true
-livekit_client.workspace = true
+livekit_client = { workspace = true, optional = true }
 notifications.workspace = true
 project.workspace = true
 recent_projects.workspace = true

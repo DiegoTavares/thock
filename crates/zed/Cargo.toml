@@ -15,6 +15,28 @@ workspace = true
 tracy = ["ztracing/tracy"]
 # LEAK_BACKTRACE=1 cargo run --features zed/track-project-leak --profile release-fast
 track-project-leak = ["gpui/leak-detection"]
+# Zed subsystems Thock ships without. Each gates an optional dependency and its
+# registration in main.rs/zed.rs; `zed-full` restores stock Zed behavior.
+calls = ["dep:call", "title_bar/call", "git_ui/call"]
+collab = ["calls", "dep:collab_ui"]
+debugger = [
+    "dep:dap_adapters",
+    "dep:debug_adapter_extension",
+    "dep:debugger_tools",
+    "dep:debugger_ui",
+]
+repl = ["dep:repl"]
+onboarding = ["dep:onboarding"]
+extensions-ui = ["dep:extensions_ui"]
+component-preview = ["dep:component_preview"]
+zed-full = [
+    "collab",
+    "component-preview",
+    "debugger",
+    "extensions-ui",
+    "onboarding",
+    "repl",
+]
 test-support = [
     "gpui/test-support",
     "gpui_platform/screen-capture",
@@ -29,6 +51,7 @@ test-support = [
     "title_bar/test-support",
 ]
 visual-tests = [
+    "calls",
     "gpui/test-support",
     "gpui_platform/screen-capture",
     "gpui_platform/test-support",
@@ -77,28 +100,28 @@ audio.workspace = true
 auto_update.workspace = true
 auto_update_ui.workspace = true
 breadcrumbs.workspace = true
-call.workspace = true
+call = { workspace = true, optional = true }
 chrono.workspace = true
 channel.workspace = true
 clap.workspace = true
 cli.workspace = true
 client.workspace = true
 codestral.workspace = true
-collab_ui.workspace = true
+collab_ui = { workspace = true, optional = true }
 collections.workspace = true
 command_palette.workspace = true
 component.workspace = true
-component_preview.workspace = true
+component_preview = { workspace = true, optional = true }
 copilot.workspace = true
 copilot_chat.workspace = true
 copilot_ui.workspace = true
 crashes.workspace = true
 csv_preview.workspace = true
-dap_adapters.workspace = true
+dap_adapters = { workspace = true, optional = true }
 db.workspace = true
-debug_adapter_extension.workspace = true
-debugger_tools.workspace = true
-debugger_ui.workspace = true
+debug_adapter_extension = { workspace = true, optional = true }
+debugger_tools = { workspace = true, optional = true }
+debugger_ui = { workspace = true, optional = true }
 dev_container.workspace = true
 diagnostics.workspace = true
 editor.workspace = true
@@ -106,7 +129,7 @@ encoding_selector.workspace = true
 env_logger.workspace = true
 extension.workspace = true
 extension_host.workspace = true
-extensions_ui.workspace = true
+extensions_ui = { workspace = true, optional = true }
 feature_flags.workspace = true
 feedback.workspace = true
 file_finder.workspace = true
@@ -114,7 +137,7 @@ fs.workspace = true
 futures.workspace = true
 git.workspace = true
 git_hosting_providers.workspace = true
-git_ui = { workspace = true, features = ["call"] }
+git_ui.workspace = true
 go_to_line.workspace = true
 system_specs.workspace = true
 gpui = { workspace = true, features = ["input-latency-histogram"] }
@@ -160,7 +183,7 @@ miniprofiler_ui.workspace = true
 mimalloc = { version = "0.1", optional = true }
 node_runtime.workspace = true
 notifications.workspace = true
-onboarding.workspace = true
+onboarding = { workspace = true, optional = true }
 outline.workspace = true
 outline_panel.workspace = true
 parking_lot.workspace = true
@@ -175,7 +198,7 @@ proto.workspace = true
 recent_projects.workspace = true
 release_channel.workspace = true
 remote.workspace = true
-repl.workspace = true
+repl = { workspace = true, optional = true }
 reqwest.workspace = true
 reqwest_client.workspace = true
 rope.workspace = true
@@ -258,6 +281,10 @@ pkg-config = "0.3.22"
 
 [dev-dependencies]
 call = { workspace = true, features = ["test-support"] }
+collab_ui.workspace = true
+debugger_tools.workspace = true
+debugger_ui.workspace = true
+onboarding.workspace = true
 editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["input-latency-histogram", "test-support"] }
 image_viewer = { workspace = true, features = ["test-support"] }

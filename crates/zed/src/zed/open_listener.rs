@@ -15,7 +15,10 @@ use futures::future;
 use futures::{FutureExt, StreamExt};
 use git_ui::{file_diff_view::FileDiffView, multi_diff_view::MultiDiffView};
 use gpui::{App, AsyncApp, Global, TaskExt, WindowHandle};
+#[cfg(feature = "onboarding")]
 use onboarding::FIRST_OPEN;
+#[cfg(not(feature = "onboarding"))]
+const FIRST_OPEN: &str = "first_open";
 use recent_projects::{RemoteSettings, navigate_to_positions, open_remote_project};
 use remote::{RemoteConnectionOptions, WslConnectionOptions};
 use settings::Settings;

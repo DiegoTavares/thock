@@ -16,6 +16,7 @@ pub use crate::extension::init_proxy as init_extension_proxy;
 
 use crate::provider::anthropic::AnthropicLanguageModelProvider;
 use crate::provider::anthropic_compatible::AnthropicCompatibleLanguageModelProvider;
+#[cfg(feature = "bedrock")]
 use crate::provider::bedrock::BedrockLanguageModelProvider;
 use crate::provider::cloud::CloudLanguageModelProvider;
 use crate::provider::copilot_chat::CopilotChatLanguageModelProvider;
@@ -292,6 +293,7 @@ fn register_language_model_providers(
         ),
         cx,
     );
+    #[cfg(feature = "bedrock")]
     registry.register_provider(
         Arc::new(BedrockLanguageModelProvider::new(
             client.http_client(),

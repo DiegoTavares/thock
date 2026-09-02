@@ -19,14 +19,19 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
 use client::{Client, ProxySettings, RefreshLlmTokenListener, UserStore, parse_zed_link};
+#[cfg(feature = "collab")]
 use collab_ui::channel_view::ChannelView;
+#[cfg(feature = "collab")]
+use workspace::notifications::NotifyResultExt;
 use collections::HashMap;
 use crashes::InitCrashHandler;
 use db::kvp::{GlobalKeyValueStore, KeyValueStore};
 use editor::Editor;
 use extension::ExtensionHostProxy;
 use fs::{Fs, RealFs};
-use futures::{StreamExt, channel::oneshot, future};
+#[cfg(feature = "collab")]
+use futures::future;
+use futures::{StreamExt, channel::oneshot};
 use git::GitHostingProviderRegistry;
 use git_ui::clone::clone_and_open;
 use gpui::{
@@ -62,12 +67,14 @@ use std::{
 };
 use theme::{ActiveTheme, GlobalTheme, ThemeRegistry};
 use theme_settings::load_user_theme;
-use util::{ResultExt, maybe};
+use util::ResultExt;
+#[cfg(feature = "collab")]
+use util::maybe;
 use uuid::Uuid;
 use workspace::{
     AppState, MultiWorkspace, SerializedWorkspaceLocation, SessionWorkspace, Toast,
     WorkspaceSettings, WorkspaceStore,
-    notifications::{NotificationId, NotifyResultExt},
+    notifications::NotificationId,
     restore_multiworkspace,
 };
 use zed::{
@@ -556,6 +563,7 @@ fn main() {
 
         let node_runtime = NodeRuntime::new(client.http_client(), Some(shell_env_loaded_rx), rx);
 
+        #[cfg(feature = "debugger")]
         debug_adapter_extension::init(extension_host_proxy.clone(), cx);
         languages::init(languages.clone(), fs.clone(), node_runtime.clone(), cx);
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
@@ -586,7 +594,9 @@ fn main() {
         #[cfg(target_os = "macos")]
         zed::move_to_applications::init(cx);
         project::Project::init(&client, cx);
+        #[cfg(feature = "debugger")]
         debugger_ui::init(cx);
+        #[cfg(feature = "debugger")]
         debugger_tools::init(cx);
         client::init(&client, cx);
         feature_flags::FeatureFlagStore::init(cx);
@@ -653,6 +663,7 @@ fn main() {
         AppState::set_global(app_state.clone(), cx);
 
         auto_update::init(client.clone(), cx);
+        #[cfg(feature = "debugger")]
         dap_adapters::init(cx);
         auto_update_ui::init(cx);
         reliability::init(client.clone(), app_state.workspace_store.clone(), cx);
@@ -718,6 +729,7 @@ fn main() {
         );
         zed::watch_user_agents_md(app_state.fs.clone(), cx);
 
+        #[cfg(feature = "repl")]
         repl::init(app_state.fs.clone(), cx);
         recent_projects::init(cx);
         dev_container::init(cx);
@@ -726,6 +738,7 @@ fn main() {
 
         editor::init(cx);
         image_viewer::init(cx);
+        #[cfg(feature = "repl")]
         repl::notebook::init(cx);
         diagnostics::init(cx);
 
@@ -766,17 +779,21 @@ fn main() {
         theme_selector::init(cx);
         settings_profile_selector::init(cx);
         language_tools::init(cx);
+        #[cfg(feature = "calls")]
         call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
+        #[cfg(feature = "collab")]
         collab_ui::init(&app_state, cx);
         git_ui::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);
         csv_preview::init(cx);
         svg_preview::init(cx);
+        #[cfg(feature = "onboarding")]
         onboarding::init(cx);
         settings_ui::init(cx);
         keymap_editor::init(cx);
+        #[cfg(feature = "extensions-ui")]
         extensions_ui::init(cx);
         edit_prediction::init(cx);
         inspector_ui::init(app_state.clone(), cx);
@@ -964,6 +981,7 @@ fn main() {
 
         let app_state = app_state.clone();
 
+        #[cfg(feature = "component-preview")]
         component_preview::init(app_state.clone(), cx);
 
         cx.spawn(async move |cx| {
@@ -1281,6 +1299,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
         }));
     }
 
+    #[cfg(feature = "collab")]
     if !request.open_channel_notes.is_empty() || request.join_channel.is_some() {
         cx.spawn(async move |cx| {
             let result = maybe!(async {
@@ -1335,6 +1354,15 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
         })
         .detach()
     } else if let Some(task) = task {
+        cx.spawn(async move |cx| {
+            if let Err(err) = task.await {
+                fail_to_open_window_async(err, cx);
+            }
+        })
+        .detach();
+    }
+    #[cfg(not(feature = "collab"))]
+    if let Some(task) = task {
         cx.spawn(async move |cx| {
             if let Err(err) = task.await {
                 fail_to_open_window_async(err, cx);
