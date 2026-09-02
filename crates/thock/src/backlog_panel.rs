@@ -8,6 +8,7 @@
 
 use anyhow::{Context as _, Result};
 use chrono::Local;
+use db::kvp::KeyValueStore;
 use editor::{Editor, EditorEvent, SelectionEffects, scroll::Autoscroll};
 use gpui::{
     Action, AnyElement, App, AsyncWindowContext, ClipboardItem, Context, Entity, EventEmitter,
@@ -17,7 +18,9 @@ use gpui::{
 use language::{Buffer, BufferEvent};
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use project::Project;
+use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use text::{Bias, Point};
@@ -64,9 +67,21 @@ actions!(
         /// Copies the selected task to the clipboard as Markdown.
         CopyBacklogTask,
         /// Opens backlog.md at the selected task's line.
-        RevealBacklogTask
+        RevealBacklogTask,
+        /// Closes the backlog category the cursor is in.
+        CollapseBacklogCategory,
+        /// Opens the backlog category the cursor is in.
+        ExpandBacklogCategory
     ]
 );
+
+/// The panel state that outlives a session: which categories the user closed
+/// (V17 §5.4). Category membership itself lives in `backlog.md`.
+#[derive(Default, Serialize, Deserialize)]
+struct SerializedBacklogPanel {
+    /// `(section heading, category name)` pairs.
+    collapsed: Vec<(String, String)>,
+}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -87,14 +102,33 @@ enum EditTarget {
         line: u32,
         original_text: String,
     },
-    /// The `+` affordance: a brand-new task appended to the section.
-    New { section: SectionKind },
+    /// The `+` affordance: a brand-new task appended to the section, inside
+    /// `category` when the add started from a group (V17 §5.3).
+    New {
+        section: SectionKind,
+        category: Option<String>,
+    },
 }
 
 struct EditState {
     target: EditTarget,
     editor: Entity<Editor>,
     _subscription: Subscription,
+}
+
+/// A row of an open column: a category header, or a task. Both the renderer
+/// and the keyboard cursor index into this list, so there is one ordering to
+/// keep in step (V17 §5.2).
+enum BacklogRow<'a> {
+    Category {
+        name: &'a str,
+        /// Open tasks in the group, whether or not it is collapsed.
+        count: usize,
+        collapsed: bool,
+    },
+    Task {
+        task: &'a BacklogTask,
+    },
 }
 
 /// The keyboard cursor: a column plus a row index into the tasks that column
@@ -123,6 +157,10 @@ pub struct BacklogPanel {
     buffer_path: Option<PathBuf>,
     _buffer_subscription: Option<Subscription>,
     backlog: Backlog,
+    /// The categories the user has closed, restored from the key-value store
+    /// on load and written back on every change (V17 §5.4).
+    collapsed: HashSet<(SectionKind, String)>,
+    pending_serialization: Option<Task<()>>,
     selected: Option<TaskSelection>,
     /// The row lit by the copy flash, if one is running.
     copy_flash: Option<TaskSelection>,
@@ -147,13 +185,42 @@ impl BacklogPanel {
         workspace: WeakEntity<Workspace>,
         mut cx: AsyncWindowContext,
     ) -> Result<Entity<Self>> {
+        let key = workspace
+            .read_with(&cx, |workspace, _| Self::serialization_key(workspace))
+            .ok()
+            .flatten();
+        let collapsed = match key {
+            Some(key) => {
+                let store = cx.update(|_, cx| KeyValueStore::global(cx))?;
+                cx.background_spawn(async move { store.read_kvp(&key) })
+                    .await
+                    .context("loading the backlog panel's collapsed groups")
+                    .log_err()
+                    .flatten()
+                    .and_then(|value| {
+                        serde_json::from_str::<SerializedBacklogPanel>(&value).log_err()
+                    })
+                    .map(|state| {
+                        state
+                            .collapsed
+                            .into_iter()
+                            .filter_map(|(section, name)| {
+                                Some((SectionKind::from_heading(&section)?, name))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            None => HashSet::default(),
+        };
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            BacklogPanel::new(workspace, window, cx)
+            BacklogPanel::new(workspace, collapsed, window, cx)
         })
     }
 
     pub fn new(
         workspace: &mut Workspace,
+        collapsed: HashSet<(SectionKind, String)>,
         _window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
@@ -189,6 +256,8 @@ impl BacklogPanel {
                 buffer_path: None,
                 _buffer_subscription: None,
                 backlog: Backlog::default(),
+                collapsed,
+                pending_serialization: None,
                 selected: None,
                 copy_flash: None,
                 copy_flash_task: None,
@@ -204,6 +273,43 @@ impl BacklogPanel {
             this.ensure_buffer(cx);
             this
         })
+    }
+
+    fn serialization_key(workspace: &Workspace) -> Option<String> {
+        workspace
+            .database_id()
+            .map(|id| i64::from(id).to_string())
+            .or(workspace.session_id())
+            .map(|id| format!("{BACKLOG_PANEL_KEY}-{id}"))
+    }
+
+    fn serialize(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self
+            .workspace
+            .read_with(cx, |workspace, _| Self::serialization_key(workspace))
+            .ok()
+            .flatten()
+        else {
+            return;
+        };
+        let state = SerializedBacklogPanel {
+            collapsed: self
+                .collapsed
+                .iter()
+                .map(|(section, name)| (section.heading().to_string(), name.clone()))
+                .collect(),
+        };
+        let Some(payload) = serde_json::to_string(&state).log_err() else {
+            return;
+        };
+        let store = KeyValueStore::global(cx);
+        // Replacing the task cancels a superseded write, which is what we
+        // want: the newest state owns the record.
+        self.pending_serialization = Some(cx.background_spawn(async move {
+            if let Err(error) = store.write_kvp(key, payload).await {
+                log::error!("couldn't save the backlog panel's collapsed groups: {error}");
+            }
+        }));
     }
 
     fn vault(&self) -> Option<&Vault> {
@@ -362,27 +468,12 @@ impl BacklogPanel {
 
     // --- Keyboard navigation (spec §6.6) ---
 
-    /// The tasks a column renders, in render order. Soon and Someday show only
-    /// open tasks, in file order; Completed shows its whole audit trail newest
-    /// first. Both the renderer and the keyboard cursor index into this, so
-    /// there is one ordering to keep in step.
-    fn visible_tasks(&self, section: SectionKind) -> Vec<&BacklogTask> {
-        match section {
-            SectionKind::Completed => {
-                // The file stays append-ordered (oldest first); reversing before
-                // the sort puts same-day completions newest-first too, and the
-                // sort is stable so that survives.
-                let mut tasks: Vec<&BacklogTask> = self.backlog.completed.iter().rev().collect();
-                tasks.sort_by_key(|task| Reverse(backlog::completion_date(&task.text)));
-                tasks
-            }
-            _ => self
-                .backlog
-                .section(section)
-                .iter()
-                .filter(|task| !task.checked)
-                .collect(),
-        }
+    fn completed_tasks(&self) -> Vec<&BacklogTask> {
+        completed_tasks(&self.backlog)
+    }
+
+    fn visible_rows(&self, section: SectionKind) -> Vec<BacklogRow<'_>> {
+        column_rows(&self.backlog, section, &self.collapsed)
     }
 
     /// The selection resolved against the current parse: same column, index
@@ -390,7 +481,7 @@ impl BacklogPanel {
     /// empty, so the highlight never points at a row that isn't there.
     fn selection(&self) -> Option<TaskSelection> {
         let selected = self.selected?;
-        let len = self.visible_tasks(selected.section).len();
+        let len = self.visible_rows(selected.section).len();
         len.checked_sub(1).map(|last| TaskSelection {
             section: selected.section,
             index: selected.index.min(last),
@@ -399,11 +490,82 @@ impl BacklogPanel {
 
     fn selected_task(&self) -> Option<(SectionKind, BacklogTask)> {
         let selection = self.selection()?;
-        let task = self
-            .visible_tasks(selection.section)
-            .get(selection.index)
-            .copied()?;
-        Some((selection.section, task.clone()))
+        match self.visible_rows(selection.section).get(selection.index)? {
+            BacklogRow::Task { task } => Some((selection.section, (*task).clone())),
+            BacklogRow::Category { .. } => None,
+        }
+    }
+
+    /// The group the cursor is in: a selected header's own category, or the
+    /// one holding the selected task. `None` on a loose task.
+    fn selected_category(&self) -> Option<(SectionKind, String)> {
+        let selection = self.selection()?;
+        match self.visible_rows(selection.section).get(selection.index)? {
+            BacklogRow::Category { name, .. } => Some((selection.section, (*name).to_string())),
+            BacklogRow::Task { task } => task
+                .category
+                .clone()
+                .map(|name| (selection.section, name)),
+        }
+    }
+
+    /// Whether the selected row is a category header, and if so whether it is
+    /// closed — read as one step so the borrow ends before a mutation.
+    fn selected_header_collapsed(&self) -> Option<bool> {
+        let selection = self.selection()?;
+        match self.visible_rows(selection.section).get(selection.index)? {
+            BacklogRow::Category { collapsed, .. } => Some(*collapsed),
+            BacklogRow::Task { .. } => None,
+        }
+    }
+
+    fn collapse_category(
+        &mut self,
+        _: &CollapseBacklogCategory,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_category_collapsed(true, cx);
+    }
+
+    fn expand_category(
+        &mut self,
+        _: &ExpandBacklogCategory,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_category_collapsed(false, cx);
+    }
+
+    fn set_category_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        let Some((section, name)) = self.selected_category() else {
+            return;
+        };
+        let changed = if collapsed {
+            self.collapsed.insert((section, name.clone()))
+        } else {
+            self.collapsed.remove(&(section, name.clone()))
+        };
+        if !changed {
+            return;
+        }
+        // A closed group swallows its tasks, so the cursor moves to the
+        // header rather than sliding onto whatever took the index.
+        if collapsed {
+            self.select_category_header(section, &name);
+        }
+        self.serialize(cx);
+        cx.notify();
+    }
+
+    fn select_category_header(&mut self, section: SectionKind, name: &str) {
+        if let Some(index) = self
+            .visible_rows(section)
+            .iter()
+            .position(|row| matches!(row, BacklogRow::Category { name: header, .. } if *header == name))
+        {
+            self.selected = Some(TaskSelection { section, index });
+        }
     }
 
     /// Where the cursor lands when a motion arrives with nothing selected: the
@@ -411,7 +573,7 @@ impl BacklogPanel {
     fn first_populated_column(&self) -> Option<SectionKind> {
         SectionKind::ALL
             .into_iter()
-            .find(|section| !self.visible_tasks(*section).is_empty())
+            .find(|section| !self.visible_rows(*section).is_empty())
     }
 
     fn select_row(&mut self, section: SectionKind, index: usize, cx: &mut Context<Self>) {
@@ -423,7 +585,7 @@ impl BacklogPanel {
         match self.selection() {
             Some(selection) => {
                 let last = self
-                    .visible_tasks(selection.section)
+                    .visible_rows(selection.section)
                     .len()
                     .saturating_sub(1);
                 self.select_row(selection.section, (selection.index + 1).min(last), cx);
@@ -448,7 +610,7 @@ impl BacklogPanel {
             }
             None => {
                 if let Some(section) = self.first_populated_column() {
-                    let last = self.visible_tasks(section).len().saturating_sub(1);
+                    let last = self.visible_rows(section).len().saturating_sub(1);
                     self.select_row(section, last, cx);
                 }
             }
@@ -461,7 +623,7 @@ impl BacklogPanel {
             .map(|selection| selection.section)
             .or_else(|| self.first_populated_column());
         if let Some(section) = section
-            && !self.visible_tasks(section).is_empty()
+            && !self.visible_rows(section).is_empty()
         {
             self.select_row(section, 0, cx);
         }
@@ -473,7 +635,7 @@ impl BacklogPanel {
             .map(|selection| selection.section)
             .or_else(|| self.first_populated_column());
         if let Some(section) = section {
-            let len = self.visible_tasks(section).len();
+            let len = self.visible_rows(section).len();
             if let Some(last) = len.checked_sub(1) {
                 self.select_row(section, last, cx);
             }
@@ -521,7 +683,7 @@ impl BacklogPanel {
         };
         let Some((destination, len)) = candidates
             .into_iter()
-            .map(|section| (section, self.visible_tasks(section).len()))
+            .map(|section| (section, self.visible_rows(section).len()))
             .find(|(_, len)| *len > 0)
         else {
             return;
@@ -560,7 +722,26 @@ impl BacklogPanel {
             Some(section) => section,
             None => SectionKind::Soon,
         };
-        self.start_edit(EditTarget::New { section }, "", window, cx);
+        let category = self.selected_category().map(|(_, name)| name);
+        self.start_add(section, category, window, cx);
+    }
+
+    /// Opens the new-task editor at the end of a group (or of the column's
+    /// uncategorized region). A closed group is opened first — otherwise the
+    /// editor would be typing into nothing.
+    fn start_add(
+        &mut self,
+        section: SectionKind,
+        category: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(name) = &category
+            && self.collapsed.remove(&(section, name.clone()))
+        {
+            self.serialize(cx);
+        }
+        self.start_edit(EditTarget::New { section, category }, "", window, cx);
     }
 
     fn complete_selected_task(
@@ -605,14 +786,18 @@ impl BacklogPanel {
         if section == destination || section == SectionKind::Completed {
             return;
         }
+        let moved_text = task.text.clone();
         if !self.move_task(section, task.line, task.text, cx) {
             return;
         }
-        // `move_task_edits` appends to the destination, so the moved task is
-        // now its last row.
-        let len = self.visible_tasks(destination).len();
-        if let Some(last) = len.checked_sub(1) {
-            self.select_row(destination, last, cx);
+        // The task keeps its category, so it lands at the end of that group
+        // rather than at the end of the column.
+        let moved = self
+            .visible_rows(destination)
+            .iter()
+            .position(|row| matches!(row, BacklogRow::Task { task } if task.text == moved_text));
+        if let Some(index) = moved {
+            self.select_row(destination, index, cx);
         }
     }
 
@@ -736,6 +921,10 @@ impl BacklogPanel {
             self.commit_edit(window, cx);
             return;
         }
+        if let Some(collapsed) = self.selected_header_collapsed() {
+            self.set_category_collapsed(!collapsed, cx);
+            return;
+        }
         self.edit_selected_task(&EditBacklogTask, window, cx);
     }
 
@@ -793,20 +982,27 @@ impl BacklogPanel {
                 let edit = backlog::rename_task_edit(task, &new_text);
                 self.write_edits(buffer, vec![edit], "Couldn't update backlog.md", cx);
             }
-            EditTarget::New { section } => {
+            EditTarget::New { section, category } => {
                 if new_text.is_empty() {
                     return;
                 }
-                self.append_new_task(section, &new_text, cx);
+                self.append_new_task(section, category, &new_text, cx);
             }
         }
     }
 
-    fn append_new_task(&mut self, section: SectionKind, text: &str, cx: &mut Context<Self>) {
+    fn append_new_task(
+        &mut self,
+        section: SectionKind,
+        category: Option<String>,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
         let block = backlog::new_task_block(text);
         if let Some(buffer) = self.buffer.clone() {
             let current = buffer.read(cx).text();
-            let edit = backlog::append_to_section_edit(&current, section, &block);
+            let edit =
+                backlog::append_to_section_edit(&current, section, category.as_deref(), &block);
             self.write_edits(
                 buffer,
                 vec![edit],
@@ -830,7 +1026,8 @@ impl BacklogPanel {
                     return Err(error).with_context(|| format!("reading {}", path.display()));
                 }
             };
-            let edit = backlog::append_to_section_edit(&current, section, &block);
+            let edit =
+                backlog::append_to_section_edit(&current, section, category.as_deref(), &block);
             let new_text = backlog::apply_edits(&current, vec![edit]);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
@@ -1069,9 +1266,15 @@ impl BacklogPanel {
         })
     }
 
-    fn is_adding_to(&self, section: SectionKind) -> bool {
+    fn is_adding_to(&self, section: SectionKind, category: Option<&str>) -> bool {
         self.edit_state.as_ref().is_some_and(|state| {
-            matches!(&state.target, EditTarget::New { section: adding } if *adding == section)
+            matches!(
+                &state.target,
+                EditTarget::New {
+                    section: adding,
+                    category: adding_category,
+                } if *adding == section && adding_category.as_deref() == category
+            )
         })
     }
 
@@ -1116,6 +1319,7 @@ impl BacklogPanel {
         task: &BacklogTask,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let indented = task.category.is_some();
         if self.is_editing(section, task.line, &task.text) {
             if let Some(editor_row) = self.render_editor_row(cx) {
                 return editor_row;
@@ -1142,6 +1346,7 @@ impl BacklogPanel {
             .gap_1()
             .px_1()
             .py_0p5()
+            .when(indented, |row| row.pl_4())
             .rounded_sm()
             .when_some(
                 self.row_background(TaskSelection { section, index }, cx),
@@ -1258,9 +1463,97 @@ impl BacklogPanel {
             .into_any_element()
     }
 
+    /// A category header row: disclosure + name + open count, with its own
+    /// `+` so a task can be added straight into the group (V17 §5.1).
+    fn render_category_row(
+        &self,
+        section: SectionKind,
+        index: usize,
+        name: &str,
+        count: usize,
+        collapsed: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let section_key = section.heading();
+        let name = name.to_string();
+        h_flex()
+            .w_full()
+            .gap_1()
+            .px_1()
+            .py_0p5()
+            .rounded_sm()
+            .when_some(
+                self.row_background(TaskSelection { section, index }, cx),
+                |row, background| row.bg(background),
+            )
+            .child(
+                h_flex()
+                    .id(ElementId::Name(
+                        format!("backlog-group-{section_key}-{index}").into(),
+                    ))
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .cursor_pointer()
+                    .child(
+                        Icon::new(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(name.clone())
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(count.to_string())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .on_click(cx.listener({
+                        let name = name.clone();
+                        move |this, _, _window, cx| {
+                            this.select_category_header(section, &name);
+                            this.set_category_collapsed(!collapsed, cx);
+                        }
+                    })),
+            )
+            .child(
+                IconButton::new(
+                    ElementId::Name(format!("backlog-group-add-{section_key}-{index}").into()),
+                    IconName::Plus,
+                )
+                .icon_size(IconSize::XSmall)
+                .icon_color(Color::Muted)
+                .tooltip({
+                    let focus_handle = self.focus_handle.clone();
+                    let label = SharedString::from(format!("Add to {name}"));
+                    move |_, cx| {
+                        Tooltip::for_action_in(label.clone(), &AddBacklogTask, &focus_handle, cx)
+                    }
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_category_header(section, &name);
+                    this.start_add(section, Some(name.clone()), window, cx);
+                })),
+            )
+            .into_any_element()
+    }
+
     fn render_open_section(&self, section: SectionKind, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
-        let tasks = self.visible_tasks(section);
+        let rows = self.visible_rows(section);
+        // Counts every open task, so a closed group still reports its share.
+        let open_count = self
+            .backlog
+            .section(section)
+            .iter()
+            .filter(|task| !task.checked)
+            .count();
         let section_key = section.heading();
         let header = h_flex()
             .justify_between()
@@ -1273,7 +1566,7 @@ impl BacklogPanel {
                     .gap_1()
                     .child(Label::new(section.heading()).size(LabelSize::Small))
                     .child(
-                        Label::new(tasks.len().to_string())
+                        Label::new(open_count.to_string())
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
                     ),
@@ -1296,15 +1589,37 @@ impl BacklogPanel {
                     }
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.start_edit(EditTarget::New { section }, "", window, cx);
+                    this.start_add(section, None, window, cx);
                 })),
             );
 
         let mut list = v_flex().py_0p5().gap_0p5();
-        for (index, task) in tasks.into_iter().enumerate() {
-            list = list.child(self.render_open_task_row(section, index, task, cx));
+        // The new-task editor belongs at the end of the group it is adding to,
+        // so it is flushed as each next header starts a new one.
+        let mut group: Option<&str> = None;
+        for (index, row) in rows.iter().enumerate() {
+            match row {
+                BacklogRow::Category {
+                    name,
+                    count,
+                    collapsed,
+                } => {
+                    if self.is_adding_to(section, group)
+                        && let Some(editor_row) = self.render_editor_row(cx)
+                    {
+                        list = list.child(editor_row);
+                    }
+                    group = Some(name);
+                    list = list.child(
+                        self.render_category_row(section, index, name, *count, *collapsed, cx),
+                    );
+                }
+                BacklogRow::Task { task } => {
+                    list = list.child(self.render_open_task_row(section, index, task, cx));
+                }
+            }
         }
-        if self.is_adding_to(section)
+        if self.is_adding_to(section, group)
             && let Some(editor_row) = self.render_editor_row(cx)
         {
             list = list.child(editor_row);
@@ -1331,7 +1646,7 @@ impl BacklogPanel {
 
     fn render_completed_section(&self, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
-        let completed = self.visible_tasks(SectionKind::Completed);
+        let completed = self.completed_tasks();
         let header = h_flex()
             .justify_between()
             .px_2()
@@ -1603,6 +1918,60 @@ impl BacklogPanel {
     }
 }
 
+/// The completed audit trail in render order. The file stays append-ordered
+/// (oldest first); reversing before the sort puts same-day completions
+/// newest-first too, and the sort is stable so that survives.
+fn completed_tasks(backlog: &Backlog) -> Vec<&BacklogTask> {
+    let mut tasks: Vec<&BacklogTask> = backlog.completed.iter().rev().collect();
+    tasks.sort_by_key(|task| Reverse(backlog::completion_date(&task.text)));
+    tasks
+}
+
+/// The rows a column renders, in render order: an open column shows its
+/// uncategorized open tasks in file order, then one header per category
+/// followed by that group's tasks unless it is closed. Completed is flat.
+fn column_rows<'a>(
+    backlog: &'a Backlog,
+    section: SectionKind,
+    collapsed: &HashSet<(SectionKind, String)>,
+) -> Vec<BacklogRow<'a>> {
+    if section == SectionKind::Completed {
+        return completed_tasks(backlog)
+            .into_iter()
+            .map(|task| BacklogRow::Task { task })
+            .collect();
+    }
+    let open: Vec<&BacklogTask> = backlog
+        .section(section)
+        .iter()
+        .filter(|task| !task.checked)
+        .collect();
+    let mut rows: Vec<BacklogRow<'a>> = open
+        .iter()
+        .copied()
+        .filter(|task| task.category.is_none())
+        .map(|task| BacklogRow::Task { task })
+        .collect();
+    for category in backlog.categories(section) {
+        let name = category.name.as_str();
+        let members: Vec<&BacklogTask> = open
+            .iter()
+            .copied()
+            .filter(|task| task.category.as_deref() == Some(name))
+            .collect();
+        let is_collapsed = collapsed.contains(&(section, name.to_string()));
+        rows.push(BacklogRow::Category {
+            name,
+            count: members.len(),
+            collapsed: is_collapsed,
+        });
+        if !is_collapsed {
+            rows.extend(members.into_iter().map(|task| BacklogRow::Task { task }));
+        }
+    }
+    rows
+}
+
 /// Activating the Inbox row runs the Triage Inbox ritual (the generic
 /// `thock::RunSkill`, per the repo's rule about dynamic content). A vault
 /// whose Inbox Routine was removed must not get a dead row (V13 §10.4), so
@@ -1684,6 +2053,8 @@ impl Render for BacklogPanel {
             .on_action(cx.listener(Self::move_selected_task_left))
             .on_action(cx.listener(Self::copy_selected_task))
             .on_action(cx.listener(Self::reveal_selected_task))
+            .on_action(cx.listener(Self::collapse_category))
+            .on_action(cx.listener(Self::expand_category))
             .size_full()
             .children(self.render_status_row(cx))
             .children(self.render_inbox_status_row(cx))
@@ -1751,7 +2122,79 @@ impl Panel for BacklogPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::restore_hidden_suffix;
+    use super::{BacklogRow, SectionKind, column_rows, restore_hidden_suffix};
+    use crate::backlog::parse_backlog;
+    use std::collections::HashSet;
+
+    const CATEGORIZED: &str = "\
+## Soon
+
+- [ ] Loose task
+- [x] Checked by hand
+
+### OpenCue
+
+- [ ] Fix the scheduler
+- [ ] Review PR #2489
+
+### Empty group
+
+## Someday
+";
+
+    /// The rendered rows as `("category", count)` / `"task text"` labels.
+    fn labels(source: &str, collapsed: &[(SectionKind, &str)]) -> Vec<String> {
+        let backlog = parse_backlog(source);
+        let collapsed: HashSet<(SectionKind, String)> = collapsed
+            .iter()
+            .map(|(section, name)| (*section, (*name).to_string()))
+            .collect();
+        column_rows(&backlog, SectionKind::Soon, &collapsed)
+            .into_iter()
+            .map(|row| match row {
+                BacklogRow::Category { name, count, .. } => format!("# {name} ({count})"),
+                BacklogRow::Task { task } => task.text.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn loose_tasks_render_above_the_groups() {
+        assert_eq!(
+            labels(CATEGORIZED, &[]),
+            vec![
+                "Loose task",
+                "# OpenCue (2)",
+                "Fix the scheduler",
+                "Review PR #2489",
+                "# Empty group (0)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_collapsed_group_keeps_its_header_and_count() {
+        assert_eq!(
+            labels(CATEGORIZED, &[(SectionKind::Soon, "OpenCue")]),
+            vec!["Loose task", "# OpenCue (2)", "# Empty group (0)"]
+        );
+    }
+
+    #[test]
+    fn a_stale_collapse_entry_is_harmless() {
+        assert_eq!(
+            labels(CATEGORIZED, &[(SectionKind::Soon, "Gone")]).len(),
+            5
+        );
+    }
+
+    #[test]
+    fn a_backlog_without_categories_renders_as_a_flat_list() {
+        assert_eq!(
+            labels("## Soon\n- [ ] One\n- [ ] Two\n", &[]),
+            vec!["One", "Two"]
+        );
+    }
 
     #[test]
     fn renames_keep_the_hidden_trailing_comment() {

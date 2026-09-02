@@ -1105,6 +1105,8 @@
       "<": "thock::MoveBacklogTaskLeft",
       "y y": "thock::CopyBacklogTask",
       "g space": "thock::RevealBacklogTask",
+      "z c": "thock::CollapseBacklogCategory",
+      "z o": "thock::ExpandBacklogCategory",
       "0": ["vim::Number", 0],
       "1": ["vim::Number", 1],
       "2": ["vim::Number", 2],

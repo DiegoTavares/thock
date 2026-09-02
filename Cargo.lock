@@ -18756,6 +18756,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "command_palette_hooks",
+ "db",
  "editor",
  "fs",
  "futures 0.3.32",

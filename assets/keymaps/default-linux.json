@@ -1641,6 +1641,8 @@
       "alt-left": "thock::MoveBacklogTaskLeft",
       "alt-right": "thock::MoveBacklogTaskRight",
       "ctrl-c": "thock::CopyBacklogTask",
+      "shift-left": "thock::CollapseBacklogCategory",
+      "shift-right": "thock::ExpandBacklogCategory",
     },
   },
   {

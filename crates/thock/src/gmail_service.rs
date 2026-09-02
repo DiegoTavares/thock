@@ -699,7 +699,7 @@ impl GmailService {
             if block.is_empty() {
                 return Ok(());
             }
-            let edit = append_to_section_edit(&text, SectionKind::Someday, &block);
+            let edit = append_to_section_edit(&text, SectionKind::Someday, None, &block);
             fs.atomic_write(backlog_path, apply_edits(&text, vec![edit])).await?;
             return Ok(());
         };
@@ -721,7 +721,7 @@ impl GmailService {
             if block.is_empty() {
                 return Ok(());
             }
-            let edit = append_to_section_edit(&text, SectionKind::Someday, &block);
+            let edit = append_to_section_edit(&text, SectionKind::Someday, None, &block);
             let new_text = apply_edits(&text, vec![edit]);
             let diff = buffer
                 .read_with(cx, |buffer, cx| buffer.diff(new_text, cx))

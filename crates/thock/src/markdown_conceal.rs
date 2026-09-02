@@ -108,8 +108,23 @@ pub struct MarkdownConcealAddon {
     /// The collapsed-by-default state is imposed once per open (V16 §5.3);
     /// after that the user's toggles are law.
     default_folds_applied: bool,
+    /// Set when `apply_folds` notifies the editor, so the self-observe below
+    /// can skip the echo of its own write rather than re-entering.
+    self_applied: bool,
+    /// The last repair `apply_folds` tried and the fold map did not take.
+    last_attempt: Option<ApplyAttempt>,
     reparse: Task<()>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// One repair pass of `apply_folds`: the folds it removed and the ones it
+/// added. If the identical repair comes back around, the previous one did not
+/// land in the fold map, and repeating it can only spin.
+#[derive(PartialEq)]
+struct ApplyAttempt {
+    stale: Vec<Range<MultiBufferOffset>>,
+    new: Vec<(Range<MultiBufferOffset>, SpanKind)>,
+    restored_impostors: Vec<Range<MultiBufferOffset>>,
 }
 
 impl editor::Addon for MarkdownConcealAddon {
@@ -213,9 +228,22 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
     // A user fold operation (`unfold_at`, `zR`, a gutter click) sweeps
     // intersecting conceal folds away with it and notifies the editor —
     // the display map itself never notifies. Heal on the editor's own
-    // notify rather than waiting for the next cursor move; this terminates
-    // because a healed apply is a no-op that doesn't notify again.
-    subscriptions.push(cx.observe(&cx.entity(), |editor, _, cx| apply_folds(editor, cx)));
+    // notify rather than waiting for the next cursor move.
+    //
+    // `apply_folds` notifies whenever it changes a fold, and this observer
+    // watches the very editor it notified, so the echo has to be dropped
+    // here: without that, a pass that doesn't reach a fixed point re-enters
+    // itself forever and pins the main thread inside `flush_effects`.
+    // Swallowing an echo can at worst delay one heal to the next cursor
+    // move, which is invisible; not swallowing it freezes the app.
+    subscriptions.push(cx.observe(&cx.entity(), |editor, _, cx| {
+        if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>()
+            && std::mem::take(&mut addon.self_applied)
+        {
+            return;
+        }
+        apply_folds(editor, cx)
+    }));
     // Highlight styles capture theme colours, so a theme change needs a
     // re-apply to pick up the new palette.
     subscriptions
@@ -269,6 +297,8 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         email: None,
         crease_ids: Vec::new(),
         default_folds_applied: false,
+        self_applied: false,
+        last_attempt: None,
         reparse: Task::ready(()),
         _subscriptions: subscriptions,
     });
@@ -768,6 +798,27 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
         .cloned()
         .collect();
     if stale.is_empty() && new.is_empty() && restored_impostors.is_empty() {
+        // Nothing to repair, so there is no failed attempt to remember.
+        if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+            addon.last_attempt = None;
+        }
+        return;
+    }
+
+    // The same repair coming back means the last one never landed in the
+    // fold map — a desired range it won't hold verbatim, say. Retrying can
+    // never converge, and every retry notifies the editor this pass observes,
+    // so the two spin until the app is wedged. Stand down and leave the folds
+    // as they are until something actually changes.
+    let attempt = ApplyAttempt {
+        stale: stale.clone(),
+        new: new.clone(),
+        restored_impostors: restored_impostors.clone(),
+    };
+    if editor
+        .addon::<MarkdownConcealAddon>()
+        .is_some_and(|addon| addon.last_attempt.as_ref() == Some(&attempt))
+    {
         return;
     }
 
@@ -797,6 +848,34 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
             map.fold(creases, cx);
         }
     });
+
+    // Did the fold map actually take it? Comparing what it holds now against
+    // what was wanted is what makes the next pass a no-op instead of the
+    // start of a loop.
+    let applied: Vec<(Range<MultiBufferOffset>, Option<SharedString>)> = editor
+        .display_map
+        .update(cx, |map, cx| map.snapshot(cx))
+        .folds_in_range(MultiBufferOffset(0)..buffer_snapshot.len())
+        .filter(|fold| fold.placeholder.type_tag == Some(fold_type_tag()))
+        .map(|fold| {
+            (
+                fold.range.start.to_offset(&buffer_snapshot)
+                    ..fold.range.end.to_offset(&buffer_snapshot),
+                fold.placeholder.collapsed_text.clone(),
+            )
+        })
+        .collect();
+    let converged = applied.len() == desired.len()
+        && desired
+            .iter()
+            .all(|want| applied.iter().any(|fold| matches(fold, want)));
+
+    if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        // The notify below lands back on this editor's own observer; that
+        // pass is our echo, not a user fold operation, so mark it.
+        addon.self_applied = true;
+        addon.last_attempt = (!converged).then_some(attempt);
+    }
     cx.notify();
 }
 
@@ -1519,6 +1598,88 @@ mod tests {
             display_text(&editor, &mut cx),
             "# Title\nsee  wiki  and  docs \n \nplain tail\n"
         );
+    }
+
+    /// The self-observe at `install` feeds `apply_folds` its own notify, so a
+    /// pass that never reaches a fixed point would re-enter itself forever
+    /// and pin the main thread inside `flush_effects`. A settled editor must
+    /// carry no outstanding repair.
+    #[gpui::test]
+    async fn a_settled_pass_leaves_no_outstanding_repair(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, NOTE).await;
+        move_cursor_to(&editor, 3, &mut cx);
+        editor.update(&mut cx, |editor, _| {
+            let addon = editor.addon::<MarkdownConcealAddon>().unwrap();
+            assert!(
+                addon.last_attempt.is_none(),
+                "a converged apply should leave nothing to retry"
+            );
+        });
+    }
+
+    /// The heal the self-observe exists for still has to work: a fold wipe
+    /// plus a plain editor notify must re-conceal, and must then settle
+    /// rather than bouncing between notify and apply.
+    #[gpui::test]
+    async fn a_wiped_fold_set_heals_on_a_notify_and_settles(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, NOTE).await;
+        move_cursor_to(&editor, 3, &mut cx);
+        editor.update_in(&mut cx, |editor, _, cx| {
+            let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+            editor.display_map.update(cx, |map, cx| {
+                map.unfold_intersecting([MultiBufferOffset(0)..buffer_snapshot.len()], true, cx);
+            });
+        });
+        assert_eq!(display_text(&editor, &mut cx), NOTE);
+
+        editor.update(&mut cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            " Title\nsee  wiki  and  docs \n \nplain tail\n"
+        );
+        editor.update(&mut cx, |editor, _| {
+            assert!(
+                editor
+                    .addon::<MarkdownConcealAddon>()
+                    .unwrap()
+                    .last_attempt
+                    .is_none()
+            );
+        });
+    }
+
+    /// Deleting lines is the shape that used to wedge the app: the edit
+    /// shifts every anchor below it while the re-parse is still debounced, so
+    /// the intervening passes run against stale spans. It has to settle.
+    #[gpui::test]
+    async fn deleting_lines_settles_instead_of_spinning(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, NOTE).await;
+        move_cursor_to(&editor, 3, &mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                selections
+                    .select_ranges([MultiBufferPoint::new(1, 0)..MultiBufferPoint::new(2, 0)]);
+            });
+            editor.insert("", window, cx);
+        });
+        settle(&mut cx);
+
+        // The cursor is left on the `___` line, which the reveal rule shows
+        // as source; everything else re-conceals against the new offsets.
+        assert_eq!(display_text(&editor, &mut cx), " Title\n___\nplain tail\n");
+        move_cursor_to(&editor, 0, &mut cx);
+        assert_eq!(display_text(&editor, &mut cx), "# Title\n \nplain tail\n");
+        editor.update(&mut cx, |editor, _| {
+            assert!(
+                editor
+                    .addon::<MarkdownConcealAddon>()
+                    .unwrap()
+                    .last_attempt
+                    .is_none()
+            );
+        });
     }
 
     const EMAIL_NOTE: &str = "---\n\

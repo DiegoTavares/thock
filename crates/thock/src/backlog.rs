@@ -39,7 +39,7 @@ pub fn email_capture_line(title: &str, stem: &str, digest: &str) -> String {
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SectionKind {
     Soon,
     Someday,
@@ -56,6 +56,20 @@ impl SectionKind {
             Self::Completed => "Completed",
         }
     }
+
+    /// The section a persisted heading names, for panel state restored from
+    /// disk.
+    pub fn from_heading(heading: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.heading() == heading)
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Soon => 0,
+            Self::Someday => 1,
+            Self::Completed => 2,
+        }
+    }
 }
 
 /// A top-level checklist task inside one of the backlog's sections.
@@ -70,6 +84,17 @@ pub struct BacklogTask {
     pub text_span: Range<usize>,
     pub text: String,
     pub checked: bool,
+    /// The category heading this task sits under, when it has one (V17 §4).
+    pub category: Option<String>,
+}
+
+/// A heading *deeper* than its section's own — `### OpenCue` under
+/// `## Soon` — naming a collapsible group of tasks (V17 §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Category {
+    pub name: String,
+    /// 0-based line of the heading.
+    pub line: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -77,9 +102,16 @@ pub struct Backlog {
     pub soon: Vec<BacklogTask>,
     pub someday: Vec<BacklogTask>,
     pub completed: Vec<BacklogTask>,
+    /// Per section, the category headings in file order — empty ones
+    /// included, so a group emptied by a move still renders.
+    categories: [Vec<Category>; 3],
 }
 
 impl Backlog {
+    pub fn categories(&self, kind: SectionKind) -> &[Category] {
+        &self.categories[kind.index()]
+    }
+
     pub fn section(&self, kind: SectionKind) -> &[BacklogTask] {
         match kind {
             SectionKind::Soon => &self.soon,
@@ -177,11 +209,12 @@ fn line_table(text: &str) -> Vec<Line<'_>> {
 }
 
 /// The lines belonging to the first heading matching `heading`
-/// (case-insensitively, at any level), ending before the next heading of
-/// equal or higher level. `None` when the heading doesn't exist. Unicode
-/// lowercasing, matching the Day Planner's heading resolution, so the two
-/// features agree on which section a configured heading names.
-fn section_line_range(lines: &[Line<'_>], heading: &str) -> Option<Range<usize>> {
+/// (case-insensitively, at any level) plus that heading's level, ending
+/// before the next heading of equal or higher level. `None` when the heading
+/// doesn't exist. Unicode lowercasing, matching the Day Planner's heading
+/// resolution, so the two features agree on which section a configured
+/// heading names.
+fn section_line_range(lines: &[Line<'_>], heading: &str) -> Option<(Range<usize>, usize)> {
     let wanted = heading.to_lowercase();
     let (start, level) = lines.iter().enumerate().find_map(|(index, line)| {
         let (level, text) = heading_level_and_text(line.content)?;
@@ -194,7 +227,40 @@ fn section_line_range(lines: &[Line<'_>], heading: &str) -> Option<Range<usize>>
         })
         .map(|offset| start + 1 + offset)
         .unwrap_or(lines.len());
-    Some(start + 1..end)
+    Some((start + 1..end, level))
+}
+
+/// The rows of a section that belong to `category`: `None` addresses the
+/// region above the section's first category heading, `Some(name)` the block
+/// under the first heading with that name. `None` is returned when the named
+/// category isn't in the section.
+fn category_line_range(
+    lines: &[Line<'_>],
+    section: Range<usize>,
+    level: usize,
+    category: Option<&str>,
+) -> Option<Range<usize>> {
+    let heading_at = |row: usize| heading_level_and_text(lines[row].content);
+    match category {
+        None => {
+            let end = section
+                .clone()
+                .find(|&row| heading_at(row).is_some_and(|(other, _)| other > level))
+                .unwrap_or(section.end);
+            Some(section.start..end)
+        }
+        Some(name) => {
+            let start = section.clone().find(|&row| {
+                heading_at(row).is_some_and(|(other, text)| other > level && text == name)
+            })?;
+            // Any further heading — even a deeper one — closes the group;
+            // V17 has no nesting.
+            let end = (start + 1..section.end)
+                .find(|&row| heading_at(row).is_some())
+                .unwrap_or(section.end);
+            Some(start + 1..end)
+        }
+    }
 }
 
 /// Matches a **top-level** `- [ ]` / `- [x]` list item (also `*` / `+`
@@ -235,19 +301,34 @@ pub fn parse_backlog(text: &str) -> Backlog {
     let lines = line_table(text);
     let mut backlog = Backlog::default();
     for kind in SectionKind::ALL {
-        let Some(range) = section_line_range(&lines, kind.heading()) else {
+        let Some((range, level)) = section_line_range(&lines, kind.heading()) else {
             continue;
         };
-        let tasks = match kind {
-            SectionKind::Soon => &mut backlog.soon,
-            SectionKind::Someday => &mut backlog.someday,
-            SectionKind::Completed => &mut backlog.completed,
-        };
+        let mut tasks = Vec::new();
+        let mut categories: Vec<Category> = Vec::new();
+        let mut category: Option<String> = None;
         let mut row = range.start;
         while row < range.end {
             let Some(line) = lines.get(row) else {
                 break;
             };
+            if let Some((heading_level, name)) = heading_level_and_text(line.content) {
+                if heading_level > level {
+                    // A heading with no text closes the group it follows
+                    // without opening one (V17 §4).
+                    category = (!name.is_empty()).then(|| name.to_string());
+                    if let Some(name) = &category
+                        && !categories.iter().any(|other| other.name == *name)
+                    {
+                        categories.push(Category {
+                            name: name.clone(),
+                            line: row as u32,
+                        });
+                    }
+                }
+                row += 1;
+                continue;
+            }
             let Some((checked, text_column)) = parse_top_level_task(line.content) else {
                 row += 1;
                 continue;
@@ -271,9 +352,16 @@ pub fn parse_backlog(text: &str) -> Backlog {
                 text_span: line.start + text_column..line.start + line.content.len(),
                 text: line.content[text_column..].to_string(),
                 checked,
+                category: category.clone(),
             });
             row = last_row + 1;
         }
+        match kind {
+            SectionKind::Soon => backlog.soon = tasks,
+            SectionKind::Someday => backlog.someday = tasks,
+            SectionKind::Completed => backlog.completed = tasks,
+        }
+        backlog.categories[kind.index()] = categories;
     }
     backlog
 }
@@ -324,18 +412,20 @@ pub fn complete_task_edits(text: &str, task: &BacklogTask, date: NaiveDate) -> V
             range: task.span.clone(),
             new_text: String::new(),
         },
-        append_to_section_edit(text, SectionKind::Completed, &completed_block),
+        append_to_section_edit(text, SectionKind::Completed, None, &completed_block),
     ]
 }
 
-/// Moves the task (with children) verbatim to the end of another section.
+/// Moves the task (with children) verbatim to the end of another section,
+/// keeping the category it was filed under (V17 §5.3) — the destination's
+/// heading is created when it isn't there yet.
 pub fn move_task_edits(text: &str, task: &BacklogTask, to: SectionKind) -> Vec<Edit> {
     vec![
         Edit {
             range: task.span.clone(),
             new_text: String::new(),
         },
-        append_to_section_edit(text, to, &task_block(text, task)),
+        append_to_section_edit(text, to, task.category.as_deref(), &task_block(text, task)),
     ]
 }
 
@@ -344,33 +434,52 @@ pub fn move_task_edits(text: &str, task: &BacklogTask, to: SectionKind) -> Vec<E
 /// when the section is empty, or — when the heading doesn't exist yet —
 /// appending the heading at the end of the file (create-if-missing, never
 /// clobber; spec §5.1).
-pub fn append_to_section_edit(text: &str, kind: SectionKind, block: &str) -> Edit {
+///
+/// With `category` set the block lands inside that group instead, and with it
+/// unset it lands *above* the section's first category heading, so an
+/// uncategorized task never falls into the last group (V17 §5.3).
+pub fn append_to_section_edit(
+    text: &str,
+    kind: SectionKind,
+    category: Option<&str>,
+    block: &str,
+) -> Edit {
     let lines = line_table(text);
-    match section_line_range(&lines, kind.heading()) {
-        Some(range) => {
-            let anchor = lines[range.clone()]
-                .iter()
-                .rposition(|line| !line.content.trim().is_empty())
-                .map(|offset| range.start + offset);
-            match anchor {
-                Some(row) => insert_after_line(&lines, row, block.to_string()),
-                // Empty section: land right under the heading, keeping one
-                // blank line between them.
-                None => insert_after_line(&lines, range.start - 1, format!("\n{block}")),
-            }
-        }
+    let Some((section, level)) = section_line_range(&lines, kind.heading()) else {
+        let prefix = if text.is_empty() {
+            ""
+        } else if text.ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        let body = match category {
+            Some(name) => format!("### {name}\n\n{block}"),
+            None => block.to_string(),
+        };
+        return Edit {
+            range: text.len()..text.len(),
+            new_text: format!("{prefix}## {}\n\n{body}", kind.heading()),
+        };
+    };
+    let last_non_blank = |rows: Range<usize>| {
+        lines[rows.clone()]
+            .iter()
+            .rposition(|line| !line.content.trim().is_empty())
+            .map(|offset| rows.start + offset)
+    };
+    match category_line_range(&lines, section.clone(), level, category) {
+        Some(rows) => match last_non_blank(rows.clone()) {
+            Some(row) => insert_after_line(&lines, row, block.to_string()),
+            // Empty section or empty group: land right under the heading,
+            // keeping one blank line between them.
+            None => insert_after_line(&lines, rows.start - 1, format!("\n{block}")),
+        },
+        // The category isn't in this section yet — open it at the end.
         None => {
-            let prefix = if text.is_empty() {
-                ""
-            } else if text.ends_with('\n') {
-                "\n"
-            } else {
-                "\n\n"
-            };
-            Edit {
-                range: text.len()..text.len(),
-                new_text: format!("{prefix}## {}\n\n{block}", kind.heading()),
-            }
+            let name = category.unwrap_or_default();
+            let anchor = last_non_blank(section.clone()).unwrap_or(section.start - 1);
+            insert_after_line(&lines, anchor, format!("\n### {name}\n\n{block}"))
         }
     }
 }
@@ -386,7 +495,7 @@ pub fn append_done_to_note_edit(note_text: &str, heading: &str, task_text: &str)
         .trim()
         .is_empty()
         .then_some(None)
-        .unwrap_or_else(|| section_line_range(&lines, heading.trim()));
+        .unwrap_or_else(|| section_line_range(&lines, heading.trim()).map(|(range, _)| range));
     match section {
         Some(range) => {
             let anchor = lines[range.clone()]
@@ -708,6 +817,7 @@ Some orienting prose the model must never touch.
             vec![append_to_section_edit(
                 DEFAULT_BACKLOG,
                 SectionKind::Soon,
+                None,
                 &new_task_block("  Renew passport  "),
             )],
         );
@@ -793,6 +903,197 @@ Some orienting prose the model must never touch.
         assert!(!backlog.contains_task("Brand new"));
     }
 
+    const CATEGORIZED: &str = "\
+## Soon
+
+- [ ] Loose task
+
+### OpenCue
+
+- [ ] Fix the scheduler
+- [ ] Review PR #2489
+
+### Thock
+
+- [ ] Backlog categories
+
+## Someday
+
+- [ ] Later thing
+
+## Completed
+";
+
+    #[test]
+    fn parses_categories_and_loose_tasks() {
+        let backlog = parse_backlog(CATEGORIZED);
+        assert_eq!(
+            backlog
+                .soon
+                .iter()
+                .map(|task| (task.text.as_str(), task.category.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Loose task", None),
+                ("Fix the scheduler", Some("OpenCue")),
+                ("Review PR #2489", Some("OpenCue")),
+                ("Backlog categories", Some("Thock")),
+            ]
+        );
+        assert_eq!(
+            backlog
+                .categories(SectionKind::Soon)
+                .iter()
+                .map(|category| category.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["OpenCue", "Thock"]
+        );
+        assert!(backlog.categories(SectionKind::Someday).is_empty());
+    }
+
+    #[test]
+    fn empty_categories_are_kept_and_unnamed_headings_close_the_group() {
+        let backlog = parse_backlog("## Soon\n### Empty\n###\n- [ ] After the blank heading\n");
+        assert_eq!(
+            backlog
+                .categories(SectionKind::Soon)
+                .iter()
+                .map(|category| category.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Empty"]
+        );
+        assert_eq!(backlog.soon[0].category, None);
+    }
+
+    #[test]
+    fn category_headings_do_not_become_task_children() {
+        let backlog = parse_backlog("## Soon\n- [ ] Task\n  - child\n### Group\n- [ ] Grouped\n");
+        assert_eq!(backlog.soon[0].category, None);
+        assert!(!CATEGORIZED[backlog.soon[0].span.clone()].contains("###"));
+        assert_eq!(backlog.soon[1].category.as_deref(), Some("Group"));
+    }
+
+    #[test]
+    fn uncategorized_appends_land_above_the_first_category() {
+        let edited = apply_edits(
+            CATEGORIZED,
+            vec![append_to_section_edit(
+                CATEGORIZED,
+                SectionKind::Soon,
+                None,
+                &new_task_block("Another loose task"),
+            )],
+        );
+        assert!(edited.contains("- [ ] Loose task\n- [ ] Another loose task\n\n### OpenCue"));
+        let reparsed = parse_backlog(&edited);
+        assert_eq!(reparsed.soon[1].category, None);
+    }
+
+    #[test]
+    fn appends_into_an_existing_category() {
+        let edited = apply_edits(
+            CATEGORIZED,
+            vec![append_to_section_edit(
+                CATEGORIZED,
+                SectionKind::Soon,
+                Some("OpenCue"),
+                &new_task_block("Chase the licensing bug"),
+            )],
+        );
+        assert!(edited.contains("- [ ] Review PR #2489\n- [ ] Chase the licensing bug\n\n### Thock"));
+    }
+
+    #[test]
+    fn appends_create_a_missing_category_at_the_end_of_the_section() {
+        let edited = apply_edits(
+            CATEGORIZED,
+            vec![append_to_section_edit(
+                CATEGORIZED,
+                SectionKind::Someday,
+                Some("Reading"),
+                &new_task_block("Finish the Housel book"),
+            )],
+        );
+        assert!(edited.contains(
+            "## Someday\n\n- [ ] Later thing\n\n### Reading\n\n- [ ] Finish the Housel book\n"
+        ));
+        let reparsed = parse_backlog(&edited);
+        assert_eq!(reparsed.someday[1].category.as_deref(), Some("Reading"));
+    }
+
+    #[test]
+    fn appends_into_an_empty_category() {
+        let source = "## Soon\n\n### Empty\n\n## Someday\n";
+        let edited = apply_edits(
+            source,
+            vec![append_to_section_edit(
+                source,
+                SectionKind::Soon,
+                Some("Empty"),
+                &new_task_block("First one"),
+            )],
+        );
+        assert_eq!(edited, "## Soon\n\n### Empty\n\n- [ ] First one\n\n## Someday\n");
+    }
+
+    #[test]
+    fn appends_land_under_the_heading_when_the_section_opens_with_a_category() {
+        let source = "## Soon\n\n### Group\n\n- [ ] Grouped\n";
+        let edited = apply_edits(
+            source,
+            vec![append_to_section_edit(
+                source,
+                SectionKind::Soon,
+                None,
+                &new_task_block("Loose"),
+            )],
+        );
+        assert_eq!(edited, "## Soon\n\n- [ ] Loose\n\n### Group\n\n- [ ] Grouped\n");
+    }
+
+    #[test]
+    fn moving_a_task_carries_its_category() {
+        let backlog = parse_backlog(CATEGORIZED);
+        let task = task(&backlog, SectionKind::Soon, "Backlog categories");
+        let edited = apply_edits(
+            CATEGORIZED,
+            move_task_edits(CATEGORIZED, task, SectionKind::Someday),
+        );
+        let reparsed = parse_backlog(&edited);
+        assert_eq!(
+            reparsed
+                .someday
+                .iter()
+                .map(|task| (task.text.as_str(), task.category.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![("Later thing", None), ("Backlog categories", Some("Thock"))]
+        );
+        // The emptied group stays behind; the panel renders it as a place to
+        // put things.
+        assert_eq!(
+            reparsed
+                .categories(SectionKind::Soon)
+                .iter()
+                .map(|category| category.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["OpenCue", "Thock"]
+        );
+    }
+
+    #[test]
+    fn completing_a_categorized_task_files_it_flat() {
+        let backlog = parse_backlog(CATEGORIZED);
+        let task = task(&backlog, SectionKind::Soon, "Fix the scheduler");
+        let edited = apply_edits(
+            CATEGORIZED,
+            complete_task_edits(CATEGORIZED, task, date(2026, 9, 2)),
+        );
+        let reparsed = parse_backlog(&edited);
+        assert_eq!(reparsed.completed.len(), 1);
+        assert_eq!(reparsed.completed[0].category, None);
+        assert_eq!(reparsed.completed[0].text, "Fix the scheduler ✅ 2026-09-02");
+    }
+
     #[test]
     fn default_backlog_round_trips() {
         let backlog = parse_backlog(DEFAULT_BACKLOG);
@@ -804,6 +1105,7 @@ Some orienting prose the model must never touch.
             vec![append_to_section_edit(
                 DEFAULT_BACKLOG,
                 SectionKind::Someday,
+                None,
                 &new_task_block("Learn woodworking"),
             )],
         );
