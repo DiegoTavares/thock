@@ -24,6 +24,23 @@ pub enum SpanKind {
     Checkbox(bool),
     /// The text between a pair of `~~` delimiters, drawn struck through.
     Strikethrough,
+    /// An email note's machinery line (frontmatter fence or sync key),
+    /// folded away entirely, trailing newline included (V16 §5.1).
+    EmailHidden,
+    /// An email note's `link:` frontmatter line, drawn as an "Open in …"
+    /// label instead of the raw URL.
+    EmailLink,
+    /// The `## ` marker of a message header, drawn as a sender dot; `true`
+    /// when the message is from the connected account.
+    EmailMarker(bool),
+    /// A sender name — in a message header or the envelope's `from:` value;
+    /// `true` for the connected account's own messages.
+    EmailSender(bool),
+    /// Muted email chrome: a message header's ` — date` tail and the
+    /// envelope's visible frontmatter keys.
+    EmailDate,
+    /// A quoted-history line (`> …` or its `… wrote:` attribution).
+    EmailQuote,
 }
 
 /// A byte range of the scanned text and how it should display.
@@ -627,6 +644,252 @@ fn parse_inline_link(line: &str, open: usize) -> Option<InlineLink> {
     })
 }
 
+/// The parsed shape of a synced email note (spec V16): a full replacement
+/// span set (V10's spans with message headers restyled, plus the envelope),
+/// one entry per `## Sender — date` message, and the quoted-history runs
+/// ready to crease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailPlan {
+    pub spans: Vec<ConcealSpan>,
+    pub messages: Vec<EmailMessage>,
+    pub quotes: Vec<Range<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailMessage {
+    /// The `## …` header line, newline excluded.
+    pub header_line: Range<usize>,
+    /// End of the header line to the end of the section's last line — the
+    /// range the reply's crease folds.
+    pub body: Range<usize>,
+    /// Whether the sender matches the connected account.
+    pub own: bool,
+}
+
+/// Frontmatter keys that are sync machinery, folded away in email view; the
+/// human keys (`from`, `link`, `due`, …) stay visible (V16 §5.1). `title`
+/// is machinery because the `# Title` heading repeats it.
+const MACHINERY_KEYS: [&str; 4] = ["source", "capture", "captured", "title"];
+
+/// Whether a `source:` value names a registered mail source (V16 §4).
+fn is_mail_source(value: &str) -> bool {
+    value.eq_ignore_ascii_case("gmail")
+}
+
+/// Scans an email note: `Some` only when the frontmatter carries a
+/// registered mail `source:`. `account` is the connected Google account for
+/// the own-reply tint; senders never match a `None` account. Pure — the
+/// caller resolves config and account (V16 §8).
+pub fn email_plan(text: &str, account: Option<&str>) -> Option<EmailPlan> {
+    let spans = scan_envelope(text)?;
+    let mut plan = EmailPlan {
+        spans,
+        messages: Vec::new(),
+        quotes: Vec::new(),
+    };
+
+    let mut headers: Vec<(Range<usize>, Range<usize>, Range<usize>, Option<Range<usize>>)> =
+        Vec::new();
+    each_content_line(text, |line_start, line| {
+        let Some((level, marker_start, text_start)) = atx_heading(line) else {
+            return;
+        };
+        if level != 2 {
+            return;
+        }
+        let heading_text = line[text_start..].trim_end();
+        if heading_text.is_empty() {
+            return;
+        }
+        let text_range = line_start + text_start..line_start + text_start + heading_text.len();
+        // `Sender — date`; a header without the em-dash tail is all sender.
+        let (sender, date) = match heading_text.rsplit_once(" — ") {
+            Some((sender, _)) => {
+                let sender = sender.trim_end();
+                let sender_range = text_range.start..text_range.start + sender.len();
+                (sender_range.clone(), Some(sender_range.end..text_range.end))
+            }
+            None => (text_range, None),
+        };
+        headers.push((
+            line_start..line_start + line.len(),
+            line_start + marker_start..line_start + text_start,
+            sender,
+            date,
+        ));
+    });
+
+    let mut base = conceal_spans(text);
+    for (header_line, marker, sender, date) in &headers {
+        base.retain(|span| {
+            let on_header = span.range.start >= header_line.start
+                && span.range.end <= header_line.end;
+            !(on_header
+                && (span.kind == SpanKind::Heading(2)
+                    || (span.kind == SpanKind::Marker && span.range == *marker)))
+        });
+        let own = account.is_some_and(|account| {
+            let account = account.trim();
+            !account.is_empty()
+                && text
+                    .get(sender.clone())
+                    .is_some_and(|text| text.to_lowercase().contains(&account.to_lowercase()))
+        });
+        base.push(ConcealSpan::new(marker.clone(), SpanKind::EmailMarker(own)));
+        base.push(ConcealSpan::new(sender.clone(), SpanKind::EmailSender(own)));
+        if let Some(date) = date {
+            base.push(ConcealSpan::new(date.clone(), SpanKind::EmailDate));
+        }
+        let body_start = header_line.end;
+        let body_end = match headers
+            .iter()
+            .find(|(next, ..)| next.start > header_line.start)
+        {
+            Some((next, ..)) => next.start.saturating_sub(1).max(body_start),
+            None => text.strip_suffix('\n').map_or(text.len(), str::len),
+        };
+        plan.messages.push(EmailMessage {
+            header_line: header_line.clone(),
+            body: body_start..body_end.max(body_start),
+            own,
+        });
+    }
+
+    let bodies: Vec<Range<usize>> = plan.messages.iter().map(|message| message.body.clone()).collect();
+    for body in bodies {
+        scan_quotes(text, body, &mut plan);
+    }
+    plan.spans.append(&mut base);
+    plan.spans.sort_by_key(|span| span.range.start);
+    Some(plan)
+}
+
+/// The envelope spans, or `None` when the note has no frontmatter or its
+/// `source:` isn't a registered mail source. Machinery lines fold away with
+/// their newlines so the envelope compacts to the human lines; unknown keys
+/// keep their value untouched — never hide what we don't understand (G6).
+fn scan_envelope(text: &str) -> Option<Vec<ConcealSpan>> {
+    let mut spans = Vec::new();
+    let mut source_is_mail = false;
+    let mut offset = 0;
+    let mut lines = text.split('\n');
+
+    let first = lines.next()?;
+    if first.trim_end() != "---" {
+        return None;
+    }
+    let hidden_line = |start: usize, raw_len: usize| {
+        ConcealSpan::new(
+            start..(start + raw_len + 1).min(text.len()),
+            SpanKind::EmailHidden,
+        )
+    };
+    spans.push(hidden_line(0, first.len()));
+    offset += first.len() + 1;
+
+    let mut closed = false;
+    for raw_line in lines {
+        let line_start = offset;
+        offset += raw_line.len() + 1;
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let trimmed = line.trim_end();
+        if trimmed == "---" || trimmed == "..." {
+            spans.push(hidden_line(line_start, raw_line.len()));
+            closed = true;
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key_range = line_start..line_start + key.len() + 1;
+        match key.trim().to_ascii_lowercase().as_str() {
+            "source" => {
+                source_is_mail = is_mail_source(value.trim());
+                spans.push(hidden_line(line_start, raw_line.len()));
+            }
+            key if MACHINERY_KEYS.contains(&key) => {
+                spans.push(hidden_line(line_start, raw_line.len()));
+            }
+            "from" => {
+                spans.push(ConcealSpan::new(key_range, SpanKind::EmailDate));
+                let sender = value.trim();
+                if !sender.is_empty() {
+                    let start = line_start + line.len() - value.trim_start().len();
+                    spans.push(ConcealSpan::new(
+                        start..start + sender.len(),
+                        SpanKind::EmailSender(false),
+                    ));
+                }
+            }
+            "link" => {
+                spans.push(ConcealSpan::new(
+                    line_start..line_start + trimmed.len(),
+                    SpanKind::EmailLink,
+                ));
+            }
+            _ => {
+                spans.push(ConcealSpan::new(key_range, SpanKind::EmailDate));
+            }
+        }
+    }
+    (closed && source_is_mail).then_some(spans)
+}
+
+/// Creases quoted history inside one message body: a run of two or more
+/// `>` lines — plus an immediately preceding `… wrote:` attribution line —
+/// collapses as a unit; every quoted line is coloured regardless of run
+/// length (V16 §5.4).
+fn scan_quotes(text: &str, body: Range<usize>, plan: &mut EmailPlan) {
+    let Some(body_text) = text.get(body.clone()) else {
+        return;
+    };
+    let mut lines = Vec::new();
+    let mut offset = body.start;
+    for raw_line in body_text.split('\n') {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        lines.push((offset, line));
+        offset += raw_line.len() + 1;
+    }
+
+    let is_quote = |line: &str| {
+        block_indent(line).is_some_and(|indent| line[indent..].starts_with('>'))
+    };
+    let mut index = 0;
+    while index < lines.len() {
+        let (_, line) = lines[index];
+        if !is_quote(line) {
+            index += 1;
+            continue;
+        }
+        let run_start = index;
+        while index < lines.len() && is_quote(lines[index].1) {
+            index += 1;
+        }
+        for &(line_start, line) in &lines[run_start..index] {
+            plan.spans.push(ConcealSpan::new(
+                line_start..line_start + line.len(),
+                SpanKind::EmailQuote,
+            ));
+        }
+        if index - run_start < 2 {
+            continue;
+        }
+        let mut crease_start = lines[run_start].0;
+        if run_start > 0 {
+            let (attribution_start, attribution) = lines[run_start - 1];
+            if attribution.trim_end().ends_with("wrote:") && !attribution.trim().is_empty() {
+                crease_start = attribution_start;
+                plan.spans.push(ConcealSpan::new(
+                    attribution_start..attribution_start + attribution.len(),
+                    SpanKind::EmailQuote,
+                ));
+            }
+        }
+        let (last_start, last_line) = lines[index - 1];
+        plan.quotes.push(crease_start..last_start + last_line.len());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1122,6 +1385,136 @@ mod tests {
             vec![("<!-- [[hidden]] [text](url) -->", SpanKind::Marker)]
         );
         assert_eq!(wikilink_at("note <!-- [[hidden]] -->", 13), None);
+    }
+
+    const EMAIL: &str = "---\n\
+        source:   gmail\n\
+        capture:  8f3c21ab9d04\n\
+        captured: 2026-08-28T09:12:44-07:00\n\
+        title:    Renewal quote\n\
+        from:     Marta Reyes <marta@acmeinsure.com>\n\
+        link:     https://mail.google.com/mail/u/d@e.com/#all/198f\n\
+        ---\n\
+        \n\
+        # Renewal quote\n\
+        \n\
+        ## Marta Reyes <marta@acmeinsure.com> — 2026-08-26 14:02\n\
+        \n\
+        Hi Diego,\n\
+        \n\
+        ## Diego Tavares <diego.exodo@gmail.com> — 2026-08-27 08:41\n\
+        \n\
+        Can we bump the rider?\n\
+        \n\
+        On Wed, Marta wrote:\n\
+        > premium comes to $1,284/yr\n\
+        > down 4% from last year\n";
+
+    fn spans_of<'a>(plan: &'a EmailPlan, text: &'a str, kind: SpanKind) -> Vec<&'a str> {
+        plan.spans
+            .iter()
+            .filter(|span| span.kind == kind)
+            .map(|span| &text[span.range.clone()])
+            .collect()
+    }
+
+    #[test]
+    fn email_plan_requires_a_mail_source() {
+        assert_eq!(email_plan("# plain note\n", None), None);
+        assert_eq!(email_plan("---\nsource: tasks\n---\nbody\n", None), None);
+        assert_eq!(email_plan("---\nsource: gmail\nbody without close\n", None), None);
+        assert!(email_plan("---\nsource: gmail\n---\nbody\n", None).is_some());
+    }
+
+    #[test]
+    fn email_envelope_hides_machinery_and_styles_the_rest() {
+        let plan = email_plan(EMAIL, None).unwrap();
+        let hidden = spans_of(&plan, EMAIL, SpanKind::EmailHidden);
+        assert_eq!(hidden.len(), 6, "{hidden:?}");
+        assert!(hidden[0].starts_with("---\n"));
+        assert!(hidden[1].starts_with("source:") && hidden[1].ends_with('\n'));
+        assert!(hidden[4].starts_with("title:"));
+        assert!(hidden[5].starts_with("---"));
+
+        // The envelope's `from:` value plus both header senders — no
+        // account, so nothing tints as own.
+        assert_eq!(
+            spans_of(&plan, EMAIL, SpanKind::EmailSender(false)),
+            vec![
+                "Marta Reyes <marta@acmeinsure.com>",
+                "Marta Reyes <marta@acmeinsure.com>",
+                "Diego Tavares <diego.exodo@gmail.com>",
+            ]
+        );
+        assert_eq!(
+            spans_of(&plan, EMAIL, SpanKind::EmailLink),
+            vec!["link:     https://mail.google.com/mail/u/d@e.com/#all/198f"]
+        );
+        // The `from:` key is muted chrome, the header dates too.
+        let muted = spans_of(&plan, EMAIL, SpanKind::EmailDate);
+        assert!(muted.contains(&"from:"), "{muted:?}");
+        assert!(muted.contains(&" — 2026-08-26 14:02"), "{muted:?}");
+    }
+
+    #[test]
+    fn email_messages_split_sender_and_body_and_tint_own_replies() {
+        let plan = email_plan(EMAIL, Some("diego.exodo@gmail.com")).unwrap();
+        assert_eq!(plan.messages.len(), 2);
+        assert!(!plan.messages[0].own);
+        assert!(plan.messages[1].own);
+        assert_eq!(
+            spans_of(&plan, EMAIL, SpanKind::EmailSender(true)),
+            vec!["Diego Tavares <diego.exodo@gmail.com>"]
+        );
+        assert_eq!(
+            spans_of(&plan, EMAIL, SpanKind::EmailMarker(false)),
+            vec!["## "]
+        );
+
+        // No Heading(2) or heading-marker span survives on header lines.
+        assert!(spans_of(&plan, EMAIL, SpanKind::Heading(2)).is_empty());
+        assert_eq!(spans_of(&plan, EMAIL, SpanKind::Heading(1)), vec!["Renewal quote"]);
+
+        // Body: from the header line's end to the line before the next
+        // header (or the file's last line).
+        let first = &plan.messages[0];
+        assert_eq!(&EMAIL[first.header_line.clone()],
+            "## Marta Reyes <marta@acmeinsure.com> — 2026-08-26 14:02");
+        assert_eq!(&EMAIL[first.body.clone()], "\n\nHi Diego,\n");
+        let second = &plan.messages[1];
+        assert!(EMAIL[second.body.clone()].ends_with("> down 4% from last year"));
+    }
+
+    #[test]
+    fn email_quotes_crease_with_their_attribution() {
+        let plan = email_plan(EMAIL, None).unwrap();
+        assert_eq!(plan.quotes.len(), 1);
+        assert_eq!(
+            &EMAIL[plan.quotes[0].clone()],
+            "On Wed, Marta wrote:\n> premium comes to $1,284/yr\n> down 4% from last year"
+        );
+        let quote_lines = spans_of(&plan, EMAIL, SpanKind::EmailQuote);
+        assert_eq!(quote_lines.len(), 3);
+
+        // A single quoted line colours but never creases.
+        let one = "---\nsource: gmail\n---\n## A — 1\n\nx\n> lone quote\ntail\n";
+        let plan = email_plan(one, None).unwrap();
+        assert!(plan.quotes.is_empty());
+        assert_eq!(spans_of(&plan, one, SpanKind::EmailQuote), vec!["> lone quote"]);
+    }
+
+    #[test]
+    fn email_headers_inside_fences_are_not_messages() {
+        let text = "---\nsource: gmail\n---\n\n```\n## Not a message — ever\n```\n\nbody\n";
+        let plan = email_plan(text, None).unwrap();
+        assert!(plan.messages.is_empty());
+
+        // A `##` heading without the em-dash tail is all sender — a
+        // hand-added section still reads as a section.
+        let text = "---\nsource: gmail\n---\n\n## Notes\n\nplain\n";
+        let plan = email_plan(text, None).unwrap();
+        assert_eq!(plan.messages.len(), 1);
+        assert_eq!(spans_of(&plan, text, SpanKind::EmailSender(false)), vec!["Notes"]);
     }
 
     #[test]

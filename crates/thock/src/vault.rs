@@ -28,6 +28,7 @@ file = "backlog.md"          # the Soon / Someday / Completed holding pen
 
 # [markdown]
 # conceal = true             # hide markup while the cursor is off the line
+# email_view = true          # render synced email notes as conversations
 
 [[routines.installed]]
 id      = "timeline"
@@ -210,30 +211,38 @@ impl AgentConfigContent {
 struct MarkdownConfigContent {
     #[serde(skip_serializing_if = "Option::is_none")]
     conceal: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email_view: Option<bool>,
 }
 
 impl MarkdownConfigContent {
     fn resolve(self) -> MarkdownConfig {
         MarkdownConfig {
             conceal: self.conceal.unwrap_or(true),
+            email_view: self.email_view.unwrap_or(true),
         }
     }
 
     fn is_unset(&self) -> bool {
-        self.conceal.is_none()
+        self.conceal.is_none() && self.email_view.is_none()
     }
 }
 
 /// The `[markdown]` table: whether Markdown markup in vault notes is hidden
-/// while the cursor is off the line (spec V10 §9). Defaults to concealed.
+/// while the cursor is off the line (spec V10 §9), and whether synced email
+/// notes render with the email view (spec V16 §4). Both default to on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarkdownConfig {
     pub conceal: bool,
+    pub email_view: bool,
 }
 
 impl Default for MarkdownConfig {
     fn default() -> Self {
-        Self { conceal: true }
+        Self {
+            conceal: true,
+            email_view: true,
+        }
     }
 }
 
@@ -1021,15 +1030,19 @@ mod tests {
         fs::create_dir_all(&marker).unwrap();
         fs::write(
             marker.join(VAULT_CONFIG_FILE),
-            "schema = 1\n[markdown]\nconceal = false\n",
+            "schema = 1\n[markdown]\nconceal = false\nemail_view = false\n",
         )
         .unwrap();
         match Vault::detect(dir.path()) {
-            VaultStatus::Valid(vault) => assert!(!vault.config.markdown.conceal),
+            VaultStatus::Valid(vault) => {
+                assert!(!vault.config.markdown.conceal);
+                assert!(!vault.config.markdown.email_view);
+            }
             other => panic!("expected valid vault, got {other:?}"),
         }
-        // An absent section means the default: concealed.
+        // An absent section means the defaults: concealed, email view on.
         assert!(VaultConfig::default().markdown.conceal);
+        assert!(VaultConfig::default().markdown.email_view);
     }
 
     #[test]

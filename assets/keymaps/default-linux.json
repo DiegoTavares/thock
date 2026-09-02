@@ -1650,4 +1650,12 @@
       "ctrl-alt-m": "thock::ToggleMarkdownSource",
     },
   },
+  {
+    "context": "Editor && ThockMarkdownConceal && vim_mode == normal",
+    "use_key_equivalents": true,
+    "bindings": {
+      "] m": "thock::NextMessage",
+      "[ m": "thock::PreviousMessage",
+    },
+  },
 ]

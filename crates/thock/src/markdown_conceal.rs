@@ -11,14 +11,16 @@ use crate::markdown_syntax::{self, SpanKind};
 use crate::markdown_text;
 use crate::vault::{Vault, VaultStatus};
 use editor::actions::GoToDefinition;
-use editor::display_map::Crease;
+use editor::display_map::{Crease, CreaseId};
 use editor::{Editor, EditorEvent, EditorMode, FoldPlaceholder, HighlightKey};
 use gpui::{
     App, AppContext as _, Context, Empty, Entity, HighlightStyle, Hsla, IntoElement as _,
-    ParentElement as _, StrikethroughStyle, Styled as _, Subscription, Task, TaskExt as _,
-    WeakEntity, Window, div, px,
+    ParentElement as _, SharedString, StrikethroughStyle, Styled as _, Subscription, Task,
+    TaskExt as _, WeakEntity, Window, div, px,
 };
-use multi_buffer::{Anchor, MultiBufferOffset, MultiBufferSnapshot, ToOffset as _, ToPoint as _};
+use multi_buffer::{
+    Anchor, MultiBufferOffset, MultiBufferPoint, MultiBufferSnapshot, ToOffset as _, ToPoint as _,
+};
 use project::ProjectPath;
 use settings::SettingsStore;
 use std::any::TypeId;
@@ -36,7 +38,15 @@ gpui::actions!(
     thock,
     [
         /// Shows or hides the Markdown markup in the current note.
-        ToggleMarkdownSource
+        ToggleMarkdownSource,
+        /// Shows or hides the email view on a synced email note.
+        ToggleEmailView,
+        /// Collapses or expands the email reply under the cursor.
+        ToggleMessage,
+        /// Moves to the next reply in an email note.
+        NextMessage,
+        /// Moves to the previous reply in an email note.
+        PreviousMessage
     ]
 );
 
@@ -50,6 +60,15 @@ fn fold_type_tag() -> TypeId {
     TypeId::of::<ConcealFoldTag>()
 }
 
+/// Tags the email view's reply and quote folds (V16 §5.3). A separate tag
+/// from `ConcealFoldTag` so the conceal diff never removes a collapsed reply
+/// and the reveal rule never pops one open.
+struct EmailFoldTag;
+
+fn email_fold_type_tag() -> TypeId {
+    TypeId::of::<EmailFoldTag>()
+}
+
 /// A scanned span re-anchored into the buffer so it survives edits between
 /// reparses.
 struct AnchorSpan {
@@ -57,9 +76,38 @@ struct AnchorSpan {
     kind: SpanKind,
 }
 
+/// One message's crease geometry, anchored (V16 §5.3).
+struct MessageAnchors {
+    header_start: Anchor,
+    body: Range<Anchor>,
+}
+
+/// The email-view half of the plan: present only when the buffer parses as
+/// an email note and the view is enabled.
+struct EmailAnchors {
+    messages: Vec<MessageAnchors>,
+    quotes: Vec<Range<Anchor>>,
+}
+
+/// What the addon knows about the buffer's vault at install time.
+#[derive(Clone, Default)]
+pub struct ConcealSettings {
+    pub conceal: bool,
+    pub email_view: bool,
+    /// The connected Google account, for the own-reply tint (V16 §6).
+    pub account: Option<String>,
+}
+
 pub struct MarkdownConcealAddon {
     enabled: bool,
+    email_enabled: bool,
+    account: Option<String>,
     spans: Vec<AnchorSpan>,
+    email: Option<EmailAnchors>,
+    crease_ids: Vec<CreaseId>,
+    /// The collapsed-by-default state is imposed once per open (V16 §5.3);
+    /// after that the user's toggles are law.
+    default_folds_applied: bool,
     reparse: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -94,8 +142,8 @@ fn register(editor: &mut Editor, cx: &mut Context<Editor>) {
     {
         return;
     }
-    if let Some(enabled) = vault_conceal_default(editor, cx) {
-        install(editor, enabled, cx);
+    if let Some(settings) = vault_markdown_settings(editor, cx) {
+        install(editor, settings, cx);
         return;
     }
     // The buffer may acquire a qualifying file later — an untitled buffer
@@ -108,16 +156,18 @@ fn register(editor: &mut Editor, cx: &mut Context<Editor>) {
         if editor.addon::<MarkdownConcealAddon>().is_some() {
             return;
         }
-        if let Some(enabled) = vault_conceal_default(editor, cx) {
-            install(editor, enabled, cx);
+        if let Some(settings) = vault_markdown_settings(editor, cx) {
+            install(editor, settings, cx);
         }
     })
     .detach();
 }
 
 /// Whether the editor's buffer is a `.md` file under a Thock vault root,
-/// returning the vault's conceal default when it is.
-fn vault_conceal_default(editor: &Editor, cx: &App) -> Option<bool> {
+/// returning the vault's markdown settings when it is. The account read is
+/// blocking config I/O, same as the sync services' reloads — done once per
+/// qualifying editor, and only when the email view could use it.
+fn vault_markdown_settings(editor: &Editor, cx: &App) -> Option<ConcealSettings> {
     let buffer = editor.buffer().read(cx).as_singleton()?;
     let file = buffer.read(cx).file()?;
     if file.path().extension() != Some("md") {
@@ -126,7 +176,23 @@ fn vault_conceal_default(editor: &Editor, cx: &App) -> Option<bool> {
     let file = project::File::from_dyn(Some(file))?;
     let vault_root = file.worktree.read(cx).abs_path();
     match Vault::detect(&vault_root) {
-        VaultStatus::Valid(vault) => Some(vault.config.markdown.conceal),
+        VaultStatus::Valid(vault) => {
+            let email_view = vault.config.markdown.email_view;
+            let account = email_view
+                .then(|| {
+                    crate::google_auth::resolve_google_settings(
+                        &vault_root,
+                        crate::gmail::GMAIL_CONFIG_FILE,
+                    )
+                    .account
+                })
+                .flatten();
+            Some(ConcealSettings {
+                conceal: vault.config.markdown.conceal,
+                email_view,
+                account,
+            })
+        }
         _ => None,
     }
 }
@@ -134,7 +200,7 @@ fn vault_conceal_default(editor: &Editor, cx: &App) -> Option<bool> {
 /// Installs the addon and its subscriptions on an editor that passed the
 /// vault gate. Split from `register` so tests can drive an editor without a
 /// vault on the real filesystem.
-fn install(editor: &mut Editor, enabled: bool, cx: &mut Context<Editor>) {
+fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Editor>) {
     let mut subscriptions = Vec::new();
     subscriptions.push(cx.subscribe(
         &cx.entity(),
@@ -144,6 +210,12 @@ fn install(editor: &mut Editor, enabled: bool, cx: &mut Context<Editor>) {
             _ => {}
         },
     ));
+    // A user fold operation (`unfold_at`, `zR`, a gutter click) sweeps
+    // intersecting conceal folds away with it and notifies the editor —
+    // the display map itself never notifies. Heal on the editor's own
+    // notify rather than waiting for the next cursor move; this terminates
+    // because a healed apply is a no-op that doesn't notify again.
+    subscriptions.push(cx.observe(&cx.entity(), |editor, _, cx| apply_folds(editor, cx)));
     // Highlight styles capture theme colours, so a theme change needs a
     // re-apply to pick up the new palette.
     subscriptions
@@ -164,10 +236,39 @@ fn install(editor: &mut Editor, enabled: bool, cx: &mut Context<Editor>) {
     subscriptions.push(editor.register_action::<GoToDefinition>(
         move |_, window, cx| go_to_wikilink(&editor_handle, window, cx),
     ));
+    let editor_handle = cx.weak_entity();
+    subscriptions.push(editor.register_action::<ToggleEmailView>(move |_, _, cx| {
+        editor_handle
+            .update(cx, |editor, cx| toggle_email_view(editor, cx))
+            .ok();
+    }));
+    let editor_handle = cx.weak_entity();
+    subscriptions.push(editor.register_action::<ToggleMessage>(move |_, _, cx| {
+        editor_handle
+            .update(cx, |editor, cx| toggle_message(editor, cx))
+            .ok();
+    }));
+    let editor_handle = cx.weak_entity();
+    subscriptions.push(editor.register_action::<NextMessage>(move |_, window, cx| {
+        editor_handle
+            .update(cx, |editor, cx| move_to_message(editor, true, window, cx))
+            .ok();
+    }));
+    let editor_handle = cx.weak_entity();
+    subscriptions.push(editor.register_action::<PreviousMessage>(move |_, window, cx| {
+        editor_handle
+            .update(cx, |editor, cx| move_to_message(editor, false, window, cx))
+            .ok();
+    }));
 
     editor.register_addon(MarkdownConcealAddon {
-        enabled,
+        enabled: settings.conceal,
+        email_enabled: settings.email_view,
+        account: settings.account,
         spans: Vec::new(),
+        email: None,
+        crease_ids: Vec::new(),
+        default_folds_applied: false,
         reparse: Task::ready(()),
         _subscriptions: subscriptions,
     });
@@ -276,40 +377,295 @@ fn toggle(editor: &mut Editor, cx: &mut Context<Editor>) {
     apply_folds(editor, cx);
 }
 
+/// Turns the email view on or off for this buffer (V16 §4). Off removes the
+/// reply/quote creases and every email fold; back on reimposes the default
+/// collapsed state, as if the note were freshly opened.
+fn toggle_email_view(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() else {
+        return;
+    };
+    addon.email_enabled = !addon.email_enabled;
+    if !addon.email_enabled {
+        addon.email = None;
+        addon.default_folds_applied = false;
+        update_email_creases(editor, cx);
+        remove_tagged_folds(editor, email_fold_type_tag(), cx);
+    }
+    // The fold diff is range-only, and the two modes give the same ranges
+    // different placeholders (`## ` is a marker in one, a sender dot in the
+    // other) — drop every conceal fold so the reparse re-applies them fresh.
+    remove_tagged_folds(editor, fold_type_tag(), cx);
+    schedule_reparse(editor, cx);
+}
+
+fn remove_tagged_folds(editor: &mut Editor, tag: TypeId, cx: &mut Context<Editor>) {
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let display_snapshot = editor.display_map.update(cx, |map, cx| map.snapshot(cx));
+    let ranges: Vec<Range<MultiBufferOffset>> = display_snapshot
+        .folds_in_range(MultiBufferOffset(0)..buffer_snapshot.len())
+        .filter(|fold| fold.placeholder.type_tag == Some(tag))
+        .map(|fold| {
+            fold.range.start.to_offset(&buffer_snapshot)..fold.range.end.to_offset(&buffer_snapshot)
+        })
+        .collect();
+    if !ranges.is_empty() {
+        editor.display_map.update(cx, |map, cx| {
+            map.remove_folds_with_type(ranges, tag, cx);
+        });
+        cx.notify();
+    }
+}
+
+/// Collapses or expands the reply the cursor is on — header row or anywhere
+/// in the body. Goes through the `DisplayMap` directly so a keyboard toggle
+/// never enters fold persistence (V16 §5.3).
+fn toggle_message(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
+        return;
+    };
+    let Some(email) = &addon.email else {
+        return;
+    };
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let cursor = editor
+        .selections
+        .newest_anchor()
+        .head()
+        .to_point(&buffer_snapshot);
+    let Some((body, placeholder)) = email.messages.iter().find_map(|message| {
+        let header_row = message.header_start.to_point(&buffer_snapshot).row;
+        let end_row = message.body.end.to_point(&buffer_snapshot).row;
+        (header_row..=end_row).contains(&cursor.row).then(|| {
+            (
+                message.body.start.to_offset(&buffer_snapshot)
+                    ..message.body.end.to_offset(&buffer_snapshot),
+                email_body_placeholder(&message.body, &buffer_snapshot),
+            )
+        })
+    }) else {
+        return;
+    };
+    let Some(placeholder) = placeholder else {
+        return;
+    };
+    let display_snapshot = editor.display_map.update(cx, |map, cx| map.snapshot(cx));
+    // Match the whole-body fold exactly — a collapsed quote inside an
+    // expanded reply is also an email fold in this range and must not read
+    // as "the reply is folded".
+    let already_folded = display_snapshot.folds_in_range(body.start..body.end).any(|fold| {
+        fold.placeholder.type_tag == Some(email_fold_type_tag())
+            && fold.range.start.to_offset(&buffer_snapshot) == body.start
+            && fold.range.end.to_offset(&buffer_snapshot) == body.end
+    });
+    // Removal sweeps every intersecting email fold, so a collapsed quote
+    // inside the reply must be re-folded after the body expands.
+    let nested: Vec<Range<MultiBufferOffset>> = display_snapshot
+        .folds_in_range(body.start..body.end)
+        .filter(|fold| fold.placeholder.type_tag == Some(email_fold_type_tag()))
+        .map(|fold| {
+            fold.range.start.to_offset(&buffer_snapshot)..fold.range.end.to_offset(&buffer_snapshot)
+        })
+        .filter(|range| *range != body)
+        .collect();
+    editor.display_map.update(cx, |map, cx| {
+        if already_folded {
+            map.remove_folds_with_type(vec![body.clone()], email_fold_type_tag(), cx);
+            let requoted: Vec<Crease<MultiBufferOffset>> = nested
+                .into_iter()
+                .map(|range| Crease::simple(range, quote_placeholder()))
+                .collect();
+            if !requoted.is_empty() {
+                map.fold(requoted, cx);
+            }
+        } else {
+            map.fold(vec![Crease::simple(body, placeholder)], cx);
+        }
+    });
+    cx.notify();
+}
+
+/// Moves the cursor to the next or previous message header (V16 §5.5).
+fn move_to_message(
+    editor: &mut Editor,
+    forward: bool,
+    window: &mut Window,
+    cx: &mut Context<Editor>,
+) {
+    let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
+        return;
+    };
+    let Some(email) = &addon.email else {
+        return;
+    };
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let cursor_row = editor
+        .selections
+        .newest_anchor()
+        .head()
+        .to_point(&buffer_snapshot)
+        .row;
+    let mut header_rows: Vec<u32> = email
+        .messages
+        .iter()
+        .map(|message| message.header_start.to_point(&buffer_snapshot).row)
+        .collect();
+    header_rows.sort_unstable();
+    let target = if forward {
+        header_rows.into_iter().find(|&row| row > cursor_row)
+    } else {
+        header_rows.into_iter().rev().find(|&row| row < cursor_row)
+    };
+    let Some(row) = target else {
+        return;
+    };
+    editor.change_selections(Default::default(), window, cx, |selections| {
+        let point = MultiBufferPoint::new(row, 0);
+        selections.select_ranges([point..point]);
+    });
+}
+
 /// Reparses the whole buffer on a background task after a short debounce,
 /// then re-anchors the span plan and applies it. Replacing the previous task
 /// is the debounce — only the last edit in a burst parses.
 fn schedule_reparse(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
+        return;
+    };
+    let email_enabled = addon.email_enabled;
+    let account = addon.account.clone();
     let task = cx.spawn(async move |editor, cx| {
         cx.background_executor().timer(REPARSE_DEBOUNCE).await;
         let Ok(snapshot) = editor.read_with(cx, |editor, cx| editor.buffer().read(cx).snapshot(cx))
         else {
             return;
         };
-        let spans = cx
+        let (spans, email) = cx
             .background_spawn(async move {
-                markdown_syntax::conceal_spans(&snapshot.text())
+                let text = snapshot.text();
+                let anchor = |range: &Range<usize>| {
+                    snapshot.anchor_after(MultiBufferOffset(range.start))
+                        ..snapshot.anchor_before(MultiBufferOffset(range.end))
+                };
+                let plan = email_enabled
+                    .then(|| markdown_syntax::email_plan(&text, account.as_deref()))
+                    .flatten();
+                let (plain_spans, email) = match plan {
+                    Some(plan) => {
+                        let email = EmailAnchors {
+                            messages: plan
+                                .messages
+                                .iter()
+                                .map(|message| MessageAnchors {
+                                    header_start: snapshot.anchor_after(MultiBufferOffset(
+                                        message.header_line.start,
+                                    )),
+                                    body: anchor(&message.body),
+                                })
+                                .collect(),
+                            quotes: plan.quotes.iter().map(|quote| anchor(quote)).collect(),
+                        };
+                        (plan.spans, Some(email))
+                    }
+                    None => (markdown_syntax::conceal_spans(&text), None),
+                };
+                let spans = plain_spans
                     .into_iter()
                     .map(|span| AnchorSpan {
-                        range: snapshot.anchor_after(MultiBufferOffset(span.range.start))
-                            ..snapshot.anchor_before(MultiBufferOffset(span.range.end)),
+                        range: anchor(&span.range),
                         kind: span.kind,
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                (spans, email)
             })
             .await;
         editor
             .update(cx, |editor, cx| {
                 if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
                     addon.spans = spans;
+                    addon.email = email;
                 }
+                update_email_creases(editor, cx);
                 apply_highlights(editor, cx);
                 apply_folds(editor, cx);
+                apply_default_email_folds(editor, cx);
             })
             .ok();
     });
     if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
         addon.reparse = task;
+    }
+}
+
+/// Replaces the addon's creases with the current plan's reply and quote
+/// creases. Fold state is unaffected — folds live in the fold map and their
+/// anchors survive edits; creases are only the *definitions* the gutter and
+/// `fold_at` use (V16 §5.3, A2).
+fn update_email_creases(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
+        return;
+    };
+    let old_ids = addon.crease_ids.clone();
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let mut creases: Vec<Crease<Anchor>> = Vec::new();
+    if let Some(email) = &addon.email {
+        for message in &email.messages {
+            if let Some(placeholder) =
+                email_body_placeholder(&message.body, &buffer_snapshot)
+            {
+                creases.push(Crease::simple(message.body.clone(), placeholder));
+            }
+        }
+        for quote in &email.quotes {
+            creases.push(Crease::simple(quote.clone(), quote_placeholder()));
+        }
+    }
+    let new_ids = editor.display_map.update(cx, |map, cx| {
+        map.remove_creases(old_ids, cx);
+        map.insert_creases(creases, cx)
+    });
+    if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        addon.crease_ids = new_ids;
+    }
+}
+
+/// Imposes the V16 §5.3/§5.4 default once per open: every reply but the
+/// newest collapsed, quoted history collapsed. Applied through the
+/// `DisplayMap` so the defaults never enter fold persistence.
+fn apply_default_email_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
+        return;
+    };
+    if addon.default_folds_applied {
+        return;
+    }
+    let Some(email) = &addon.email else {
+        return;
+    };
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let mut folds: Vec<Crease<MultiBufferOffset>> = Vec::new();
+    let newest = email.messages.len().saturating_sub(1);
+    for message in email.messages.iter().take(newest) {
+        let range = message.body.start.to_offset(&buffer_snapshot)
+            ..message.body.end.to_offset(&buffer_snapshot);
+        if let Some(placeholder) = email_body_placeholder(&message.body, &buffer_snapshot)
+            && range.start < range.end
+        {
+            folds.push(Crease::simple(range, placeholder));
+        }
+    }
+    for quote in &email.quotes {
+        let range = quote.start.to_offset(&buffer_snapshot)
+            ..quote.end.to_offset(&buffer_snapshot);
+        if range.start < range.end {
+            folds.push(Crease::simple(range, quote_placeholder()));
+        }
+    }
+    if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        addon.default_folds_applied = true;
+    }
+    if !folds.is_empty() {
+        editor.display_map.update(cx, |map, cx| map.fold(folds, cx));
+        cx.notify();
     }
 }
 
@@ -342,7 +698,15 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
                 continue;
             }
             let start_row = span.range.start.to_point(&buffer_snapshot).row;
-            let end_row = span.range.end.to_point(&buffer_snapshot).row;
+            let end_point = span.range.end.to_point(&buffer_snapshot);
+            // A line-inclusive span (`EmailHidden` folds its newline) ends at
+            // the next row's column 0; that row isn't part of the span for
+            // the reveal rule.
+            let end_row = if end_point.column == 0 && end_point.row > start_row {
+                end_point.row - 1
+            } else {
+                end_point.row
+            };
             let is_revealed = revealed
                 .iter()
                 .any(|&(first, last)| start_row <= last && end_row >= first);
@@ -353,34 +717,54 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
     }
 
     let display_snapshot = editor.display_map.update(cx, |map, cx| map.snapshot(cx));
-    let mut existing: Vec<Range<MultiBufferOffset>> = Vec::new();
+    let mut existing: Vec<(Range<MultiBufferOffset>, Option<SharedString>)> = Vec::new();
     let mut restored_impostors: Vec<Range<MultiBufferOffset>> = Vec::new();
     for fold in display_snapshot.folds_in_range(MultiBufferOffset(0)..buffer_snapshot.len()) {
         let range = fold.range.start.to_offset(&buffer_snapshot)
             ..fold.range.end.to_offset(&buffer_snapshot);
         if fold.placeholder.type_tag == Some(fold_type_tag()) {
-            existing.push(range);
+            existing.push((range, fold.placeholder.collapsed_text.clone()));
+        } else if fold.placeholder.type_tag == Some(email_fold_type_tag()) {
+            continue;
         } else if addon.spans.iter().any(|span| {
             is_folded(span.kind)
                 && span.range.start.to_offset(&buffer_snapshot) == range.start
                 && span.range.end.to_offset(&buffer_snapshot) == range.end
+        }) || addon.email.as_ref().is_some_and(|email| {
+            let matches = |anchors: &Range<Anchor>| {
+                anchors.start.to_offset(&buffer_snapshot) == range.start
+                    && anchors.end.to_offset(&buffer_snapshot) == range.end
+            };
+            email.messages.iter().any(|message| matches(&message.body))
+                || email.quotes.iter().any(matches)
         }) {
             // A fold restored from the workspace database that exactly
-            // matches a conceal span is one of ours that got swept into fold
-            // persistence — purge it before it renders as a literal `⋯`
-            // (§10.1).
+            // matches a conceal span — or an email reply or quote crease
+            // (V16 §7) — is one of ours that got swept into fold
+            // persistence: purge it before it renders as a literal `⋯`
+            // (§10.1). The email default-state pass then re-collapses.
             restored_impostors.push(range);
         }
     }
 
+    // The diff compares placeholder text as well as range: toggling the
+    // email view gives the same `## ` range a different placeholder (marker
+    // space vs sender dot), and a range-only diff would keep the stale one.
+    let matches = |(range, text): &(Range<MultiBufferOffset>, Option<SharedString>),
+                   (desired, kind): &(Range<MultiBufferOffset>, SpanKind)| {
+        range == desired && text.as_deref() == Some(collapsed_text_for(*kind))
+    };
     let stale: Vec<Range<MultiBufferOffset>> = existing
         .iter()
-        .filter(|range| !desired.iter().any(|(desired, _)| desired == *range))
-        .cloned()
+        .filter(|fold| !desired.iter().any(|want| matches(fold, want)))
+        .map(|(range, _)| range.clone())
         .collect();
     let new: Vec<(Range<MultiBufferOffset>, SpanKind)> = desired
         .iter()
-        .filter(|(range, _)| !existing.contains(range) || restored_impostors.contains(range))
+        .filter(|want| {
+            !existing.iter().any(|fold| matches(fold, want))
+                || restored_impostors.contains(&want.0)
+        })
         .cloned()
         .collect();
     if stale.is_empty() && new.is_empty() && restored_impostors.is_empty() {
@@ -394,6 +778,8 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
             let placeholder = match kind {
                 SpanKind::Rule => rule_placeholder(editor_handle.clone()),
                 SpanKind::Checkbox(checked) => checkbox_placeholder(checked),
+                SpanKind::EmailMarker(own) => sender_dot_placeholder(own),
+                SpanKind::EmailLink => email_link_placeholder(),
                 _ => marker_placeholder(),
             };
             Crease::simple(range, placeholder)
@@ -414,12 +800,30 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
     cx.notify();
 }
 
+/// The collapsed text each folded kind's placeholder carries — the fold
+/// diff's placeholder key. Must agree with what the placeholder constructors
+/// set.
+fn collapsed_text_for(kind: SpanKind) -> &'static str {
+    match kind {
+        SpanKind::Checkbox(false) => "☐",
+        SpanKind::Checkbox(true) => "☑",
+        SpanKind::EmailMarker(_) => "●",
+        SpanKind::EmailLink => "Open in Gmail ↗",
+        _ => " ",
+    }
+}
+
 /// Whether a span is concealed behind a fold placeholder rather than merely
 /// coloured.
 fn is_folded(kind: SpanKind) -> bool {
     matches!(
         kind,
-        SpanKind::Marker | SpanKind::Rule | SpanKind::Checkbox(_)
+        SpanKind::Marker
+            | SpanKind::Rule
+            | SpanKind::Checkbox(_)
+            | SpanKind::EmailHidden
+            | SpanKind::EmailLink
+            | SpanKind::EmailMarker(_)
     )
 }
 
@@ -537,14 +941,121 @@ fn rule_placeholder(editor: WeakEntity<Editor>) -> FoldPlaceholder {
     }
 }
 
-/// The number of highlight slots: two link colours, three heading colours,
-/// and the strikethrough.
-const HIGHLIGHT_SLOTS: usize = 6;
+/// Placeholder for a message header's `## ` marker: a small sender dot in
+/// the sender's colour — the conversation-spine glyph (V16 §5.2).
+fn sender_dot_placeholder(own: bool) -> FoldPlaceholder {
+    FoldPlaceholder {
+        render: Arc::new(move |_, _, cx| {
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .size(px(7.))
+                        .rounded_full()
+                        .bg(sender_color(own, cx)),
+                )
+                .into_any_element()
+        }),
+        constrain_width: false,
+        merge_adjacent: false,
+        type_tag: Some(fold_type_tag()),
+        gutter_toggle: false,
+        collapsed_text: Some("●".into()),
+    }
+}
 
-/// The slot strikethrough spans take. It is the last one so its style merges
-/// over the colour slots, and it carries no colour of its own — a struck link
-/// keeps its link colour and gains the line.
-const STRIKETHROUGH_SLOT: usize = HIGHLIGHT_SLOTS - 1;
+/// Placeholder for the envelope's `link:` line: an "Open in Gmail" label in
+/// the link colour instead of the raw URL (V16 §5.1).
+fn email_link_placeholder() -> FoldPlaceholder {
+    FoldPlaceholder {
+        render: Arc::new(|_, _, cx| {
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .text_color(markdown_text::external_link_color(cx))
+                .child("Open in Gmail ↗")
+                .into_any_element()
+        }),
+        constrain_width: false,
+        merge_adjacent: false,
+        type_tag: Some(fold_type_tag()),
+        gutter_toggle: false,
+        collapsed_text: Some("Open in Gmail ↗".into()),
+    }
+}
+
+/// Placeholder for a collapsed reply body: a muted `⋯ N lines` pill at the
+/// end of the header row (V16 §5.3). `None` when the body has no rows to
+/// hide.
+fn email_body_placeholder(
+    body: &Range<Anchor>,
+    buffer_snapshot: &MultiBufferSnapshot,
+) -> Option<FoldPlaceholder> {
+    let rows = body
+        .end
+        .to_point(buffer_snapshot)
+        .row
+        .saturating_sub(body.start.to_point(buffer_snapshot).row);
+    if rows == 0 {
+        return None;
+    }
+    let label = SharedString::from(format!(
+        "⋯ {rows} {}",
+        if rows == 1 { "line" } else { "lines" }
+    ));
+    Some(email_fold_placeholder(label))
+}
+
+/// Placeholder for collapsed quoted history (V16 §5.4).
+fn quote_placeholder() -> FoldPlaceholder {
+    email_fold_placeholder("⋯ quoted history".into())
+}
+
+/// The shared shape of the email view's user-toggleable folds: muted label,
+/// email tag, and a gutter toggle so a collapsed reply advertises itself.
+fn email_fold_placeholder(label: SharedString) -> FoldPlaceholder {
+    let collapsed = label.clone();
+    FoldPlaceholder {
+        render: Arc::new(move |_, _, cx| {
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .text_color(cx.theme().colors().text_muted)
+                .child(label.clone())
+                .into_any_element()
+        }),
+        constrain_width: false,
+        merge_adjacent: false,
+        type_tag: Some(email_fold_type_tag()),
+        gutter_toggle: true,
+        collapsed_text: Some(collapsed),
+    }
+}
+
+fn sender_color(own: bool, cx: &App) -> Hsla {
+    if own {
+        cx.theme().status().created
+    } else {
+        cx.theme().colors().text_accent
+    }
+}
+
+/// The number of highlight slots: two link colours, three heading colours,
+/// the strikethrough, and the email view's sender/own/muted trio.
+const HIGHLIGHT_SLOTS: usize = 9;
+
+/// The slot strikethrough spans take. Late so its style merges over the
+/// colour slots, and it carries no colour of its own — a struck link keeps
+/// its link colour and gains the line.
+const STRIKETHROUGH_SLOT: usize = 5;
+
+const EMAIL_SENDER_SLOT: usize = 6;
+const EMAIL_OWN_SENDER_SLOT: usize = 7;
+const EMAIL_MUTED_SLOT: usize = 8;
 
 /// The highlight slot for a styled span. Links get the higher-priority
 /// slots so a link label inside a heading keeps its link colour.
@@ -556,7 +1067,15 @@ fn highlight_slot(kind: SpanKind) -> Option<usize> {
         // structure at a glance (§7.1).
         SpanKind::Heading(level) => Some(1 + (level.clamp(1, 3) as usize)),
         SpanKind::Strikethrough => Some(STRIKETHROUGH_SLOT),
-        SpanKind::Marker | SpanKind::Rule | SpanKind::Checkbox(_) => None,
+        SpanKind::EmailSender(false) => Some(EMAIL_SENDER_SLOT),
+        SpanKind::EmailSender(true) => Some(EMAIL_OWN_SENDER_SLOT),
+        SpanKind::EmailDate | SpanKind::EmailQuote => Some(EMAIL_MUTED_SLOT),
+        SpanKind::Marker
+        | SpanKind::Rule
+        | SpanKind::Checkbox(_)
+        | SpanKind::EmailHidden
+        | SpanKind::EmailLink
+        | SpanKind::EmailMarker(_) => None,
     }
 }
 
@@ -570,8 +1089,11 @@ fn slot_style(slot: usize, cx: &App) -> HighlightStyle {
             ..Default::default()
         };
     }
+    let font_weight = matches!(slot, EMAIL_SENDER_SLOT | EMAIL_OWN_SENDER_SLOT)
+        .then_some(gpui::FontWeight::SEMIBOLD);
     HighlightStyle {
         color: Some(slot_color(slot, cx)),
+        font_weight,
         ..Default::default()
     }
 }
@@ -581,6 +1103,9 @@ fn slot_color(slot: usize, cx: &App) -> Hsla {
     match slot {
         0 => markdown_text::wikilink_color(cx),
         1 => markdown_text::external_link_color(cx),
+        EMAIL_SENDER_SLOT => sender_color(false, cx),
+        EMAIL_OWN_SENDER_SLOT => sender_color(true, cx),
+        EMAIL_MUTED_SLOT => colors.text_muted,
         _ => {
             let players = &cx.theme().players().0;
             // Slot 0 of the player palette is the local-user colour; heading
@@ -663,9 +1188,19 @@ mod tests {
             .add_window(|window, cx| Editor::for_buffer(buffer, Some(project.clone()), window, cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let editor = window.root(&mut cx).unwrap();
-        editor.update_in(&mut cx, |editor, _, cx| install(editor, true, cx));
+        editor.update_in(&mut cx, |editor, _, cx| {
+            install(editor, test_settings(), cx)
+        });
         settle(&mut cx);
         (editor, cx)
+    }
+
+    fn test_settings() -> ConcealSettings {
+        ConcealSettings {
+            conceal: true,
+            email_view: true,
+            account: Some("diego.exodo@gmail.com".to_string()),
+        }
     }
 
     /// Lets the reparse debounce elapse and all effects flush.
@@ -986,6 +1521,184 @@ mod tests {
         );
     }
 
+    const EMAIL_NOTE: &str = "---\n\
+        source:   gmail\n\
+        capture:  8f3c\n\
+        captured: 2026-08-28T09:12:44-07:00\n\
+        title:    Renewal quote\n\
+        from:     Marta Reyes <marta@acmeinsure.com>\n\
+        link:     https://mail.google.com/mail/u/d/#all/198f\n\
+        ---\n\
+        \n\
+        # Renewal quote\n\
+        \n\
+        ## Marta Reyes <marta@acmeinsure.com> — 2026-08-26 14:02\n\
+        \n\
+        Hi Diego,\n\
+        \n\
+        ## Diego Tavares <diego.exodo@gmail.com> — 2026-08-27 08:41\n\
+        \n\
+        On Wed, Marta wrote:\n\
+        > quoted one\n\
+        > quoted two\n\
+        \n\
+        Sure.\n";
+
+    /// The V16 default open state: machinery folded into the envelope, the
+    /// older reply collapsed to its header row, quoted history collapsed,
+    /// the newest reply readable.
+    const EMAIL_DISPLAY: &str = "     from:     Marta Reyes <marta@acmeinsure.com>\n\
+        Open in Gmail ↗\n\
+        \u{20}\n\
+        \u{20}Renewal quote\n\
+        \n\
+        ●Marta Reyes <marta@acmeinsure.com> — 2026-08-26 14:02⋯ 3 lines\n\
+        ●Diego Tavares <diego.exodo@gmail.com> — 2026-08-27 08:41\n\
+        \n\
+        ⋯ quoted history\n\
+        \n\
+        Sure.\n";
+
+    #[gpui::test]
+    async fn an_email_note_opens_as_envelope_and_spine(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, EMAIL_NOTE).await;
+        move_cursor_to(&editor, 21, &mut cx);
+        assert_eq!(display_text(&editor, &mut cx), EMAIL_DISPLAY);
+    }
+
+    #[gpui::test]
+    async fn a_message_header_reveals_its_source_without_expanding_the_reply(
+        cx: &mut TestAppContext,
+    ) {
+        let (editor, mut cx) = setup(cx, EMAIL_NOTE).await;
+        move_cursor_to(&editor, 11, &mut cx);
+        let display = display_text(&editor, &mut cx);
+        // The cursor's line shows its raw source (§5 R1)…
+        assert!(
+            display.contains("## Marta Reyes <marta@acmeinsure.com> — 2026-08-26 14:02"),
+            "{display}"
+        );
+        // …but the reply stays collapsed: email folds are not conceal folds.
+        assert!(display.contains("⋯ 3 lines"), "{display}");
+        assert!(!display.contains("Hi Diego,"), "{display}");
+    }
+
+    #[gpui::test]
+    async fn toggle_message_collapses_and_expands_from_header_or_body(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, EMAIL_NOTE).await;
+        // Cursor in the newest reply's body: collapse it.
+        move_cursor_to(&editor, 21, &mut cx);
+        editor.update_in(&mut cx, |editor, _, cx| toggle_message(editor, cx));
+        let display = display_text(&editor, &mut cx);
+        assert!(display.contains("⋯ 6 lines"), "{display}");
+        assert!(!display.contains("Sure."), "{display}");
+
+        // Toggle from the header row: expand again — the quote inside keeps
+        // its own collapsed state.
+        move_cursor_to(&editor, 15, &mut cx);
+        editor.update_in(&mut cx, |editor, _, cx| toggle_message(editor, cx));
+        let display = display_text(&editor, &mut cx);
+        assert!(display.contains("Sure."), "{display}");
+        assert!(display.contains("⋯ quoted history"), "{display}");
+
+        // The older reply expands the same way.
+        move_cursor_to(&editor, 11, &mut cx);
+        editor.update_in(&mut cx, |editor, _, cx| toggle_message(editor, cx));
+        let display = display_text(&editor, &mut cx);
+        assert!(display.contains("Hi Diego,"), "{display}");
+    }
+
+    #[gpui::test]
+    async fn gutter_folding_uses_the_reply_crease(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, EMAIL_NOTE).await;
+        move_cursor_to(&editor, 21, &mut cx);
+        // A gutter click routes through `unfold_at` / `fold_at` (V16 §5.3).
+        // Unfolding the collapsed reply also sweeps the row's conceal folds —
+        // the BufferFoldToggled heal must restore them without a cursor move.
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.unfold_at(MultiBufferRow(11), window, cx)
+        });
+        cx.run_until_parked();
+        let display = display_text(&editor, &mut cx);
+        assert!(display.contains("Hi Diego,"), "{display}");
+        assert!(display.contains("●Marta"), "conceal folds must heal: {display}");
+
+        // Folding again finds the inserted crease and its placeholder.
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.fold_at(MultiBufferRow(11), window, cx)
+        });
+        cx.run_until_parked();
+        let display = display_text(&editor, &mut cx);
+        assert!(display.contains("⋯ 3 lines"), "{display}");
+        assert!(!display.contains("Hi Diego,"), "{display}");
+    }
+
+    #[gpui::test]
+    async fn message_motions_step_between_headers(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, EMAIL_NOTE).await;
+        move_cursor_to(&editor, 0, &mut cx);
+        let cursor_row = |editor: &Entity<Editor>, cx: &mut VisualTestContext| {
+            editor.update(cx, |editor, cx| {
+                let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+                editor
+                    .selections
+                    .newest_anchor()
+                    .head()
+                    .to_point(&buffer_snapshot)
+                    .row
+            })
+        };
+        editor.update_in(&mut cx, |editor, window, cx| {
+            move_to_message(editor, true, window, cx)
+        });
+        assert_eq!(cursor_row(&editor, &mut cx), 11);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            move_to_message(editor, true, window, cx)
+        });
+        assert_eq!(cursor_row(&editor, &mut cx), 15);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            move_to_message(editor, true, window, cx)
+        });
+        assert_eq!(cursor_row(&editor, &mut cx), 15, "no header past the last");
+        editor.update_in(&mut cx, |editor, window, cx| {
+            move_to_message(editor, false, window, cx)
+        });
+        assert_eq!(cursor_row(&editor, &mut cx), 11);
+    }
+
+    #[gpui::test]
+    async fn toggling_email_view_off_restores_plain_conceal(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, EMAIL_NOTE).await;
+        move_cursor_to(&editor, 21, &mut cx);
+        editor.update_in(&mut cx, |editor, _, cx| toggle_email_view(editor, cx));
+        settle(&mut cx);
+        let display = display_text(&editor, &mut cx);
+        assert!(display.contains("source:   gmail"), "{display}");
+        assert!(display.contains("Hi Diego,"), "{display}");
+        assert!(!display.contains('⋯'), "{display}");
+        assert!(!display.contains('●'), "{display}");
+
+        // Back on: the default collapsed state reimposes, as freshly opened.
+        editor.update_in(&mut cx, |editor, _, cx| toggle_email_view(editor, cx));
+        settle(&mut cx);
+        assert_eq!(display_text(&editor, &mut cx), EMAIL_DISPLAY);
+    }
+
+    #[gpui::test]
+    async fn an_email_note_is_never_modified_by_the_view(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, EMAIL_NOTE).await;
+        move_cursor_to(&editor, 21, &mut cx);
+        editor.update_in(&mut cx, |editor, _, cx| toggle_message(editor, cx));
+        move_cursor_to(&editor, 11, &mut cx);
+        editor.update_in(&mut cx, |editor, _, cx| toggle_message(editor, cx));
+        editor.update_in(&mut cx, |editor, _, cx| toggle_email_view(editor, cx));
+        settle(&mut cx);
+        editor.update(&mut cx, |editor, cx| {
+            assert_eq!(editor.buffer().read(cx).snapshot(cx).text(), EMAIL_NOTE);
+            assert!(!editor.buffer().read(cx).read(cx).is_dirty());
+        });
+    }
+
     #[test]
     fn wikilink_targets_resolve_by_exact_path_then_stem() {
         let files = [
@@ -1062,7 +1775,9 @@ mod tests {
             .unwrap()
             .downcast::<Editor>()
             .unwrap();
-        editor.update_in(&mut cx, |editor, _, cx| install(editor, true, cx));
+        editor.update_in(&mut cx, |editor, _, cx| {
+            install(editor, test_settings(), cx)
+        });
         cx.focus(&editor);
         settle(&mut cx);
         (workspace, editor, cx)

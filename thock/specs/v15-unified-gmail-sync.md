@@ -89,6 +89,7 @@ Every mapping lands the same artifact: one note per thread in the V13 §6 inbox-
 `source`/`capture`/`captured`/`title`/`link` frontmatter, `# Title`, body. One addition to that
 format: an optional `from:` field, written when the source knows the sender, so the archived email
 keeps what V9's archive format recorded. (V13 notes simply never had a sender; nothing breaks.)
+The body is the whole conversation, not just one message — §7.1 has the per-message rendering.
 
 Filename, collision handling, sanitization, and the "a capture is never dropped silently"
 placeholder body are V13 §6/§8, reused verbatim — the planner is the same planner, run once per
@@ -191,10 +192,13 @@ V9's separate archive renderer and `thread:` frontmatter writer.
 
 Per poll: one `labels.list`, resolving every mapped label by full path name, case-insensitively
 (V9's resolution, cached until an error suggests staleness). Then per mapping in priority order:
-`messages.list` by `labelIds`, newest first, first message per thread represents it. A thread
-already claimed this pass — or whose digest (either construction, §9) is in the skip set — is
-skipped. Claimed threads are fetched `format=full` once and become `CapturedItem`s tagged with
-their mapping.
+`messages.list` by `labelIds`, newest first — the listing's only job is discovering thread ids.
+A thread already claimed this pass — or whose digest (either construction, §9) is in the skip
+set — is skipped. Claimed threads are fetched whole (`threads.get`, `format=full`, one request
+per thread) and become `CapturedItem`s tagged with their mapping: subject and sender come from
+the thread's first message, the item's moment from its last, and the body carries every
+non-draft message's text oldest-first — a single-message thread keeps V13 §6's bare body, a
+longer one renders one `## sender — date` section per message so replies read in order.
 
 A mapped label missing from Gmail is a per-mapping **holding** note (`label "thock/reading" not
 found`), surfaced in the status row; other mappings keep capturing — the V13 "errors isolate per

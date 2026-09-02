@@ -1,5 +1,5 @@
 //! The Gmail REST transport (spec `v15-unified-gmail-sync.md` §7.1):
-//! `labels.list` / `messages.list` / `messages.get`, MIME-tree walking,
+//! `labels.list` / `messages.list` / `threads.get`, MIME-tree walking,
 //! base64url body decoding, RFC 2047 header decoding, and an honest HTML →
 //! plain-text reduction. One fetch covers every configured mapping; the
 //! claim pass — a thread lands once, first mapping wins — happens here.
@@ -113,24 +113,29 @@ struct MessagePart {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct GmailMessage {
-    id: String,
-    thread_id: String,
+    label_ids: Vec<String>,
     /// Milliseconds since the epoch, as a string.
     internal_date: Option<String>,
     payload: MessagePart,
 }
 
-async fn get_message(
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct GmailThread {
+    messages: Vec<GmailMessage>,
+}
+
+async fn get_thread(
     http: &Arc<dyn HttpClient>,
     access_token: &str,
-    message_id: &str,
-) -> Result<GmailMessage> {
+    thread_id: &str,
+) -> Result<GmailThread> {
     let url = format!(
-        "{API_BASE}/users/me/messages/{}?format=full",
-        url_path_escape(message_id)
+        "{API_BASE}/users/me/threads/{}?format=full",
+        url_path_escape(thread_id)
     );
     let body = get_json(http, &url, access_token).await?;
-    serde_json::from_str(&body).context("failed to parse Gmail message response")
+    serde_json::from_str(&body).context("failed to parse Gmail thread response")
 }
 
 fn url_path_escape(segment: &str) -> String {
@@ -508,8 +513,8 @@ impl TransportInner {
                 {
                     continue;
                 }
-                let message = get_message(&self.http, access_token, &reference.id).await?;
-                items.push(captured_item(&message, &self.account, &reference.thread_id));
+                let thread = get_thread(&self.http, access_token, &reference.thread_id).await?;
+                items.push(captured_item(&thread, &self.account, &reference.thread_id));
             }
             mappings.push(MappingFetched::Items(items));
         }
@@ -545,23 +550,39 @@ impl TransportInner {
     }
 }
 
-/// One labeled thread as a captured item, represented by its most recent
-/// message: sanitized subject, sender, the email's text, and a link back to
-/// the thread (V13 §5) — `link`, never `url`.
-fn captured_item(message: &GmailMessage, account: &str, thread_id: &str) -> CapturedItem {
-    let subject = header_value(&message.payload, "Subject")
+/// One labeled thread as a captured item: sanitized subject and sender from
+/// the thread's first message, the latest message's date, every non-draft
+/// message's text as the body, and a link back to the thread (V13 §5) —
+/// `link`, never `url`. A single-message thread keeps V13's bare-body shape;
+/// more than one message renders as one `##` section per message, oldest
+/// first, so replies read in order.
+fn captured_item(thread: &GmailThread, account: &str, thread_id: &str) -> CapturedItem {
+    let mut messages: Vec<&GmailMessage> = thread
+        .messages
+        .iter()
+        .filter(|message| !message.label_ids.iter().any(|label| label == "DRAFT"))
+        .collect();
+    messages.sort_by_key(|message| message_date(message));
+
+    let first = messages.first();
+    let subject = first
+        .and_then(|message| header_value(&message.payload, "Subject"))
         .map(decode_rfc2047)
         .unwrap_or_default();
-    let from = header_value(&message.payload, "From")
+    let from = first
+        .and_then(|message| header_value(&message.payload, "From"))
         .map(decode_rfc2047)
         .filter(|from| !from.trim().is_empty());
-    let date = message
-        .internal_date
-        .as_deref()
-        .and_then(|millis| millis.parse::<i64>().ok())
-        .and_then(DateTime::from_timestamp_millis)
+    let date = messages
+        .last()
+        .and_then(|message| message_date(message))
         .map(|instant| instant.with_timezone(&Local))
         .unwrap_or_else(Local::now);
+    let body = match messages.as_slice() {
+        [] => None,
+        [only] => extract_text_body(&only.payload),
+        many => Some(thread_sections(many)),
+    };
     CapturedItem {
         source: "gmail",
         external_id: thread_id.to_string(),
@@ -569,10 +590,49 @@ fn captured_item(message: &GmailMessage, account: &str, thread_id: &str) -> Capt
         from,
         url: None,
         link: Some(gmail_thread_url(account, thread_id)),
-        body: extract_text_body(&message.payload),
+        body,
         occurred_at: Some(date.fixed_offset()),
         due: None,
     }
+}
+
+fn message_date(message: &GmailMessage) -> Option<DateTime<chrono::Utc>> {
+    message
+        .internal_date
+        .as_deref()
+        .and_then(|millis| millis.parse::<i64>().ok())
+        .and_then(DateTime::from_timestamp_millis)
+}
+
+fn thread_sections(messages: &[&GmailMessage]) -> String {
+    let mut out = String::new();
+    for message in messages {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let from = header_value(&message.payload, "From")
+            .map(decode_rfc2047)
+            .map(|from| crate::gmail::collapse_whitespace(&from))
+            .filter(|from| !from.is_empty())
+            .unwrap_or_else(|| "(unknown sender)".to_string());
+        out.push_str("## ");
+        out.push_str(&from);
+        if let Some(date) = message_date(message) {
+            let local = date.with_timezone(&Local);
+            out.push_str(&format!(" — {}", local.format("%Y-%m-%d %H:%M")));
+        }
+        out.push('\n');
+        let text = extract_text_body(&message.payload);
+        match text.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
+            Some(text) => {
+                out.push('\n');
+                out.push_str(text);
+                out.push('\n');
+            }
+            None => out.push_str("\n_(no content)_\n"),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -667,6 +727,61 @@ mod tests {
         assert_eq!(extract_text_body(&attachment_only), None);
     }
 
+    fn plain_message(from: &str, text: Option<&str>, millis: &str, labels: &[&str]) -> GmailMessage {
+        GmailMessage {
+            label_ids: labels.iter().map(|label| label.to_string()).collect(),
+            internal_date: Some(millis.to_string()),
+            payload: MessagePart {
+                mime_type: "text/plain".to_string(),
+                headers: vec![
+                    MessageHeader {
+                        name: "Subject".to_string(),
+                        value: "Plans".to_string(),
+                    },
+                    MessageHeader {
+                        name: "From".to_string(),
+                        value: from.to_string(),
+                    },
+                ],
+                body: PartBody {
+                    data: text.map(base64url),
+                },
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn threads_render_every_message_in_order() {
+        // Unsorted input, a draft, and a reply with no text.
+        let thread = GmailThread {
+            messages: vec![
+                plain_message("Bea <bea@example.com>", Some("Second"), "2000", &[]),
+                plain_message("Draft <me@example.com>", Some("wip"), "3000", &["DRAFT"]),
+                plain_message("Ana <ana@example.com>", Some("First"), "1000", &[]),
+                plain_message("Cal <cal@example.com>", None, "4000", &[]),
+            ],
+        };
+        let item = captured_item(&thread, "diego@example.com", "t-1");
+        assert_eq!(item.from.as_deref(), Some("Ana <ana@example.com>"));
+        let body = item.body.as_deref().unwrap();
+        let ana = body.find("## Ana").expect("ana section");
+        let bea = body.find("## Bea").expect("bea section");
+        let cal = body.find("## Cal").expect("cal section");
+        assert!(ana < bea && bea < cal, "{body}");
+        assert!(body.contains("First") && body.contains("Second"), "{body}");
+        assert!(body.contains("_(no content)_"), "{body}");
+        assert!(!body.contains("Draft") && !body.contains("wip"), "{body}");
+
+        // A single-message thread keeps the bare V13 body — no section
+        // heading.
+        let single = GmailThread {
+            messages: vec![plain_message("Ana <ana@example.com>", Some("Solo"), "1000", &[])],
+        };
+        let item = captured_item(&single, "diego@example.com", "t-2");
+        assert_eq!(item.body.as_deref(), Some("Solo"));
+    }
+
     #[test]
     fn transport_claims_threads_by_mapping_priority_and_skips_imported() {
         let http = FakeHttpClient::create(|request| async move {
@@ -693,17 +808,33 @@ mod tests {
                     {"id": "m4", "threadId": "t-inbox"}
                 ]}"#
                 .to_string()
-            } else if uri.contains("/messages/m3") {
+            } else if uri.contains("/threads/t-both") {
                 assert!(uri.contains("format=full"), "{uri}");
-                r#"{"id": "m3", "threadId": "t-both", "internalDate": "1755500000000",
-                    "payload": {"headers": [
-                        {"name": "Subject", "value": "=?UTF-8?Q?Caf=C3=A9?= plans"},
-                        {"name": "From", "value": "Ana <ana@example.com>"}
-                    ]}}"#
-                .to_string()
-            } else if uri.contains("/messages/m4") {
-                r#"{"id": "m4", "threadId": "t-inbox", "internalDate": "1755500000000",
-                    "payload": {"headers": [{"name": "Subject", "value": "Read later"}]}}"#
+                format!(
+                    r#"{{"id": "t-both", "messages": [
+                        {{"id": "m3", "internalDate": "1755500000000",
+                          "payload": {{"headers": [
+                            {{"name": "Subject", "value": "Re: =?UTF-8?Q?Caf=C3=A9?= plans"}},
+                            {{"name": "From", "value": "Diego <diego@example.com>"}}
+                          ],
+                          "mimeType": "text/plain",
+                          "body": {{"data": "{}"}}}}}},
+                        {{"id": "m2", "internalDate": "1755400000000",
+                          "payload": {{"headers": [
+                            {{"name": "Subject", "value": "=?UTF-8?Q?Caf=C3=A9?= plans"}},
+                            {{"name": "From", "value": "Ana <ana@example.com>"}}
+                          ],
+                          "mimeType": "text/plain",
+                          "body": {{"data": "{}"}}}}}}
+                    ]}}"#,
+                    base64url("Sure, 9am works."),
+                    base64url("Coffee tomorrow?")
+                )
+            } else if uri.contains("/threads/t-inbox") {
+                r#"{"id": "t-inbox", "messages": [
+                    {"id": "m4", "internalDate": "1755500000000",
+                     "payload": {"headers": [{"name": "Subject", "value": "Read later"}]}}
+                ]}"#
                 .to_string()
             } else {
                 panic!("unexpected request to {uri}");
@@ -728,7 +859,8 @@ mod tests {
         let MappingFetched::Items(backlog) = &fetched.mappings[0] else {
             panic!("expected items for the backlog mapping");
         };
-        // t-both claimed here (newest message, decoded subject, sender kept)…
+        // t-both claimed here: whole thread fetched, subject and sender from
+        // the first message, replies rendered oldest first…
         assert_eq!(backlog.len(), 1);
         assert_eq!(backlog[0].external_id, "t-both");
         assert_eq!(backlog[0].title, "Café plans");
@@ -737,6 +869,12 @@ mod tests {
             backlog[0].link.as_deref(),
             Some("https://mail.google.com/mail/u/diego@example.com/#all/t-both")
         );
+        let body = backlog[0].body.as_deref().unwrap();
+        let ana = body.find("## Ana <ana@example.com>").expect("first message section");
+        let diego = body.find("## Diego <diego@example.com>").expect("reply section");
+        assert!(ana < diego, "{body}");
+        assert!(body.contains("Coffee tomorrow?"), "{body}");
+        assert!(body.contains("Sure, 9am works."), "{body}");
         let MappingFetched::Items(inbox) = &fetched.mappings[1] else {
             panic!("expected items for the inbox mapping");
         };
