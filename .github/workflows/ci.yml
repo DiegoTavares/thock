@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+    branches: ["**"]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  # Debug info dominates the target directory and blows past both the runner
+  # disk and the 10 GB Actions cache limit. CI never symbolicates.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"
+
+jobs:
+  style:
+    name: Style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Check keymaps
+        run: script/check-keymaps
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: .github/scripts/free-disk-space.sh
+
+      - name: Install Linux dependencies
+        run: script/linux
+
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+          cache-all-crates: true
+
+      # Thock lives in `crates/thock`; `crates/zed` is the only upstream crate
+      # the fork registers into, so together they cover the whole delta.
+      - name: cargo clippy
+        run: cargo clippy -p thock -p zed --all-targets -- --deny warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: .github/scripts/free-disk-space.sh
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: script/linux
+
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: taiki-e/install-action@nextest
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.os }}
+          cache-all-crates: true
+
+      - name: cargo nextest
+        run: cargo nextest run -p thock --no-fail-fast --failure-output immediate-final
+
+  ci:
+    name: CI
+    if: always()
+    needs: [style, clippy, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "One or more jobs failed"
+            exit 1
+          fi
