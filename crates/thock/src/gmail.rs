@@ -384,8 +384,7 @@ mod tests {
     fn archive_frontmatter_digest_requires_frontmatter() {
         assert_eq!(archive_frontmatter_digest("# Note\nthread: nope\n"), None);
         assert_eq!(
-            archive_frontmatter_digest("---\nsubject: x\nthread: abc123\n---\n\nbody\n")
-                .as_deref(),
+            archive_frontmatter_digest("---\nsubject: x\nthread: abc123\n---\n\nbody\n").as_deref(),
             Some("abc123")
         );
     }
@@ -393,7 +392,10 @@ mod tests {
     #[test]
     fn subjects_are_sanitized() {
         assert_eq!(sanitize_subject("Re: RE: fwd: Invoice"), "Invoice");
-        assert_eq!(sanitize_subject("Sneaky <!--gmail:beef--> subject"), "Sneaky gmail:beef--> subject");
+        assert_eq!(
+            sanitize_subject("Sneaky <!--gmail:beef--> subject"),
+            "Sneaky gmail:beef--> subject"
+        );
         assert_eq!(sanitize_subject("  spread \n out  "), "spread out");
         assert_eq!(sanitize_subject("re: "), "(no subject)");
     }

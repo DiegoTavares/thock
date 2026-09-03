@@ -1495,8 +1495,9 @@ impl RealGitRepository {
                         excludes.restore_original().await?;
 
                         if let Some(head_sha) = head_sha.as_deref() {
-                            let head_tree =
-                                git.run(&["rev-parse", &format!("{head_sha}^{{tree}}")]).await?;
+                            let head_tree = git
+                                .run(&["rev-parse", &format!("{head_sha}^{{tree}}")])
+                                .await?;
                             if head_tree == tree {
                                 return Ok(None);
                             }
@@ -5376,11 +5377,17 @@ mod tests {
 
         let git_dir_arg = format!("--git-dir={}", git_dir.display());
         assert_eq!(
-            git_command_output(&vault_dir, [git_dir_arg.as_str(), "rev-parse", "checkpoints"]),
+            git_command_output(
+                &vault_dir,
+                [git_dir_arg.as_str(), "rev-parse", "checkpoints"]
+            ),
             second.commit_sha.to_string()
         );
         assert_eq!(
-            git_command_output(&vault_dir, [git_dir_arg.as_str(), "rev-parse", "checkpoints^"]),
+            git_command_output(
+                &vault_dir,
+                [git_dir_arg.as_str(), "rev-parse", "checkpoints^"]
+            ),
             first.commit_sha.to_string()
         );
         assert_eq!(

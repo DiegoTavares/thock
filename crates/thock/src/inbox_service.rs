@@ -9,6 +9,7 @@
 use anyhow::{Context as _, Result};
 use chrono::Local;
 use fs::Fs;
+use gpui::TaskExt as _;
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, Subscription,
     Task, WeakEntity, actions,
@@ -18,15 +19,12 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use gpui::TaskExt as _;
 use workspace::Workspace;
 
 use ui::IconName;
 
 use crate::calendar_service::{ManualSyncFinished, SyncState, show_sync_toast};
-use crate::google_auth::{
-    AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings,
-};
+use crate::google_auth::{AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings};
 use crate::inbox::{
     INBOX_CONFIG_FILE, ImportRecord, InboxConfig, InboxFetched, InboxSource, TRIAGE_LOG_PATH,
     inbox_note_digest, parse_inbox_config, plan_inbox_capture, scan_triage_log_markers,
@@ -463,9 +461,7 @@ impl InboxService {
                     n => format!("Inbox synced — {n} new items").into(),
                 }),
                 SyncOutcome::Held(reason) => Some(format!("Inbox sync held — {reason}").into()),
-                SyncOutcome::Failed(error) => {
-                    Some(format!("Inbox sync failed — {error:#}").into())
-                }
+                SyncOutcome::Failed(error) => Some(format!("Inbox sync failed — {error:#}").into()),
                 SyncOutcome::AuthRevoked => {
                     Some("Google sign-in expired — reconnect to sync the inbox".into())
                 }
@@ -855,8 +851,14 @@ mod tests {
             .find(|path| path.to_string_lossy().contains("ship-it"))
             .expect("ship-it note");
         let content = fs.load(ship).await.unwrap();
-        assert!(content.contains(&format!("capture:  {digest}")), "{content}");
-        assert!(content.contains("url:      https://example.com/ship-it"), "{content}");
+        assert!(
+            content.contains(&format!("capture:  {digest}")),
+            "{content}"
+        );
+        assert!(
+            content.contains("url:      https://example.com/ship-it"),
+            "{content}"
+        );
         let state = fs
             .load(Path::new("/vault/.thock/state/inbox/imported.jsonl"))
             .await
@@ -890,7 +892,10 @@ mod tests {
             let announcements = announcements.clone();
             |cx| {
                 cx.subscribe(&service, move |_, event: &ManualSyncFinished, _| {
-                    announcements.lock().unwrap().push(event.message.to_string());
+                    announcements
+                        .lock()
+                        .unwrap()
+                        .push(event.message.to_string());
                 })
             }
         });
@@ -913,7 +918,11 @@ mod tests {
         assert_eq!(*announcements.lock().unwrap(), Vec::<String>::new());
 
         // A manual sync announces what it found.
-        source.items.lock().unwrap().push(item("task-2", "Call back"));
+        source
+            .items
+            .lock()
+            .unwrap()
+            .push(item("task-2", "Call back"));
         service.update(cx, |service, cx| service.sync_now(cx));
         cx.run_until_parked();
         assert_eq!(
@@ -983,7 +992,9 @@ mod tests {
         // through the log's marker even with the state gone again.
         let digest = capture_digest("diego@example.com", "google-tasks", "task-1");
         fs.remove_file(&notes[0], Default::default()).await.unwrap();
-        fs.create_dir(Path::new("/vault/archives/inbox")).await.unwrap();
+        fs.create_dir(Path::new("/vault/archives/inbox"))
+            .await
+            .unwrap();
         fs.insert_file(
             Path::new("/vault/archives/inbox/triage-log.md"),
             format!("- 2026-08-23 · Ship it → Backlog · Someday <!--inbox:{digest}-->\n")

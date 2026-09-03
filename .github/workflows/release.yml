@@ -96,12 +96,12 @@ jobs:
       - name: Bundle
         run: script/bundle-linux
 
+      # `script/bundle-linux` also emits a remote_server archive; Thock does not
+      # ship remote development, so it stays out of the release.
       - uses: actions/upload-artifact@v4
         with:
           name: thock-linux-x86_64
-          path: |
-            target/release/thock-linux-x86_64.tar.gz
-            target/thock-remote-server-linux-x86_64.gz
+          path: target/release/thock-linux-x86_64.tar.gz
           if-no-files-found: error
 
   publish:

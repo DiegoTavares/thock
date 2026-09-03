@@ -13,8 +13,7 @@ use chrono::Utc;
 use fs::Fs;
 use git::repository::{GitRepositoryCheckpoint, RealGitRepository};
 use gpui::{
-    App, AppContext as _, BackgroundExecutor, Context, Entity, EntityId, Global, Subscription,
-    Task,
+    App, AppContext as _, BackgroundExecutor, Context, Entity, EntityId, Global, Subscription, Task,
 };
 use project::{Project, WorktreeId};
 use std::collections::HashMap;
@@ -260,10 +259,7 @@ impl HistoryService {
                             this.try_checkpoint(worktree_id, CheckpointTrigger::Initial, cx);
                         }
                         Err(error) => {
-                            log::warn!(
-                                "Thock history disabled for {}: {error:#}",
-                                root.display()
-                            );
+                            log::warn!("Thock history disabled for {}: {error:#}", root.display());
                             state.phase = HistoryPhase::Disabled;
                         }
                     }
@@ -274,7 +270,9 @@ impl HistoryService {
 
         let heartbeat_task = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(HEARTBEAT_POLL_INTERVAL).await;
+                cx.background_executor()
+                    .timer(HEARTBEAT_POLL_INTERVAL)
+                    .await;
                 let keep_going = this.update(cx, |this, cx| {
                     let Some(state) = this.vaults.get_mut(&worktree_id) else {
                         return false;
@@ -427,8 +425,11 @@ impl Drop for HistoryService {
             let HistoryPhase::Ready(repository) = &state.phase else {
                 continue;
             };
-            let checkpoint =
-                checkpoint_future(repository, CheckpointTrigger::Close, state.config.max_file_bytes);
+            let checkpoint = checkpoint_future(
+                repository,
+                CheckpointTrigger::Close,
+                state.config.max_file_bytes,
+            );
             self.executor
                 .spawn(async move {
                     checkpoint.await.log_err();

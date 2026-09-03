@@ -37,7 +37,10 @@ struct LabelsResponse {
     labels: Vec<GmailLabel>,
 }
 
-pub async fn list_labels(http: &Arc<dyn HttpClient>, access_token: &str) -> Result<Vec<GmailLabel>> {
+pub async fn list_labels(
+    http: &Arc<dyn HttpClient>,
+    access_token: &str,
+) -> Result<Vec<GmailLabel>> {
     let body = get_json(http, &format!("{API_BASE}/users/me/labels"), access_token).await?;
     let response: LabelsResponse =
         serde_json::from_str(&body).context("failed to parse Gmail labels response")?;
@@ -165,7 +168,10 @@ async fn get_json(http: &Arc<dyn HttpClient>, url: &str, access_token: &str) -> 
         return Err(anyhow!(AuthRevoked));
     }
     if !response.status().is_success() {
-        bail!("Gmail API request failed with status {}: {body}", response.status());
+        bail!(
+            "Gmail API request failed with status {}: {body}",
+            response.status()
+        );
     }
     Ok(body)
 }
@@ -189,7 +195,9 @@ fn extract_text_body(payload: &MessagePart) -> Option<String> {
         {
             return Some(data);
         }
-        part.parts.iter().find_map(|child| find_leaf(child, mime_type))
+        part.parts
+            .iter()
+            .find_map(|child| find_leaf(child, mime_type))
     }
     if let Some(data) = find_leaf(payload, "text/plain") {
         return decode_body_data(data);
@@ -508,8 +516,11 @@ impl TransportInner {
                 }
                 // Both digest constructions (spec §9): V15's, and V9's for
                 // threads the old stack already captured.
-                if skip.contains(&capture_digest(&self.account, "gmail", &reference.thread_id))
-                    || skip.contains(&thread_marker_id(&self.account, &reference.thread_id))
+                if skip.contains(&capture_digest(
+                    &self.account,
+                    "gmail",
+                    &reference.thread_id,
+                )) || skip.contains(&thread_marker_id(&self.account, &reference.thread_id))
                 {
                     continue;
                 }
@@ -623,7 +634,11 @@ fn thread_sections(messages: &[&GmailMessage]) -> String {
         }
         out.push('\n');
         let text = extract_text_body(&message.payload);
-        match text.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
+        match text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
             Some(text) => {
                 out.push('\n');
                 out.push_str(text);
@@ -648,23 +663,11 @@ mod tests {
     #[test]
     fn rfc2047_decoding() {
         assert_eq!(decode_rfc2047("plain subject"), "plain subject");
-        assert_eq!(
-            decode_rfc2047("=?UTF-8?B?SW52b2ljZSDinIU=?="),
-            "Invoice ✅"
-        );
-        assert_eq!(
-            decode_rfc2047("=?utf-8?Q?caf=C3=A9_menu?="),
-            "café menu"
-        );
-        assert_eq!(
-            decode_rfc2047("=?ISO-8859-1?Q?f=FCr_dich?="),
-            "für dich"
-        );
+        assert_eq!(decode_rfc2047("=?UTF-8?B?SW52b2ljZSDinIU=?="), "Invoice ✅");
+        assert_eq!(decode_rfc2047("=?utf-8?Q?caf=C3=A9_menu?="), "café menu");
+        assert_eq!(decode_rfc2047("=?ISO-8859-1?Q?f=FCr_dich?="), "für dich");
         // Whitespace between adjacent encoded words is dropped…
-        assert_eq!(
-            decode_rfc2047("=?UTF-8?B?YWI=?= =?UTF-8?B?Y2Q=?="),
-            "abcd"
-        );
+        assert_eq!(decode_rfc2047("=?UTF-8?B?YWI=?= =?UTF-8?B?Y2Q=?="), "abcd");
         // …but real text between them survives.
         assert_eq!(
             decode_rfc2047("=?UTF-8?B?YWI=?= and =?UTF-8?B?Y2Q=?="),
@@ -718,7 +721,10 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_eq!(extract_text_body(&html_only).as_deref(), Some("only <html>"));
+        assert_eq!(
+            extract_text_body(&html_only).as_deref(),
+            Some("only <html>")
+        );
 
         let attachment_only = MessagePart {
             mime_type: "application/pdf".to_string(),
@@ -727,7 +733,12 @@ mod tests {
         assert_eq!(extract_text_body(&attachment_only), None);
     }
 
-    fn plain_message(from: &str, text: Option<&str>, millis: &str, labels: &[&str]) -> GmailMessage {
+    fn plain_message(
+        from: &str,
+        text: Option<&str>,
+        millis: &str,
+        labels: &[&str],
+    ) -> GmailMessage {
         GmailMessage {
             label_ids: labels.iter().map(|label| label.to_string()).collect(),
             internal_date: Some(millis.to_string()),
@@ -776,7 +787,12 @@ mod tests {
         // A single-message thread keeps the bare V13 body — no section
         // heading.
         let single = GmailThread {
-            messages: vec![plain_message("Ana <ana@example.com>", Some("Solo"), "1000", &[])],
+            messages: vec![plain_message(
+                "Ana <ana@example.com>",
+                Some("Solo"),
+                "1000",
+                &[],
+            )],
         };
         let item = captured_item(&single, "diego@example.com", "t-2");
         assert_eq!(item.body.as_deref(), Some("Solo"));
@@ -848,12 +864,16 @@ mod tests {
 
         let inner = test_inner(
             http,
-            &[("thock/backlog", "archives/emails"), ("thock/inbox", "inbox")],
+            &[
+                ("thock/backlog", "archives/emails"),
+                ("thock/inbox", "inbox"),
+            ],
         );
         // The V9 digest still skips (spec §9) — the fake panics on
         // /messages/m1 if it doesn't.
-        let skip: HashSet<String> =
-            [thread_marker_id("diego@example.com", "t-old")].into_iter().collect();
+        let skip: HashSet<String> = [thread_marker_id("diego@example.com", "t-old")]
+            .into_iter()
+            .collect();
         let fetched = block_on(inner.fetch_with_token(&skip, "token")).unwrap();
         assert_eq!(fetched.mappings.len(), 2);
         let MappingFetched::Items(backlog) = &fetched.mappings[0] else {
@@ -870,8 +890,12 @@ mod tests {
             Some("https://mail.google.com/mail/u/diego@example.com/#all/t-both")
         );
         let body = backlog[0].body.as_deref().unwrap();
-        let ana = body.find("## Ana <ana@example.com>").expect("first message section");
-        let diego = body.find("## Diego <diego@example.com>").expect("reply section");
+        let ana = body
+            .find("## Ana <ana@example.com>")
+            .expect("first message section");
+        let diego = body
+            .find("## Diego <diego@example.com>")
+            .expect("reply section");
         assert!(ana < diego, "{body}");
         assert!(body.contains("Coffee tomorrow?"), "{body}");
         assert!(body.contains("Sure, 9am works."), "{body}");
@@ -926,7 +950,10 @@ mod tests {
         let http: Arc<dyn HttpClient> = http;
         let inner = test_inner(
             http,
-            &[("thock/backlog", "archives/emails"), ("thock/inbox", "inbox")],
+            &[
+                ("thock/backlog", "archives/emails"),
+                ("thock/inbox", "inbox"),
+            ],
         );
         let fetched = block_on(inner.fetch_with_token(&HashSet::new(), "token")).unwrap();
         assert_eq!(

@@ -9,9 +9,8 @@ use anyhow::{Context as _, Result, anyhow};
 use chrono::Local;
 use fs::Fs;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, DismissEvent, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, Global, SharedString, Subscription, Task, WeakEntity,
-    Window, actions,
+    App, AppContext as _, AsyncApp, Context, DismissEvent, Entity, EntityId, EventEmitter,
+    FocusHandle, Focusable, Global, SharedString, Subscription, Task, WeakEntity, Window, actions,
 };
 use language::Buffer;
 use notifications::status_toast::StatusToast;
@@ -33,10 +32,10 @@ use crate::calendar::{
 use crate::calendar_google::{self, CalendarListEntry, GoogleProvider};
 use crate::gmail::GMAIL_CONFIG_FILE;
 use crate::gmail_service::GmailService;
-use crate::inbox_service::InboxService;
 use crate::google_auth::{
     self, AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings,
 };
+use crate::inbox_service::InboxService;
 use crate::notes::NoteKind;
 use crate::vault::{VAULT_CONFIG_FILE, VAULT_MARKER_DIR, Vault, VaultStatus};
 
@@ -202,7 +201,9 @@ pub(crate) fn show_sync_toast(
 }
 
 enum SyncOutcome {
-    Synced { diverged: Vec<Divergence> },
+    Synced {
+        diverged: Vec<Divergence>,
+    },
     Held(SharedString),
     Failed(anyhow::Error),
     AuthRevoked,
@@ -313,10 +314,7 @@ impl CalendarService {
             return;
         };
 
-        let config_path = vault
-            .root
-            .join(VAULT_MARKER_DIR)
-            .join(CALENDAR_CONFIG_FILE);
+        let config_path = vault.root.join(VAULT_MARKER_DIR).join(CALENDAR_CONFIG_FILE);
         // Same synchronous read as `Vault::detect`; the file is tiny.
         let config = match std::fs::read_to_string(&config_path) {
             Err(_) => None,
@@ -431,9 +429,7 @@ impl CalendarService {
             .then(|| match &outcome {
                 SyncOutcome::Aborted => None,
                 SyncOutcome::Synced { .. } => Some("Calendar synced".into()),
-                SyncOutcome::Held(reason) => {
-                    Some(format!("Calendar sync held — {reason}").into())
-                }
+                SyncOutcome::Held(reason) => Some(format!("Calendar sync held — {reason}").into()),
                 SyncOutcome::Failed(error) => {
                     Some(format!("Calendar sync failed — {error:#}").into())
                 }
@@ -522,7 +518,11 @@ impl CalendarService {
             Err(error) if error.is::<AuthRevoked>() => return SyncOutcome::AuthRevoked,
             Err(error) => return SyncOutcome::Failed(error),
             // Every calendar answered 304: nothing to do (§10.2).
-            Ok(Fetched::Unchanged) => return SyncOutcome::Synced { diverged: Vec::new() },
+            Ok(Fetched::Unchanged) => {
+                return SyncOutcome::Synced {
+                    diverged: Vec::new(),
+                };
+            }
             Ok(Fetched::Events(events)) => events,
         };
 
@@ -608,7 +608,9 @@ impl CalendarService {
                 return SyncOutcome::Synced { diverged };
             }
         }
-        SyncOutcome::Failed(anyhow!("the buffer kept changing while applying calendar edits"))
+        SyncOutcome::Failed(anyhow!(
+            "the buffer kept changing while applying calendar edits"
+        ))
     }
 
     /// Records newly-diverged lines in `.thock/state/calendar/log.jsonl`
@@ -919,8 +921,8 @@ pub(crate) async fn update_config_file(
 ) -> Result<()> {
     let path = vault_root.join(VAULT_MARKER_DIR).join(file_name);
     let existing = fs.load(&path).await.unwrap_or_default();
-    let mut table: toml::Table = toml::from_str(&existing)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let mut table: toml::Table =
+        toml::from_str(&existing).with_context(|| format!("parsing {}", path.display()))?;
     mutate(&mut table);
     let serialized = toml::to_string_pretty(&table).context("serializing calendar.toml")?;
     fs.atomic_write(path, serialized).await
@@ -1091,7 +1093,11 @@ impl PickerDelegate for CalendarPickerDelegate {
             )
             .child(Label::new(name));
         if entry.primary {
-            item = item.end_slot(Label::new("Primary").size(LabelSize::XSmall).color(Color::Muted));
+            item = item.end_slot(
+                Label::new("Primary")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            );
         }
         Some(item)
     }
@@ -1112,11 +1118,7 @@ mod tests {
     }
 
     impl CalendarProvider for StubProvider {
-        fn fetch_day(
-            &self,
-            _date: chrono::NaiveDate,
-            _cx: &AsyncApp,
-        ) -> Task<Result<Fetched>> {
+        fn fetch_day(&self, _date: chrono::NaiveDate, _cx: &AsyncApp) -> Task<Result<Fetched>> {
             let events = self.events.lock().unwrap().clone();
             Task::ready(Ok(Fetched::Events(events)))
         }
@@ -1183,10 +1185,7 @@ mod tests {
 
         // The user ticks the meeting off; the meeting also moves. The next
         // poll corrects the time and keeps the checkmark (G2).
-        let ticked = text.replace(
-            "- [ ] 10:00 - 10:30 Standup",
-            "- [x] 10:00 - 10:30 Standup",
-        );
+        let ticked = text.replace("- [ ] 10:00 - 10:30 Standup", "- [x] 10:00 - 10:30 Standup");
         fs.atomic_write(note_path.clone(), ticked).await.unwrap();
         *provider.events.lock().unwrap() = vec![CalendarEvent {
             id: "aaaaaaaaaaaa".to_string(),
@@ -1222,7 +1221,8 @@ mod tests {
         let note_path = PathBuf::from(format!("/vault/daily/{}.md", today.format("%Y-%m-%d")));
         let original = "# Monday\n\n## Day planner\n\n- [ ] Workout\n";
         fs.create_dir(Path::new("/vault/daily")).await.unwrap();
-        fs.insert_file(&note_path, original.as_bytes().to_vec()).await;
+        fs.insert_file(&note_path, original.as_bytes().to_vec())
+            .await;
         let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
         cx.run_until_parked();
 

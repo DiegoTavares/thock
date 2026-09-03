@@ -143,11 +143,7 @@ impl LaunchRequest {
         }
     }
 
-    pub fn run_skill(
-        skill_name: &str,
-        vault_relative_path: &str,
-        tier: agent::ModelTier,
-    ) -> Self {
+    pub fn run_skill(skill_name: &str, vault_relative_path: &str, tier: agent::ModelTier) -> Self {
         Self {
             title: skill_name.to_string(),
             kickoff: Some(agent::run_skill_kickoff(vault_relative_path)),
@@ -942,8 +938,7 @@ fn toggle_run_skill_picker(
         Some(VaultStatus::Valid(vault)) => runnable_skills(&vault),
         _ => {
             workspace.show_error(
-                "This workspace isn't a Thock vault, so there are no skills to run."
-                    .to_string(),
+                "This workspace isn't a Thock vault, so there are no skills to run.".to_string(),
                 cx,
             );
             return;

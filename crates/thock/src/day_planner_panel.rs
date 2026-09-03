@@ -10,8 +10,8 @@ use anyhow::Result;
 use chrono::{Local, NaiveDate, Timelike as _};
 use editor::{Editor, EditorEvent, RowHighlightOptions, SelectionEffects, scroll::Autoscroll};
 use gpui::{
-    Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    Pixels, Subscription, Task, WeakEntity, Window, actions, div, px, relative,
+    Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
+    Subscription, Task, WeakEntity, Window, actions, div, px, relative,
 };
 use language::{Buffer, BufferEvent};
 use multi_buffer::MultiBufferRow;
@@ -149,17 +149,16 @@ impl DayPlannerPanel {
         let weak_workspace = workspace.weak_handle();
         let workspace_entity = cx.entity();
         cx.new(|cx| {
-            let project_subscription =
-                cx.subscribe(&project, |this: &mut Self, _, event, cx| {
-                    if matches!(
-                        event,
-                        project::Event::WorktreeAdded(_)
-                            | project::Event::WorktreeRemoved(_)
-                            | project::Event::WorktreeUpdatedEntries(..)
-                    ) {
-                        this.refresh_vault_status(cx);
-                    }
-                });
+            let project_subscription = cx.subscribe(&project, |this: &mut Self, _, event, cx| {
+                if matches!(
+                    event,
+                    project::Event::WorktreeAdded(_)
+                        | project::Event::WorktreeRemoved(_)
+                        | project::Event::WorktreeUpdatedEntries(..)
+                ) {
+                    this.refresh_vault_status(cx);
+                }
+            });
             let workspace_subscription = cx.subscribe(
                 &workspace_entity,
                 |this: &mut Self, _, event: &workspace::Event, cx| {
@@ -170,7 +169,9 @@ impl DayPlannerPanel {
             );
             let now_tick = cx.spawn(async move |this, cx| {
                 loop {
-                    cx.background_executor().timer(Duration::from_secs(60)).await;
+                    cx.background_executor()
+                        .timer(Duration::from_secs(60))
+                        .await;
                     let tick = this.update(cx, |this, cx| {
                         this.update_active_item(false, cx);
                         cx.notify();
@@ -327,12 +328,11 @@ impl DayPlannerPanel {
                 if this.resolve_active_daily_note(cx).is_some() {
                     return;
                 }
-                let subscription =
-                    cx.subscribe(&buffer, |this, _, event: &BufferEvent, cx| {
-                        if matches!(event, BufferEvent::Edited { .. } | BufferEvent::Reloaded) {
-                            this.schedule_reparse(cx);
-                        }
-                    });
+                let subscription = cx.subscribe(&buffer, |this, _, event: &BufferEvent, cx| {
+                    if matches!(event, BufferEvent::Edited { .. } | BufferEvent::Reloaded) {
+                        this.schedule_reparse(cx);
+                    }
+                });
                 let plan = this.parse_text_plan(&buffer.read(cx).text());
                 this.set_active(
                     Some(ActiveNote {
@@ -562,7 +562,10 @@ impl DayPlannerPanel {
             SyncState::Connecting => vec![muted("Calendar · connecting…".to_string())],
             SyncState::Idle => vec![muted("Calendar · waiting for first sync".to_string())],
             SyncState::Synced { at } => {
-                vec![muted(format!("Calendar · synced {}", format_ago(at.elapsed())))]
+                vec![muted(format!(
+                    "Calendar · synced {}",
+                    format_ago(at.elapsed())
+                ))]
             }
             SyncState::Holding { reason } => vec![muted(format!("Calendar · {reason}"))],
             SyncState::Failing { error } => vec![
@@ -610,16 +613,13 @@ impl DayPlannerPanel {
     }
 
     fn render_hint(&self, text: &'static str) -> Div {
-        v_flex().p_3().child(
-            Label::new(text)
-                .size(LabelSize::Small)
-                .color(Color::Muted),
-        )
+        v_flex()
+            .p_3()
+            .child(Label::new(text).size(LabelSize::Small).color(Color::Muted))
     }
 
     fn render_planner(&self, cx: &Context<Self>) -> AnyElement {
-        let (VaultStatus::Valid(vault), Some(active)) = (&self.vault_status, &self.active)
-        else {
+        let (VaultStatus::Valid(vault), Some(active)) = (&self.vault_status, &self.active) else {
             return self
                 .render_hint("Open a daily note to see its schedule.")
                 .into_any_element();
@@ -648,11 +648,7 @@ impl DayPlannerPanel {
             .into_any_element()
     }
 
-    fn render_unscheduled_strip(
-        &self,
-        plan: &DayPlan,
-        cx: &Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_unscheduled_strip(&self, plan: &DayPlan, cx: &Context<Self>) -> Option<AnyElement> {
         let unscheduled: Vec<usize> = plan.unscheduled_indices().collect();
         if unscheduled.is_empty() {
             return None;
@@ -676,12 +672,7 @@ impl DayPlannerPanel {
     /// An item's label with its Markdown links rendered as clickable labels.
     /// An empty label still needs something to show, so it falls back to an
     /// ellipsis the way a bare chip always has.
-    fn render_item_label(
-        &self,
-        id: ElementId,
-        item: &PlanItem,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    fn render_item_label(&self, id: ElementId, item: &PlanItem, cx: &Context<Self>) -> AnyElement {
         if item.label.is_empty() {
             return SharedString::from("…").into_any_element();
         }
@@ -751,9 +742,8 @@ impl DayPlannerPanel {
         let min_visual_minutes = (MIN_BLOCK_PX / HOUR_HEIGHT * 60.0).ceil() as u32;
         let blocks = day_plan::layout_blocks(plan, min_visual_minutes);
         let total_height = (grid_end - grid_start) as f32 / 60.0 * HOUR_HEIGHT;
-        let offset = |minutes: u32| {
-            px((minutes.saturating_sub(grid_start)) as f32 / 60.0 * HOUR_HEIGHT)
-        };
+        let offset =
+            |minutes: u32| px((minutes.saturating_sub(grid_start)) as f32 / 60.0 * HOUR_HEIGHT);
 
         let mut body = div().relative().w_full().h(px(total_height));
         for hour in grid_start / 60..grid_end / 60 {
@@ -884,11 +874,9 @@ impl DayPlannerPanel {
         let accent = colors.text_accent;
         let item_index = block.item_index;
         let selected = self.selected_item == Some(item_index);
-        let top =
-            px(block.start_min.saturating_sub(grid_start) as f32 / 60.0 * HOUR_HEIGHT);
-        let height = px(
-            ((block.end_min - block.start_min) as f32 / 60.0 * HOUR_HEIGHT).max(MIN_BLOCK_PX),
-        );
+        let top = px(block.start_min.saturating_sub(grid_start) as f32 / 60.0 * HOUR_HEIGHT);
+        let height =
+            px(((block.end_min - block.start_min) as f32 / 60.0 * HOUR_HEIGHT).max(MIN_BLOCK_PX));
         let width = 1.0 / block.column_count as f32;
         let left = block.column as f32 * width;
         let status = item.weight == day_plan::ItemWeight::Status;
@@ -897,8 +885,8 @@ impl DayPlannerPanel {
         // one line of label text (blocks with no label keep the caption).
         // The status lane is too narrow for a caption at any height.
         let has_label = !item.label.is_empty();
-        let show_caption = !status
-            && (!has_label || f32::from(height) >= BLOCK_CAPTION_PX + BLOCK_LABEL_LINE_PX);
+        let show_caption =
+            !status && (!has_label || f32::from(height) >= BLOCK_CAPTION_PX + BLOCK_LABEL_LINE_PX);
         // Lines of wrapped label text that fit in the remaining height, so
         // the last visible line gets an ellipsis instead of a hard clip.
         let label_height = if show_caption {

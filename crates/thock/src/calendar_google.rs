@@ -201,7 +201,10 @@ async fn get_json(
     let mut body = String::new();
     response.body_mut().read_to_string(&mut body).await?;
     if !response.status().is_success() {
-        bail!("Google API request failed with status {}: {body}", response.status());
+        bail!(
+            "Google API request failed with status {}: {body}",
+            response.status()
+        );
     }
     let etag = response
         .headers()
@@ -297,10 +300,18 @@ impl DayMinutes {
 /// `None` when the event doesn't pass the timing filters or doesn't overlap
 /// `date`. An event spanning midnight is clamped to the day window (V4 §5.5
 /// precedent).
-fn event_day_minutes(item: &GoogleEvent, date: NaiveDate, filters: &EventFilters) -> Option<DayMinutes> {
+fn event_day_minutes(
+    item: &GoogleEvent,
+    date: NaiveDate,
+    filters: &EventFilters,
+) -> Option<DayMinutes> {
     if let (Some(start), Some(end)) = (&item.start.date_time, &item.end.date_time) {
-        let start = DateTime::parse_from_rfc3339(start).ok()?.with_timezone(&Local);
-        let end = DateTime::parse_from_rfc3339(end).ok()?.with_timezone(&Local);
+        let start = DateTime::parse_from_rfc3339(start)
+            .ok()?
+            .with_timezone(&Local);
+        let end = DateTime::parse_from_rfc3339(end)
+            .ok()?
+            .with_timezone(&Local);
         if start.date_naive() > date || end.date_naive() < date {
             return None;
         }
@@ -342,7 +353,11 @@ fn attendance_passes(item: &GoogleEvent, filters: &EventFilters) -> bool {
             _ => !filters.accepted_only,
         },
         None => {
-            if item.organizer.as_ref().is_some_and(|organizer| organizer.is_self) {
+            if item
+                .organizer
+                .as_ref()
+                .is_some_and(|organizer| organizer.is_self)
+            {
                 filters.include_solo
             } else {
                 // An event on a subscribed calendar the user is not invited
@@ -449,7 +464,10 @@ impl ProviderInner {
         let mut any_changed = false;
         for calendar_id in &self.calendars {
             let stored_etag = {
-                let state = self.state.lock().map_err(|_| anyhow!("provider state poisoned"))?;
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| anyhow!("provider state poisoned"))?;
                 state
                     .cache
                     .get(&(calendar_id.clone(), date))
@@ -463,7 +481,10 @@ impl ProviderInner {
                 stored_etag.as_deref(),
             )
             .await?;
-            let mut state = self.state.lock().map_err(|_| anyhow!("provider state poisoned"))?;
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("provider state poisoned"))?;
             match fetched {
                 DayFetch::NotModified => {
                     if let Some(cached) = state.cache.get(&(calendar_id.clone(), date)) {
@@ -484,7 +505,9 @@ impl ProviderInner {
                 }
             }
             // Rollover cleanup: the window (and so the ETag) is per day.
-            state.cache.retain(|(_, cached_date), _| *cached_date == date);
+            state
+                .cache
+                .retain(|(_, cached_date), _| *cached_date == date);
         }
         if any_changed {
             Ok(Fetched::Events(all_events))
@@ -635,10 +658,7 @@ mod tests {
                 .iter()
                 .map(|event| (event.title.as_str(), event.time))
                 .collect::<Vec<_>>(),
-            vec![
-                ("Standup", Some((570, 600))),
-                ("Red-eye", Some((0, 90))),
-            ]
+            vec![("Standup", Some((570, 600))), ("Red-eye", Some((0, 90))),]
         );
         assert_eq!(events[0].id, event_marker_id("primary", "accepted"));
 
@@ -656,7 +676,11 @@ mod tests {
             vec!["Maybe", "Standup", "(busy)", "Holiday", "Red-eye"]
         );
         assert_eq!(
-            events.iter().find(|event| event.title == "Holiday").unwrap().time,
+            events
+                .iter()
+                .find(|event| event.title == "Holiday")
+                .unwrap()
+                .time,
             None
         );
     }
@@ -686,7 +710,9 @@ mod tests {
             include_solo: false,
             ..EventFilters::default()
         };
-        assert!(normalize_events(std::slice::from_ref(&solo), "primary", date(), &filters).is_empty());
+        assert!(
+            normalize_events(std::slice::from_ref(&solo), "primary", date(), &filters).is_empty()
+        );
         assert_eq!(
             normalize_events(&[solo], "primary", date(), &EventFilters::default()).len(),
             1
@@ -745,9 +771,14 @@ mod tests {
                 .unwrap())
         });
         let http: Arc<dyn HttpClient> = http;
-        let fetched =
-            block_on(fetch_day_events(&http, "token", "primary", date(), Some("\"tag1\"")))
-                .unwrap();
+        let fetched = block_on(fetch_day_events(
+            &http,
+            "token",
+            "primary",
+            date(),
+            Some("\"tag1\""),
+        ))
+        .unwrap();
         assert!(matches!(fetched, DayFetch::NotModified));
     }
 

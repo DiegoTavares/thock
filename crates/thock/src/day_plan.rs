@@ -476,10 +476,7 @@ fn assign_columns(cluster: &mut [PlacedBlock], min_visual_minutes: u32) {
     let mut column_ends: Vec<u32> = Vec::new();
     for block in cluster.iter_mut() {
         let visual_end = block.end_min.max(block.start_min + min_visual_minutes);
-        match column_ends
-            .iter()
-            .position(|&end| end <= block.start_min)
-        {
+        match column_ends.iter().position(|&end| end <= block.start_min) {
             Some(column) => {
                 column_ends[column] = visual_end;
                 block.column = column;
@@ -716,10 +713,7 @@ mod tests {
 
     #[test]
     fn empty_label_and_kept_metadata() {
-        let plan = parse_day_plan(
-            "- [ ] 09:00\n- [ ] 10:00 Review #tag [[link]]\n",
-            &config(),
-        );
+        let plan = parse_day_plan("- [ ] 09:00\n- [ ] 10:00 Review #tag [[link]]\n", &config());
         assert_eq!(plan.items[0].timing, timed(540, 570));
         assert_eq!(plan.items[0].label, "");
         assert_eq!(plan.items[1].label, "Review #tag [[link]]");
@@ -756,10 +750,7 @@ mod tests {
 
     #[test]
     fn missing_heading_parses_whole_file() {
-        let plan = parse_day_plan(
-            "# Monday\n- [ ] 09:00 One\n\n- [ ] Two\n",
-            &config(),
-        );
+        let plan = parse_day_plan("# Monday\n- [ ] 09:00 One\n\n- [ ] Two\n", &config());
         assert_eq!(plan.items.len(), 2);
     }
 

@@ -160,9 +160,7 @@ pub fn resolve_google_settings(vault_root: &Path, own_file: &str) -> GoogleSetti
             continue;
         };
         if resolved.account.is_none() {
-            resolved.account = content
-                .account
-                .filter(|account| !account.trim().is_empty());
+            resolved.account = content.account.filter(|account| !account.trim().is_empty());
         }
         // The override resolves as a pair, so an id and a secret can never
         // come from two different files.
@@ -209,8 +207,8 @@ pub async fn connect_workspace(
 ) -> Result<Connected> {
     let verifier =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
-    let challenge =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
     let state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 16]>());
 
     let (redirect_uri, callback) = oauth_callback_server::start_oauth_callback_server()?;
@@ -352,7 +350,10 @@ pub(crate) async fn api_get_json(
         return Err(anyhow!(AuthRevoked));
     }
     if !response.status().is_success() {
-        bail!("{what} request failed with status {}: {body}", response.status());
+        bail!(
+            "{what} request failed with status {}: {body}",
+            response.status()
+        );
     }
     Ok(body)
 }
@@ -372,9 +373,7 @@ pub async fn read_refresh_token(cx: &AsyncApp) -> Result<Option<(String, String)
 
 /// The unified token, falling back to the legacy calendar-only slot so an
 /// already-connected calendar keeps syncing across the upgrade (spec §6.2).
-pub async fn read_refresh_token_allowing_legacy(
-    cx: &AsyncApp,
-) -> Result<Option<(String, String)>> {
+pub async fn read_refresh_token_allowing_legacy(cx: &AsyncApp) -> Result<Option<(String, String)>> {
     if let Some(credentials) = read_from(KEYCHAIN_URL, cx).await? {
         return Ok(Some(credentials));
     }
@@ -482,8 +481,10 @@ impl TokenKeeper {
         let response = refresh_access_token(http, &self.client, &refresh_token).await?;
         let token = response.access_token.clone();
         if let Ok(mut state) = self.state.lock() {
-            state.access_token =
-                Some((token.clone(), Instant::now() + token_lifetime(response.expires_in)));
+            state.access_token = Some((
+                token.clone(),
+                Instant::now() + token_lifetime(response.expires_in),
+            ));
         }
         Ok(token)
     }
@@ -497,7 +498,12 @@ mod tests {
 
     #[test]
     fn auth_url_carries_both_scopes_pkce_and_loopback_redirect() {
-        let url = build_auth_url("client-123", "http://127.0.0.1:9000/callback", "chal", "nonce");
+        let url = build_auth_url(
+            "client-123",
+            "http://127.0.0.1:9000/callback",
+            "chal",
+            "nonce",
+        );
         assert!(url.starts_with(AUTH_ENDPOINT));
         for needle in [
             "client_id=client-123",
@@ -547,7 +553,11 @@ mod tests {
         // for the calendar service and (via the fixed cross-file order) for
         // gmail too.
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "calendar.toml", "account = \"legacy@example.com\"\n");
+        write(
+            dir.path(),
+            "calendar.toml",
+            "account = \"legacy@example.com\"\n",
+        );
         for own in ["calendar.toml", "gmail.toml"] {
             let resolved = resolve_google_settings(dir.path(), own);
             assert_eq!(resolved.account.as_deref(), Some("legacy@example.com"));
@@ -557,7 +567,11 @@ mod tests {
         // inert; the account and the override may still come from different
         // files, but an override id/secret pair never splits across two.
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "google.toml", "account = \"unified@example.com\"\n");
+        write(
+            dir.path(),
+            "google.toml",
+            "account = \"unified@example.com\"\n",
+        );
         write(
             dir.path(),
             "calendar.toml",
@@ -580,7 +594,11 @@ mod tests {
         // An unparseable file is skipped, never fatal.
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "google.toml", "not [valid");
-        write(dir.path(), "gmail.toml", "account = \"fallback@example.com\"\n");
+        write(
+            dir.path(),
+            "gmail.toml",
+            "account = \"fallback@example.com\"\n",
+        );
         let resolved = resolve_google_settings(dir.path(), "gmail.toml");
         assert_eq!(resolved.account.as_deref(), Some("fallback@example.com"));
     }

@@ -253,11 +253,15 @@ pub fn plan_inbox_capture(
         // hex (spec §6); a collision with the *same* item never reaches here
         // — its frontmatter digest already skipped it above.
         let short = digest.get(..4).unwrap_or(&digest);
-        let stem = [base.clone(), format!("{base}-{short}"), format!("{base}-{digest}")]
-            .into_iter()
-            .find(|candidate| !claimed_stems.contains(candidate))
-            // Unreachable in practice: the full digest is unique per item.
-            .unwrap_or_else(|| format!("{base}-{digest}"));
+        let stem = [
+            base.clone(),
+            format!("{base}-{short}"),
+            format!("{base}-{digest}"),
+        ]
+        .into_iter()
+        .find(|candidate| !claimed_stems.contains(candidate))
+        // Unreachable in practice: the full digest is unique per item.
+        .unwrap_or_else(|| format!("{base}-{digest}"));
         claimed_stems.insert(stem.clone());
         plan.files.push(InboxFile {
             rel_path: format!("{dir}/{stem}.md"),
@@ -421,7 +425,10 @@ mod tests {
         assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(digest, capture_digest(ACCOUNT, "google-tasks", "task-1"));
         assert_ne!(digest, capture_digest(ACCOUNT, "gmail", "task-1"));
-        assert_ne!(digest, capture_digest("other@example.com", "google-tasks", "task-1"));
+        assert_ne!(
+            digest,
+            capture_digest("other@example.com", "google-tasks", "task-1")
+        );
     }
 
     #[test]
@@ -460,9 +467,16 @@ mod tests {
             "due:      2026-08-27",
             "# Ship it — a practical guide\n\nhttps://example.com/ship-it\n",
         ] {
-            assert!(file.content.contains(needle), "missing {needle} in {}", file.content);
+            assert!(
+                file.content.contains(needle),
+                "missing {needle} in {}",
+                file.content
+            );
         }
-        assert_eq!(inbox_note_digest(&file.content).as_deref(), Some(digest.as_str()));
+        assert_eq!(
+            inbox_note_digest(&file.content).as_deref(),
+            Some(digest.as_str())
+        );
         assert_eq!(plan.newly_imported.len(), 1);
         assert_eq!(plan.newly_imported[0].digest, digest);
     }
@@ -494,7 +508,10 @@ mod tests {
             &HashSet::new(),
         );
         let content = &plan.files[0].content;
-        assert!(content.contains("from:     Ana <ana@example.com>"), "{content}");
+        assert!(
+            content.contains("from:     Ana <ana@example.com>"),
+            "{content}"
+        );
         assert!(content.contains("link:     https://mail.google.com/mail/u/d@e.com/#all/t-1"));
         assert!(!content.contains("url:"), "{content}");
         assert!(
@@ -545,8 +562,7 @@ mod tests {
             item("google-tasks", "task-2", "In the vault"),
             item("google-tasks", "task-3", "Fresh"),
         ];
-        let imported: HashSet<String> =
-            [capture_digest(ACCOUNT, "google-tasks", "task-1")].into();
+        let imported: HashSet<String> = [capture_digest(ACCOUNT, "google-tasks", "task-1")].into();
         let vault: HashSet<String> = [capture_digest(ACCOUNT, "google-tasks", "task-2")].into();
         let plan = plan(&items, &imported, &vault, &HashSet::new());
         // task-1 skipped outright, task-2 skipped but repaired into the
@@ -610,7 +626,10 @@ mod tests {
                     prose <!--inbox: bbbb -->\n<!--inbox:-->\n<!--gmail:cccc-->\n";
         assert_eq!(
             scan_triage_log_markers(text),
-            ["4d1f9a02c7b3", "bbbb"].into_iter().map(str::to_string).collect()
+            ["4d1f9a02c7b3", "bbbb"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
         );
     }
 

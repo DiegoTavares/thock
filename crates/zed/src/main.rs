@@ -21,8 +21,6 @@ use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
 use client::{Client, ProxySettings, RefreshLlmTokenListener, UserStore, parse_zed_link};
 #[cfg(feature = "collab")]
 use collab_ui::channel_view::ChannelView;
-#[cfg(feature = "collab")]
-use workspace::notifications::NotifyResultExt;
 use collections::HashMap;
 use crashes::InitCrashHandler;
 use db::kvp::{GlobalKeyValueStore, KeyValueStore};
@@ -38,6 +36,8 @@ use gpui::{
     App, AppContext, Application, AsyncApp, QuitMode, Task, TaskExt, UpdateGlobal as _, block_on,
 };
 use gpui_platform;
+#[cfg(feature = "collab")]
+use workspace::notifications::NotifyResultExt;
 
 use gpui_tokio::Tokio;
 use language::LanguageRegistry;
@@ -73,9 +73,7 @@ use util::maybe;
 use uuid::Uuid;
 use workspace::{
     AppState, MultiWorkspace, SerializedWorkspaceLocation, SessionWorkspace, Toast,
-    WorkspaceSettings, WorkspaceStore,
-    notifications::NotificationId,
-    restore_multiworkspace,
+    WorkspaceSettings, WorkspaceStore, notifications::NotificationId, restore_multiworkspace,
 };
 use zed::{
     OpenListener, OpenRequest, RawOpenRequest, app_menus, build_window_options,
@@ -784,6 +782,10 @@ fn main() {
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         #[cfg(feature = "collab")]
         collab_ui::init(&app_state, cx);
+        // `collab_ui::init` is what installs the title bar upstream, so without it
+        // the workspace has no titlebar item and the window controls overlap the docks.
+        #[cfg(not(feature = "collab"))]
+        title_bar::init(cx);
         git_ui::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);

@@ -30,9 +30,7 @@ use crate::gmail::{
     parse_gmail_config, scan_backlog_markers,
 };
 use crate::gmail_google::GmailTransport;
-use crate::google_auth::{
-    AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings,
-};
+use crate::google_auth::{AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings};
 use crate::inbox::{
     ImportRecord, TRIAGE_LOG_PATH, inbox_note_digest, plan_inbox_capture, scan_triage_log_markers,
 };
@@ -385,9 +383,7 @@ impl GmailService {
                     n => format!("Gmail synced — {n} new emails").into(),
                 }),
                 SyncOutcome::Held(reason) => Some(format!("Gmail sync held — {reason}").into()),
-                SyncOutcome::Failed(error) => {
-                    Some(format!("Gmail sync failed — {error:#}").into())
-                }
+                SyncOutcome::Failed(error) => Some(format!("Gmail sync failed — {error:#}").into()),
                 SyncOutcome::AuthRevoked => {
                     Some("Google sign-in expired — reconnect to sync Gmail".into())
                 }
@@ -519,9 +515,18 @@ impl GmailService {
         let mut captured = 0;
         if !plans.is_empty() {
             captured = plans.iter().map(|(_, plan)| plan.files.len()).sum();
-            if let Err(error) =
-                Self::apply_plans(this, &fs, &vault, &config, &project, &scan, plans, &captured_at, cx)
-                    .await
+            if let Err(error) = Self::apply_plans(
+                this,
+                &fs,
+                &vault,
+                &config,
+                &project,
+                &scan,
+                plans,
+                &captured_at,
+                cx,
+            )
+            .await
             {
                 return SyncOutcome::Failed(error);
             }
@@ -700,7 +705,8 @@ impl GmailService {
                 return Ok(());
             }
             let edit = append_to_section_edit(&text, SectionKind::Someday, None, &block);
-            fs.atomic_write(backlog_path, apply_edits(&text, vec![edit])).await?;
+            fs.atomic_write(backlog_path, apply_edits(&text, vec![edit]))
+                .await?;
             return Ok(());
         };
 
@@ -738,7 +744,9 @@ impl GmailService {
                 return Ok(());
             }
         }
-        Err(anyhow!("the buffer kept changing while applying captured emails"))
+        Err(anyhow!(
+            "the buffer kept changing while applying captured emails"
+        ))
     }
 
     /// Appends the captured threads to `.thock/state/gmail/imported.jsonl`
@@ -954,11 +962,16 @@ mod tests {
 
         // The backlog mapping landed an archive note in the V13 note format…
         let digest = capture_digest("diego@example.com", "gmail", "t-invoice");
-        let archive_path =
-            Path::new("/vault/archives/emails/2026-08-18-0930-invoice-4821.md");
+        let archive_path = Path::new("/vault/archives/emails/2026-08-18-0930-invoice-4821.md");
         let archive = fs.load(archive_path).await.unwrap();
-        assert!(archive.contains(&format!("capture:  {digest}")), "{archive}");
-        assert!(archive.contains("from:     Ana <ana@example.com>"), "{archive}");
+        assert!(
+            archive.contains(&format!("capture:  {digest}")),
+            "{archive}"
+        );
+        assert!(
+            archive.contains("from:     Ana <ana@example.com>"),
+            "{archive}"
+        );
         assert!(archive.contains("Pay up."), "{archive}");
         // …and its line in Someday, linked to the archive and marked.
         let backlog = fs.load(Path::new("/vault/backlog.md")).await.unwrap();
@@ -971,7 +984,9 @@ mod tests {
         );
         // The inbox mapping landed a plain note and touched nothing else.
         let inbox_note = fs
-            .load(Path::new("/vault/inbox/2026-08-18-0930-an-idea-from-the-road.md"))
+            .load(Path::new(
+                "/vault/inbox/2026-08-18-0930-an-idea-from-the-road.md",
+            ))
             .await
             .unwrap();
         assert!(inbox_note.contains("Two thoughts."), "{inbox_note}");
@@ -997,7 +1012,10 @@ mod tests {
         // nothing.
         cx.executor().advance_clock(Duration::from_secs(301));
         cx.run_until_parked();
-        assert_eq!(fs.load(Path::new("/vault/backlog.md")).await.unwrap(), backlog);
+        assert_eq!(
+            fs.load(Path::new("/vault/backlog.md")).await.unwrap(),
+            backlog
+        );
         let skips = transport.skips_seen.lock().unwrap();
         assert!(skips.last().unwrap().contains(&digest));
     }
@@ -1006,16 +1024,16 @@ mod tests {
     async fn legacy_v9_records_and_state_loss_never_duplicate(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
-        fs.create_dir(Path::new("/vault/archives/emails")).await.unwrap();
+        fs.create_dir(Path::new("/vault/archives/emails"))
+            .await
+            .unwrap();
         // A V9-format archive with `thread:` frontmatter and its old-digest
         // backlog line.
         let legacy_digest = thread_marker_id("diego@example.com", "t-legacy");
         fs.insert_file(
             Path::new("/vault/archives/emails/2026-08-01-old-invoice.md"),
-            format!(
-                "---\nsubject: Old invoice\nthread: {legacy_digest}\n---\n\n# Old invoice\n"
-            )
-            .into_bytes(),
+            format!("---\nsubject: Old invoice\nthread: {legacy_digest}\n---\n\n# Old invoice\n")
+                .into_bytes(),
         )
         .await;
         fs.insert_file(
@@ -1071,7 +1089,9 @@ mod tests {
     async fn crash_between_landing_and_append_is_repaired(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
-        fs.create_dir(Path::new("/vault/archives/emails")).await.unwrap();
+        fs.create_dir(Path::new("/vault/archives/emails"))
+            .await
+            .unwrap();
         // The landed note exists (V15 format), but neither the backlog line
         // nor the state made it — the crash window of spec §7.2.
         let digest = capture_digest("diego@example.com", "gmail", "t-invoice");
@@ -1093,7 +1113,10 @@ mod tests {
             // The stub keeps returning the thread (a real transport would
             // skip it), so this also exercises the planner's vault-digest
             // guard: repair, never a second file.
-            items: Mutex::new(vec![vec![email("t-invoice", "Invoice #4821", "Pay up.")], vec![]]),
+            items: Mutex::new(vec![
+                vec![email("t-invoice", "Invoice #4821", "Pay up.")],
+                vec![],
+            ]),
             skips_seen: Mutex::new(Vec::new()),
         });
         service.update(cx, |service, cx| {
@@ -1123,7 +1146,10 @@ mod tests {
             service.configure_for_test(test_vault(), test_config(), transport.clone(), cx)
         });
         cx.run_until_parked();
-        assert_eq!(fs.load(Path::new("/vault/backlog.md")).await.unwrap(), backlog);
+        assert_eq!(
+            fs.load(Path::new("/vault/backlog.md")).await.unwrap(),
+            backlog
+        );
     }
 
     #[gpui::test]

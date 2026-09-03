@@ -295,9 +295,7 @@ impl DayPlannerConfigContent {
         let mut day_start = parse_bound(self.day_start, "day_start", defaults.day_start);
         let mut day_end = parse_bound(self.day_end, "day_end", defaults.day_end);
         if day_end <= day_start {
-            log::warn!(
-                "Thock: [day_planner] day_end must be after day_start; using the defaults"
-            );
+            log::warn!("Thock: [day_planner] day_end must be after day_start; using the defaults");
             day_start = defaults.day_start;
             day_end = defaults.day_end;
         }

@@ -318,7 +318,10 @@ mod tests {
     fn global_command_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
-        assert_eq!(load_global_agent_field_from(&path, "command").unwrap(), None);
+        assert_eq!(
+            load_global_agent_field_from(&path, "command").unwrap(),
+            None
+        );
 
         save_global_command_to(&path, "claude").unwrap();
         assert_eq!(
@@ -365,7 +368,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
         fs::write(&path, "[agent]\ncommand = \"  \"\n").unwrap();
-        assert_eq!(load_global_agent_field_from(&path, "command").unwrap(), None);
+        assert_eq!(
+            load_global_agent_field_from(&path, "command").unwrap(),
+            None
+        );
     }
 
     #[test]

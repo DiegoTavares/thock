@@ -261,9 +261,11 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
     // actions are installed first at paint), so this listener sees the
     // action first and propagates it when the cursor isn't on a wikilink.
     let editor_handle = cx.weak_entity();
-    subscriptions.push(editor.register_action::<GoToDefinition>(
-        move |_, window, cx| go_to_wikilink(&editor_handle, window, cx),
-    ));
+    subscriptions.push(
+        editor.register_action::<GoToDefinition>(move |_, window, cx| {
+            go_to_wikilink(&editor_handle, window, cx)
+        }),
+    );
     let editor_handle = cx.weak_entity();
     subscriptions.push(editor.register_action::<ToggleEmailView>(move |_, _, cx| {
         editor_handle
@@ -283,11 +285,13 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
             .ok();
     }));
     let editor_handle = cx.weak_entity();
-    subscriptions.push(editor.register_action::<PreviousMessage>(move |_, window, cx| {
-        editor_handle
-            .update(cx, |editor, cx| move_to_message(editor, false, window, cx))
-            .ok();
-    }));
+    subscriptions.push(
+        editor.register_action::<PreviousMessage>(move |_, window, cx| {
+            editor_handle
+                .update(cx, |editor, cx| move_to_message(editor, false, window, cx))
+                .ok();
+        }),
+    );
 
     editor.register_addon(MarkdownConcealAddon {
         enabled: settings.conceal,
@@ -482,11 +486,13 @@ fn toggle_message(editor: &mut Editor, cx: &mut Context<Editor>) {
     // Match the whole-body fold exactly — a collapsed quote inside an
     // expanded reply is also an email fold in this range and must not read
     // as "the reply is folded".
-    let already_folded = display_snapshot.folds_in_range(body.start..body.end).any(|fold| {
-        fold.placeholder.type_tag == Some(email_fold_type_tag())
-            && fold.range.start.to_offset(&buffer_snapshot) == body.start
-            && fold.range.end.to_offset(&buffer_snapshot) == body.end
-    });
+    let already_folded = display_snapshot
+        .folds_in_range(body.start..body.end)
+        .any(|fold| {
+            fold.placeholder.type_tag == Some(email_fold_type_tag())
+                && fold.range.start.to_offset(&buffer_snapshot) == body.start
+                && fold.range.end.to_offset(&buffer_snapshot) == body.end
+        });
     // Removal sweeps every intersecting email fold, so a collapsed quote
     // inside the reply must be re-folded after the body expands.
     let nested: Vec<Range<MultiBufferOffset>> = display_snapshot
@@ -586,9 +592,8 @@ fn schedule_reparse(editor: &mut Editor, cx: &mut Context<Editor>) {
                                 .messages
                                 .iter()
                                 .map(|message| MessageAnchors {
-                                    header_start: snapshot.anchor_after(MultiBufferOffset(
-                                        message.header_line.start,
-                                    )),
+                                    header_start: snapshot
+                                        .anchor_after(MultiBufferOffset(message.header_line.start)),
                                     body: anchor(&message.body),
                                 })
                                 .collect(),
@@ -639,9 +644,7 @@ fn update_email_creases(editor: &mut Editor, cx: &mut Context<Editor>) {
     let mut creases: Vec<Crease<Anchor>> = Vec::new();
     if let Some(email) = &addon.email {
         for message in &email.messages {
-            if let Some(placeholder) =
-                email_body_placeholder(&message.body, &buffer_snapshot)
-            {
+            if let Some(placeholder) = email_body_placeholder(&message.body, &buffer_snapshot) {
                 creases.push(Crease::simple(message.body.clone(), placeholder));
             }
         }
@@ -684,8 +687,7 @@ fn apply_default_email_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
         }
     }
     for quote in &email.quotes {
-        let range = quote.start.to_offset(&buffer_snapshot)
-            ..quote.end.to_offset(&buffer_snapshot);
+        let range = quote.start.to_offset(&buffer_snapshot)..quote.end.to_offset(&buffer_snapshot);
         if range.start < range.end {
             folds.push(Crease::simple(range, quote_placeholder()));
         }
@@ -792,8 +794,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
     let new: Vec<(Range<MultiBufferOffset>, SpanKind)> = desired
         .iter()
         .filter(|want| {
-            !existing.iter().any(|fold| matches(fold, want))
-                || restored_impostors.contains(&want.0)
+            !existing.iter().any(|fold| matches(fold, want)) || restored_impostors.contains(&want.0)
         })
         .cloned()
         .collect();
@@ -1029,12 +1030,7 @@ fn sender_dot_placeholder(own: bool) -> FoldPlaceholder {
                 .h_full()
                 .flex()
                 .items_center()
-                .child(
-                    div()
-                        .size(px(7.))
-                        .rounded_full()
-                        .bg(sender_color(own, cx)),
-                )
+                .child(div().size(px(7.)).rounded_full().bg(sender_color(own, cx)))
                 .into_any_element()
         }),
         constrain_width: false,
@@ -1782,7 +1778,10 @@ mod tests {
         cx.run_until_parked();
         let display = display_text(&editor, &mut cx);
         assert!(display.contains("Hi Diego,"), "{display}");
-        assert!(display.contains("●Marta"), "conceal folds must heal: {display}");
+        assert!(
+            display.contains("●Marta"),
+            "conceal folds must heal: {display}"
+        );
 
         // Folding again finds the inserted crease and its placeholder.
         editor.update_in(&mut cx, |editor, window, cx| {

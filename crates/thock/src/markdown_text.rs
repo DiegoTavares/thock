@@ -396,11 +396,7 @@ mod tests {
     fn strikethrough_drops_its_delimiters_and_marks_the_run() {
         assert_eq!(
             parse_inline_spans("Skip ~~the standup~~ today"),
-            vec![
-                text("Skip "),
-                struck(text("the standup")),
-                text(" today"),
-            ]
+            vec![text("Skip "), struck(text("the standup")), text(" today"),]
         );
     }
 

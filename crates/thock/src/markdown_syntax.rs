@@ -291,8 +291,7 @@ fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
 
     // A `~~` inside a link construct belongs to its destination or label, not
     // to a strikethrough — and folding one would overlap the link's own folds.
-    let struck_excluded: Vec<Range<usize>> =
-        excluded.into_iter().chain(link_ranges).collect();
+    let struck_excluded: Vec<Range<usize>> = excluded.into_iter().chain(link_ranges).collect();
     for run in each_strikethrough(line, inline_from, &struck_excluded) {
         spans.push(ConcealSpan::new(
             line_start + run.range.start..line_start + run.text.start,
@@ -364,7 +363,10 @@ fn html_comment_ranges(line: &str, code_spans: &[Range<usize>]) -> Vec<Range<usi
     let mut cursor = 0;
     while let Some(open) = line[cursor..].find(OPEN).map(|index| index + cursor) {
         let body = open + OPEN.len();
-        let Some(close) = line[body..].find(CLOSE).map(|index| index + body + CLOSE.len()) else {
+        let Some(close) = line[body..]
+            .find(CLOSE)
+            .map(|index| index + body + CLOSE.len())
+        else {
             break;
         };
         let range = open..close;
@@ -568,10 +570,7 @@ fn each_strikethrough(
         let Some(run) = parse_strikethrough(line, open) else {
             continue;
         };
-        let delimiters = [
-            run.range.start..run.text.start,
-            run.text.end..run.range.end,
-        ];
+        let delimiters = [run.range.start..run.text.start, run.text.end..run.range.end];
         if delimiters
             .iter()
             .any(|delimiter| overlaps_excluded(excluded, delimiter))
@@ -688,8 +687,12 @@ pub fn email_plan(text: &str, account: Option<&str>) -> Option<EmailPlan> {
         quotes: Vec::new(),
     };
 
-    let mut headers: Vec<(Range<usize>, Range<usize>, Range<usize>, Option<Range<usize>>)> =
-        Vec::new();
+    let mut headers: Vec<(
+        Range<usize>,
+        Range<usize>,
+        Range<usize>,
+        Option<Range<usize>>,
+    )> = Vec::new();
     each_content_line(text, |line_start, line| {
         let Some((level, marker_start, text_start)) = atx_heading(line) else {
             return;
@@ -722,8 +725,8 @@ pub fn email_plan(text: &str, account: Option<&str>) -> Option<EmailPlan> {
     let mut base = conceal_spans(text);
     for (header_line, marker, sender, date) in &headers {
         base.retain(|span| {
-            let on_header = span.range.start >= header_line.start
-                && span.range.end <= header_line.end;
+            let on_header =
+                span.range.start >= header_line.start && span.range.end <= header_line.end;
             !(on_header
                 && (span.kind == SpanKind::Heading(2)
                     || (span.kind == SpanKind::Marker && span.range == *marker)))
@@ -755,7 +758,11 @@ pub fn email_plan(text: &str, account: Option<&str>) -> Option<EmailPlan> {
         });
     }
 
-    let bodies: Vec<Range<usize>> = plan.messages.iter().map(|message| message.body.clone()).collect();
+    let bodies: Vec<Range<usize>> = plan
+        .messages
+        .iter()
+        .map(|message| message.body.clone())
+        .collect();
     for body in bodies {
         scan_quotes(text, body, &mut plan);
     }
@@ -851,9 +858,8 @@ fn scan_quotes(text: &str, body: Range<usize>, plan: &mut EmailPlan) {
         offset += raw_line.len() + 1;
     }
 
-    let is_quote = |line: &str| {
-        block_indent(line).is_some_and(|indent| line[indent..].starts_with('>'))
-    };
+    let is_quote =
+        |line: &str| block_indent(line).is_some_and(|indent| line[indent..].starts_with('>'));
     let mut index = 0;
     while index < lines.len() {
         let (_, line) = lines[index];
@@ -1216,7 +1222,10 @@ mod tests {
     fn strikethrough_spans_a_link_but_never_reads_one_as_a_delimiter() {
         assert_eq!(
             struck("~~see [docs](https://a.example)~~"),
-            vec![("~~see [docs](https://a.example)~~", "see [docs](https://a.example)")]
+            vec![(
+                "~~see [docs](https://a.example)~~",
+                "see [docs](https://a.example)"
+            )]
         );
         // The `~~` here is part of the destination, not a delimiter.
         assert_eq!(struck("[a](https://a.example/~~x~~)"), vec![]);
@@ -1361,13 +1370,13 @@ mod tests {
         );
         assert_eq!(
             slices("<!--a--> mid <!--b-->\n"),
-            vec![("<!--a-->", SpanKind::Marker), ("<!--b-->", SpanKind::Marker)]
+            vec![
+                ("<!--a-->", SpanKind::Marker),
+                ("<!--b-->", SpanKind::Marker)
+            ]
         );
         // The empty comment closes on its own dashes.
-        assert_eq!(
-            slices("<!---->\n"),
-            vec![("<!---->", SpanKind::Marker)]
-        );
+        assert_eq!(slices("<!---->\n"), vec![("<!---->", SpanKind::Marker)]);
     }
 
     #[test]
@@ -1422,7 +1431,10 @@ mod tests {
     fn email_plan_requires_a_mail_source() {
         assert_eq!(email_plan("# plain note\n", None), None);
         assert_eq!(email_plan("---\nsource: tasks\n---\nbody\n", None), None);
-        assert_eq!(email_plan("---\nsource: gmail\nbody without close\n", None), None);
+        assert_eq!(
+            email_plan("---\nsource: gmail\nbody without close\n", None),
+            None
+        );
         assert!(email_plan("---\nsource: gmail\n---\nbody\n", None).is_some());
     }
 
@@ -1473,13 +1485,18 @@ mod tests {
 
         // No Heading(2) or heading-marker span survives on header lines.
         assert!(spans_of(&plan, EMAIL, SpanKind::Heading(2)).is_empty());
-        assert_eq!(spans_of(&plan, EMAIL, SpanKind::Heading(1)), vec!["Renewal quote"]);
+        assert_eq!(
+            spans_of(&plan, EMAIL, SpanKind::Heading(1)),
+            vec!["Renewal quote"]
+        );
 
         // Body: from the header line's end to the line before the next
         // header (or the file's last line).
         let first = &plan.messages[0];
-        assert_eq!(&EMAIL[first.header_line.clone()],
-            "## Marta Reyes <marta@acmeinsure.com> — 2026-08-26 14:02");
+        assert_eq!(
+            &EMAIL[first.header_line.clone()],
+            "## Marta Reyes <marta@acmeinsure.com> — 2026-08-26 14:02"
+        );
         assert_eq!(&EMAIL[first.body.clone()], "\n\nHi Diego,\n");
         let second = &plan.messages[1];
         assert!(EMAIL[second.body.clone()].ends_with("> down 4% from last year"));
@@ -1500,7 +1517,10 @@ mod tests {
         let one = "---\nsource: gmail\n---\n## A — 1\n\nx\n> lone quote\ntail\n";
         let plan = email_plan(one, None).unwrap();
         assert!(plan.quotes.is_empty());
-        assert_eq!(spans_of(&plan, one, SpanKind::EmailQuote), vec!["> lone quote"]);
+        assert_eq!(
+            spans_of(&plan, one, SpanKind::EmailQuote),
+            vec!["> lone quote"]
+        );
     }
 
     #[test]
@@ -1514,7 +1534,10 @@ mod tests {
         let text = "---\nsource: gmail\n---\n\n## Notes\n\nplain\n";
         let plan = email_plan(text, None).unwrap();
         assert_eq!(plan.messages.len(), 1);
-        assert_eq!(spans_of(&plan, text, SpanKind::EmailSender(false)), vec!["Notes"]);
+        assert_eq!(
+            spans_of(&plan, text, SpanKind::EmailSender(false)),
+            vec!["Notes"]
+        );
     }
 
     #[test]

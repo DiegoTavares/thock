@@ -502,10 +502,9 @@ impl BacklogPanel {
         let selection = self.selection()?;
         match self.visible_rows(selection.section).get(selection.index)? {
             BacklogRow::Category { name, .. } => Some((selection.section, (*name).to_string())),
-            BacklogRow::Task { task } => task
-                .category
-                .clone()
-                .map(|name| (selection.section, name)),
+            BacklogRow::Task { task } => {
+                task.category.clone().map(|name| (selection.section, name))
+            }
         }
     }
 
@@ -559,11 +558,9 @@ impl BacklogPanel {
     }
 
     fn select_category_header(&mut self, section: SectionKind, name: &str) {
-        if let Some(index) = self
-            .visible_rows(section)
-            .iter()
-            .position(|row| matches!(row, BacklogRow::Category { name: header, .. } if *header == name))
-        {
+        if let Some(index) = self.visible_rows(section).iter().position(
+            |row| matches!(row, BacklogRow::Category { name: header, .. } if *header == name),
+        ) {
             self.selected = Some(TaskSelection { section, index });
         }
     }
@@ -584,10 +581,7 @@ impl BacklogPanel {
     fn select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
         match self.selection() {
             Some(selection) => {
-                let last = self
-                    .visible_rows(selection.section)
-                    .len()
-                    .saturating_sub(1);
+                let last = self.visible_rows(selection.section).len().saturating_sub(1);
                 self.select_row(selection.section, (selection.index + 1).min(last), cx);
             }
             None => {
@@ -1361,12 +1355,7 @@ impl BacklogPanel {
                 .tooltip({
                     let focus_handle = self.focus_handle.clone();
                     move |_, cx| {
-                        Tooltip::for_action_in(
-                            "Mark done",
-                            &CompleteBacklogTask,
-                            &focus_handle,
-                            cx,
-                        )
+                        Tooltip::for_action_in("Mark done", &CompleteBacklogTask, &focus_handle, cx)
                     }
                 })
                 .on_click(cx.listener({
@@ -1584,9 +1573,7 @@ impl BacklogPanel {
                         SectionKind::Soon => "Add to Soon",
                         _ => "Add to Someday",
                     };
-                    move |_, cx| {
-                        Tooltip::for_action_in(label, &AddBacklogTask, &focus_handle, cx)
-                    }
+                    move |_, cx| Tooltip::for_action_in(label, &AddBacklogTask, &focus_handle, cx)
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.start_add(section, None, window, cx);
@@ -1748,7 +1735,10 @@ impl BacklogPanel {
             SyncState::Connecting => vec![muted("Gmail · connecting…".to_string())],
             SyncState::Idle => vec![muted("Gmail · waiting for first check".to_string())],
             SyncState::Synced { at } => {
-                vec![muted(format!("Gmail · checked {}", format_ago(at.elapsed())))]
+                vec![muted(format!(
+                    "Gmail · checked {}",
+                    format_ago(at.elapsed())
+                ))]
             }
             SyncState::Holding { reason } => vec![muted(format!("Gmail · {reason}"))],
             SyncState::Failing { error } => vec![
@@ -1808,15 +1798,18 @@ impl BacklogPanel {
                     return None;
                 }
                 vec![
-                    Button::new("thock-connect-google-workspace-inbox", "Connect Google Workspace")
-                        .label_size(LabelSize::Small)
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(
-                                crate::calendar_service::ConnectGoogleWorkspace.boxed_clone(),
-                                cx,
-                            );
-                        })
-                        .into_any_element(),
+                    Button::new(
+                        "thock-connect-google-workspace-inbox",
+                        "Connect Google Workspace",
+                    )
+                    .label_size(LabelSize::Small)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(
+                            crate::calendar_service::ConnectGoogleWorkspace.boxed_clone(),
+                            cx,
+                        );
+                    })
+                    .into_any_element(),
                 ]
             }
             SyncState::Connecting => vec![muted("Inbox · connecting…".to_string())],
@@ -2182,10 +2175,7 @@ mod tests {
 
     #[test]
     fn a_stale_collapse_entry_is_harmless() {
-        assert_eq!(
-            labels(CATEGORIZED, &[(SectionKind::Soon, "Gone")]).len(),
-            5
-        );
+        assert_eq!(labels(CATEGORIZED, &[(SectionKind::Soon, "Gone")]).len(), 5);
     }
 
     #[test]
@@ -2202,7 +2192,10 @@ mod tests {
             restore_hidden_suffix("Pay invoice <!--gmail:9f2c1ab4e7d0-->", "Pay invoice today"),
             "Pay invoice today <!--gmail:9f2c1ab4e7d0-->"
         );
-        assert_eq!(restore_hidden_suffix("Plain task", "Renamed task"), "Renamed task");
+        assert_eq!(
+            restore_hidden_suffix("Plain task", "Renamed task"),
+            "Renamed task"
+        );
         // A mid-line comment is visible content, not identity — untouched.
         assert_eq!(
             restore_hidden_suffix("a <!-- note --> b", "a <!-- note --> c"),

@@ -19,8 +19,8 @@ pub mod markdown_syntax;
 pub mod markdown_text;
 pub mod notes;
 pub mod routines;
-pub mod tasks_google;
 pub mod routines_panel;
+pub mod tasks_google;
 pub mod vault;
 
 use anyhow::{Context as _, Result};

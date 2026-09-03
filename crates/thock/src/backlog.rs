@@ -709,9 +709,15 @@ Some orienting prose the model must never touch.
         let first = &backlog.soon[0];
         // Blank lines between children are inside the span; the trailing
         // blank after note B is not.
-        assert_eq!(&source[first.span.clone()], "- [ ] Task\n  - note A\n\n  - note B\n");
+        assert_eq!(
+            &source[first.span.clone()],
+            "- [ ] Task\n  - note A\n\n  - note B\n"
+        );
 
-        let edited = apply_edits(source, complete_task_edits(source, first, date(2026, 7, 24)));
+        let edited = apply_edits(
+            source,
+            complete_task_edits(source, first, date(2026, 7, 24)),
+        );
         let reparsed = parse_backlog(&edited);
         assert_eq!(reparsed.soon.len(), 1);
         assert_eq!(reparsed.soon[0].text, "Next");
@@ -744,7 +750,11 @@ Some orienting prose the model must never touch.
     #[test]
     fn complete_moves_task_with_children_and_stamps_date() {
         let backlog = parse_backlog(SAMPLE);
-        let task = task(&backlog, SectionKind::Soon, "Fix the day-planner overlap bug");
+        let task = task(
+            &backlog,
+            SectionKind::Soon,
+            "Fix the day-planner overlap bug",
+        );
         let edited = apply_edits(SAMPLE, complete_task_edits(SAMPLE, task, date(2026, 7, 24)));
 
         let reparsed = parse_backlog(&edited);
@@ -794,7 +804,11 @@ Some orienting prose the model must never touch.
     #[test]
     fn move_between_sections_keeps_children_verbatim() {
         let backlog = parse_backlog(SAMPLE);
-        let task = task(&backlog, SectionKind::Soon, "Fix the day-planner overlap bug");
+        let task = task(
+            &backlog,
+            SectionKind::Soon,
+            "Fix the day-planner overlap bug",
+        );
         let edited = apply_edits(SAMPLE, move_task_edits(SAMPLE, task, SectionKind::Someday));
         let reparsed = parse_backlog(&edited);
         assert_eq!(reparsed.soon.len(), 1);
@@ -841,7 +855,11 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn append_done_to_note_falls_back_to_end_of_file() {
-        for note in ["# Monday\nno planner heading", "# Monday\nno planner heading\n", ""] {
+        for note in [
+            "# Monday\nno planner heading",
+            "# Monday\nno planner heading\n",
+            "",
+        ] {
             let edit = append_done_to_note_edit(note, "Day planner", "Task");
             let edited = apply_edits(note, vec![edit]);
             assert!(edited.ends_with("- [x] Task\n"), "got {edited:?}");
@@ -1000,7 +1018,9 @@ Some orienting prose the model must never touch.
                 &new_task_block("Chase the licensing bug"),
             )],
         );
-        assert!(edited.contains("- [ ] Review PR #2489\n- [ ] Chase the licensing bug\n\n### Thock"));
+        assert!(
+            edited.contains("- [ ] Review PR #2489\n- [ ] Chase the licensing bug\n\n### Thock")
+        );
     }
 
     #[test]
@@ -1033,7 +1053,10 @@ Some orienting prose the model must never touch.
                 &new_task_block("First one"),
             )],
         );
-        assert_eq!(edited, "## Soon\n\n### Empty\n\n- [ ] First one\n\n## Someday\n");
+        assert_eq!(
+            edited,
+            "## Soon\n\n### Empty\n\n- [ ] First one\n\n## Someday\n"
+        );
     }
 
     #[test]
@@ -1048,7 +1071,10 @@ Some orienting prose the model must never touch.
                 &new_task_block("Loose"),
             )],
         );
-        assert_eq!(edited, "## Soon\n\n- [ ] Loose\n\n### Group\n\n- [ ] Grouped\n");
+        assert_eq!(
+            edited,
+            "## Soon\n\n- [ ] Loose\n\n### Group\n\n- [ ] Grouped\n"
+        );
     }
 
     #[test]
@@ -1091,7 +1117,10 @@ Some orienting prose the model must never touch.
         let reparsed = parse_backlog(&edited);
         assert_eq!(reparsed.completed.len(), 1);
         assert_eq!(reparsed.completed[0].category, None);
-        assert_eq!(reparsed.completed[0].text, "Fix the scheduler ✅ 2026-09-02");
+        assert_eq!(
+            reparsed.completed[0].text,
+            "Fix the scheduler ✅ 2026-09-02"
+        );
     }
 
     #[test]

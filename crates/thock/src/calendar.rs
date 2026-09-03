@@ -207,10 +207,19 @@ pub fn parse_calendar_config(text: &str, planner_heading: &str) -> Result<Calend
             .unwrap_or_else(|| "Calendar".to_string()),
         poll_interval: Duration::from_secs(content.poll_seconds.unwrap_or(300).clamp(60, 3600)),
         filters: EventFilters {
-            accepted_only: content.filters.accepted_only.unwrap_or(defaults.accepted_only),
-            include_solo: content.filters.include_solo.unwrap_or(defaults.include_solo),
+            accepted_only: content
+                .filters
+                .accepted_only
+                .unwrap_or(defaults.accepted_only),
+            include_solo: content
+                .filters
+                .include_solo
+                .unwrap_or(defaults.include_solo),
             all_day: content.filters.all_day.unwrap_or(defaults.all_day),
-            private_busy: content.filters.private_busy.unwrap_or(defaults.private_busy),
+            private_busy: content
+                .filters
+                .private_busy
+                .unwrap_or(defaults.private_busy),
         },
         google: GoogleClientOverride {
             client_id: content.google.client_id,
@@ -263,9 +272,9 @@ fn parse_marker_payload(payload: &str) -> Option<(&str, Option<&str>)> {
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
-    if suffix.is_some_and(|suffix| {
-        suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_lowercase())
-    }) {
+    if suffix
+        .is_some_and(|suffix| suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_lowercase()))
+    {
         return None;
     }
     Some((id, suffix))
@@ -350,12 +359,7 @@ pub fn reconcile(note: &str, events: &[CalendarEvent], config: &CalendarConfig) 
         })
         .collect();
 
-    let section = find_child_section(
-        &lines,
-        &planner_range,
-        planner_level,
-        &config.section,
-    );
+    let section = find_child_section(&lines, &planner_range, planner_level, &config.section);
 
     let mut edits = Vec::new();
     let mut diverged = Vec::new();
@@ -625,8 +629,7 @@ impl SyncedLine {
     fn parse(row: usize, line: &str) -> Option<Self> {
         let trimmed = line.trim_end();
         let marker_start = trimmed.rfind(MARKER_PREFIX)?;
-        let payload =
-            trimmed[marker_start + MARKER_PREFIX.len()..].strip_suffix(MARKER_SUFFIX)?;
+        let payload = trimmed[marker_start + MARKER_PREFIX.len()..].strip_suffix(MARKER_SUFFIX)?;
         let (id, marker_suffix) = parse_marker_payload(payload)?;
         let marker_span = marker_start..trimmed.len();
 
@@ -636,10 +639,10 @@ impl SyncedLine {
             Some((start, len)) => (Some(start), len),
             None => (None, 0),
         };
-        let token_span =
-            (token_len > 0).then(|| text_offset..text_offset + token_len);
+        let token_span = (token_len > 0).then(|| text_offset..text_offset + token_len);
         let after_token = &line[text_offset + token_len..marker_start];
-        let text_start = text_offset + token_len + (after_token.len() - after_token.trim_start().len());
+        let text_start =
+            text_offset + token_len + (after_token.len() - after_token.trim_start().len());
         let text_end = text_start + after_token.trim().len();
 
         Some(Self {
@@ -906,7 +909,10 @@ mod tests {
     #[test]
     fn focus_time_lines_carry_their_kind_in_the_marker() {
         let note = "# Day planner\n\n## Calendar\n\n";
-        let (applied, _) = run(note, &[focus_event("aaaaaaaaaaaa", "Focus time", 540, 1020)]);
+        let (applied, _) = run(
+            note,
+            &[focus_event("aaaaaaaaaaaa", "Focus time", 540, 1020)],
+        );
         assert!(
             applied.contains("- [ ] 09:00 - 17:00 Focus time <!--gcal:aaaaaaaaaaaa:focus-->"),
             "{applied}"
@@ -919,7 +925,10 @@ mod tests {
             line_event_kind("- [ ] 10:00 - 10:30 Standup <!--gcal:aaaaaaaaaaaa-->"),
             EventKind::Default
         );
-        assert_eq!(line_event_kind("- [ ] A task of my own"), EventKind::Default);
+        assert_eq!(
+            line_event_kind("- [ ] A task of my own"),
+            EventKind::Default
+        );
     }
 
     #[test]
@@ -928,7 +937,10 @@ mod tests {
         // by the user since — the marker still upgrades, the rename survives.
         let note = "# Day planner\n\n## Calendar\n\n\
                     - [x] 09:00 - 17:00 Focus time (deep work) <!--gcal:aaaaaaaaaaaa-->\n";
-        let (applied, diverged) = run(note, &[focus_event("aaaaaaaaaaaa", "Focus time", 540, 1020)]);
+        let (applied, diverged) = run(
+            note,
+            &[focus_event("aaaaaaaaaaaa", "Focus time", 540, 1020)],
+        );
         assert_eq!(
             applied,
             "# Day planner\n\n## Calendar\n\n\
@@ -962,7 +974,11 @@ mod tests {
 
     #[test]
     fn missing_planner_heading_holds() {
-        let result = reconcile("# Journal\n", &[event("aaaaaaaaaaaa", "T", 600, 630)], &config());
+        let result = reconcile(
+            "# Journal\n",
+            &[event("aaaaaaaaaaaa", "T", 600, 630)],
+            &config(),
+        );
         assert_eq!(result, Reconciled::NoPlannerSection);
     }
 
@@ -1070,9 +1086,9 @@ mod tests {
         assert!(diverged.is_empty());
         // Indent, bullet style, checkbox, and the user's trailing text all
         // survive; only the token changed.
-        assert!(applied.contains(
-            "\t* [x] 11:00 - 11:30 Standup with notes <!--gcal:aaaaaaaaaaaa-->"
-        ));
+        assert!(
+            applied.contains("\t* [x] 11:00 - 11:30 Standup with notes <!--gcal:aaaaaaaaaaaa-->")
+        );
     }
 
     #[test]
@@ -1080,7 +1096,10 @@ mod tests {
         let note = "# Day planner\n\n## Calendar\n\n\
                     - [ ] 10:00 - 10:30 Coffee with the API folks <!--gcal:aaaaaaaaaaaa-->\n";
         // Even the time change is not applied once the title diverged.
-        let (applied, diverged) = run(note, &[event("aaaaaaaaaaaa", "API Leads meeting", 660, 690)]);
+        let (applied, diverged) = run(
+            note,
+            &[event("aaaaaaaaaaaa", "API Leads meeting", 660, 690)],
+        );
         assert_eq!(applied, note);
         assert_eq!(diverged.len(), 1);
         assert_eq!(diverged[0].id, "aaaaaaaaaaaa");
@@ -1138,7 +1157,12 @@ mod tests {
         let note = "# Day planner\n\n## Calendar\n";
         let (applied, _) = run(
             note,
-            &[event("aaaaaaaaaaaa", "sneaky <!--gcal:ffffffffffff--> \n newline", 600, 630)],
+            &[event(
+                "aaaaaaaaaaaa",
+                "sneaky <!--gcal:ffffffffffff--> \n newline",
+                600,
+                630,
+            )],
         );
         assert!(applied.contains(
             "- [ ] 10:00 - 10:30 sneaky gcal:ffffffffffff--> newline <!--gcal:aaaaaaaaaaaa-->"
@@ -1152,7 +1176,8 @@ mod tests {
     fn section_heading_is_found_case_insensitively_and_by_config_name() {
         let mut config = config();
         config.section = "Meetings".to_string();
-        let note = "# Day planner\n\n## MEETINGS\n\n- [ ] 10:00 - 10:30 Old <!--gcal:aaaaaaaaaaaa-->\n";
+        let note =
+            "# Day planner\n\n## MEETINGS\n\n- [ ] 10:00 - 10:30 Old <!--gcal:aaaaaaaaaaaa-->\n";
         let Reconciled::Edits { edits, .. } =
             reconcile(note, &[event("aaaaaaaaaaaa", "Old", 600, 630)], &config)
         else {
@@ -1215,7 +1240,10 @@ mod tests {
     #[test]
     fn reconcile_is_idempotent() {
         let scenarios: Vec<(&str, Vec<CalendarEvent>)> = vec![
-            ("# Day planner\n", vec![event("aaaaaaaaaaaa", "Standup", 570, 600)]),
+            (
+                "# Day planner\n",
+                vec![event("aaaaaaaaaaaa", "Standup", 570, 600)],
+            ),
             ("# Day planner\n- [ ] Workout", vec![]),
             (
                 "# Day planner\n\n## Calendar\n\n- [x] 10:00 - 10:30 Standup <!--gcal:aaaaaaaaaaaa-->\n",
@@ -1239,7 +1267,10 @@ mod tests {
             ),
             (
                 "# Monday\n# Day planner\n- [ ] Workout\n# Personal\n",
-                vec![event("aaaaaaaaaaaa", "A", 600, 630), all_day("bbbbbbbbbbbb", "B")],
+                vec![
+                    event("aaaaaaaaaaaa", "A", 600, 630),
+                    all_day("bbbbbbbbbbbb", "B"),
+                ],
             ),
         ];
         for (note, events) in scenarios {

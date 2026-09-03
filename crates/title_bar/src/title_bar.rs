@@ -25,12 +25,12 @@ use crate::application_menu::{
 use auto_update::AutoUpdateStatus;
 #[cfg(feature = "call")]
 use call::ActiveCall;
+use client::{Client, UserStore, zed_urls};
+use command_palette_hooks::CommandPaletteFilter;
 #[cfg(feature = "call")]
 use gpui::TaskExt;
 #[cfg(feature = "call")]
 use ui::PopoverMenuHandle;
-use client::{Client, UserStore, zed_urls};
-use command_palette_hooks::CommandPaletteFilter;
 
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, Context, Element, Entity, Focusable,

@@ -1043,12 +1043,12 @@ impl RoutinesPanel {
                             // session.
                             this.update_in(cx, |this, window, cx| {
                                 this.run_skill(
-                                title,
-                                onboarding_file,
-                                crate::agent::ModelTier::Default,
-                                window,
-                                cx,
-                            );
+                                    title,
+                                    onboarding_file,
+                                    crate::agent::ModelTier::Default,
+                                    window,
+                                    cx,
+                                );
                             })?;
                         }
                     }

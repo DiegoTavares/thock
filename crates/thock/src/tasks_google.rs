@@ -156,10 +156,7 @@ fn captured_item(task: &GoogleTask) -> CapturedItem {
         from: None,
         url: task_url(task),
         link: None,
-        body: task
-            .notes
-            .clone()
-            .filter(|notes| !notes.trim().is_empty()),
+        body: task.notes.clone().filter(|notes| !notes.trim().is_empty()),
         occurred_at: task
             .updated
             .as_deref()
@@ -339,7 +336,10 @@ mod tests {
         // No links entry, so the URL came out of the notes.
         assert_eq!(ship.url.as_deref(), Some("https://example.com/ship-it"));
         assert_eq!(ship.link, None);
-        assert_eq!(ship.body.as_deref(), Some("worth a read\nhttps://example.com/ship-it end"));
+        assert_eq!(
+            ship.body.as_deref(),
+            Some("worth a read\nhttps://example.com/ship-it end")
+        );
         // Date parsed, meaningless time component discarded.
         assert_eq!(ship.due, NaiveDate::from_ymd_opt(2026, 8, 27));
         assert!(ship.occurred_at.is_some());
@@ -383,7 +383,10 @@ mod tests {
     fn missing_list_is_a_holding_state_not_an_error() {
         let http = FakeHttpClient::create(|request| async move {
             let uri = request.uri().to_string();
-            assert!(uri.contains("/users/@me/lists"), "unexpected request to {uri}");
+            assert!(
+                uri.contains("/users/@me/lists"),
+                "unexpected request to {uri}"
+            );
             Ok(Response::builder()
                 .status(200)
                 .body(AsyncBody::from(br#"{"items": []}"#.to_vec()))
@@ -421,8 +424,14 @@ mod tests {
             notes: Some("no url here".to_string()),
             ..Default::default()
         };
-        assert_eq!(task_url(&task).as_deref(), Some("https://title.example.com"));
-        assert_eq!(task_due("2026-08-27T00:00:00.000Z"), NaiveDate::from_ymd_opt(2026, 8, 27));
+        assert_eq!(
+            task_url(&task).as_deref(),
+            Some("https://title.example.com")
+        );
+        assert_eq!(
+            task_due("2026-08-27T00:00:00.000Z"),
+            NaiveDate::from_ymd_opt(2026, 8, 27)
+        );
         assert_eq!(task_due("junk"), None);
     }
 }
