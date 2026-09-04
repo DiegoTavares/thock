@@ -39,6 +39,27 @@ pub fn email_capture_line(title: &str, stem: &str, digest: &str) -> String {
     )
 }
 
+/// The `[backlog] headings` table resolved against the English defaults
+/// (V19 §5.2): what the three sections are actually called in the user's
+/// `backlog.md`. Matching also falls back to the English defaults, so a
+/// half-migrated vault still parses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BacklogHeadings {
+    pub soon: String,
+    pub someday: String,
+    pub completed: String,
+}
+
+impl Default for BacklogHeadings {
+    fn default() -> Self {
+        Self {
+            soon: SectionKind::Soon.default_heading().to_string(),
+            someday: SectionKind::Someday.default_heading().to_string(),
+            completed: SectionKind::Completed.default_heading().to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SectionKind {
     Soon,
@@ -49,7 +70,20 @@ pub enum SectionKind {
 impl SectionKind {
     pub const ALL: [SectionKind; 3] = [Self::Soon, Self::Someday, Self::Completed];
 
-    pub fn heading(self) -> &'static str {
+    /// The section's stable, language-independent key — for persisted state
+    /// and element ids, never for matching or writing file content (V19
+    /// decision 3).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Soon => "soon",
+            Self::Someday => "someday",
+            Self::Completed => "completed",
+        }
+    }
+
+    /// The built-in English heading — the default when `[backlog] headings`
+    /// is absent, and always tried as a matching fallback.
+    pub fn default_heading(self) -> &'static str {
         match self {
             Self::Soon => "Soon",
             Self::Someday => "Someday",
@@ -57,10 +91,22 @@ impl SectionKind {
         }
     }
 
-    /// The section a persisted heading names, for panel state restored from
-    /// disk.
-    pub fn from_heading(heading: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.heading() == heading)
+    /// The heading as it appears in the user's file.
+    pub fn heading(self, headings: &BacklogHeadings) -> &str {
+        match self {
+            Self::Soon => &headings.soon,
+            Self::Someday => &headings.someday,
+            Self::Completed => &headings.completed,
+        }
+    }
+
+    /// The section a persisted key names, for panel state restored from
+    /// disk. Case-insensitive so state written by pre-V19 builds — which
+    /// keyed on the English headings — still restores.
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.id().eq_ignore_ascii_case(id))
     }
 
     fn index(self) -> usize {
@@ -230,6 +276,24 @@ fn section_line_range(lines: &[Line<'_>], heading: &str) -> Option<(Range<usize>
     Some((start + 1..end, level))
 }
 
+/// A backlog section's lines: the configured heading first and, on a miss,
+/// the built-in English default (V19 decision 4). Both orders of the Set
+/// Language ritual's two writes — config and file — resolve, and a vault
+/// whose config was translated before its file still parses.
+fn resolve_section(
+    lines: &[Line<'_>],
+    kind: SectionKind,
+    headings: &BacklogHeadings,
+) -> Option<(Range<usize>, usize)> {
+    let configured = kind.heading(headings);
+    section_line_range(lines, configured).or_else(|| {
+        let default = kind.default_heading();
+        (!configured.eq_ignore_ascii_case(default))
+            .then(|| section_line_range(lines, default))
+            .flatten()
+    })
+}
+
 /// The rows of a section that belong to `category`: `None` addresses the
 /// region above the section's first category heading, `Some(name)` the block
 /// under the first heading with that name. `None` is returned when the named
@@ -297,11 +361,11 @@ fn is_child_line(line: &str) -> bool {
     line.starts_with([' ', '\t']) && !line.trim().is_empty()
 }
 
-pub fn parse_backlog(text: &str) -> Backlog {
+pub fn parse_backlog(text: &str, headings: &BacklogHeadings) -> Backlog {
     let lines = line_table(text);
     let mut backlog = Backlog::default();
     for kind in SectionKind::ALL {
-        let Some((range, level)) = section_line_range(&lines, kind.heading()) else {
+        let Some((range, level)) = resolve_section(&lines, kind, headings) else {
             continue;
         };
         let mut tasks = Vec::new();
@@ -392,7 +456,12 @@ pub fn new_task_block(text: &str) -> String {
 
 /// Moves the task (with children) out of its section and appends it to the
 /// end of Completed, checked off and stamped ` ✅ <date>` (spec §6.3 step 2).
-pub fn complete_task_edits(text: &str, task: &BacklogTask, date: NaiveDate) -> Vec<Edit> {
+pub fn complete_task_edits(
+    text: &str,
+    task: &BacklogTask,
+    date: NaiveDate,
+    headings: &BacklogHeadings,
+) -> Vec<Edit> {
     let block = task_block(text, task);
     let (first_line, children) = block.split_once('\n').unwrap_or((block.as_str(), ""));
     let first_line = if task.checked {
@@ -412,20 +481,37 @@ pub fn complete_task_edits(text: &str, task: &BacklogTask, date: NaiveDate) -> V
             range: task.span.clone(),
             new_text: String::new(),
         },
-        append_to_section_edit(text, SectionKind::Completed, None, &completed_block),
+        append_to_section_edit(
+            text,
+            SectionKind::Completed,
+            None,
+            &completed_block,
+            headings,
+        ),
     ]
 }
 
 /// Moves the task (with children) verbatim to the end of another section,
 /// keeping the category it was filed under (V17 §5.3) — the destination's
 /// heading is created when it isn't there yet.
-pub fn move_task_edits(text: &str, task: &BacklogTask, to: SectionKind) -> Vec<Edit> {
+pub fn move_task_edits(
+    text: &str,
+    task: &BacklogTask,
+    to: SectionKind,
+    headings: &BacklogHeadings,
+) -> Vec<Edit> {
     vec![
         Edit {
             range: task.span.clone(),
             new_text: String::new(),
         },
-        append_to_section_edit(text, to, task.category.as_deref(), &task_block(text, task)),
+        append_to_section_edit(
+            text,
+            to,
+            task.category.as_deref(),
+            &task_block(text, task),
+            headings,
+        ),
     ]
 }
 
@@ -443,9 +529,10 @@ pub fn append_to_section_edit(
     kind: SectionKind,
     category: Option<&str>,
     block: &str,
+    headings: &BacklogHeadings,
 ) -> Edit {
     let lines = line_table(text);
-    let Some((section, level)) = section_line_range(&lines, kind.heading()) else {
+    let Some((section, level)) = resolve_section(&lines, kind, headings) else {
         let prefix = if text.is_empty() {
             ""
         } else if text.ends_with('\n') {
@@ -459,7 +546,7 @@ pub fn append_to_section_edit(
         };
         return Edit {
             range: text.len()..text.len(),
-            new_text: format!("{prefix}## {}\n\n{body}", kind.heading()),
+            new_text: format!("{prefix}## {}\n\n{body}", kind.heading(headings)),
         };
     };
     let last_non_blank = |rows: Range<usize>| {
@@ -571,6 +658,10 @@ pub fn normalize_task_text(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn parse(text: &str) -> Backlog {
+        parse_backlog(text, &BacklogHeadings::default())
+    }
+
     const SAMPLE: &str = "\
 # Backlog
 
@@ -610,7 +701,7 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn parses_sections_and_children() {
-        let backlog = parse_backlog(SAMPLE);
+        let backlog = parse(SAMPLE);
         assert_eq!(
             backlog
                 .soon
@@ -642,35 +733,35 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn parses_headings_case_insensitively_at_any_level() {
-        let backlog = parse_backlog("### sOoN\n- [ ] A\n# Someday\n- [ ] B\n");
+        let backlog = parse("### sOoN\n- [ ] A\n# Someday\n- [ ] B\n");
         assert_eq!(backlog.soon.len(), 1);
         assert_eq!(backlog.someday.len(), 1);
     }
 
     #[test]
     fn first_matching_heading_wins() {
-        let backlog = parse_backlog("## Soon\n- [ ] First\n## Break\n## Soon\n- [ ] Second\n");
+        let backlog = parse("## Soon\n- [ ] First\n## Break\n## Soon\n- [ ] Second\n");
         assert_eq!(backlog.soon.len(), 1);
         assert_eq!(backlog.soon[0].text, "First");
     }
 
     #[test]
     fn missing_sections_parse_as_empty() {
-        let backlog = parse_backlog("# Notes\nJust prose.\n");
+        let backlog = parse("# Notes\nJust prose.\n");
         assert_eq!(backlog, Backlog::default());
         assert!(backlog.is_empty());
     }
 
     #[test]
     fn indented_checkboxes_are_not_tasks() {
-        let backlog = parse_backlog("## Soon\n  - [ ] indented\n- [ ] top level\n");
+        let backlog = parse("## Soon\n  - [ ] indented\n- [ ] top level\n");
         assert_eq!(backlog.soon.len(), 1);
         assert_eq!(backlog.soon[0].text, "top level");
     }
 
     #[test]
     fn duplicate_texts_are_both_parsed() {
-        let backlog = parse_backlog("## Soon\n- [ ] Twice\n- [ ] Twice\n");
+        let backlog = parse("## Soon\n- [ ] Twice\n- [ ] Twice\n");
         assert_eq!(backlog.soon.len(), 2);
         assert_ne!(backlog.soon[0].span, backlog.soon[1].span);
         // The line disambiguates duplicates; an ambiguous text with a stale
@@ -686,7 +777,7 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn locate_task_falls_back_to_unique_text_when_lines_shift() {
-        let backlog = parse_backlog("## Soon\n\n\n- [ ] Only\n");
+        let backlog = parse("## Soon\n\n\n- [ ] Only\n");
         // A stale line (from before blank lines were removed above the task)
         // still resolves because the text is unambiguous.
         assert_eq!(
@@ -704,7 +795,7 @@ Some orienting prose the model must never touch.
                       - [ ] Task\n  - note A\n\n  - note B\n\n\
                       - [ ] Next\n\n\
                       ## Completed\n";
-        let backlog = parse_backlog(source);
+        let backlog = parse(source);
         assert_eq!(backlog.soon.len(), 2);
         let first = &backlog.soon[0];
         // Blank lines between children are inside the span; the trailing
@@ -716,9 +807,14 @@ Some orienting prose the model must never touch.
 
         let edited = apply_edits(
             source,
-            complete_task_edits(source, first, date(2026, 7, 24)),
+            complete_task_edits(
+                source,
+                first,
+                date(2026, 7, 24),
+                &BacklogHeadings::default(),
+            ),
         );
-        let reparsed = parse_backlog(&edited);
+        let reparsed = parse(&edited);
         assert_eq!(reparsed.soon.len(), 1);
         assert_eq!(reparsed.soon[0].text, "Next");
         let completed_span = &edited[reparsed.completed[0].span.clone()];
@@ -730,7 +826,7 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn hand_checked_tasks_do_not_count_as_open_work() {
-        let backlog = parse_backlog("## Soon\n- [x] Done by hand\n## Someday\n");
+        let backlog = parse("## Soon\n- [x] Done by hand\n## Someday\n");
         assert_eq!(backlog.soon.len(), 1);
         assert!(backlog.soon[0].checked);
         assert!(backlog.is_empty());
@@ -738,7 +834,7 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn rename_touches_only_the_task_text() {
-        let backlog = parse_backlog(SAMPLE);
+        let backlog = parse(SAMPLE);
         let task = task(&backlog, SectionKind::Soon, "Renew passport");
         let edited = apply_edits(SAMPLE, vec![rename_task_edit(task, "Renew both passports")]);
         assert_eq!(
@@ -749,15 +845,18 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn complete_moves_task_with_children_and_stamps_date() {
-        let backlog = parse_backlog(SAMPLE);
+        let backlog = parse(SAMPLE);
         let task = task(
             &backlog,
             SectionKind::Soon,
             "Fix the day-planner overlap bug",
         );
-        let edited = apply_edits(SAMPLE, complete_task_edits(SAMPLE, task, date(2026, 7, 24)));
+        let edited = apply_edits(
+            SAMPLE,
+            complete_task_edits(SAMPLE, task, date(2026, 7, 24), &BacklogHeadings::default()),
+        );
 
-        let reparsed = parse_backlog(&edited);
+        let reparsed = parse(&edited);
         assert_eq!(reparsed.soon.len(), 1);
         assert_eq!(reparsed.completed.len(), 2);
         assert_eq!(
@@ -777,14 +876,17 @@ Some orienting prose the model must never touch.
     #[test]
     fn complete_creates_missing_completed_section() {
         let source = "## Soon\n\n- [ ] Only task\n";
-        let backlog = parse_backlog(source);
+        let backlog = parse(source);
         let task = task(&backlog, SectionKind::Soon, "Only task");
-        let edited = apply_edits(source, complete_task_edits(source, task, date(2026, 7, 24)));
+        let edited = apply_edits(
+            source,
+            complete_task_edits(source, task, date(2026, 7, 24), &BacklogHeadings::default()),
+        );
         assert_eq!(
             edited,
             "## Soon\n\n\n## Completed\n\n- [x] Only task ✅ 2026-07-24\n"
         );
-        let reparsed = parse_backlog(&edited);
+        let reparsed = parse(&edited);
         assert_eq!(reparsed.completed.len(), 1);
         assert!(reparsed.soon.is_empty());
     }
@@ -792,10 +894,13 @@ Some orienting prose the model must never touch.
     #[test]
     fn complete_task_without_trailing_newline() {
         let source = "## Soon\n- [ ] Last line";
-        let backlog = parse_backlog(source);
+        let backlog = parse(source);
         let task = task(&backlog, SectionKind::Soon, "Last line");
-        let edited = apply_edits(source, complete_task_edits(source, task, date(2026, 7, 24)));
-        let reparsed = parse_backlog(&edited);
+        let edited = apply_edits(
+            source,
+            complete_task_edits(source, task, date(2026, 7, 24), &BacklogHeadings::default()),
+        );
+        let reparsed = parse(&edited);
         assert!(reparsed.soon.is_empty());
         assert_eq!(reparsed.completed.len(), 1);
         assert_eq!(reparsed.completed[0].text, "Last line ✅ 2026-07-24");
@@ -803,14 +908,22 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn move_between_sections_keeps_children_verbatim() {
-        let backlog = parse_backlog(SAMPLE);
+        let backlog = parse(SAMPLE);
         let task = task(
             &backlog,
             SectionKind::Soon,
             "Fix the day-planner overlap bug",
         );
-        let edited = apply_edits(SAMPLE, move_task_edits(SAMPLE, task, SectionKind::Someday));
-        let reparsed = parse_backlog(&edited);
+        let edited = apply_edits(
+            SAMPLE,
+            move_task_edits(
+                SAMPLE,
+                task,
+                SectionKind::Someday,
+                &BacklogHeadings::default(),
+            ),
+        );
+        let reparsed = parse(&edited);
         assert_eq!(reparsed.soon.len(), 1);
         assert_eq!(
             reparsed
@@ -833,10 +946,11 @@ Some orienting prose the model must never touch.
                 SectionKind::Soon,
                 None,
                 &new_task_block("  Renew passport  "),
+                &BacklogHeadings::default(),
             )],
         );
         assert!(edited.contains("## Soon\n\n- [ ] Renew passport\n\n## Someday"));
-        let reparsed = parse_backlog(&edited);
+        let reparsed = parse(&edited);
         assert_eq!(reparsed.soon.len(), 1);
         assert_eq!(reparsed.soon[0].text, "Renew passport");
     }
@@ -912,9 +1026,114 @@ Some orienting prose the model must never touch.
         assert_eq!(completion_date("Malformed ✅ 2026-13-99"), None);
     }
 
+    fn portuguese() -> BacklogHeadings {
+        BacklogHeadings {
+            soon: "Em breve".to_string(),
+            someday: "Algum dia".to_string(),
+            completed: "Concluído".to_string(),
+        }
+    }
+
+    #[test]
+    fn round_trips_under_non_english_headings() {
+        let source = "## Em breve\n\n- [ ] Renovar o passaporte\n\n\
+                      ## Algum dia\n\n## Concluído\n";
+        let headings = portuguese();
+        let backlog = parse_backlog(source, &headings);
+        assert_eq!(backlog.soon.len(), 1);
+
+        let completed = apply_edits(
+            source,
+            complete_task_edits(source, &backlog.soon[0], date(2026, 9, 3), &headings),
+        );
+        let reparsed = parse_backlog(&completed, &headings);
+        assert!(reparsed.soon.is_empty());
+        assert_eq!(
+            reparsed.completed[0].text,
+            "Renovar o passaporte ✅ 2026-09-03"
+        );
+        assert!(completed.contains("## Concluído\n\n- [x] Renovar o passaporte"));
+
+        let appended = apply_edits(
+            &completed,
+            vec![append_to_section_edit(
+                &completed,
+                SectionKind::Someday,
+                None,
+                &new_task_block("Aprender marcenaria"),
+                &headings,
+            )],
+        );
+        assert!(appended.contains("## Algum dia\n\n- [ ] Aprender marcenaria"));
+    }
+
+    #[test]
+    fn english_sections_still_parse_under_translated_config() {
+        // The config was written before the file was renamed (V19 decision
+        // 4): the configured heading misses and the English default matches.
+        let backlog = parse_backlog(SAMPLE, &portuguese());
+        assert_eq!(backlog.soon.len(), 2);
+        assert_eq!(backlog.someday.len(), 1);
+        assert_eq!(backlog.completed.len(), 1);
+        // Writes into the fallback-matched section land inside it.
+        let edited = apply_edits(
+            SAMPLE,
+            vec![append_to_section_edit(
+                SAMPLE,
+                SectionKind::Soon,
+                None,
+                &new_task_block("Nova tarefa"),
+                &portuguese(),
+            )],
+        );
+        assert!(edited.contains("overlap bug\n  - notes"));
+        assert!(parse_backlog(&edited, &portuguese()).soon.len() == 3);
+    }
+
+    #[test]
+    fn translated_file_without_config_renders_as_empty_state() {
+        // The reverse half-migration: the file was renamed by hand before
+        // the config write. Nothing matches, and that is an empty state to
+        // render — never an error.
+        let backlog = parse_backlog("## Em breve\n- [ ] Tarefa\n", &BacklogHeadings::default());
+        assert_eq!(backlog, Backlog::default());
+    }
+
+    #[test]
+    fn complete_and_move_create_missing_sections_with_configured_headings() {
+        let headings = portuguese();
+        let source = "## Em breve\n\n- [ ] Só esta\n- [ ] Outra\n";
+        let backlog = parse_backlog(source, &headings);
+
+        let completed = apply_edits(
+            source,
+            complete_task_edits(source, &backlog.soon[0], date(2026, 9, 3), &headings),
+        );
+        assert!(completed.contains("## Concluído\n\n- [x] Só esta ✅ 2026-09-03"));
+
+        let moved = apply_edits(
+            source,
+            move_task_edits(source, &backlog.soon[1], SectionKind::Someday, &headings),
+        );
+        assert!(moved.contains("## Algum dia\n\n- [ ] Outra"));
+    }
+
+    #[test]
+    fn from_id_accepts_legacy_english_heading_keys() {
+        // Pre-V19 builds persisted collapsed-group state keyed on the
+        // English headings.
+        assert_eq!(SectionKind::from_id("Soon"), Some(SectionKind::Soon));
+        assert_eq!(SectionKind::from_id("someday"), Some(SectionKind::Someday));
+        assert_eq!(
+            SectionKind::from_id("Completed"),
+            Some(SectionKind::Completed)
+        );
+        assert_eq!(SectionKind::from_id("Em breve"), None);
+    }
+
     #[test]
     fn contains_task_checks_every_section() {
-        let backlog = parse_backlog(SAMPLE);
+        let backlog = parse(SAMPLE);
         assert!(backlog.contains_task("Renew  passport"));
         assert!(backlog.contains_task("Learn woodworking"));
         assert!(backlog.contains_task("Book dentist appointment"));
@@ -944,7 +1163,7 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn parses_categories_and_loose_tasks() {
-        let backlog = parse_backlog(CATEGORIZED);
+        let backlog = parse(CATEGORIZED);
         assert_eq!(
             backlog
                 .soon
@@ -971,7 +1190,7 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn empty_categories_are_kept_and_unnamed_headings_close_the_group() {
-        let backlog = parse_backlog("## Soon\n### Empty\n###\n- [ ] After the blank heading\n");
+        let backlog = parse("## Soon\n### Empty\n###\n- [ ] After the blank heading\n");
         assert_eq!(
             backlog
                 .categories(SectionKind::Soon)
@@ -985,7 +1204,7 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn category_headings_do_not_become_task_children() {
-        let backlog = parse_backlog("## Soon\n- [ ] Task\n  - child\n### Group\n- [ ] Grouped\n");
+        let backlog = parse("## Soon\n- [ ] Task\n  - child\n### Group\n- [ ] Grouped\n");
         assert_eq!(backlog.soon[0].category, None);
         assert!(!CATEGORIZED[backlog.soon[0].span.clone()].contains("###"));
         assert_eq!(backlog.soon[1].category.as_deref(), Some("Group"));
@@ -1000,10 +1219,11 @@ Some orienting prose the model must never touch.
                 SectionKind::Soon,
                 None,
                 &new_task_block("Another loose task"),
+                &BacklogHeadings::default(),
             )],
         );
         assert!(edited.contains("- [ ] Loose task\n- [ ] Another loose task\n\n### OpenCue"));
-        let reparsed = parse_backlog(&edited);
+        let reparsed = parse(&edited);
         assert_eq!(reparsed.soon[1].category, None);
     }
 
@@ -1016,6 +1236,7 @@ Some orienting prose the model must never touch.
                 SectionKind::Soon,
                 Some("OpenCue"),
                 &new_task_block("Chase the licensing bug"),
+                &BacklogHeadings::default(),
             )],
         );
         assert!(
@@ -1032,12 +1253,13 @@ Some orienting prose the model must never touch.
                 SectionKind::Someday,
                 Some("Reading"),
                 &new_task_block("Finish the Housel book"),
+                &BacklogHeadings::default(),
             )],
         );
         assert!(edited.contains(
             "## Someday\n\n- [ ] Later thing\n\n### Reading\n\n- [ ] Finish the Housel book\n"
         ));
-        let reparsed = parse_backlog(&edited);
+        let reparsed = parse(&edited);
         assert_eq!(reparsed.someday[1].category.as_deref(), Some("Reading"));
     }
 
@@ -1051,6 +1273,7 @@ Some orienting prose the model must never touch.
                 SectionKind::Soon,
                 Some("Empty"),
                 &new_task_block("First one"),
+                &BacklogHeadings::default(),
             )],
         );
         assert_eq!(
@@ -1069,6 +1292,7 @@ Some orienting prose the model must never touch.
                 SectionKind::Soon,
                 None,
                 &new_task_block("Loose"),
+                &BacklogHeadings::default(),
             )],
         );
         assert_eq!(
@@ -1079,13 +1303,18 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn moving_a_task_carries_its_category() {
-        let backlog = parse_backlog(CATEGORIZED);
+        let backlog = parse(CATEGORIZED);
         let task = task(&backlog, SectionKind::Soon, "Backlog categories");
         let edited = apply_edits(
             CATEGORIZED,
-            move_task_edits(CATEGORIZED, task, SectionKind::Someday),
+            move_task_edits(
+                CATEGORIZED,
+                task,
+                SectionKind::Someday,
+                &BacklogHeadings::default(),
+            ),
         );
-        let reparsed = parse_backlog(&edited);
+        let reparsed = parse(&edited);
         assert_eq!(
             reparsed
                 .someday
@@ -1108,13 +1337,18 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn completing_a_categorized_task_files_it_flat() {
-        let backlog = parse_backlog(CATEGORIZED);
+        let backlog = parse(CATEGORIZED);
         let task = task(&backlog, SectionKind::Soon, "Fix the scheduler");
         let edited = apply_edits(
             CATEGORIZED,
-            complete_task_edits(CATEGORIZED, task, date(2026, 9, 2)),
+            complete_task_edits(
+                CATEGORIZED,
+                task,
+                date(2026, 9, 2),
+                &BacklogHeadings::default(),
+            ),
         );
-        let reparsed = parse_backlog(&edited);
+        let reparsed = parse(&edited);
         assert_eq!(reparsed.completed.len(), 1);
         assert_eq!(reparsed.completed[0].category, None);
         assert_eq!(
@@ -1125,7 +1359,7 @@ Some orienting prose the model must never touch.
 
     #[test]
     fn default_backlog_round_trips() {
-        let backlog = parse_backlog(DEFAULT_BACKLOG);
+        let backlog = parse(DEFAULT_BACKLOG);
         assert!(backlog.is_empty());
         assert!(backlog.completed.is_empty());
         // Appending to each section keeps the others' content identical.
@@ -1136,6 +1370,7 @@ Some orienting prose the model must never touch.
                 SectionKind::Someday,
                 None,
                 &new_task_block("Learn woodworking"),
+                &BacklogHeadings::default(),
             )],
         );
         assert!(edited.contains("<!-- Soon = tasks for the coming days."));

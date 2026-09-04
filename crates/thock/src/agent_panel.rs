@@ -42,7 +42,10 @@ actions!(
         /// Starts a new conversation with the connected agent.
         NewConversation,
         /// Opens the guided flow for connecting a CLI agent.
-        ConnectAgent
+        ConnectAgent,
+        /// Sets the language your notes and your agent use, translating the
+        /// vault's templates and docs with your agent.
+        SetLanguage
     ]
 );
 
@@ -84,6 +87,9 @@ pub fn init(cx: &mut App) {
                 Some(skill_id) => run_skill_by_id(workspace, skill_id, window, cx),
                 None => toggle_run_skill_picker(workspace, window, cx),
             }
+        });
+        workspace.register_action(|workspace, _: &SetLanguage, window, cx| {
+            run_set_language(workspace, window, cx);
         });
     })
     .detach();
@@ -127,6 +133,38 @@ fn run_skill_by_id(
             cx,
         ),
     }
+}
+
+/// The `thock: set language` path (V19 §5.3): launch the core Set Language
+/// ritual with the connected agent. Available in any vault, any time — the
+/// ritual is re-runnable by design.
+fn run_set_language(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let root = workspace
+        .project()
+        .read(cx)
+        .visible_worktrees(cx)
+        .next()
+        .map(|worktree| worktree.read(cx).abs_path().to_path_buf());
+    if !matches!(
+        root.as_deref().map(Vault::detect),
+        Some(VaultStatus::Valid(_))
+    ) {
+        workspace.show_error(
+            "This workspace isn't a Thock vault, so there is no language to set.".to_string(),
+            cx,
+        );
+        return;
+    }
+    AgentPanel::launch_in_workspace(
+        workspace,
+        LaunchRequest::run_skill(
+            "Set Language",
+            crate::routines::SET_LANGUAGE_SKILL_PATH,
+            agent::ModelTier::Default,
+        ),
+        window,
+        cx,
+    );
 }
 
 /// One agent action to launch in a fresh terminal tab (spec locked decision

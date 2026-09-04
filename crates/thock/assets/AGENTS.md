@@ -20,11 +20,17 @@ These are binding for any agent working in this vault:
    Filing, moving, deleting, or acting on the user's behalf happens only
    after they say yes.
 3. **Never write under `.thock/`, `.claude/`, or `.gemini/`.** Thock owns
-   that machinery. The one exception: state markers a skill explicitly
-   documents (ready and done markers under `.thock/state/`).
+   that machinery. Two exceptions, both for skills, never incidental:
+   state markers a skill explicitly documents (ready and done markers under
+   `.thock/state/`), and `.thock/config.toml` when a skill is changing a
+   setting the user explicitly asked for (the Set Language ritual does).
 4. **Create-if-missing.** Daily and weekly notes may not exist yet —
    creating them from `templates/` is normal. Never treat a missing file or
    folder as an error.
+
+When a **`## Language`** section exists in this file (the Set Language
+ritual appends one), it is as binding as the rules above: speak and write
+in that language, within the limits the section names.
 
 ## The map
 

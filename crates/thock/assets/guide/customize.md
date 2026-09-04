@@ -20,6 +20,13 @@ Too small or too large? `⌘ +` and `⌘ -` resize the text you're reading
 right now. To make a size the default, ask your agent — *"make my note text
 bigger"* — or change `buffer_font_size` in the settings (`⌘ ,`).
 
+## Your language
+
+Your notes and your agent can work in your language: open the command bar
+(`⌘ ⇧ P`) and run **thock: set language**. Your agent translates the
+templates, docs, and list headings with you — though Thock's own buttons
+and menus stay in English for now.
+
 ## The keys worth knowing
 
 - **⌘ ⇧ P — do anything.** Opens the command bar. Type what you want in

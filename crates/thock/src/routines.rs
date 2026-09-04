@@ -34,9 +34,11 @@ const LEGACY_MANIFEST_FILE: &str = "manifest.toml";
 /// the vault-root agent instructions every CLI reads.
 pub const ROUTINES_REFERENCE_PATH: &str = "routines/ROUTINES.md";
 pub const NEW_ROUTINE_SKILL_PATH: &str = "skills/thock/new-routine.md";
+pub const SET_LANGUAGE_SKILL_PATH: &str = "skills/thock/set-language.md";
 pub const AGENT_INSTRUCTIONS_PATH: &str = "AGENTS.md";
 const ROUTINES_REFERENCE: &str = include_str!("../assets/routines/ROUTINES.md");
 const NEW_ROUTINE_SKILL: &str = include_str!("../assets/skills/new-routine.md");
+const SET_LANGUAGE_SKILL: &str = include_str!("../assets/skills/set-language.md");
 const AGENT_INSTRUCTIONS: &str = include_str!("../assets/AGENTS.md");
 
 /// Per-CLI names for the vault-root instruction file, each linked to
@@ -1357,7 +1359,14 @@ pub fn materialize_core_files(vault_root: &Path) -> Result<()> {
         ROUTINES_REFERENCE,
     )?;
     write_if_missing(&vault_root.join(NEW_ROUTINE_SKILL_PATH), NEW_ROUTINE_SKILL)?;
-    write_if_missing(&vault_root.join(AGENT_INSTRUCTIONS_PATH), AGENT_INSTRUCTIONS)?;
+    write_if_missing(
+        &vault_root.join(SET_LANGUAGE_SKILL_PATH),
+        SET_LANGUAGE_SKILL,
+    )?;
+    write_if_missing(
+        &vault_root.join(AGENT_INSTRUCTIONS_PATH),
+        AGENT_INSTRUCTIONS,
+    )?;
     for link_name in AGENT_INSTRUCTION_LINKS {
         link_agent_instructions(vault_root, link_name)?;
     }
@@ -2413,10 +2422,15 @@ mod tests {
         // The core authoring files ship with every vault (V7 §7.2).
         assert!(dir.path().join(ROUTINES_REFERENCE_PATH).is_file());
         assert!(dir.path().join(NEW_ROUTINE_SKILL_PATH).is_file());
+        assert!(dir.path().join(SET_LANGUAGE_SKILL_PATH).is_file());
         // The agent instruction file and its per-CLI links (V18 §5.1), and
         // the first-run guide pages (V18 §5.3–5.4).
         assert!(dir.path().join(AGENT_INSTRUCTIONS_PATH).is_file());
-        assert!(dir.path().join(crate::getting_started::GUIDE_PATH).is_file());
+        assert!(
+            dir.path()
+                .join(crate::getting_started::GUIDE_PATH)
+                .is_file()
+        );
         assert!(
             dir.path()
                 .join(crate::getting_started::CUSTOMIZE_PATH)

@@ -244,6 +244,17 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   a Gemini fast-tier mapping, and de-Clauded skill copy — a Gemini user gets the full experience. The
   folder picker and a pick-your-Routines step stay deferred. Spec `specs/v18-first-run-onboarding.md`. _(shipped)_
 - [x] **Remove code-editor chrome** — the inherited Zed surface is off by default: no sign-in/user menu, no git/collab/debugger/diagnostics/LSP buttons, no tasks, Jupyter or gutter runnables, telemetry and auto-update off, no unconditional phone-home (extension update ping guarded, prettier-for-Markdown off so opening a note downloads nothing). Language servers are opt-in per language (TOML via auto-installed extension, JSON/JSONC/YAML kept for settings editing); the command palette hides the debugger/task/repl/collab/account namespaces; menus list the Thock panels and drop the Run menu and Zed marketing links. All setting-level flips and hides, never code removal, so rebases stay cheap. Spec `specs/v12-de-zed-ification.md`. _(shipped)_
+- [x] **Your vault, in your language** — the vault and the agent speak the user's language while the app's
+  chrome stays English (stated plainly, not hidden). A **Set Language** ritual (`skills/thock/set-language.md`,
+  `thock: set language` in the palette, and the Welcome Tour's new opening question) records the language as a
+  binding `## Language` section in `AGENTS.md`, writes `[language]` plus the parsing config, and translates the
+  templates, welcome note, customize page, and Routine docs in confirmed batches — shipped skills only as an
+  opt-in extra with a stops-receiving-updates warning, existing notes never. Underneath it `[backlog] headings`
+  became configurable like `[day_planner] heading`: `SectionKind` split `id()` (stable keys for persisted
+  state and element ids) from `heading()` (the configured text), matching falls back to the English defaults so
+  half-migrated vaults still parse, and the Backlog panel's columns render the configured headings. The daily
+  template retitles to a wordless `YYYY-MM-DD` date; localized month names, chrome i18n, and divergence
+  tracking for translated skills stay deferred. Spec `specs/v19-vault-language.md`. _(shipped)_
 - [ ] **BYO-LLM cost visibility** — key/model choice, local vs cloud, graceful failure. _(planned)_
 
 ---

@@ -30,7 +30,9 @@ use util::ResultExt as _;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 use workspace::{OpenOptions, OpenVisible, Workspace};
 
-use crate::backlog::{self, Backlog, BacklogTask, SectionKind, parse_backlog, split_completion};
+use crate::backlog::{
+    self, Backlog, BacklogHeadings, BacklogTask, SectionKind, parse_backlog, split_completion,
+};
 use crate::calendar_service::{ConnectGoogleWorkspace, SyncState};
 use crate::day_plan::strip_trailing_comment;
 use crate::gmail_service::{self, GmailService, SyncGmailNow};
@@ -79,7 +81,9 @@ actions!(
 /// (V17 §5.4). Category membership itself lives in `backlog.md`.
 #[derive(Default, Serialize, Deserialize)]
 struct SerializedBacklogPanel {
-    /// `(section heading, category name)` pairs.
+    /// `(section id, category name)` pairs. Keyed on `SectionKind::id()` so
+    /// the state survives a language change; pre-V19 builds wrote the English
+    /// headings, which `from_id` still accepts (V19 §3 #3).
     collapsed: Vec<(String, String)>,
 }
 
@@ -205,7 +209,7 @@ impl BacklogPanel {
                             .collapsed
                             .into_iter()
                             .filter_map(|(section, name)| {
-                                Some((SectionKind::from_heading(&section)?, name))
+                                Some((SectionKind::from_id(&section)?, name))
                             })
                             .collect()
                     })
@@ -296,7 +300,7 @@ impl BacklogPanel {
             collapsed: self
                 .collapsed
                 .iter()
-                .map(|(section, name)| (section.heading().to_string(), name.clone()))
+                .map(|(section, name)| (section.id().to_string(), name.clone()))
                 .collect(),
         };
         let Some(payload) = serde_json::to_string(&state).log_err() else {
@@ -319,6 +323,14 @@ impl BacklogPanel {
         }
     }
 
+    /// The vault's resolved section headings (V19 §5.2) — what the parser
+    /// matches, the write helpers create, and the column headers show.
+    fn headings(&self) -> BacklogHeadings {
+        self.vault()
+            .map(|vault| vault.config.backlog.headings.clone())
+            .unwrap_or_default()
+    }
+
     fn detect_vault_status(&self, cx: &App) -> VaultStatus {
         match self
             .project
@@ -336,6 +348,9 @@ impl BacklogPanel {
         let status = self.detect_vault_status(cx);
         if status != self.vault_status {
             self.vault_status = status;
+            // A config change can rename the parsed headings without moving
+            // the file, so the buffer must be re-read under the new ones.
+            self.reparse(cx);
             cx.notify();
         }
         // Re-resolve the buffer either way: a worktree event may mean
@@ -411,7 +426,7 @@ impl BacklogPanel {
 
     fn reparse(&mut self, cx: &mut Context<Self>) {
         let backlog = match &self.buffer {
-            Some(buffer) => parse_backlog(&buffer.read(cx).text()),
+            Some(buffer) => parse_backlog(&buffer.read(cx).text(), &self.headings()),
             None => Backlog::default(),
         };
         if backlog != self.backlog {
@@ -812,7 +827,7 @@ impl BacklogPanel {
             .as_ref()
             .map(|buffer| buffer.read(cx).text())
             .and_then(|text| {
-                let located = parse_backlog(&text)
+                let located = parse_backlog(&text, &self.headings())
                     .locate_task(section, task.line, &task.text)
                     .map(|located| located.span.clone())?;
                 Some(text.get(located)?.trim_end().to_string())
@@ -962,7 +977,7 @@ impl BacklogPanel {
                     return;
                 };
                 let text = buffer.read(cx).text();
-                let backlog = parse_backlog(&text);
+                let backlog = parse_backlog(&text, &self.headings());
                 let Some(task) = backlog.locate_task(section, line, &original_text) else {
                     // The line changed under the edit; dropping beats guessing
                     // (spec §6.5).
@@ -993,10 +1008,16 @@ impl BacklogPanel {
         cx: &mut Context<Self>,
     ) {
         let block = backlog::new_task_block(text);
+        let headings = self.headings();
         if let Some(buffer) = self.buffer.clone() {
             let current = buffer.read(cx).text();
-            let edit =
-                backlog::append_to_section_edit(&current, section, category.as_deref(), &block);
+            let edit = backlog::append_to_section_edit(
+                &current,
+                section,
+                category.as_deref(),
+                &block,
+                &headings,
+            );
             self.write_edits(
                 buffer,
                 vec![edit],
@@ -1020,8 +1041,13 @@ impl BacklogPanel {
                     return Err(error).with_context(|| format!("reading {}", path.display()));
                 }
             };
-            let edit =
-                backlog::append_to_section_edit(&current, section, category.as_deref(), &block);
+            let edit = backlog::append_to_section_edit(
+                &current,
+                section,
+                category.as_deref(),
+                &block,
+                &headings,
+            );
             let new_text = backlog::apply_edits(&current, vec![edit]);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
@@ -1123,11 +1149,12 @@ impl BacklogPanel {
                     .clone()
                     .context("backlog.md is no longer open")?;
                 let text = buffer.read(cx).text();
-                let backlog = parse_backlog(&text);
+                let headings = this.headings();
+                let backlog = parse_backlog(&text, &headings);
                 let task = backlog
                     .locate_task(section, line, &task_text)
                     .context("the task changed while it was being completed")?;
-                let mut edits = backlog::complete_task_edits(&text, task, today);
+                let mut edits = backlog::complete_task_edits(&text, task, today, &headings);
                 edits.sort_by_key(|edit| edit.range.start);
                 buffer.update(cx, |buffer, cx| {
                     buffer.edit(
@@ -1184,7 +1211,8 @@ impl BacklogPanel {
             return false;
         };
         let text = buffer.read(cx).text();
-        let backlog = parse_backlog(&text);
+        let headings = self.headings();
+        let backlog = parse_backlog(&text, &headings);
         let Some(task) = backlog.locate_task(section, line, &task_text) else {
             self.show_error(
                 "That task changed outside the panel, so it wasn't moved.".to_string(),
@@ -1192,7 +1220,7 @@ impl BacklogPanel {
             );
             return false;
         };
-        let edits = backlog::move_task_edits(&text, task, destination);
+        let edits = backlog::move_task_edits(&text, task, destination, &headings);
         self.write_edits(buffer, edits, "Couldn't update backlog.md", cx);
         true
     }
@@ -1319,7 +1347,7 @@ impl BacklogPanel {
                 return editor_row;
             }
         }
-        let section_key = section.heading();
+        let section_key = section.id();
         let task_text = task.text.clone();
         let task_line = task.line;
         // Chevrons, matching the `>` / `<` keys that do the same thing.
@@ -1463,7 +1491,7 @@ impl BacklogPanel {
         collapsed: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let section_key = section.heading();
+        let section_key = section.id();
         let name = name.to_string();
         h_flex()
             .w_full()
@@ -1543,7 +1571,7 @@ impl BacklogPanel {
             .iter()
             .filter(|task| !task.checked)
             .count();
-        let section_key = section.heading();
+        let section_key = section.id();
         let header = h_flex()
             .justify_between()
             .px_2()
@@ -1553,7 +1581,10 @@ impl BacklogPanel {
             .child(
                 h_flex()
                     .gap_1()
-                    .child(Label::new(section.heading()).size(LabelSize::Small))
+                    .child(
+                        Label::new(section.heading(&self.headings()).to_string())
+                            .size(LabelSize::Small),
+                    )
                     .child(
                         Label::new(open_count.to_string())
                             .size(LabelSize::XSmall)
@@ -1640,7 +1671,7 @@ impl BacklogPanel {
             .py_1()
             .border_b_1()
             .border_color(colors.border_variant)
-            .child(Label::new("Completed").size(LabelSize::Small));
+            .child(Label::new(self.headings().completed).size(LabelSize::Small));
 
         let mut list = v_flex().py_0p5().gap_0p5();
         for (index, task) in completed.into_iter().enumerate() {
@@ -2116,7 +2147,7 @@ impl Panel for BacklogPanel {
 #[cfg(test)]
 mod tests {
     use super::{BacklogRow, SectionKind, column_rows, restore_hidden_suffix};
-    use crate::backlog::parse_backlog;
+    use crate::backlog::{BacklogHeadings, parse_backlog};
     use std::collections::HashSet;
 
     const CATEGORIZED: &str = "\
@@ -2137,7 +2168,7 @@ mod tests {
 
     /// The rendered rows as `("category", count)` / `"task text"` labels.
     fn labels(source: &str, collapsed: &[(SectionKind, &str)]) -> Vec<String> {
-        let backlog = parse_backlog(source);
+        let backlog = parse_backlog(source, &BacklogHeadings::default());
         let collapsed: HashSet<(SectionKind, String)> = collapsed
             .iter()
             .map(|(section, name)| (*section, (*name).to_string()))

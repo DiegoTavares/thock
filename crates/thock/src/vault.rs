@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::backlog::BacklogHeadings;
 use crate::day_plan::DayPlannerConfig;
 use crate::notes::NoteKind;
 
@@ -155,6 +156,8 @@ impl VaultConfigContent {
 struct BacklogConfigContent {
     #[serde(skip_serializing_if = "Option::is_none")]
     file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headings: Option<BacklogHeadingsContent>,
 }
 
 impl BacklogConfigContent {
@@ -164,26 +167,61 @@ impl BacklogConfigContent {
                 .file
                 .filter(|file| !file.trim().is_empty())
                 .unwrap_or_else(|| BacklogConfig::default().file),
+            headings: self.headings.unwrap_or_default().resolve(),
         }
     }
 
     fn is_unset(&self) -> bool {
-        self.file.is_none()
+        self.file.is_none() && self.headings.is_none()
+    }
+}
+
+/// The `[backlog] headings` table (spec `v19-vault-language.md` §5.2): what
+/// the three parsed sections are called in the user's file. Per-key fallback,
+/// so a partial table keeps the English defaults for the missing keys.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct BacklogHeadingsContent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    soon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    someday: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed: Option<String>,
+}
+
+impl BacklogHeadingsContent {
+    fn resolve(self) -> BacklogHeadings {
+        let defaults = BacklogHeadings::default();
+        let or_default = |value: Option<String>, default: String| {
+            value
+                .map(|heading| heading.trim().to_string())
+                .filter(|heading| !heading.is_empty())
+                .unwrap_or(default)
+        };
+        BacklogHeadings {
+            soon: or_default(self.soon, defaults.soon),
+            someday: or_default(self.someday, defaults.someday),
+            completed: or_default(self.completed, defaults.completed),
+        }
     }
 }
 
 /// The `[backlog]` table: where the vault's backlog file lives (spec
-/// `v6-backlog.md` §5.2). One file per vault.
+/// `v6-backlog.md` §5.2) and what its section headings are called (spec
+/// `v19-vault-language.md`). One file per vault.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BacklogConfig {
     /// Vault-relative path of the backlog file.
     pub file: String,
+    pub headings: BacklogHeadings,
 }
 
 impl Default for BacklogConfig {
     fn default() -> Self {
         Self {
             file: "backlog.md".to_string(),
+            headings: BacklogHeadings::default(),
         }
     }
 }
@@ -1183,6 +1221,72 @@ mod tests {
             }
             other => panic!("expected valid vault, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn backlog_headings_parse_with_per_key_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(VAULT_MARKER_DIR);
+        fs::create_dir_all(&marker).unwrap();
+        fs::write(
+            marker.join(VAULT_CONFIG_FILE),
+            "schema = 1\n[backlog]\nheadings = { soon = \"Em breve\", completed = \" \" }\n",
+        )
+        .unwrap();
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => {
+                let headings = &vault.config.backlog.headings;
+                assert_eq!(headings.soon, "Em breve");
+                // Absent and blank keys fall back to the English defaults.
+                assert_eq!(headings.someday, "Someday");
+                assert_eq!(headings.completed, "Completed");
+                // A `headings`-only table keeps the default file path.
+                assert_eq!(vault.config.backlog.file, "backlog.md");
+            }
+            other => panic!("expected valid vault, got {other:?}"),
+        }
+
+        // An untouched `[backlog]` is not re-emitted on a registry rewrite.
+        fs::write(marker.join(VAULT_CONFIG_FILE), DEFAULT_CONFIG_TOML).unwrap();
+        update_routines_registry(dir.path(), |_| {}).unwrap();
+        let raw = fs::read_to_string(marker.join(VAULT_CONFIG_FILE)).unwrap();
+        assert!(
+            !raw.contains("headings"),
+            "unset headings reappeared: {raw}"
+        );
+    }
+
+    #[test]
+    fn set_language_two_writes_parse_in_either_order() {
+        // The Set Language ritual writes the config and renames the file's
+        // headings as two separate writes (V19 §5.3 steps 5–6); the vault
+        // must parse between them, whichever landed first.
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_vault(dir.path()).unwrap();
+        let backlog_path = dir.path().join("backlog.md");
+        fs::write(&backlog_path, "## Soon\n\n- [ ] Renovar o passaporte\n").unwrap();
+
+        // Write 1: the config, file still English.
+        let config_path = dir.path().join(VAULT_MARKER_DIR).join(VAULT_CONFIG_FILE);
+        fs::write(
+            &config_path,
+            "schema = 1\n[backlog]\nheadings = { soon = \"Em breve\", \
+             someday = \"Algum dia\", completed = \"Concluído\" }\n",
+        )
+        .unwrap();
+        let VaultStatus::Valid(vault) = Vault::detect(dir.path()) else {
+            panic!("expected valid vault");
+        };
+        let text = fs::read_to_string(&backlog_path).unwrap();
+        let parsed = crate::backlog::parse_backlog(&text, &vault.config.backlog.headings);
+        assert_eq!(parsed.soon.len(), 1, "English heading must still match");
+
+        // Write 2: the file's headings renamed to what the config says.
+        fs::write(&backlog_path, "## Em breve\n\n- [ ] Renovar o passaporte\n").unwrap();
+        let text = fs::read_to_string(&backlog_path).unwrap();
+        let parsed = crate::backlog::parse_backlog(&text, &vault.config.backlog.headings);
+        assert_eq!(parsed.soon.len(), 1);
+        assert_eq!(parsed.soon[0].text, "Renovar o passaporte");
     }
 
     #[test]

@@ -16,7 +16,10 @@
   (e.g. `finance/`) live wherever makes sense for the user.
 - **Never** write under `.thock/`, `.claude/`, or `.gemini/`. Thock generates
   the slash-command bridges for each CLI and the provenance records itself
-  when the user activates the Routine.
+  when the user activates the Routine. (The two sanctioned exceptions —
+  documented state markers under `.thock/state/`, and `.thock/config.toml`
+  when a skill is changing a setting the user explicitly asked for — belong
+  to running skills, never to Routine authoring.)
 - A new or edited `routine.toml` shows up on the next vault refresh. Nothing
   is activated automatically — the user clicks **Activate** in the panel's
   Add Routine list.
