@@ -6,6 +6,12 @@ name: Release
 #     which is how you smoke-test a change to the bundling scripts.
 #   * pushing a `v*` tag — build, then publish a draft GitHub Release holding
 #     the same bundles, ready to be attached to the download page.
+#
+# The bundle steps read THOCK_GOOGLE_CLIENT_ID / THOCK_GOOGLE_CLIENT_SECRET
+# from repository secrets so the shipped app can sign in to Google without the
+# user supplying their own OAuth client (see `crates/thock/src/google_auth.rs`).
+# Both are compiled in; a build without them still works, but Google sync stays
+# unavailable until the vault supplies a `[google]` override.
 on:
   workflow_dispatch: {}
   push:
@@ -65,6 +71,8 @@ jobs:
           APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
           APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+          THOCK_GOOGLE_CLIENT_ID: ${{ secrets.THOCK_GOOGLE_CLIENT_ID }}
+          THOCK_GOOGLE_CLIENT_SECRET: ${{ secrets.THOCK_GOOGLE_CLIENT_SECRET }}
         run: script/bundle-mac aarch64-apple-darwin
 
       - uses: actions/upload-artifact@v4
@@ -106,6 +114,9 @@ jobs:
           llvm-objcopy --version
 
       - name: Bundle
+        env:
+          THOCK_GOOGLE_CLIENT_ID: ${{ secrets.THOCK_GOOGLE_CLIENT_ID }}
+          THOCK_GOOGLE_CLIENT_SECRET: ${{ secrets.THOCK_GOOGLE_CLIENT_SECRET }}
         run: script/bundle-linux
 
       # `script/bundle-linux` also emits a remote_server archive; Thock does not
