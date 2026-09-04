@@ -25,6 +25,10 @@ env:
   # Nothing downstream symbolicates these builds, and the debug info alone
   # exceeds the free space on a hosted runner.
   CARGO_PROFILE_RELEASE_DEBUG: "false"
+  # Ship on the stable channel so the bundles poll for updates; the committed
+  # RELEASE_CHANNEL file stays `dev` so local builds never do. The bundle
+  # scripts write this through to crates/zed/RELEASE_CHANNEL before building.
+  ZED_RELEASE_CHANNEL: stable
 
 jobs:
   macos:
@@ -129,3 +133,60 @@ jobs:
             --title "Thock ${GITHUB_REF_NAME}" \
             --generate-notes \
             artifacts/*
+
+  # Publishes the artifacts and channel manifest that installed apps poll
+  # (spec: thock/specs/v20-auto-update.md §11). Guarded on the GCP repository
+  # variables so tags keep building before the infrastructure exists — the job
+  # then reports as skipped, not green.
+  publish-updates:
+    name: Publish update channel
+    if: startsWith(github.ref, 'refs/tags/v') && vars.GCP_RELEASES_BUCKET != ''
+    needs: [publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation; no key in secrets
+    env:
+      BUCKET: ${{ vars.GCP_RELEASES_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # A tag that disagrees with the crate version either updates nobody or
+      # updates everybody forever, depending on which way it disagrees.
+      - name: Verify the tag matches the crate version
+        run: |
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -1)"
+          [ "v${crate}" = "${GITHUB_REF_NAME}" ] || {
+            echo "tag ${GITHUB_REF_NAME} does not match crates/zed/Cargo.toml ${crate}" >&2
+            exit 1
+          }
+
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build the manifest
+        run: |
+          thock/services/releases/write-manifest "${GITHUB_REF_NAME}" artifacts > manifest.json
+          cat manifest.json
+
+      # Immutable, and first: no manifest may name a URL that doesn't resolve yet.
+      - name: Upload artifacts
+        run: |
+          gcloud storage cp artifacts/* manifest.json \
+            "gs://${BUCKET}/dist/${GITHUB_REF_NAME}/" \
+            --cache-control="public, max-age=31536000, immutable"
+
+      # The one write that changes what an installed app sees.
+      - name: Flip the stable channel
+        run: |
+          gcloud storage cp \
+            "gs://${BUCKET}/dist/${GITHUB_REF_NAME}/manifest.json" \
+            "gs://${BUCKET}/channels/stable.json" \
+            --cache-control="no-store"
+          echo "Thock ${GITHUB_REF_NAME} is live on the stable channel." >> "$GITHUB_STEP_SUMMARY"

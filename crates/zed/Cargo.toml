@@ -330,9 +330,12 @@ osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["zed"]
 
 [package.metadata.bundle-stable]
-icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
+# Thock ships from the stable channel; same icons as the dev bundle. The
+# identifier has to keep matching `ReleaseChannel::app_id`, which is also the
+# Wayland/X11 application ID, so only the display name is rebranded.
+icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
 identifier = "dev.zed.Zed"
-name = "Zed"
+name = "Thock"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["zed"]

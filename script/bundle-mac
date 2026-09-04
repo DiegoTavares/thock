@@ -49,15 +49,23 @@ shift $((OPTIND-1))
 
 
 # Get release channel
+# Thock: the release workflow pre-sets ZED_RELEASE_CHANNEL=stable; local builds
+# fall back to the committed RELEASE_CHANNEL file (dev), which never polls for
+# updates. Release binaries compile the channel in via include_str!, so a
+# pre-set value has to be written through to the file before the build.
 pushd crates/zed
-channel=$(<RELEASE_CHANNEL)
-export ZED_RELEASE_CHANNEL="${channel}"
+if [[ -n "${ZED_RELEASE_CHANNEL:-}" ]]; then
+    channel="${ZED_RELEASE_CHANNEL}"
+    if [[ "${channel}" != "$(<RELEASE_CHANNEL)" ]]; then
+        echo "${channel}" > RELEASE_CHANNEL
+    fi
+else
+    channel=$(<RELEASE_CHANNEL)
+    export ZED_RELEASE_CHANNEL="${channel}"
+fi
 popd
 
 export ZED_BUNDLE=true
-# Thock: baked in at compile time so a bundled build can never fetch Zed
-# release binaries, whatever the release channel (V12 de-Zed-ification).
-export ZED_UPDATE_EXPLANATION="Thock updates ship as new builds of the app; there is nothing to fetch from Zed."
 
 cargo_bundle_version=$(cargo -q bundle --help 2>&1 | head -n 1 || echo "")
 if [ "$cargo_bundle_version" != "cargo-bundle v0.6.1-zed" ]; then

@@ -1,0 +1,63 @@
+name: Promote release
+
+# Re-points an update channel at any already-archived version — no build, no
+# artifacts, no recomputation; the manifest it promotes is byte-for-byte the
+# one that shipped with that tag (spec: thock/specs/v20-auto-update.md §11).
+#
+# This is the rollback. It is also how a preview/beta channel gets pointed at
+# a build for testing, and how a channel is repaired if a manifest is ever
+# written by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to promote (e.g. v1.15.0); must already be archived under dist/"
+        required: true
+      channel:
+        description: "Channel to point at it"
+        required: true
+        default: stable
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: Point ${{ inputs.channel }} at ${{ inputs.version }}
+    if: vars.GCP_RELEASES_BUCKET != ''
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # Workload Identity Federation; no key in secrets
+    env:
+      BUCKET: ${{ vars.GCP_RELEASES_BUCKET }}
+      VERSION: ${{ inputs.version }}
+      CHANNEL: ${{ inputs.channel }}
+    steps:
+      - name: Validate inputs
+        run: |
+          echo "${VERSION}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "version ${VERSION} is not a vMAJOR.MINOR.PATCH tag" >&2
+            exit 1
+          }
+          echo "${CHANNEL}" | grep -Eq '^[a-z0-9][a-z0-9._-]*$' || {
+            echo "channel ${CHANNEL} is not a valid channel name" >&2
+            exit 1
+          }
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Point the channel at the archived manifest
+        run: |
+          archived="gs://${BUCKET}/dist/${VERSION}/manifest.json"
+          gcloud storage objects describe "${archived}" > /dev/null || {
+            echo "no archived manifest at ${archived} — was ${VERSION} ever published?" >&2
+            exit 1
+          }
+          gcloud storage cp "${archived}" \
+            "gs://${BUCKET}/channels/${CHANNEL}.json" \
+            --cache-control="no-store"
+          echo "Thock ${VERSION} is live on the ${CHANNEL} channel." >> "$GITHUB_STEP_SUMMARY"

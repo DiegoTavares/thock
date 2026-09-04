@@ -1123,12 +1123,13 @@ async fn install_release_linux(
     } else {
         String::default()
     };
-    let app_folder_name = format!("zed{}.app", suffix);
+    // Thock: script/bundle-linux packages thock.app with libexec/thock-editor.
+    let app_folder_name = format!("thock{}.app", suffix);
 
     let from = extracted.join(&app_folder_name);
     let mut to = home_dir.join(".local");
 
-    let expected_suffix = format!("{}/libexec/zed-editor", app_folder_name);
+    let expected_suffix = format!("{}/libexec/thock-editor", app_folder_name);
 
     if let Some(prefix) = running_app_path
         .to_str()
@@ -1165,7 +1166,9 @@ async fn install_release_macos(
         .file_name()
         .with_context(|| format!("invalid running app path {running_app_path:?}"))?;
 
-    let mount_path = temp_dir.path().join("Zed");
+    // Thock: the subdirectory under -mountroot is the DMG volume name, and
+    // script/bundle-mac creates the image with `-volname Thock`.
+    let mount_path = temp_dir.path().join("Thock");
     let mut mounted_app_path: OsString = mount_path.join(running_app_filename).into();
 
     mounted_app_path.push("/");
