@@ -99,16 +99,26 @@ impl ConnectedAgent {
 }
 
 /// The built-in fast mapping for CLIs whose flags Thock knows: `claude` gets
-/// `--model haiku`. Anything else (or a command that already pins a model)
-/// returns `None`, so the `[agent] fast_command` setting is the only other
-/// way to opt in — never a guessed flag on a CLI we can't vouch for.
+/// `--model haiku`, `gemini` gets `-m gemini-flash-latest` (both rolling
+/// aliases, so the mapping doesn't rot with model releases). Anything else
+/// (or a command that already pins a model) returns `None`, so the
+/// `[agent] fast_command` setting is the only other way to opt in — never a
+/// guessed flag on a CLI we can't vouch for.
 fn derived_fast_command(command: &str) -> Option<String> {
     if command.contains("--model") {
         return None;
     }
-    let program = shlex::split(command)?.into_iter().next()?;
-    let program = Path::new(&program).file_name()?.to_str()?;
-    (program == "claude").then(|| format!("{command} --model haiku"))
+    let tokens = shlex::split(command)?;
+    if tokens.iter().any(|token| token == "-m") {
+        return None;
+    }
+    let program = tokens.first()?;
+    let program = Path::new(program).file_name()?.to_str()?;
+    match program {
+        "claude" => Some(format!("{command} --model haiku")),
+        "gemini" => Some(format!("{command} -m gemini-flash-latest")),
+        _ => None,
+    }
 }
 
 /// Resolves the launch command: the vault's `[agent] command` override if set,
@@ -406,6 +416,16 @@ mod tests {
         assert_eq!(
             agent("claude --model opus", None).command_for(ModelTier::Fast),
             "claude --model opus"
+        );
+        // gemini derives its flash alias the same way, and its short `-m`
+        // pin is respected like `--model`.
+        assert_eq!(
+            agent("gemini", None).command_for(ModelTier::Fast),
+            "gemini -m gemini-flash-latest"
+        );
+        assert_eq!(
+            agent("gemini -m gemini-2.5-pro", None).command_for(ModelTier::Fast),
+            "gemini -m gemini-2.5-pro"
         );
         // Unknown CLIs never get guessed flags — fast falls back to normal.
         assert_eq!(agent("codex", None).command_for(ModelTier::Fast), "codex");

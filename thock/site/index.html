@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Thock</title>
-<meta name="description" content="Thock turns a folder of plain Markdown into a guided, LLM-augmented second brain — rituals for your days, weeks, money and inbox, run by the model you already trust.">
+<meta name="description" content="Thock turns a folder of plain Markdown into a guided, LLM-augmented second brain: rituals for your days, weeks, money and inbox, run by the model you already trust.">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;700&family=Geist+Mono:wght@400;500&display=swap">
 <style>
   :root {
@@ -39,8 +39,10 @@
   a:hover { color: var(--amber); }
   ::selection { background: var(--amber); color: var(--amber-ink); }
 
-  .wrap { max-width: 44rem; margin: 0 auto; padding: 0 1.5rem; }
-  .wrap.wide { max-width: 54rem; }
+  .wrap { max-width: 46rem; margin: 0 auto; padding: 0 1.5rem; }
+  .wrap.wide { max-width: 72rem; }
+  .sectionhead { max-width: 46rem; }
+  @media (min-width: 120rem) { body { font-size: 18px; } }
 
   kbd {
     font-family: var(--mono);
@@ -62,7 +64,7 @@
     border-bottom: 1px solid var(--edge);
   }
   nav .bar {
-    max-width: 54rem; margin: 0 auto; padding: 0.85rem 1.5rem;
+    max-width: 72rem; margin: 0 auto; padding: 0.85rem 1.5rem;
     display: flex; align-items: center; gap: 1.5rem;
   }
   nav .wordmark { font-weight: 700; font-size: 1.1rem; letter-spacing: -0.01em; margin-right: auto; }
@@ -85,7 +87,7 @@
   @media (prefers-reduced-motion: reduce) { section.keyed { animation: none; } }
 
   h1, h2, h3 { letter-spacing: -0.02em; text-wrap: balance; }
-  h2 { font-size: 1.75rem; font-weight: 700; margin: 0 0 1rem; }
+  h2 { font-size: clamp(1.75rem, 2.4vw, 2.25rem); font-weight: 700; margin: 0 0 1rem; }
   .eyebrow {
     font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.1em;
     text-transform: uppercase; color: var(--amber); margin: 0 0 0.9rem;
@@ -136,8 +138,19 @@
   @keyframes blink { 50% { opacity: 0; } }
   .demo-caption { font-size: 0.82rem; color: var(--dim); margin-top: 0.9rem; text-align: center; }
 
+  /* hero goes two-column on wide displays */
+  @media (min-width: 64rem) {
+    #hero { text-align: left; padding: 7rem 0 6rem; }
+    .hero-grid { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 4.5rem; align-items: center; }
+    #hero h1 { font-size: clamp(2.6rem, 3.2vw, 3.9rem); }
+    #hero .sub { margin: 0 0 2.2rem; }
+    .waitform { justify-content: flex-start; }
+    .note-demo { margin: 0; max-width: none; font-size: 0.92rem; }
+    .demo-caption { text-align: left; }
+  }
+
   /* ---------- promise list ---------- */
-  .promises { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1.6rem 2.5rem; margin-top: 2.4rem; }
+  .promises { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 2rem 3rem; margin-top: 2.8rem; }
   .promises h3 { font-size: 1rem; font-weight: 500; margin: 0 0 0.35rem; color: var(--text); }
   .promises p { font-size: 0.92rem; margin: 0; }
 
@@ -148,6 +161,12 @@
   .feature h3 { font-size: 1.25rem; font-weight: 700; margin: 0 0 0.6rem; }
   .feature p { font-size: 0.95rem; margin: 0 0 0.6rem; }
   .feature .keyline { font-family: var(--mono); font-size: 0.78rem; color: var(--dim); }
+  @media (min-width: 64rem) {
+    .feature { gap: 5.5rem; margin-top: 4.5rem; }
+    .feature h3 { font-size: 1.4rem; }
+    .feature p { font-size: 1rem; }
+    .feature .vignette { font-size: 0.85rem; padding: 1.6rem 1.9rem; }
+  }
 
   .vignette {
     background: var(--surface); border: 1px solid var(--edge); border-radius: 10px;
@@ -175,6 +194,16 @@
   .skillcard .h { color: var(--amber); }
   .skillcard .scope { color: var(--dim); }
   .skillcard .scope b { color: var(--muted); font-weight: 500; }
+
+  /* ---------- editor / vault wide layouts ---------- */
+  #editor .points { margin-top: 0.5rem; }
+  @media (min-width: 64rem) {
+    #editor .points { display: grid; grid-template-columns: 1fr 1fr; gap: 3.5rem; margin-top: 1.5rem; }
+    #editor .points p { margin: 0; }
+    .vault-grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 4.5rem; align-items: center; }
+    #vault .folder { margin-top: 0; font-size: 0.9rem; }
+    .who-grid { gap: 4rem; margin-top: 2.5rem; }
+  }
 
   /* ---------- vault ---------- */
   #vault .folder {
@@ -248,35 +277,42 @@
 </nav>
 
 <section id="hero">
-  <div class="wrap">
-    <h1>A second brain that ships with a&nbsp;system</h1>
-    <p class="sub">Thock is a desktop app that turns a folder of plain Markdown files into a guided
-    daily practice — rituals for your days, weeks, money and inbox, run by the LLM you already trust.</p>
+  <div class="wrap wide">
+    <div class="hero-grid">
+      <div class="hero-copy">
+        <h1>A second brain for people who savour the experience of writing</h1>
+        <p class="sub">Thock is a desktop app that turns a folder of plain Markdown files into a guided
+        daily practice: rituals for your days, weeks, money and inbox, run by the LLM you already trust.</p>
 
-    <form class="waitform" data-waitlist>
-      <input type="email" name="email" placeholder="your@email.com" required aria-label="Email address">
-      <button type="submit">Join the waitlist</button>
-    </form>
-    <p class="form-status" aria-live="polite"></p>
-    <p class="form-note">Free while in early access &nbsp;·&nbsp; macOS first &nbsp;·&nbsp; your files stay plain Markdown</p>
-
-    <div class="note-demo" id="notedemo" aria-label="Demo: Thock appends a Daily Closure review to a daily note">
-      <div class="fname">2026-09-02.md</div>
-      <div class="lines"></div>
+        <form class="waitform" data-waitlist>
+          <input type="email" name="email" placeholder="your@email.com" required aria-label="Email address">
+          <button type="submit">Join the waitlist</button>
+        </form>
+        <p class="form-status" aria-live="polite"></p>
+        <p class="form-note">Free while in early access &nbsp;·&nbsp; macOS first &nbsp;·&nbsp; your files stay plain Markdown</p>
+      </div>
+      <div class="hero-demo">
+        <div class="note-demo" id="notedemo" aria-label="Demo: Thock appends a Daily Closure review to a daily note">
+          <div class="fname">2026-09-02.md</div>
+          <div class="lines"></div>
+        </div>
+        <p class="demo-caption">Your words stay yours. The AI appends its reading below them. It never rewrites.</p>
+      </div>
     </div>
-    <p class="demo-caption">Your words stay yours. The AI appends its reading below them — it never rewrites.</p>
   </div>
 </section>
 
 <section id="why" class="band" tabindex="-1">
-  <div class="wrap">
-    <p class="eyebrow">Why it exists</p>
-    <h2>People already build this by hand. It just doesn't transfer.</h2>
-    <p>The setup works: a vault of plain-text notes, a fast editor, an AI that reads your week and helps
-    you close it. But today it's held together by conventions, prompt files, and folder discipline that
-    only its author understands. Powerful — and completely non-transferable.</p>
-    <p>Thock ships that opinion as a product. The folder structure, the rituals, the layouts, and the
-    guardrails are <strong>visible, editable features</strong> instead of tribal knowledge.</p>
+  <div class="wrap wide">
+    <div class="sectionhead">
+      <p class="eyebrow">Why it exists</p>
+      <h2>People already build this by hand. It just doesn't transfer.</h2>
+      <p>The setup works: a vault of plain-text notes, a fast editor, an AI that reads your week and helps
+      you close it. But today it's held together by conventions, prompt files, and folder discipline that
+      only its author understands. Powerful, and completely non-transferable.</p>
+      <p>Thock ships that opinion as a product. The folder structure, the rituals, the layouts, and the
+      guardrails are <strong>visible, editable features</strong> instead of tribal knowledge.</p>
+    </div>
 
     <div class="promises">
       <div>
@@ -289,15 +325,15 @@
       </div>
       <div>
         <h3>Bring your own brain</h3>
-        <p>You connect your own LLM with your own key — Claude, a local model, whatever you trust. Thock doesn't resell intelligence.</p>
+        <p>You connect your own LLM with your own key: Claude, a local model, whatever you trust. Thock doesn't resell intelligence.</p>
       </div>
       <div>
         <h3>You act, it advises</h3>
-        <p>It computes exactly what to do next — it cannot and will not do the important things for you. Money moves when you move it.</p>
+        <p>It computes exactly what to do next, but it cannot and will not do the important things for you. Money moves when you move it.</p>
       </div>
       <div>
         <h3>Invisible history</h3>
-        <p>Every meaningful change is checkpointed in the background. Restore any version of any note — no source-control vocabulary anywhere.</p>
+        <p>Every meaningful change is checkpointed in the background. Restore any version of any note, with no source-control vocabulary anywhere.</p>
       </div>
       <div>
         <h3>Everything is editable</h3>
@@ -309,7 +345,7 @@
 
 <section id="routines" tabindex="-1">
   <div class="wrap wide">
-    <div class="wrap" style="padding: 0;">
+    <div class="sectionhead">
       <p class="eyebrow">Routines</p>
       <h2>Install a rhythm, not an app full of features</h2>
       <p>A Routine is one life-domain, packaged: its folders, templates, quick links and rituals. Enable
@@ -319,17 +355,17 @@
 
     <div class="feature">
       <div>
-        <h3>Timeline — days and weeks</h3>
-        <p>Today, Yesterday, This Week, Last Week — one keystroke each, filenames resolved for you.
+        <h3>Timeline: days and weeks</h3>
+        <p>Today, Yesterday, This Week, Last Week. One keystroke each, filenames resolved for you.
         Wrap rituals read the day's tasks and commits and append an honest closure. A week review
         gathers it all every Friday.</p>
         <p class="keyline">wrap today · week review · open today</p>
       </div>
       <div class="vignette">
         <span class="dim">timeline/</span><br>
-        <span class="amb">▸</span> Today <span class="dim">— 2026-09-02.md</span><br>
-        &nbsp;&nbsp;Yesterday <span class="dim">— 2026-09-01.md</span><br>
-        &nbsp;&nbsp;This Week <span class="dim">— 2026-W36.md</span><br>
+        <span class="amb">▸</span> Today <span class="dim">· 2026-09-02.md</span><br>
+        &nbsp;&nbsp;Yesterday <span class="dim">· 2026-09-01.md</span><br>
+        &nbsp;&nbsp;This Week <span class="dim">· 2026-W36.md</span><br>
         <span class="dim">rituals</span><br>
         &nbsp;&nbsp;<span class="mut">Wrap Today</span> <span class="dim">· appends # Daily Closure</span><br>
         &nbsp;&nbsp;<span class="mut">Week Review</span> <span class="dim">· appends # AI Week Review</span>
@@ -352,9 +388,9 @@
         </div>
       </div>
       <div>
-        <h3>Backlog — nothing dies in yesterday's note</h3>
+        <h3>Backlog: nothing dies in yesterday's note</h3>
         <p>A plain <code>backlog.md</code> with Soon, Someday, and a dated Completed history. When you
-        wrap a day, unfinished tasks are offered a place there — you confirm all, none, or some. Checking
+        wrap a day, unfinished tasks are offered a place there; you confirm all, none, or some. Checking
         one off records it in today's note.</p>
         <p class="keyline">soon ↔ someday · categories · complete with a keystroke</p>
       </div>
@@ -362,10 +398,10 @@
 
     <div class="feature">
       <div>
-        <h3>Day planner — your checklist as a day</h3>
+        <h3>Day planner: your checklist as a day</h3>
         <p>The right rail follows what you're reading. On a daily note it renders your task list as
         time blocks, calendar-style. Connect Google Calendar and the day's events appear inside the
-        note itself — as ordinary checklist lines you can edit.</p>
+        note itself, as ordinary checklist lines you can edit.</p>
         <p class="keyline">read-only toward Google · times corrected, your edits never touched</p>
       </div>
       <div class="vignette">
@@ -384,10 +420,10 @@
         <span class="mut">a-link-you-shared-from-your-phone.md</span><br>
         <span class="mut">email-labeled-thock-inbox.md</span><br>
         <span class="mut">that-idea-from-the-train.md</span><br>
-        <span class="amb">▸ Triage Inbox</span> <span class="dim">— 3 items waiting</span>
+        <span class="amb">▸ Triage Inbox</span> <span class="dim">· 3 items waiting</span>
       </div>
       <div>
-        <h3>Inbox — capture anywhere, decide at the desk</h3>
+        <h3>Inbox: capture anywhere, decide at the desk</h3>
         <p>A folder anything can drop a note into: a link shared from your phone, an email you label,
         a file dragged in. A triage ritual proposes a destination for each item and files only what you
         confirm. Capture is dumb and instant; deciding happens where you think.</p>
@@ -397,7 +433,7 @@
 
     <div class="feature">
       <div>
-        <h3>Skills — rituals you can read</h3>
+        <h3>Skills: rituals you can read</h3>
         <p>Every ritual is an inspectable Markdown file with a plain-language description and declared
         scopes: what it reads, what it writes, and whether it appends or edits. Trust comes from being
         able to open the thing and read it.</p>
@@ -408,58 +444,68 @@
         <span class="mut">Reads the day's tasks and commits, then appends</span><br>
         <span class="mut">an honest closure to today's note.</span><br>
         <span class="scope"><b>reads</b> daily notes, git log</span><br>
-        <span class="scope"><b>writes</b> today's note — append only</span>
+        <span class="scope"><b>writes</b> today's note, append only</span>
       </div>
     </div>
   </div>
 </section>
 
 <section id="editor" class="band" tabindex="-1">
-  <div class="wrap">
-    <p class="eyebrow">The editor</p>
-    <h2>Built on the bones of a fast code editor — without the face of one</h2>
-    <p>Thock inherits its editing core from <a href="https://zed.dev">Zed</a>: native, instant, and
-    happy in a ten-thousand-file folder. The code-editor chrome is gone — no diagnostics, no debugger,
-    no source-control pane. What's left is a writing instrument.</p>
-    <p><strong>Markdown that reads like a page.</strong> While your cursor is elsewhere, heading markers
-    and link syntax fold away, checkboxes draw as checkboxes, and wikilinks are visibly links. The line
-    you're editing always shows its exact source. The file on disk never changes.</p>
-    <p><strong>Keyboard, everywhere.</strong> Every panel is fully operable without the mouse — arrows
-    or vim motions, your choice. Every action has a name and a binding. This page works the same way:
-    press <kbd>?</kbd>.</p>
+  <div class="wrap wide">
+    <div class="sectionhead">
+      <p class="eyebrow">The editor</p>
+      <h2>Built on the bones of a fast code editor, without the face of one</h2>
+      <p>Thock inherits its editing core from <a href="https://zed.dev">Zed</a>: native, instant, and
+      happy in a ten-thousand-file folder. The code-editor chrome is gone: no diagnostics, no debugger,
+      no source-control pane. What's left is a writing instrument.</p>
+    </div>
+    <div class="points">
+      <p><strong>Markdown that reads like a page.</strong> While your cursor is elsewhere, heading markers
+      and link syntax fold away, checkboxes draw as checkboxes, and wikilinks are visibly links. The line
+      you're editing always shows its exact source. The file on disk never changes.</p>
+      <p><strong>Keyboard, everywhere.</strong> Every panel is fully operable without the mouse: arrows
+      or vim motions, your choice. Every action has a name and a binding. This page works the same way:
+      press <kbd>?</kbd>.</p>
+    </div>
   </div>
 </section>
 
 <section id="vault" tabindex="-1">
-  <div class="wrap">
-    <p class="eyebrow">Your vault</p>
-    <h2>Already keep a vault? Point Thock at it.</h2>
-    <p>A Thock vault is a normal folder of Markdown — which means the one you already have probably is
-    one. No import, no conversion, no migration. <code>[[wikilinks]]</code> resolve, your folder
-    structure is respected, and everything Thock adds is a readable file sitting beside your notes.</p>
-    <p>Open the same folder in your current tools whenever you like. Nothing breaks, because nothing
-    changed shape.</p>
-    <div class="folder">
-      <span class="dim">~/vault/</span><br>
-      &nbsp;&nbsp;2026-09-02.md&nbsp;&nbsp;<span class="dim">← today, created on first keystroke</span><br>
-      &nbsp;&nbsp;2026-W36.md<br>
-      &nbsp;&nbsp;backlog.md<br>
-      &nbsp;&nbsp;inbox/<br>
-      &nbsp;&nbsp;<span class="amb">routines/</span>&nbsp;&nbsp;<span class="dim">← what Thock adds: readable, editable, yours</span>
+  <div class="wrap wide">
+    <div class="vault-grid">
+      <div>
+        <p class="eyebrow">Your vault</p>
+        <h2>Already keep a vault? Point Thock at it.</h2>
+        <p>A Thock vault is a normal folder of Markdown, which means the one you already have probably is
+        one. No import, no conversion, no migration. <code>[[wikilinks]]</code> resolve, your folder
+        structure is respected, and everything Thock adds is a readable file sitting beside your notes.</p>
+        <p>Open the same folder in your current tools whenever you like. Nothing breaks, because nothing
+        changed shape.</p>
+      </div>
+      <div class="folder">
+        <span class="dim">~/vault/</span><br>
+        &nbsp;&nbsp;2026-09-02.md&nbsp;&nbsp;<span class="dim">← today, created on first keystroke</span><br>
+        &nbsp;&nbsp;2026-W36.md<br>
+        &nbsp;&nbsp;backlog.md<br>
+        &nbsp;&nbsp;inbox/<br>
+        &nbsp;&nbsp;<span class="amb">routines/</span>&nbsp;&nbsp;<span class="dim">← what Thock adds: readable, editable, yours</span>
+      </div>
     </div>
   </div>
 </section>
 
 <section id="who" class="band" tabindex="-1">
-  <div class="wrap">
-    <p class="eyebrow">Who it's for</p>
-    <h2>Opinionated and personal, by design</h2>
+  <div class="wrap wide">
+    <div class="sectionhead">
+      <p class="eyebrow">Who it's for</p>
+      <h2>Opinionated and personal, by design</h2>
+    </div>
     <div class="who-grid">
       <div>
         <h3>Probably for you if</h3>
         <ul>
           <li>You already think in plain text and live on the keyboard.</li>
-          <li>You want AI woven into your life-admin — reviews, finances, journaling — without hand-building the plumbing.</li>
+          <li>You want AI woven into your life-admin (reviews, finances, journaling) without hand-building the plumbing.</li>
           <li>You've tried to wire an editor, a vault, and an LLM together yourself, and kept the scars.</li>
           <li>You want your notes readable in thirty years, by anything.</li>
         </ul>
@@ -468,7 +514,7 @@
         <h3>Probably not, if</h3>
         <ul>
           <li>You're looking for a team wiki or a shared workspace.</li>
-          <li>You want an AI that acts on your behalf — Thock advises; you act.</li>
+          <li>You want an AI that acts on your behalf. Thock advises; you act.</li>
           <li>You'd rather have a database app with forms and views than a folder of files.</li>
         </ul>
       </div>
@@ -478,7 +524,7 @@
 
 <section id="waitlist" tabindex="-1">
   <div class="wrap">
-    <h2>Free to download and test — by way of a short line</h2>
+    <h2>Free to download and test, by way of a short line</h2>
     <p class="sub">Thock is in early access. Leave an email and you'll get a download link as testing
     slots open, plus a note when things meaningfully change. Nothing else.</p>
     <form class="waitform" data-waitlist>
@@ -493,7 +539,7 @@
 
 <footer>
   <div class="wrap wide">
-    <span>Thock — plain files, practiced rhythms.</span>
+    <span>Thock · plain files, practiced rhythms.</span>
     <span>Editor core by <a href="https://zed.dev">Zed</a> · <a href="#hero">Back to top</a></span>
   </div>
 </footer>
@@ -528,7 +574,7 @@
       var status = form.parentElement.querySelector(".form-status");
       var email = form.email.value.trim();
       if (!WAITLIST_ENDPOINT) {
-        status.textContent = "Signups aren't open quite yet — check back soon.";
+        status.textContent = "Signups aren't open quite yet. Check back soon.";
         return;
       }
       status.textContent = "…";
@@ -541,10 +587,10 @@
           form.reset();
           status.textContent = "You're on the list. We'll be in touch.";
         } else {
-          status.textContent = "That didn't go through — mind trying again?";
+          status.textContent = "That didn't go through. Mind trying again?";
         }
       }).catch(function () {
-        status.textContent = "That didn't go through — mind trying again?";
+        status.textContent = "That didn't go through. Mind trying again?";
       });
     });
   });
@@ -558,7 +604,7 @@
     { text: "", cls: "" },
     { text: "# Daily Closure", cls: "ai-h" },
     { text: "Two of three done, and both shipped items closed multi-week", cls: "ai-b" },
-    { text: "threads. The bank call has slipped twice — move it to the", cls: "ai-b" },
+    { text: "threads. The bank call has slipped twice. Move it to the", cls: "ai-b" },
     { text: "backlog so tomorrow starts clean?", cls: "ai-b" }
   ];
   var container = document.querySelector("#notedemo .lines");

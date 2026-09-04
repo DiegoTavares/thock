@@ -64,8 +64,9 @@ paper over.
 
 ## 4. Confirm, then log
 
-The user acts in their own apps. Ask one structured question (AskUserQuestion in Claude
-Code): which of the proposed actions did they actually do — **accept all · some · none**?
+The user acts in their own apps. Ask one structured question (via your structured
+question tool if you have one, otherwise plain numbered text): which of the proposed
+actions did they actually do — **accept all · some · none**?
 Amounts that differed land in "Other". Nothing is written before that answer, and only
 confirmed actions are recorded.
 

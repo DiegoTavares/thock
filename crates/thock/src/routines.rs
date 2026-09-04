@@ -30,11 +30,20 @@ const LEGACY_INSTALLED_AREAS_DIR: &str = "areas";
 const LEGACY_MANIFEST_FILE: &str = "manifest.toml";
 
 /// Core-owned materialized files (not part of any Routine): the
-/// `routine.toml` format reference agents read, and the New Routine ritual.
+/// `routine.toml` format reference agents read, the New Routine ritual, and
+/// the vault-root agent instructions every CLI reads.
 pub const ROUTINES_REFERENCE_PATH: &str = "routines/ROUTINES.md";
 pub const NEW_ROUTINE_SKILL_PATH: &str = "skills/thock/new-routine.md";
+pub const AGENT_INSTRUCTIONS_PATH: &str = "AGENTS.md";
 const ROUTINES_REFERENCE: &str = include_str!("../assets/routines/ROUTINES.md");
 const NEW_ROUTINE_SKILL: &str = include_str!("../assets/skills/new-routine.md");
+const AGENT_INSTRUCTIONS: &str = include_str!("../assets/AGENTS.md");
+
+/// Per-CLI names for the vault-root instruction file, each linked to
+/// `AGENTS.md`: Claude Code reads `CLAUDE.md`, Gemini CLI reads `GEMINI.md`
+/// (and declined to read `AGENTS.md` by default); Codex, Jules and Cursor
+/// read `AGENTS.md` natively.
+const AGENT_INSTRUCTION_LINKS: &[&str] = &["CLAUDE.md", "GEMINI.md"];
 
 const TIMELINE_MANIFEST: &str = include_str!("../assets/routines/timeline/routine.toml");
 const TIMELINE_DOC: &str = include_str!("../assets/routines/timeline/doc.md");
@@ -626,6 +635,10 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
 /// files are generated from the manifest, not shipped as static assets.
 pub const CLAUDE_SKILLS_DIR: &str = ".claude/skills";
 
+/// Vault-relative root under which Gemini CLI discovers project commands.
+/// Generated from the manifest like the Claude bridges.
+pub const GEMINI_COMMANDS_DIR: &str = ".gemini/commands";
+
 /// A file a Routine ships into the vault, pairing the vault-relative
 /// destination with the asset path inside the catalog package it came from
 /// (when it has one).
@@ -634,18 +647,37 @@ struct DeclaredFile {
     source: Option<String>,
 }
 
-/// A `.claude/skills/<id>/SKILL.md` bridge generated from a skill's manifest
-/// entry. Claude Code only discovers skills under `.claude/skills/`, so each
-/// Routine skill gets a thin bridge there whose front matter Claude Code
-/// reads and whose body points back to the canonical skill file — keeping one
-/// source of truth for the ritual itself.
-struct ClaudeBridge {
+/// A slash-command bridge generated from a skill's manifest entry —
+/// `.claude/skills/<id>/SKILL.md` for Claude Code, `.gemini/commands/<id>.toml`
+/// for Gemini CLI. Each CLI only discovers commands under its own directory,
+/// so every Routine skill gets a thin bridge per CLI whose body points back to
+/// the canonical skill file — keeping one source of truth for the ritual
+/// itself.
+struct AgentBridge {
     destination: String,
     content: String,
 }
 
 fn yaml_quote(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+fn toml_quote(value: &str) -> String {
+    let mut escaped = String::new();
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            '\r' => escaped.push_str("\\r"),
+            control if (control as u32) < 0x20 => {
+                escaped.push_str(&format!("\\u{:04X}", control as u32));
+            }
+            other => escaped.push(other),
+        }
+    }
     format!("\"{escaped}\"")
 }
 
@@ -668,13 +700,41 @@ fn claude_bridge_content(skill: &RoutineSkill) -> String {
     content
 }
 
-fn claude_bridge_files(manifest: &RoutineManifest) -> Vec<ClaudeBridge> {
+fn gemini_bridge_content(skill: &RoutineSkill) -> String {
+    let mut prompt = format!(
+        "This is a Thock Routine skill. Read and follow the full instructions in \
+         {file} (relative to the vault root), then carry out the ritual it describes. \
+         It appends to your notes and never rewrites what you wrote.",
+        file = skill.file,
+    );
+    if !skill.reads.is_empty() {
+        prompt.push_str(&format!(" Reads: {}.", skill.reads.join(", ")));
+    }
+    if !skill.writes.is_empty() {
+        prompt.push_str(&format!(" Writes: {}.", skill.writes.join(", ")));
+    }
+    format!(
+        "description = {description}\nprompt = {prompt}\n",
+        description = toml_quote(&skill.summary),
+        prompt = toml_quote(&prompt),
+    )
+}
+
+fn agent_bridge_files(manifest: &RoutineManifest) -> Vec<AgentBridge> {
     manifest
         .skills
         .iter()
-        .map(|skill| ClaudeBridge {
-            destination: format!("{CLAUDE_SKILLS_DIR}/{}/SKILL.md", skill.id),
-            content: claude_bridge_content(skill),
+        .flat_map(|skill| {
+            [
+                AgentBridge {
+                    destination: format!("{CLAUDE_SKILLS_DIR}/{}/SKILL.md", skill.id),
+                    content: claude_bridge_content(skill),
+                },
+                AgentBridge {
+                    destination: format!("{GEMINI_COMMANDS_DIR}/{}.toml", skill.id),
+                    content: gemini_bridge_content(skill),
+                },
+            ]
         })
         .collect()
 }
@@ -1017,13 +1077,14 @@ pub fn refresh_fingerprint(vault_root: &Path) -> Vec<(String, String)> {
     for marker in pending_ready_markers(vault_root) {
         fingerprint.push((format!("ready:{marker}"), String::new()));
     }
+    fingerprint.extend(crate::getting_started::fingerprint(vault_root));
     fingerprint.sort();
     fingerprint
 }
 
 /// Activates a discovered (vault-authored or hand-copied) Routine: validate,
 /// record the hash lockfile, create declared scaffold dirs, generate the
-/// Claude Code bridges, and register it enabled. Registration happens last so
+/// slash-command bridges, and register it enabled. Registration happens last so
 /// a failed activation never leaves a registered-but-broken Routine behind.
 /// Blocking I/O — call from a background thread.
 pub fn activate_routine(vault_root: &Path, routine_id: &str) -> Result<RoutineManifest> {
@@ -1043,7 +1104,7 @@ pub fn activate_routine(vault_root: &Path, routine_id: &str) -> Result<RoutineMa
         routine_id,
         &on_disk_files_lock(vault_root, &manifest)?,
     )?;
-    for bridge in claude_bridge_files(&manifest) {
+    for bridge in agent_bridge_files(&manifest) {
         write_if_missing(
             &vault_file_path(vault_root, &bridge.destination)?,
             &bridge.content,
@@ -1136,7 +1197,7 @@ pub fn materialize_routine(vault_root: &Path, routine: &CatalogRoutine) -> Resul
         })?;
         write_if_missing(&vault_file_path(vault_root, &file.destination)?, contents)?;
     }
-    for bridge in claude_bridge_files(&routine.manifest) {
+    for bridge in agent_bridge_files(&routine.manifest) {
         write_if_missing(
             &vault_file_path(vault_root, &bridge.destination)?,
             &bridge.content,
@@ -1288,15 +1349,56 @@ pub fn set_onboarding_state(
 }
 
 /// Writes the core-owned Routine authoring files (the format reference and
-/// the New Routine ritual) — create-if-missing, like the rest of the vault
-/// scaffold.
+/// the New Routine ritual) and the vault-root agent instructions —
+/// create-if-missing, like the rest of the vault scaffold.
 pub fn materialize_core_files(vault_root: &Path) -> Result<()> {
     write_if_missing(
         &vault_root.join(ROUTINES_REFERENCE_PATH),
         ROUTINES_REFERENCE,
     )?;
     write_if_missing(&vault_root.join(NEW_ROUTINE_SKILL_PATH), NEW_ROUTINE_SKILL)?;
+    write_if_missing(&vault_root.join(AGENT_INSTRUCTIONS_PATH), AGENT_INSTRUCTIONS)?;
+    for link_name in AGENT_INSTRUCTION_LINKS {
+        link_agent_instructions(vault_root, link_name)?;
+    }
+    write_if_missing(
+        &vault_root.join(crate::getting_started::GUIDE_PATH),
+        crate::getting_started::GUIDE_HTML,
+    )?;
+    write_if_missing(
+        &vault_root.join(crate::getting_started::CUSTOMIZE_PATH),
+        crate::getting_started::CUSTOMIZE_NOTE,
+    )?;
+    write_if_missing(
+        &vault_root.join(crate::getting_started::WELCOME_TOUR_SKILL_PATH),
+        crate::getting_started::WELCOME_TOUR_SKILL,
+    )?;
     Ok(())
+}
+
+/// Points `link_name` at `AGENTS.md` (V18 §5.1) so every CLI reads the same
+/// instruction file. An existing file — including a dangling symlink or a
+/// hand-written CLAUDE.md — is never touched. Where the filesystem refuses a
+/// symlink, a one-line pointer file stands in so scaffolding never fails
+/// over it.
+fn link_agent_instructions(vault_root: &Path, link_name: &str) -> Result<()> {
+    let link = vault_root.join(link_name);
+    if link.symlink_metadata().is_ok() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    match std::os::unix::fs::symlink(AGENT_INSTRUCTIONS_PATH, &link) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => log::warn!(
+            "Thock: couldn't link {link_name} to {AGENT_INSTRUCTIONS_PATH} ({error}); \
+             writing a pointer file instead"
+        ),
+    }
+    write_if_missing(
+        &link,
+        &format!("Read `{AGENT_INSTRUCTIONS_PATH}` in this folder and follow it.\n"),
+    )
 }
 
 /// The per-vault-open reconcile pass: migrates pre-V7 layouts (§2), keeps the
@@ -1477,8 +1579,8 @@ fn migrate_installed_routine(
     // Refresh the generated bridges: one that still matches its legacy
     // generated content is app-owned and follows the new skill paths; an
     // edited one is the user's and stays.
-    let legacy_bridges = claude_bridge_files(legacy);
-    for bridge in claude_bridge_files(&manifest) {
+    let legacy_bridges = agent_bridge_files(legacy);
+    for bridge in agent_bridge_files(&manifest) {
         let path = vault_file_path(root, &bridge.destination)?;
         let legacy_content = legacy_bridges
             .iter()
@@ -1772,9 +1874,9 @@ pub fn plan_removal(vault_root: &Path, routine_id: &str) -> Result<RemovalPlan> 
             plan.keep_modified.push(file.destination);
         }
     }
-    // Claude Code bridges are generated, not shipped as assets, so compare
+    // Slash-command bridges are generated, not shipped as assets, so compare
     // each against its freshly generated content instead of a recorded hash.
-    for bridge in claude_bridge_files(&manifest) {
+    for bridge in agent_bridge_files(&manifest) {
         let path = vault_file_path(vault_root, &bridge.destination)?;
         let current = match fs::read_to_string(&path) {
             Ok(current) => current,
@@ -2311,14 +2413,42 @@ mod tests {
         // The core authoring files ship with every vault (V7 §7.2).
         assert!(dir.path().join(ROUTINES_REFERENCE_PATH).is_file());
         assert!(dir.path().join(NEW_ROUTINE_SKILL_PATH).is_file());
-        // Claude Code bridges are generated for every skill so a `claude`
-        // session opened in the vault can invoke them via `/<skill-id>`.
+        // The agent instruction file and its per-CLI links (V18 §5.1), and
+        // the first-run guide pages (V18 §5.3–5.4).
+        assert!(dir.path().join(AGENT_INSTRUCTIONS_PATH).is_file());
+        assert!(dir.path().join(crate::getting_started::GUIDE_PATH).is_file());
+        assert!(
+            dir.path()
+                .join(crate::getting_started::CUSTOMIZE_PATH)
+                .is_file()
+        );
+        assert!(
+            dir.path()
+                .join(crate::getting_started::WELCOME_TOUR_SKILL_PATH)
+                .is_file()
+        );
+        for link_name in AGENT_INSTRUCTION_LINKS {
+            let link = dir.path().join(link_name);
+            assert_eq!(
+                fs::read_to_string(&link).unwrap(),
+                fs::read_to_string(dir.path().join(AGENT_INSTRUCTIONS_PATH)).unwrap(),
+                "{link_name} doesn't resolve to AGENTS.md"
+            );
+        }
+        // Slash-command bridges are generated for every skill so a `claude`
+        // or `gemini` session opened in the vault can invoke `/<skill-id>`.
         for skill_id in ["week-review", "wrap-today", "wrap-yesterday", "onboarding"] {
             assert!(
                 dir.path()
                     .join(format!(".claude/skills/{skill_id}/SKILL.md"))
                     .is_file(),
                 "missing Claude bridge for {skill_id}"
+            );
+            assert!(
+                dir.path()
+                    .join(format!(".gemini/commands/{skill_id}.toml"))
+                    .is_file(),
+                "missing Gemini bridge for {skill_id}"
             );
         }
 
@@ -2354,6 +2484,87 @@ mod tests {
             plan.keep_modified
                 .contains(&".claude/skills/wrap-today/SKILL.md".to_string())
         );
+    }
+
+    #[test]
+    fn gemini_bridges_are_valid_toml_and_share_the_claude_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_vault(dir.path()).unwrap();
+        let bridge = dir.path().join(".gemini/commands/wrap-today.toml");
+        let content = fs::read_to_string(&bridge).unwrap();
+        let parsed: toml::Table = toml::from_str(&content).unwrap();
+        assert!(
+            parsed["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("routines/timeline/skills/wrap-today.md")
+        );
+        assert!(parsed["description"].as_str().unwrap().len() > 0);
+
+        // create-if-missing: a user edit survives re-materialize, and an
+        // unmodified bridge is deleted on removal while an edited one stays.
+        let plan = plan_removal(dir.path(), TIMELINE_ROUTINE_ID).unwrap();
+        assert!(
+            plan.delete
+                .contains(&".gemini/commands/wrap-today.toml".to_string())
+        );
+        fs::write(&bridge, "edited by hand").unwrap();
+        let routine = catalog_routine(TIMELINE_ROUTINE_ID).unwrap().unwrap();
+        materialize_routine(dir.path(), &routine).unwrap();
+        assert_eq!(fs::read_to_string(&bridge).unwrap(), "edited by hand");
+        let plan = plan_removal(dir.path(), TIMELINE_ROUTINE_ID).unwrap();
+        assert!(
+            plan.keep_modified
+                .contains(&".gemini/commands/wrap-today.toml".to_string())
+        );
+    }
+
+    #[test]
+    fn scaffold_registry_versions_match_the_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_vault(dir.path()).unwrap();
+        let vault = detect(dir.path());
+        for entry in &vault.config.routines.installed {
+            let routine = catalog_routine(&entry.id).unwrap().unwrap();
+            assert_eq!(
+                entry.version, routine.manifest.version,
+                "DEFAULT_CONFIG_TOML's {} version drifted from the shipped manifest",
+                entry.id
+            );
+        }
+    }
+
+    #[test]
+    fn agent_instruction_links_never_touch_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("CLAUDE.md"), "my own instructions").unwrap();
+        scaffold_vault(dir.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap(),
+            "my own instructions"
+        );
+        // The untouched link is real on the other name.
+        assert!(
+            dir.path()
+                .join("GEMINI.md")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        // Idempotent: a second pass changes nothing.
+        materialize_core_files(dir.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap(),
+            "my own instructions"
+        );
+    }
+
+    #[test]
+    fn toml_quote_escapes_control_and_quote_characters() {
+        let quoted = toml_quote("a \"b\"\nc\\d");
+        let table: toml::Table = toml::from_str(&format!("value = {quoted}")).unwrap();
+        assert_eq!(table["value"].as_str().unwrap(), "a \"b\"\nc\\d");
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod calendar_google;
 pub mod calendar_service;
 pub mod day_plan;
 pub mod day_planner_panel;
+pub mod getting_started;
 pub mod gmail;
 pub mod gmail_google;
 pub mod gmail_service;
@@ -26,7 +27,7 @@ pub mod vault;
 use anyhow::{Context as _, Result};
 use command_palette_hooks::CommandPaletteFilter;
 use editor::Editor;
-use gpui::{App, AppContext as _, AsyncWindowContext, Task, WeakEntity};
+use gpui::{App, AppContext as _, AsyncWindowContext, Task, TaskExt as _, WeakEntity};
 use markdown_preview::markdown_preview_view::MarkdownPreviewView;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -121,8 +122,9 @@ pub async fn open_abs_path_as_preview(
 
 /// Opens the default vault as the workspace, scaffolding the sample vault
 /// first if it doesn't exist yet. On a fresh scaffold, `welcome.md` is opened
-/// alongside so the user lands on something oriented. Used at startup when
-/// there is no previous session to restore.
+/// as a rendered preview so the user lands on a readable page, not raw
+/// markup (V18 §5.2). Used at startup when there is no previous session to
+/// restore.
 pub fn open_startup_vault(app_state: Arc<AppState>, cx: &mut App) -> Task<Result<()>> {
     let vault_root = vault::default_vault_path();
     let scaffold = cx.background_spawn({
@@ -142,19 +144,26 @@ pub fn open_startup_vault(app_state: Arc<AppState>, cx: &mut App) -> Task<Result
     cx.spawn(async move |cx| {
         let open_result = async {
             let freshly_scaffolded = scaffold.await?;
-            let mut paths = vec![vault_root.clone()];
+            let opened = cx
+                .update(|cx| {
+                    workspace::open_paths(
+                        std::slice::from_ref(&vault_root),
+                        app_state.clone(),
+                        workspace::OpenOptions::default(),
+                        cx,
+                    )
+                })
+                .await?;
             if freshly_scaffolded {
-                paths.push(vault_root.join(vault::WELCOME_FILE));
+                let welcome_path = vault_root.join(vault::WELCOME_FILE);
+                let workspace = opened.workspace.downgrade();
+                opened.window.update(cx, |_, window, cx| {
+                    cx.spawn_in(window, async move |_, cx| {
+                        open_abs_path_as_preview(workspace, welcome_path, cx).await
+                    })
+                    .detach_and_log_err(cx);
+                })?;
             }
-            cx.update(|cx| {
-                workspace::open_paths(
-                    &paths,
-                    app_state.clone(),
-                    workspace::OpenOptions::default(),
-                    cx,
-                )
-            })
-            .await?;
             anyhow::Ok(())
         }
         .await;

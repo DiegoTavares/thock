@@ -33,12 +33,12 @@ file = "backlog.md"          # the Soon / Someday / Completed holding pen
 [[routines.installed]]
 id      = "timeline"
 enabled = true
-version = 7
+version = 9
 
 [[routines.installed]]
 id      = "inbox"
 enabled = true
-version = 1
+version = 2
 "#;
 
 pub const DEFAULT_DAILY_TEMPLATE: &str = r#"# {{date:dddd, MMMM D, YYYY}}
@@ -61,29 +61,35 @@ pub const DEFAULT_WEEKLY_TEMPLATE: &str = r#"# Week {{date:W}}, {{date:GGGG}}
 
 pub const DEFAULT_WELCOME: &str = r#"# Welcome to Thock
 
-This folder is your **vault** — a plain folder of Markdown files that belongs to you.
+This folder is your **vault**: your notes, as plain files that belong to you.
+Nothing here is locked away — if you ever stop using Thock, every note still
+opens anywhere.
 
-## The Timeline
+## What you're looking at
 
-Open the **Timeline** panel in the left sidebar and click an entry:
+- **Left rail — your days and your rituals.** Open **Today** or **This Week**
+  with one click; the note is created for you the first time. Below them are
+  your rituals — small routines your agent runs when you ask.
+- **Right rail — the shape of your day.** When a daily note is open, its
+  checklist is drawn as a day plan beside it.
+- **Bottom — your lists.** The Backlog holds what's coming **Soon**, what's
+  for **Someday**, and everything you've completed.
 
-- **Today** / **Yesterday** open daily notes, created from `templates/daily.md`.
-- **This Week** / **Last Week** open weekly notes, created from `templates/weekly.md`.
+## Your agent
 
-The same entries (plus **Tomorrow**) are available from the command palette as
-`thock: open today`, `thock: open tomorrow`, and friends.
+Thock works with the AI assistant you already use — it runs beside your notes
+and helps with the rituals. It only ever **adds** to a note, below your words;
+it never rewrites what you wrote, and it always asks before doing anything
+that matters.
 
-Notes live in `daily/` and `weekly/`, one file per day or week. Existing notes
-are only ever opened — never overwritten.
+## Start here
 
-## Make it yours
+The left rail has a short **Getting started** list: read the introduction,
+customize your look and keys, connect your agent, take the tour. Ten
+minutes, and the vault is yours.
 
-Everything is a plain file you can edit:
-
-- `templates/daily.md` and `templates/weekly.md` — the templates for new notes.
-  Tokens like `{{date:dddd, MMMM D, YYYY}}`, `{{time}}`, and `{{title}}` are
-  filled in when a note is created.
-- `.thock/config.toml` — where notes go and how they are named.
+The full story — what Thock believes and how it treats your files — is in the
+**introduction** (`guide/index.html`, the first Getting started step opens it).
 
 This file is just a note, too. Edit it, or delete it once you've found your feet.
 "#;
@@ -773,6 +779,9 @@ pub fn scaffold_vault(root: &Path) -> Result<()> {
     )?;
     crate::routines::materialize_core_files(root)?;
     if install_default_routines {
+        // A vault this scaffold is creating gets the Getting started
+        // checklist; an existing vault never does (V18 decision 3).
+        crate::getting_started::activate(root)?;
         // Timeline and Inbox ship pre-installed (V13 §12 #3): the front door
         // exists from first run, so capture always has a ritual to point at.
         for routine_id in [
@@ -830,8 +839,8 @@ mod tests {
         assert_eq!(
             vault.config.routines.installed,
             vec![
-                InstalledRoutine::new("timeline".to_string(), true, 7),
-                InstalledRoutine::new("inbox".to_string(), true, 1),
+                InstalledRoutine::new("timeline".to_string(), true, 9),
+                InstalledRoutine::new("inbox".to_string(), true, 2),
             ]
         );
         // The Inbox Routine's landing zone and files ship with the scaffold.

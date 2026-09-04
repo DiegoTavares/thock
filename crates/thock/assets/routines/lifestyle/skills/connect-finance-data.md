@@ -84,9 +84,10 @@ confirmation:
 >
 > Accept all · fix some · start over
 
-Use the harness's structured question tool (AskUserQuestion in Claude Code) as a single
-question with "Accept all" and "Fix some" options; re-assignments and prose land in
-"Other". Nothing is written before the answer.
+Use your structured question tool if you have one (AskUserQuestion in Claude Code, for
+example), otherwise a plain numbered question — a single question with "Accept all" and
+"Fix some" options; re-assignments and prose land in "Other". Nothing is written before
+the answer.
 
 ## 6. Write `routines/lifestyle/accounts.md`
 

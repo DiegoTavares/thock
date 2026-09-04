@@ -14,9 +14,9 @@
 - Keep everything about a Routine inside its folder: the doc, the agent doc,
   and its skills (under `routines/<id>/skills/`). Scaffold dirs for user data
   (e.g. `finance/`) live wherever makes sense for the user.
-- **Never** write under `.thock/` or `.claude/`. Thock generates
-  the Claude Code skill bridges and provenance records itself when the user
-  activates the Routine.
+- **Never** write under `.thock/`, `.claude/`, or `.gemini/`. Thock generates
+  the slash-command bridges for each CLI and the provenance records itself
+  when the user activates the Routine.
 - A new or edited `routine.toml` shows up on the next vault refresh. Nothing
   is activated automatically — the user clicks **Activate** in the panel's
   Add Routine list.
@@ -160,8 +160,8 @@ existing bindings.
 2. Write `routines/<id>/routine.toml`, the explainer doc, the `agent_doc`,
    and skill files under `routines/<id>/skills/`.
 3. Create any scaffold dirs the Routine declares.
-4. Do **not** touch `.thock/` or `.claude/` (one exception: the
-   ready marker below).
+4. Do **not** touch `.thock/`, `.claude/`, or `.gemini/` (one exception:
+   the ready marker below).
 5. Optionally write an empty file at `.thock/state/routine-ready/<id>`
    so Thock can offer activation with a toast; otherwise just tell the
    user to activate the Routine from the panel's **Add Routine** list.

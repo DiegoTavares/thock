@@ -55,13 +55,13 @@ Carried over
 
 ## 4. Wait
 
-Do not touch anything before the user answers. Present the proposed batch through the
-harness's structured question tool (AskUserQuestion in Claude Code) as a single question —
-never one question per item. The user can confirm `all`, a selection (`1,3`), re-assign a
+Do not touch anything before the user answers. Present the proposed batch through your
+structured question tool if you have one (AskUserQuestion in Claude Code, for example),
+otherwise as a plain numbered question — always a single question, never one per item. The user can confirm `all`, a selection (`1,3`), re-assign a
 destination (`2 → soon`, `3 → today`), `leave 4` (defer), `drop 6` (discard), or answer in
 plain prose. Anything not confirmed is left exactly where it is.
 
-When calling AskUserQuestion:
+When using a structured question tool:
 
 - `question`: "Where should these items go? Confirm with all, a selection like 1,3, or
   adjust with 1 → destination." (or similar)

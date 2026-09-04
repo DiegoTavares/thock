@@ -36,7 +36,8 @@
     // "calt": false
   },
   // The default font size for text in the editor
-  "buffer_font_size": 15,
+  // Thock: notes read better bigger than code (V18 follow-up).
+  "buffer_font_size": 17,
   // The weight of the editor font in standard CSS units from 100 to 900.
   "buffer_font_weight": 400,
   // Set the buffer's line height.

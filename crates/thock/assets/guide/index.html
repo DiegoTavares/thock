@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>An Introduction to Thock</title>
+<style>
+  :root {
+    --paper: #f6f4ef;
+    --raised: #fdfcf9;
+    --ink: #2a2822;
+    --soft: #6b675a;
+    --line: #ddd9cc;
+    --accent: #2e6b5a;
+    --accent-soft: #e2ebe6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #1d1f1c;
+      --raised: #262924;
+      --ink: #e7e5db;
+      --soft: #a5a396;
+      --line: #3b3e38;
+      --accent: #74b299;
+      --accent-soft: #27382f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Charter, Georgia, "Times New Roman", serif;
+    font-size: 18px;
+    line-height: 1.65;
+  }
+  .wrap { max-width: 41rem; margin: 0 auto; padding: 4.5rem 1.5rem 6rem; }
+  h1 { font-size: 2.7rem; line-height: 1.1; font-weight: 600; margin: 0.4rem 0 1rem; }
+  h2 { font-size: 1.55rem; font-weight: 600; margin: 3.2rem 0 0.75rem; }
+  p { margin: 0.8rem 0; }
+  .eyebrow {
+    font-family: system-ui, sans-serif;
+    font-size: 0.72rem; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase;
+    color: var(--accent); margin: 0;
+  }
+  .lede { font-size: 1.2rem; color: var(--soft); }
+  em { color: inherit; }
+  .belief {
+    border-left: 3px solid var(--accent);
+    background: var(--raised);
+    border-radius: 0 8px 8px 0;
+    padding: 1rem 1.3rem;
+    margin: 1.2rem 0;
+  }
+  .belief h3 { margin: 0 0 0.3rem; font-size: 1.1rem; font-weight: 600; }
+  .belief p { margin: 0; color: var(--soft); font-size: 0.98rem; }
+
+  /* workspace sketch */
+  .sketch {
+    font-family: system-ui, sans-serif;
+    display: grid;
+    grid-template-columns: 1fr 2.2fr 1fr;
+    grid-template-rows: 1fr auto;
+    gap: 8px;
+    background: var(--raised);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px;
+    margin: 1.5rem 0;
+    min-height: 15rem;
+  }
+  .pane {
+    border: 1px dashed var(--line);
+    border-radius: 8px;
+    padding: 0.7rem 0.8rem;
+    font-size: 0.8rem;
+    color: var(--soft);
+    display: flex; flex-direction: column; gap: 0.25rem;
+  }
+  .pane b { color: var(--ink); font-size: 0.85rem; }
+  .pane.bottom { grid-column: 1 / -1; flex-direction: row; align-items: baseline; gap: 0.8rem; }
+  .pane .fake { background: var(--accent-soft); border-radius: 4px; height: 0.55rem; }
+  @media (max-width: 560px) { .sketch { grid-template-columns: 1fr; } .pane.bottom { flex-wrap: wrap; } }
+
+  .word { margin: 1.1rem 0; }
+  .word dt {
+    font-family: system-ui, sans-serif;
+    font-weight: 650; font-size: 1rem;
+  }
+  .word dd { margin: 0.15rem 0 0; color: var(--soft); }
+  .next {
+    background: var(--accent-soft);
+    border-radius: 10px;
+    padding: 1.2rem 1.4rem;
+    margin-top: 3rem;
+  }
+  .next p { margin: 0.4rem 0; }
+  footer { margin-top: 3.5rem; color: var(--soft); font-size: 0.9rem; }
+  code {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 0.85em;
+    background: var(--accent-soft);
+    border-radius: 4px;
+    padding: 0.1em 0.3em;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">An introduction</p>
+  <h1>Your notes. Your agent. Your machine.</h1>
+  <p class="lede">Thock is a home for the things on your mind — days, plans, lists,
+  reflections — kept as plain files on your own computer, with an AI assistant that
+  helps you keep the rhythm.</p>
+
+  <h2>What Thock believes</h2>
+
+  <div class="belief">
+    <h3>Your files, forever</h3>
+    <p>Everything you write is an ordinary file in an ordinary folder. There is no
+    account holding your notes hostage, no special format. If Thock disappeared
+    tomorrow, every word would still open on any computer.</p>
+  </div>
+  <div class="belief">
+    <h3>It adds — it never rewrites</h3>
+    <p>When your assistant reviews your day or your week, it writes its part
+    <em>below</em> yours, as its own section. Your words are never reworded,
+    reordered, or deleted. What you wrote stays exactly as you wrote it.</p>
+  </div>
+  <div class="belief">
+    <h3>You confirm anything that matters</h3>
+    <p>The assistant proposes; you decide. It will suggest where a captured note
+    should be filed or what to carry into tomorrow — and then it waits for your
+    yes. Nothing important happens without you.</p>
+  </div>
+  <div class="belief">
+    <h3>Nothing is ever lost</h3>
+    <p>Thock quietly keeps every version of every note as you work. If anything
+    ever goes wrong — a bad edit, an accident — your words can come back.
+    You never have to think about it.</p>
+  </div>
+
+  <h2>The room you're standing in</h2>
+  <div class="sketch" role="img" aria-label="A sketch of the Thock window: days and rituals on the left, your note in the middle, your day's plan on the right, your lists along the bottom.">
+    <div class="pane"><b>Days &amp; rituals</b><span>Today · This Week</span><span>Wrap Today · Week Review</span></div>
+    <div class="pane"><b>Your note</b><div class="fake" style="width:80%"></div><div class="fake" style="width:65%"></div><div class="fake" style="width:72%"></div></div>
+    <div class="pane"><b>Your day, drawn</b><span>the note's checklist as a day plan</span></div>
+    <div class="pane bottom"><b>Your lists</b><span>Soon</span><span>Someday</span><span>Completed</span></div>
+  </div>
+
+  <h2>Four words to know</h2>
+  <dl>
+    <div class="word"><dt>Vault</dt>
+      <dd>The folder holding all your notes. This one lives at <code>~/Thock</code>.</dd></div>
+    <div class="word"><dt>Agent</dt>
+      <dd>The AI assistant you already use, running beside your notes. You bring your
+      own; Thock just gives it a seat and the house rules.</dd></div>
+    <div class="word"><dt>Ritual</dt>
+      <dd>A small routine your agent runs when you ask — wrapping up the day, reviewing
+      the week, sorting what you've captured. Each one is a readable file you can open
+      and change.</dd></div>
+    <div class="word"><dt>Routine</dt>
+      <dd>A bundle of rituals and folders for one part of life — your days and weeks,
+      your inbox, your finances. Add the ones you want; skip the rest.</dd></div>
+  </dl>
+
+  <div class="next">
+    <p><strong>What to do next</strong></p>
+    <p>Back in Thock, the left rail has a short <strong>Getting started</strong> list:
+    make it yours — pick a theme you like and learn the handful of keys worth
+    knowing — connect your agent, then take the tour: your agent will walk you
+    through your first note and your first ritual. Ten minutes, and the vault is
+    yours.</p>
+  </div>
+
+  <footer>
+    <p>This page is itself a file in your vault (<code>guide/index.html</code>) —
+    like everything in Thock, yours to keep and yours to change.</p>
+  </footer>
+</div>
+</body>
+</html>

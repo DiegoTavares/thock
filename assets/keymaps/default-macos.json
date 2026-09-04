@@ -712,6 +712,8 @@
       "cmd-1": ["workspace::ActivatePane", 0],
       "cmd-2": "thock::ToggleFocus",
       "cmd-alt-u": "thock::ToggleBacklogFocus",
+      "cmd-alt-t": "thock::ToggleAgentFocus",
+      "cmd-alt-p": "thock::ToggleDayPlannerFocus",
       "cmd-3": ["workspace::ActivatePane", 2],
       "cmd-4": ["workspace::ActivatePane", 3],
       "cmd-5": ["workspace::ActivatePane", 4],

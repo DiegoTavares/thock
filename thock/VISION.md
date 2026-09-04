@@ -231,7 +231,18 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
 - [x] **Dashboard output type** — `data.js → static HTML that computes its own analytics`, shipped as the Timeline Routine's Weekly Dashboard and generalized into the Routine format as an openable browser link. _(shipped)_
 
 ### Milestone 4 — Onboarding & de-Zed-ification
-- [ ] **First-run onboarding** — point at a folder, connect an LLM, pick Routines, run first ritual in <10 min. _(planned)_
+- [x] **First-run onboarding** — a fresh vault opens on a *rendered* welcome note; a vault-local
+  **Introductory Guide** (`guide/index.html`, the dashboard-output pattern) tells the philosophy in plain
+  language; a **Getting started** checklist pinned atop the Routines rail walks read-the-introduction →
+  customize (`guide/customize.md` with the live theme selector popped on top — dark is only the default —
+  then text size, "⌘⇧P does anything", the panel toggles, and how to rebind, agent included) →
+  connect-your-agent → take-the-tour, each step checking off on real evidence and the
+  section retiring itself when done (fresh vaults only, state in `.thock/state/getting-started/`); and the **Welcome Tour**
+  core ritual has the user's own agent create the first note, demonstrate the append contract, and finish
+  with a first Wrap Today. The vault also became agent-agnostic: canonical `AGENTS.md` with
+  `CLAUDE.md`/`GEMINI.md` symlinks, slash-command bridges generated for Gemini CLI alongside Claude Code,
+  a Gemini fast-tier mapping, and de-Clauded skill copy — a Gemini user gets the full experience. The
+  folder picker and a pick-your-Routines step stay deferred. Spec `specs/v18-first-run-onboarding.md`. _(shipped)_
 - [x] **Remove code-editor chrome** — the inherited Zed surface is off by default: no sign-in/user menu, no git/collab/debugger/diagnostics/LSP buttons, no tasks, Jupyter or gutter runnables, telemetry and auto-update off, no unconditional phone-home (extension update ping guarded, prettier-for-Markdown off so opening a note downloads nothing). Language servers are opt-in per language (TOML via auto-installed extension, JSON/JSONC/YAML kept for settings editing); the command palette hides the debugger/task/repl/collab/account namespaces; menus list the Thock panels and drop the Run menu and Zed marketing links. All setting-level flips and hides, never code removal, so rebases stay cheap. Spec `specs/v12-de-zed-ification.md`. _(shipped)_
 - [ ] **BYO-LLM cost visibility** — key/model choice, local vs cloud, graceful failure. _(planned)_
 

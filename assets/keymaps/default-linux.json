@@ -701,6 +701,8 @@
       "ctrl-shift-d": "debug_panel::ToggleFocus",
       "ctrl-2": "thock::ToggleFocus",
       "ctrl-alt-u": "thock::ToggleBacklogFocus",
+      "ctrl-alt-t": "thock::ToggleAgentFocus",
+      "ctrl-alt-p": "thock::ToggleDayPlannerFocus",
       "ctrl-?": "agent::ToggleFocus",
       "alt-save": "workspace::SaveAll",
       "ctrl-alt-s": "workspace::SaveAll",

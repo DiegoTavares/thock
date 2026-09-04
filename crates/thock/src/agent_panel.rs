@@ -9,8 +9,8 @@ use editor::Editor;
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
 use gpui::{
     Action, App, AsyncWindowContext, Context, DismissEvent, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, Pixels, SharedString, Subscription, WeakEntity, Window, actions, div,
-    px,
+    FocusHandle, Focusable, KeyContext, Pixels, SharedString, Subscription, WeakEntity, Window,
+    actions, div, px,
 };
 use picker::{Picker, PickerDelegate};
 use project::Project;
@@ -57,7 +57,16 @@ pub struct RunSkill {
     pub skill: Option<String>,
 }
 
+/// Bumped whenever the connect flow saves a launch command, so other panels
+/// (the Getting started checklist) re-check the connection without polling
+/// the settings files (V18 §5.4).
+#[derive(Default)]
+pub struct ConnectionEpoch(pub usize);
+
+impl gpui::Global for ConnectionEpoch {}
+
 pub fn init(cx: &mut App) {
+    cx.set_global(ConnectionEpoch::default());
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleAgentFocus, window, cx| {
             workspace.toggle_panel_focus::<AgentPanel>(window, cx);
@@ -489,6 +498,28 @@ impl AgentPanel {
         cx.notify();
     }
 
+    /// `enter` anywhere in the connect flow connects with the field's
+    /// command; single-line editors don't consume enter, so the action
+    /// bubbles here from the focused command field.
+    fn confirm_connect(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        let PanelView::Connect(flow) = &self.view else {
+            cx.propagate();
+            return;
+        };
+        let command = flow.command_editor.read(cx).text(cx);
+        self.save_connection(command, window, cx);
+    }
+
+    /// `escape` backs out of the connect flow; outside it, let the default
+    /// escape behavior run.
+    fn cancel_view(&mut self, _: &menu::Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.view, PanelView::Connect(_)) {
+            self.cancel_connect(cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
     fn save_connection(&mut self, command: String, window: &mut Window, cx: &mut Context<Self>) {
         let command = command.trim().to_string();
         if command.is_empty() {
@@ -517,6 +548,9 @@ impl AgentPanel {
                 this.view = PanelView::Sessions;
                 this.refresh_vault_status(cx);
                 this.refresh_connected(cx);
+                // A global-default save writes outside the vault, so nothing
+                // else would tell the Getting started checklist (V18 §5.4).
+                cx.update_global::<ConnectionEpoch, ()>(|epoch, _| epoch.0 += 1);
                 if let Some(request) = this.pending_launch.take() {
                     this.launch(request, window, cx);
                 }
@@ -532,16 +566,29 @@ impl AgentPanel {
         .detach_and_log_err(cx);
     }
 
+    /// The connect flow (V5 §6.2), laid out as one choice with one outcome:
+    /// the detected agents and the custom command are alternative ways to
+    /// fill the same launch command, and a single **Connect** applies it.
+    /// Picking a detected agent fills the field rather than saving directly,
+    /// so a row's selected state, the field, and the footer never disagree.
     fn render_connect(&self, flow: &ConnectFlow, cx: &Context<Self>) -> AnyElement {
         let editor = flow.command_editor.clone();
+        let current_command = editor.read(cx).text(cx).trim().to_string();
+        let section_caption = |label: &'static str| {
+            Label::new(label)
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .into_any_element()
+        };
         let mut content = v_flex()
             .gap_2()
             .p_3()
             .child(Label::new("Connect your agent").size(LabelSize::Large))
             .child(
                 Label::new(
-                    "Thock launches your own CLI agent in a terminal — \
-                     it never talks to a model itself.",
+                    "Pick the AI assistant Thock should run beside your notes. \
+                     It runs in a terminal here, under its own account. Thock \
+                     never talks to a model itself.",
                 )
                 .size(LabelSize::Small)
                 .color(Color::Muted),
@@ -549,31 +596,66 @@ impl AgentPanel {
 
         content = match &flow.detected {
             None => content.child(
-                Label::new("Looking for installed agents…")
+                Label::new("Looking for agents on this computer…")
                     .size(LabelSize::Small)
                     .color(Color::Muted),
             ),
             Some(detected) if detected.is_empty() => content.child(
-                Label::new("No known agents found on PATH. Enter a command below.")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            ),
-            Some(detected) => content.children(detected.iter().map(|agent| {
-                let program = agent.program;
-                Button::new(
-                    ElementId::Name(SharedString::from(format!("thock-connect-{program}"))),
-                    format!("{} ({program})", agent.display_name),
+                Label::new(
+                    "No agents were found on this computer. Type the command \
+                     that starts yours below.",
                 )
-                .style(ButtonStyle::Filled)
-                .full_width()
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.save_connection(program.to_string(), window, cx);
-                }))
-            })),
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+            ),
+            Some(detected) => content.child(
+                v_flex()
+                    .gap_1()
+                    .child(section_caption("Found on this computer"))
+                    .children(detected.iter().map(|agent| {
+                        let program = agent.program;
+                        let selected = current_command == program;
+                        ListItem::new(ElementId::Name(SharedString::from(format!(
+                            "thock-connect-{program}"
+                        ))))
+                        .toggle_state(selected)
+                        .start_slot(
+                            Icon::new(IconName::Terminal)
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(Label::new(agent.display_name))
+                        .end_slot(if selected {
+                            Icon::new(IconName::Check)
+                                .size(IconSize::Small)
+                                .color(Color::Accent)
+                                .into_any_element()
+                        } else {
+                            Label::new(program)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .into_any_element()
+                        })
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                if let PanelView::Connect(flow) = &this.view {
+                                    flow.command_editor.update(cx, |editor, cx| {
+                                        editor.set_text(program, window, cx);
+                                    });
+                                    cx.notify();
+                                }
+                            },
+                        ))
+                    })),
+            ),
         };
 
+        let custom_caption = match &flow.detected {
+            Some(detected) if detected.is_empty() => "Custom command",
+            _ => "Or a custom command",
+        };
         content
-            .child(Divider::horizontal())
+            .child(div().mt_1().child(section_caption(custom_caption)))
             .child(
                 div()
                     .child(editor.clone())
@@ -584,47 +666,53 @@ impl AgentPanel {
             )
             .child(
                 Label::new(format!(
-                    "The kickoff prompt is appended as the last argument, or replaces \
-                     {} if present.",
+                    "Thock starts your agent with this command and tells it what \
+                     to do by adding one final argument, or by filling in \
+                     {} wherever you put it.",
                     agent::PROMPT_PLACEHOLDER
                 ))
                 .size(LabelSize::XSmall)
                 .color(Color::Muted),
             )
-            .when(self.vault().is_some(), |this| {
-                let only_this_vault = flow.only_this_vault;
-                this.child(
-                    Checkbox::new(
-                        "thock-connect-only-vault",
-                        if only_this_vault {
-                            ToggleState::Selected
-                        } else {
-                            ToggleState::Unselected
-                        },
-                    )
-                    .label("Only for this vault")
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        if let PanelView::Connect(flow) = &mut this.view {
-                            flow.only_this_vault = !flow.only_this_vault;
-                            cx.notify();
-                        }
-                    })),
-                )
-            })
+            .child(div().mt_1().child(Divider::horizontal()))
             .child(
                 h_flex()
-                    .gap_2()
+                    .justify_between()
+                    .child(if self.vault().is_some() {
+                        let only_this_vault = flow.only_this_vault;
+                        Checkbox::new(
+                            "thock-connect-only-vault",
+                            if only_this_vault {
+                                ToggleState::Selected
+                            } else {
+                                ToggleState::Unselected
+                            },
+                        )
+                        .label("Only for this vault")
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            if let PanelView::Connect(flow) = &mut this.view {
+                                flow.only_this_vault = !flow.only_this_vault;
+                                cx.notify();
+                            }
+                        }))
+                        .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    })
                     .child(
-                        Button::new("thock-connect-save", "Save")
-                            .style(ButtonStyle::Filled)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let command = editor.read(cx).text(cx);
-                                this.save_connection(command, window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("thock-connect-cancel", "Cancel")
-                            .on_click(cx.listener(|this, _, _window, cx| this.cancel_connect(cx))),
+                        h_flex()
+                            .gap_1()
+                            .child(Button::new("thock-connect-cancel", "Cancel").on_click(
+                                cx.listener(|this, _, _window, cx| this.cancel_connect(cx)),
+                            ))
+                            .child(
+                                Button::new("thock-connect-save", "Connect")
+                                    .style(ButtonStyle::Filled)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        let command = editor.read(cx).text(cx);
+                                        this.save_connection(command, window, cx);
+                                    })),
+                            ),
                     ),
             )
             .into_any_element()
@@ -816,10 +904,18 @@ impl Render for AgentPanel {
                 )
                 .into_any_element(),
         };
+        let mut key_context = KeyContext::new_with_defaults();
+        key_context.add("ThockAgentPanel");
+        // The connect flow is menu-shaped: enter connects, escape backs out.
+        if matches!(self.view, PanelView::Connect(_)) {
+            key_context.add("menu");
+        }
         v_flex()
             .id("thock-agent-panel")
-            .key_context("ThockAgentPanel")
+            .key_context(key_context)
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::confirm_connect))
+            .on_action(cx.listener(Self::cancel_view))
             .size_full()
             .child(content)
     }

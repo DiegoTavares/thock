@@ -31,6 +31,7 @@ use workspace::notifications::NotificationId;
 use workspace::{OpenOptions, OpenVisible, Toast, Workspace};
 
 use crate::agent_panel::RunSkill;
+use crate::getting_started;
 use crate::notes::{EnsureNoteOutcome, TimelineEntry, ensure_note};
 use crate::routines::{
     self, DiscoveredRoutine, LinkKind, RoutineLink, RoutineLoad, RoutineManifest, RoutineSkill,
@@ -63,7 +64,13 @@ actions!(
         /// Hides the selected group of extra notes or setup steps.
         CollapseGroup,
         /// Shows what the selected group of extra notes or setup steps holds.
-        ExpandGroup
+        ExpandGroup,
+        /// Opens the introduction to Thock in your browser.
+        OpenGuide,
+        /// Opens the customize guide — themes, text size, and keyboard shortcuts.
+        OpenCustomize,
+        /// Hides the Getting started list from the routines panel.
+        HideGettingStarted
     ]
 );
 
@@ -102,6 +109,21 @@ pub fn init(cx: &mut App) {
                 window,
                 cx,
             );
+        });
+        workspace.register_action(|workspace, _: &OpenGuide, _window, cx| {
+            if let Some(panel) = workspace.panel::<RoutinesPanel>(cx) {
+                panel.update(cx, |panel, cx| panel.open_guide(cx));
+            }
+        });
+        workspace.register_action(|workspace, _: &OpenCustomize, window, cx| {
+            if let Some(panel) = workspace.panel::<RoutinesPanel>(cx) {
+                panel.update(cx, |panel, cx| panel.open_customize(window, cx));
+            }
+        });
+        workspace.register_action(|workspace, _: &HideGettingStarted, _window, cx| {
+            if let Some(panel) = workspace.panel::<RoutinesPanel>(cx) {
+                panel.update(cx, |panel, cx| panel.hide_getting_started(cx));
+            }
         });
     })
     .detach();
@@ -210,6 +232,51 @@ fn group_key(routine_id: &str, label: &str) -> String {
     format!("{routine_id}\u{1}{label}")
 }
 
+/// The pseudo section id the Getting started rows use in nav keys; not a
+/// Routine, so it can never collide with one (routine ids are directory
+/// names, and this one contains no files).
+const GETTING_STARTED_SECTION_ID: &str = "\u{1}getting-started";
+
+/// The first-run checklist's four steps (V18 §5.4), in render order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GettingStartedStep {
+    Introduction,
+    Customize,
+    Agent,
+    Tour,
+}
+
+impl GettingStartedStep {
+    const ALL: [Self; 4] = [Self::Introduction, Self::Customize, Self::Agent, Self::Tour];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Introduction => "introduction",
+            Self::Customize => "customize",
+            Self::Agent => "agent",
+            Self::Tour => "tour",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Introduction => "Read the introduction",
+            Self::Customize => "Customize",
+            Self::Agent => "Connect your agent",
+            Self::Tour => "Take the tour",
+        }
+    }
+
+    fn done(self, steps: getting_started::Steps) -> bool {
+        match self {
+            Self::Introduction => steps.introduction,
+            Self::Customize => steps.customize,
+            Self::Agent => steps.agent,
+            Self::Tour => steps.tour,
+        }
+    }
+}
+
 /// What a row *is*, independent of where it currently sits. Opening or
 /// closing a group renumbers everything below it, so the cursor is re-found
 /// by this rather than left on a stale index.
@@ -218,6 +285,7 @@ fn row_key(row: &NavRow) -> String {
         NavRowKind::Link(link) => nav_key(&row.routine_id, "link", &link.id),
         NavRowKind::Skill(skill) => nav_key(&row.routine_id, "skill", &skill.id),
         NavRowKind::Group(label) => nav_key(&row.routine_id, "group", label),
+        NavRowKind::GettingStarted(step) => nav_key(&row.routine_id, "step", step.key()),
     }
 }
 
@@ -360,6 +428,7 @@ enum NavRowKind {
     Link(RoutineLink),
     Skill(RoutineSkill),
     Group(SharedString),
+    GettingStarted(GettingStartedStep),
 }
 
 struct NavRow {
@@ -416,6 +485,10 @@ pub struct RoutinesPanel {
     /// Ready markers already offered with a toast this session, so a marker
     /// awaiting activation doesn't re-toast on every refresh.
     ready_toasted: HashSet<String>,
+    /// The first-run Getting started checklist (V18 §5.4), `None` while
+    /// inactive. Re-derived off the UI thread whenever the refresh snapshot
+    /// or the agent connection changes.
+    getting_started: Option<getting_started::Steps>,
     position: DockPosition,
     /// Whether an onboarding marker/expiry check is mid-flight. Checks are
     /// serialized (never cancelled): a cancelled check could persist a state
@@ -485,6 +558,13 @@ impl RoutinesPanel {
                     }
                 },
             );
+            // The connect flow saving a global default writes outside the
+            // vault, so no worktree event fires — the epoch global is how
+            // the checklist's "Connect your agent" row learns about it.
+            let connection_subscription =
+                cx.observe_global::<crate::agent_panel::ConnectionEpoch>(|this: &mut Self, cx| {
+                    this.refresh_getting_started(cx);
+                });
             let mut this = Self {
                 workspace: weak_workspace,
                 project,
@@ -499,10 +579,15 @@ impl RoutinesPanel {
                 expanded_groups: HashSet::new(),
                 show_add_routines: false,
                 ready_toasted: HashSet::new(),
+                getting_started: None,
                 position: DockPosition::Left,
                 onboarding_check_running: false,
                 onboarding_recheck: false,
-                _subscriptions: vec![project_subscription, workspace_subscription],
+                _subscriptions: vec![
+                    project_subscription,
+                    workspace_subscription,
+                    connection_subscription,
+                ],
             };
             this.refresh_vault_status(cx);
             // Startup check: a marker written while the app was closed still
@@ -535,7 +620,134 @@ impl RoutinesPanel {
                 self.reconcile_routines(cx);
             }
             self.offer_ready_routines(cx);
+            self.refresh_getting_started(cx);
             cx.notify();
+        }
+    }
+
+    /// Re-derives the Getting started checklist off the UI thread: the step
+    /// markers are cheap, but resolving the agent command reads the global
+    /// settings file. Once every step is done the checklist dismisses itself
+    /// and the section disappears for good (V18 §5.4).
+    fn refresh_getting_started(&mut self, cx: &mut Context<Self>) {
+        let VaultStatus::Valid(vault) = &self.vault_status else {
+            if self.getting_started.take().is_some() {
+                cx.notify();
+            }
+            return;
+        };
+        let vault = vault.clone();
+        let derive = cx.background_spawn(async move {
+            let connected = crate::agent::resolved_command(Some(&vault)).is_some();
+            match getting_started::state(&vault.root, connected) {
+                Some(steps) if steps.all_done() => {
+                    getting_started::dismiss(&vault.root);
+                    None
+                }
+                state => state,
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let state = derive.await;
+            this.update(cx, |this, cx| {
+                if this.getting_started != state {
+                    this.getting_started = state;
+                    cx.notify();
+                }
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// `thock::OpenGuide` and the checklist's first row: the introduction is
+    /// a vault-local HTML page, opened like any browser link. Opening it is
+    /// what completes the step — evidence, not a click on a checkbox.
+    fn open_guide(&mut self, cx: &mut Context<Self>) {
+        let VaultStatus::Valid(vault) = &self.vault_status else {
+            return;
+        };
+        let root = vault.root.clone();
+        cx.open_with_system(&root.join(getting_started::GUIDE_PATH));
+        let mark = cx.background_spawn(async move {
+            crate::getting_started::mark_introduction_read(&root)
+        });
+        cx.spawn(async move |this, cx| {
+            mark.await?;
+            this.update(cx, |this, cx| this.refresh_getting_started(cx))
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// `thock::OpenCustomize` and the checklist's second row: the customize
+    /// page (themes, text size, shortcuts) opened as a rendered preview,
+    /// with the live theme selector popped on top — so "dark isn't the only
+    /// look" is *shown*, not described. Opening it is what completes the
+    /// step.
+    fn open_customize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let VaultStatus::Valid(vault) = &self.vault_status else {
+            return;
+        };
+        let root = vault.root.clone();
+        let workspace = self.workspace.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            crate::open_abs_path_as_preview(
+                workspace,
+                root.join(getting_started::CUSTOMIZE_PATH),
+                cx,
+            )
+            .await?;
+            // The page's first section narrates the picker now hovering over
+            // it; arrowing through themes live is the whole lesson.
+            cx.update(|window, cx| {
+                window.dispatch_action(
+                    zed_actions::theme_selector::Toggle::default().boxed_clone(),
+                    cx,
+                );
+            })?;
+            let mark = cx
+                .background_spawn(async move { getting_started::mark_customize_read(&root) });
+            mark.await?;
+            this.update(cx, |this, cx| this.refresh_getting_started(cx))
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// `thock::HideGettingStarted`: puts the checklist away early. The step
+    /// markers stay, so nothing is forgotten — only the section goes.
+    fn hide_getting_started(&mut self, cx: &mut Context<Self>) {
+        let VaultStatus::Valid(vault) = &self.vault_status else {
+            return;
+        };
+        let root = vault.root.clone();
+        let dismiss = cx.background_spawn(async move {
+            getting_started::dismiss(&root);
+        });
+        cx.spawn(async move |this, cx| {
+            dismiss.await;
+            this.update(cx, |this, cx| this.refresh_getting_started(cx))
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn run_getting_started_step(
+        &mut self,
+        step: GettingStartedStep,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match step {
+            GettingStartedStep::Introduction => self.open_guide(cx),
+            GettingStartedStep::Customize => self.open_customize(window, cx),
+            GettingStartedStep::Agent => {
+                window.dispatch_action(crate::agent_panel::ConnectAgent.boxed_clone(), cx);
+            }
+            GettingStartedStep::Tour => self.run_skill(
+                "Welcome Tour".to_string(),
+                getting_started::WELCOME_TOUR_SKILL_PATH.to_string(),
+                crate::agent::ModelTier::Default,
+                window,
+                cx,
+            ),
         }
     }
 
@@ -1515,10 +1727,20 @@ impl RoutinesPanel {
         section_items(manifest, &self.expanded_groups)
     }
 
-    /// The flat, visible row list keyboard selection walks: every expanded,
+    /// The flat, visible row list keyboard selection walks: the Getting
+    /// started steps when the checklist is active, then every expanded,
     /// cleanly loaded Routine's selectable section items, in section order.
     fn nav_rows(&self) -> Vec<NavRow> {
         let mut rows = Vec::new();
+        if self.getting_started.is_some() {
+            for step in GettingStartedStep::ALL {
+                rows.push(NavRow {
+                    routine_id: GETTING_STARTED_SECTION_ID.to_string(),
+                    group: None,
+                    kind: NavRowKind::GettingStarted(step),
+                });
+            }
+        }
         for load in &self.routines {
             let RoutineLoad::Loaded(manifest) = load else {
                 continue;
@@ -1627,7 +1849,7 @@ impl RoutinesPanel {
                     routines::vault_file_path(&vault.root, &resolved.relative_path).ok()
                 })
                 .is_some_and(|path| path == active_path),
-            NavRowKind::Skill(_) | NavRowKind::Group(_) => false,
+            NavRowKind::Skill(_) | NavRowKind::Group(_) | NavRowKind::GettingStarted(_) => false,
         })
     }
 
@@ -1704,6 +1926,7 @@ impl RoutinesPanel {
                 self.run_skill(title, skill.file, skill.model, window, cx);
             }
             NavRowKind::Group(label) => self.toggle_group(&row.routine_id, &label, cx),
+            NavRowKind::GettingStarted(step) => self.run_getting_started_step(step, window, cx),
         }
     }
 
@@ -1711,8 +1934,21 @@ impl RoutinesPanel {
         let Some(row) = self.selected_row(cx) else {
             return;
         };
-        if let NavRowKind::Skill(skill) = row.kind {
-            self.open_routine_file(skill.file, row.routine_id, window, cx);
+        match row.kind {
+            NavRowKind::Skill(skill) => {
+                self.open_routine_file(skill.file, row.routine_id, window, cx);
+            }
+            // The tour runs on enter like a ritual, so reading its
+            // instructions gets the same affordance ritual rows have.
+            NavRowKind::GettingStarted(GettingStartedStep::Tour) => {
+                self.open_routine_file(
+                    getting_started::WELCOME_TOUR_SKILL_PATH.to_string(),
+                    row.routine_id,
+                    window,
+                    cx,
+                );
+            }
+            _ => {}
         }
     }
 
@@ -2271,11 +2507,60 @@ impl RoutinesPanel {
             )
     }
 
+    /// The Getting started section (V18 §5.4): a caption plus three checkable
+    /// step rows, pinned above the Routine sections while the checklist is
+    /// active. Completed steps stay visible (checked, muted) until all three
+    /// are done, at which point the whole section retires itself.
+    fn render_getting_started(
+        &self,
+        steps: getting_started::Steps,
+        row_index: &mut usize,
+        selected_index: Option<usize>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let mut section = v_flex().child(render_caption("Getting started".into()));
+        for step in GettingStartedStep::ALL {
+            let index = *row_index;
+            *row_index += 1;
+            let done = step.done(steps);
+            section = section.child(
+                ListItem::new(ElementId::Name(SharedString::from(format!(
+                    "thock-getting-started-{}",
+                    step.key()
+                ))))
+                .indent_level(1)
+                .indent_step_size(px(12.))
+                .toggle_state(selected_index == Some(index))
+                .start_slot(
+                    Icon::new(if done {
+                        IconName::TodoComplete
+                    } else {
+                        IconName::TodoPending
+                    })
+                    .size(IconSize::XSmall)
+                    .color(if done { Color::Success } else { Color::Accent }),
+                )
+                .child(
+                    Label::new(step.label())
+                        .size(LabelSize::Small)
+                        .color(if done { Color::Muted } else { Color::Default }),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.run_getting_started_step(step, window, cx);
+                })),
+            );
+        }
+        section.into_any_element()
+    }
+
     fn render_routines(&self, cx: &Context<Self>) -> AnyElement {
         let rows = self.nav_rows();
         let selected_index = self.effective_selected_index(&rows, cx);
         let mut row_index = 0usize;
         let mut sections = Vec::new();
+        if let Some(steps) = self.getting_started {
+            sections.push(self.render_getting_started(steps, &mut row_index, selected_index, cx));
+        }
         for load in &self.routines {
             sections.push(match load {
                 RoutineLoad::Loaded(manifest) => {

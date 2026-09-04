@@ -19,8 +19,8 @@ anything you remember.
    yes first.
 3. **Never rewrite user-authored content.** If a file you'd create already
    exists, point at it from `routine.toml` instead of overwriting it.
-4. **Never** write under `.thock/` or `.claude/` — except the single
-   ready marker in the final step. Thock generates bridges and
+4. **Never** write under `.thock/`, `.claude/`, or `.gemini/` — except the
+   single ready marker in the final step. Thock generates bridges and
    provenance itself at activation.
 5. Work inside the vault you were launched in (your current directory).
 
