@@ -10,7 +10,9 @@ local_install=false
 can_code_sign=false
 
 # This must match the team in the provisioning profile.
-IDENTITY="Zed Industries, Inc."
+# Thock signs with its own Developer ID, supplied by CI; the upstream default is
+# kept so an unmodified checkout still behaves the way Zed's docs describe.
+IDENTITY="${MACOS_SIGNING_IDENTITY:-Zed Industries, Inc.}"
 APPLE_NOTARIZATION_TEAM="MQ55VZLNZQ"
 
 # Function for displaying help info
@@ -207,7 +209,12 @@ function sign_app_binaries() {
     download_git "${target_triple}" "${app_path}/Contents/MacOS/git"
 
     # Note: The app identifier for our development builds is the same as the app identifier for nightly.
-    cp crates/zed/contents/$channel/embedded.provisionprofile "${app_path}/Contents/"
+    # The committed profiles are issued to Zed's team, so embedding one under a
+    # different signing identity ships a team mismatch. Thock's entitlements
+    # request no profile-backed capability, so it can simply go unembedded.
+    if [[ -z "${MACOS_SIGNING_IDENTITY:-}" ]]; then
+        cp crates/zed/contents/$channel/embedded.provisionprofile "${app_path}/Contents/"
+    fi
 
     if [[ $can_code_sign = true ]]; then
         echo "Code signing binaries"

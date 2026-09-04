@@ -51,12 +51,20 @@ jobs:
         with:
           node-version: "20"
 
-      # Unsigned: `script/bundle-mac` falls back to an ad-hoc signature when the
-      # Apple secrets are absent. Add MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD,
-      # APPLE_NOTARIZATION_KEY, APPLE_NOTARIZATION_KEY_ID and
-      # APPLE_NOTARIZATION_ISSUER_ID as repository secrets to get a signed,
-      # notarized DMG that opens without a Gatekeeper warning.
+      # `script/bundle-mac` signs and notarizes only when all five Apple secrets
+      # are present, and falls back to an ad-hoc signature otherwise — so a
+      # partial set silently produces an unsigned bundle that still passes here.
+      # MACOS_SIGNING_IDENTITY is a repository variable rather than a secret: it
+      # is stamped into every shipped binary anyway, and masking it in the log
+      # would only make a codesign failure harder to read.
       - name: Bundle
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
         run: script/bundle-mac aarch64-apple-darwin
 
       - uses: actions/upload-artifact@v4
