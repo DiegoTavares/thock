@@ -218,7 +218,7 @@ collaboration flow, which Thock doesn't show.
 |---|---|
 | `GET /releases/{channel}/{version}/asset` | Resolve `(asset, os, arch)` against the channel manifest. `200 {version,url}`, or `404` with a plain-language body. `asset=zed` is accepted as an alias for `thock`. `{version}` may be `latest` or an exact match. |
 | `GET /releases/{channel}/{version}` | `302` to the manifest's `notes_url`. |
-| `GET /healthz` | `200 ok`. |
+| `GET /health` | `200 ok`. Also served at `/healthz`, but Cloud Run's frontend answers that exact path itself and never forwards it to the container, so `/health` is the only one reachable in production. |
 | anything else | `404`, plain text. Repointing `server_url` sends Zed's account and docs links here too (§8 item 4); they get an answer rather than a hang. |
 
 Three behaviors the routes don't show:

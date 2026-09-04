@@ -98,7 +98,7 @@ EOF
 gcloud storage cp /tmp/stable.json gs://thock-releases/channels/stable.json --cache-control="no-store"
 
 URL="$(gcloud run services describe thock-releases-api --region us-central1 --format='value(status.url)')"
-curl -s "$URL/healthz"                                                        # ok
+curl -s "$URL/health"                                                         # ok
 curl -s "$URL/releases/stable/latest/asset?asset=zed&os=macos&arch=aarch64"   # {"version":"1.14.1",...}
 curl -si "$URL/releases/stable/1.14.1" | head -3                              # 302 → notes_url
 curl -s "$URL/releases/stable/latest/asset?asset=zed&os=windows&arch=x86_64"  # 404, a sentence

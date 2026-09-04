@@ -85,9 +85,14 @@ func (s *server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /releases/{channel}/{version}/asset", s.handleAsset)
 	mux.HandleFunc("GET /releases/{channel}/{version}", s.handleReleaseNotes)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	// Cloud Run's frontend answers the exact path /healthz itself and never
+	// forwards it to the container, so /health is the one reachable in
+	// production; /healthz stays registered for local runs.
+	health := func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, "ok")
-	})
+	}
+	mux.HandleFunc("GET /health", health)
+	mux.HandleFunc("GET /healthz", health)
 	// Repointing server_url sends Zed's account and docs links here too; they
 	// get an answer rather than a hang.
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {

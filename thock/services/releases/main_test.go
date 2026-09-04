@@ -266,8 +266,10 @@ func TestManifestFetchIsCached(t *testing.T) {
 func TestHealthzAndUnknownPaths(t *testing.T) {
 	_, mux := newTestServer(t, stableBucket(t))
 
-	if response := get(mux, "/healthz"); response.Code != http.StatusOK {
-		t.Fatalf("healthz: got %d", response.Code)
+	for _, url := range []string{"/health", "/healthz"} {
+		if response := get(mux, url); response.Code != http.StatusOK {
+			t.Fatalf("%s: got %d", url, response.Code)
+		}
 	}
 	for _, url := range []string{"/", "/account", "/docs/getting-started", "/releases", "/releases/stable"} {
 		response := get(mux, url)
