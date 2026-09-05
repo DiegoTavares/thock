@@ -54,7 +54,9 @@ thethock.com, www.thethock.com  ──►  Cloud Run  thock-site  (us-central1)
 - Service account `thock-site-deployer@…` for CI: `cloudbuild.builds.editor` (project), `run.developer`
   on `thock-site` only, `storage.admin` on the Cloud Run sources bucket, `artifactregistry.writer` on
   `cloud-run-source-deploy`, `serviceAccountUser` on the runtime and default build accounts, and
-  `workloadIdentityUser` from the `github` pool — the same pool and repository condition as V20.
+  `workloadIdentityUser` from the `github` pool — the same pool and repository condition as V20. Plus the
+  custom project role `thockBucketLister` (`storage.buckets.list` only): `gcloud run deploy --source` lists
+  buckets to find its staging bucket, and the alternative was project-wide `storage.admin`.
 
 ## 4. Operating it
 
