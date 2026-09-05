@@ -16,6 +16,12 @@ seal.mjs               writes gate.json; prints the invite code
 Cloud Run, from source, in the same project and region as the release index
 (`thock/services/releases`). Buildpacks compile `main.go`; there is no Dockerfile.
 
+**Deploys are automatic:** `.github/workflows/deploy-site.yml` runs on every push to `main` that
+touches this directory (tests, then deploy, then a smoke test), authenticating through the same
+Workload Identity Federation pool as the release workflows as `thock-site-deployer@`, an account
+that can build and roll out this one service and nothing else. The job skips until the
+`GCP_SITE_DEPLOY_SERVICE_ACCOUNT` repository variable is set. To deploy by hand:
+
 ```sh
 gcloud run deploy thock-site \
   --source thock/site \

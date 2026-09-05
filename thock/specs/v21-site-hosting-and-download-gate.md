@@ -47,12 +47,16 @@ thethock.com, www.thethock.com  ──►  Cloud Run  thock-site  (us-central1)
 - Domain mappings `thethock.com` (A/AAAA) and `www.thethock.com` (CNAME) in the `thethock-com`
   Cloud DNS zone, beside the existing `updates` record.
 - `gs://thock-releases` gained one CORS rule. Nothing else about V20's infrastructure changed.
+- Service account `thock-site-deployer@…` for CI: `cloudbuild.builds.editor` (project), `run.developer`
+  on `thock-site` only, `storage.admin` on the Cloud Run sources bucket, `artifactregistry.writer` on
+  `cloud-run-source-deploy`, `serviceAccountUser` on the runtime and default build accounts, and
+  `workloadIdentityUser` from the `github` pool — the same pool and repository condition as V20.
 
 ## 4. Operating it
 
 | Task | How |
 |---|---|
-| Deploy | `gcloud run deploy thock-site --source thock/site …` (README has the full line) |
+| Deploy | Merge to `main`. `.github/workflows/deploy-site.yml` tests, deploys and smoke-tests on any push touching `thock/site/**`, as `thock-site-deployer@` via the V20 WIF pool. By hand: `gcloud run deploy thock-site --source thock/site …` (README). |
 | Approve a tester | Reply to their signup with `https://thethock.com/download#<code>` |
 | Rotate the code | `node thock/site/seal.mjs`, redeploy, re-send |
 | New release | Nothing — push the tag (V20). The page reads the manifest. |
