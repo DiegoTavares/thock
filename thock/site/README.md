@@ -66,12 +66,26 @@ manifest; that rule was added for this page and nothing else depends on it.
 
 ## Waitlist
 
-The two waitlist forms POST `{ "email": "..." }` as JSON to the endpoint named in the
-`WAITLIST_ENDPOINT` constant at the top of the inline script in `public/index.html`. It ships
-empty, and the form tells visitors signups aren't open yet until it's set. Formspree is the
-intended fit: create a form, set the endpoint to `https://formspree.io/f/<id>`, and every signup
-arrives as an email you reply to with the invite code. (Buttondown behind a tiny proxy, or a
-Cloudflare Worker + KV, also work.)
+No third party. The two forms POST `{ "email": "..." }` to the site's own `/waitlist` route
+(`WAITLIST_ENDPOINT` in `public/index.html`; set it to `""` to close signups — the form then says
+so). The server normalizes the address, writes one document per address to the Firestore
+collection `waitlist` (id = hash of the address, so a repeat signup is a no-op), and logs a
+structured `waitlist_signup` line. A Cloud Logging alert policy ("Thock waitlist signup") matches
+that line and emails the notification channel — currently `diego@studiobeehive.ca` — with the
+address in the message. Signups within five minutes of each other collapse into one email.
+
+Approving is replying with the invite link (see above). The full list:
+
+```sh
+curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  "https://firestore.googleapis.com/v1/projects/thock-505921/databases/(default)/documents/waitlist?pageSize=300" \
+  | python3 -c 'import json,sys; [print(d["fields"]["joined_at"]["timestampValue"][:10], d["fields"]["email"]["stringValue"]) for d in json.load(sys.stdin).get("documents",[])]'
+```
+
+Pieces, all in project `thock-505921`: Firestore `(default)`, Native mode, `us-central1`; the
+runtime account `thock-site@` holds `roles/datastore.user`; notification channel and alert policy
+in Cloud Monitoring. The server reaches Firestore over REST with the metadata-server token — no
+SDK, no key.
 
 ## Design
 

@@ -565,10 +565,10 @@
   "use strict";
 
   /* ---------- waitlist ----------
-     Set WAITLIST_ENDPOINT to a form backend (Formspree, Buttondown,
-     a worker...) that accepts a JSON POST of {email}. Until it is set,
-     the form reports that signups aren't wired up yet. */
-  var WAITLIST_ENDPOINT = "";
+     Same-origin: the site's own server records the address in Firestore
+     and logs it, which emails Diego (see README). Set to "" to turn
+     signups off; the form then says so instead of failing. */
+  var WAITLIST_ENDPOINT = "/waitlist";
 
   document.querySelectorAll("[data-waitlist]").forEach(function (form) {
     form.addEventListener("submit", function (e) {
@@ -585,12 +585,14 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: email })
       }).then(function (r) {
-        if (r.ok) {
-          form.reset();
-          status.textContent = "You're on the list. We'll be in touch.";
-        } else {
-          status.textContent = "That didn't go through. Mind trying again?";
-        }
+        return r.json().catch(function () { return {}; }).then(function (reply) {
+          if (r.ok) {
+            form.reset();
+            status.textContent = "You're on the list. We'll be in touch.";
+          } else {
+            status.textContent = reply.error || "That didn't go through. Mind trying again?";
+          }
+        });
       }).catch(function () {
         status.textContent = "That didn't go through. Mind trying again?";
       });
