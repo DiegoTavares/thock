@@ -1342,7 +1342,9 @@
   //     "autosave": "on_focus_change",
   // 4. Save when idle for a certain amount of time:
   //     "autosave": { "after_delay": {"milliseconds": 500} },
-  "autosave": "off",
+  // Thock: a note is saved the moment you leave it — nobody should lose a
+  // thought to a forgotten cmd-s, and the vault is what the agent reads.
+  "autosave": "on_focus_change",
   // Maximum number of tabs per pane. Unset for unlimited.
   "max_tabs": null,
   // Settings related to the editor's tab bar.
