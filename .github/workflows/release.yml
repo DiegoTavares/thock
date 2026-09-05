@@ -6,6 +6,12 @@ name: Release
 #     which is how you smoke-test a change to the bundling scripts.
 #   * pushing a `v*` tag — build, then publish a draft GitHub Release holding
 #     the same bundles, ready to be attached to the download page.
+#
+# The bundle steps read THOCK_GOOGLE_CLIENT_ID / THOCK_GOOGLE_CLIENT_SECRET
+# from repository secrets so the shipped app can sign in to Google without the
+# user supplying their own OAuth client (see `crates/thock/src/google_auth.rs`).
+# Both are compiled in; a build without them still works, but Google sync stays
+# unavailable until the vault supplies a `[google]` override.
 on:
   workflow_dispatch: {}
   push:
@@ -25,6 +31,10 @@ env:
   # Nothing downstream symbolicates these builds, and the debug info alone
   # exceeds the free space on a hosted runner.
   CARGO_PROFILE_RELEASE_DEBUG: "false"
+  # Ship on the stable channel so the bundles poll for updates; the committed
+  # RELEASE_CHANNEL file stays `dev` so local builds never do. The bundle
+  # scripts write this through to crates/zed/RELEASE_CHANNEL before building.
+  ZED_RELEASE_CHANNEL: stable
 
 jobs:
   macos:
@@ -47,12 +57,22 @@ jobs:
         with:
           node-version: "20"
 
-      # Unsigned: `script/bundle-mac` falls back to an ad-hoc signature when the
-      # Apple secrets are absent. Add MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD,
-      # APPLE_NOTARIZATION_KEY, APPLE_NOTARIZATION_KEY_ID and
-      # APPLE_NOTARIZATION_ISSUER_ID as repository secrets to get a signed,
-      # notarized DMG that opens without a Gatekeeper warning.
+      # `script/bundle-mac` signs and notarizes only when all five Apple secrets
+      # are present, and falls back to an ad-hoc signature otherwise — so a
+      # partial set silently produces an unsigned bundle that still passes here.
+      # MACOS_SIGNING_IDENTITY is a repository variable rather than a secret: it
+      # is stamped into every shipped binary anyway, and masking it in the log
+      # would only make a codesign failure harder to read.
       - name: Bundle
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+          THOCK_GOOGLE_CLIENT_ID: ${{ secrets.THOCK_GOOGLE_CLIENT_ID }}
+          THOCK_GOOGLE_CLIENT_SECRET: ${{ secrets.THOCK_GOOGLE_CLIENT_SECRET }}
         run: script/bundle-mac aarch64-apple-darwin
 
       - uses: actions/upload-artifact@v4
@@ -93,7 +113,15 @@ jobs:
           fi
           llvm-objcopy --version
 
+      # `script/bundle-linux` exports CC but not CXX, so webrtc-sys' C++ would
+      # otherwise build with g++, which rejects webrtc's `Network()` declaration
+      # ("changes meaning of 'Network'"); the -Wno-changes-meaning it passes
+      # only exists in GCC 14+ and is ignored on this runner.
       - name: Bundle
+        env:
+          CXX: clang++
+          THOCK_GOOGLE_CLIENT_ID: ${{ secrets.THOCK_GOOGLE_CLIENT_ID }}
+          THOCK_GOOGLE_CLIENT_SECRET: ${{ secrets.THOCK_GOOGLE_CLIENT_SECRET }}
         run: script/bundle-linux
 
       # `script/bundle-linux` also emits a remote_server archive; Thock does not
@@ -129,3 +157,60 @@ jobs:
             --title "Thock ${GITHUB_REF_NAME}" \
             --generate-notes \
             artifacts/*
+
+  # Publishes the artifacts and channel manifest that installed apps poll
+  # (spec: thock/specs/v20-auto-update.md §11). Guarded on the GCP repository
+  # variables so tags keep building before the infrastructure exists — the job
+  # then reports as skipped, not green.
+  publish-updates:
+    name: Publish update channel
+    if: startsWith(github.ref, 'refs/tags/v') && vars.GCP_RELEASES_BUCKET != ''
+    needs: [publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation; no key in secrets
+    env:
+      BUCKET: ${{ vars.GCP_RELEASES_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # A tag that disagrees with the crate version either updates nobody or
+      # updates everybody forever, depending on which way it disagrees.
+      - name: Verify the tag matches the crate version
+        run: |
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -1)"
+          [ "v${crate}" = "${GITHUB_REF_NAME}" ] || {
+            echo "tag ${GITHUB_REF_NAME} does not match crates/zed/Cargo.toml ${crate}" >&2
+            exit 1
+          }
+
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build the manifest
+        run: |
+          thock/services/releases/write-manifest "${GITHUB_REF_NAME}" artifacts > manifest.json
+          cat manifest.json
+
+      # Immutable, and first: no manifest may name a URL that doesn't resolve yet.
+      - name: Upload artifacts
+        run: |
+          gcloud storage cp artifacts/* manifest.json \
+            "gs://${BUCKET}/dist/${GITHUB_REF_NAME}/" \
+            --cache-control="public, max-age=31536000, immutable"
+
+      # The one write that changes what an installed app sees.
+      - name: Flip the stable channel
+        run: |
+          gcloud storage cp \
+            "gs://${BUCKET}/dist/${GITHUB_REF_NAME}/manifest.json" \
+            "gs://${BUCKET}/channels/stable.json" \
+            --cache-control="no-store"
+          echo "Thock ${GITHUB_REF_NAME} is live on the stable channel." >> "$GITHUB_STEP_SUMMARY"

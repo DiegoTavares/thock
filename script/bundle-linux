@@ -45,7 +45,18 @@ done
 
 export ZED_BUNDLE=true
 
-channel=$(<crates/zed/RELEASE_CHANNEL)
+# Thock: the release workflow pre-sets ZED_RELEASE_CHANNEL=stable; local builds
+# fall back to the committed RELEASE_CHANNEL file (dev), which never polls for
+# updates. Release binaries compile the channel in via include_str!, so a
+# pre-set value has to be written through to the file before the build.
+if [[ -n "${ZED_RELEASE_CHANNEL:-}" ]]; then
+    channel="${ZED_RELEASE_CHANNEL}"
+    if [[ "${channel}" != "$(<crates/zed/RELEASE_CHANNEL)" ]]; then
+        echo "${channel}" > crates/zed/RELEASE_CHANNEL
+    fi
+else
+    channel=$(<crates/zed/RELEASE_CHANNEL)
+fi
 target_dir="${CARGO_TARGET_DIR:-target}"
 
 version="$(script/get-crate-version zed)"
@@ -167,10 +178,16 @@ rm -rf "${app_dir}/lib/*"
 cp $(find_libs) "${app_dir}/lib"
 
 # Icons
+# Thock has no stable icon asset; stable ships the same icon as dev, matching
+# bundle-stable in crates/zed/Cargo.toml.
+icon_suffix="$suffix"
+if [ "$channel" = "stable" ]; then
+  icon_suffix="-dev"
+fi
 mkdir -p "${app_dir}/share/icons/hicolor/512x512/apps"
-cp "crates/zed/resources/app-icon$suffix.png" "${app_dir}/share/icons/hicolor/512x512/apps/thock.png"
+cp "crates/zed/resources/app-icon$icon_suffix.png" "${app_dir}/share/icons/hicolor/512x512/apps/thock.png"
 mkdir -p "${app_dir}/share/icons/hicolor/1024x1024/apps"
-cp "crates/zed/resources/app-icon$suffix@2x.png" "${app_dir}/share/icons/hicolor/1024x1024/apps/thock.png"
+cp "crates/zed/resources/app-icon$icon_suffix@2x.png" "${app_dir}/share/icons/hicolor/1024x1024/apps/thock.png"
 
 # .desktop
 # APP_ID has to keep matching `ReleaseChannel::app_id`, which Wayland and X11

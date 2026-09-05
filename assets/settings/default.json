@@ -1582,8 +1582,9 @@
   // Automatically update Zed. This setting may be ignored on Linux if
   // installed through a package manager.
   //
-  // Thock: a fork must never fetch Zed release binaries (V12 de-Zed-ification).
-  "auto_update": false,
+  // Thock: updates come from the Thock release index (V20), never from Zed —
+  // server_url points there and dev-channel builds don't poll at all.
+  "auto_update": true,
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
   // Possible values:
@@ -2698,7 +2699,9 @@
   },
   // The server to connect to. If the environment variable
   // ZED_SERVER_URL is set, it will override this setting.
-  "server_url": "https://zed.dev",
+  // Thock: points at the Thock release index so auto-update polls our
+  // channel manifest instead of Zed Cloud (V20).
+  "server_url": "https://updates.thethock.com",
   // Settings overrides to use when using Zed Preview.
   // Mostly useful for developers who are managing multiple instances of Zed.
   "preview": {
