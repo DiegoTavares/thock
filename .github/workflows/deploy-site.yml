@@ -1,0 +1,72 @@
+# Deploys thock/site to Cloud Run whenever a change to it lands on main.
+# Spec: thock/specs/v21-site-hosting-and-download-gate.md.
+#
+# Authenticates through the same Workload Identity Federation pool as the
+# release workflows (no key in secrets); the deployer service account can
+# only build and roll out this one service.
+
+name: Deploy site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "thock/site/**"
+      - ".github/workflows/deploy-site.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-site
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy thethock.com
+    # Skipped, not green, while the GCP side isn't configured — a deploy step
+    # that silently succeeds without deploying is the outcome to engineer against.
+    if: vars.GCP_SITE_DEPLOY_SERVICE_ACCOUNT != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation; no key in secrets
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: thock/site/go.mod
+
+      - name: Test the static server
+        working-directory: thock/site
+        run: go test ./...
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SITE_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # No --allow-unauthenticated: the service already has that policy and the
+      # deployer deliberately can't change IAM. Domain mappings are untouched.
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy thock-site \
+            --source thock/site \
+            --region us-central1 \
+            --min-instances 0 --max-instances 3 \
+            --service-account thock-site@thock-505921.iam.gserviceaccount.com \
+            --quiet
+          url="$(gcloud run services describe thock-site --region us-central1 --format='value(status.url)')"
+          echo "Deployed thock/site @ ${GITHUB_SHA::10} → ${url} (https://thethock.com)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test
+        run: |
+          url="$(gcloud run services describe thock-site --region us-central1 --format='value(status.url)')"
+          for path in /health / /download /gate.json; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' "${url}${path}")"
+            echo "${path} → ${code}"
+            [ "$code" = "200" ] || exit 1
+          done

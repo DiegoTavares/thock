@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Download Thock</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground: #1a1918;
+    --surface: #232120;
+    --edge: #2f2c29;
+    --text: #ece7de;
+    --muted: #a49d92;
+    --dim: #6d675e;
+    --amber: #e2a554;
+    --amber-ink: #1a1918;
+    --sans: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+    --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--text);
+    font-family: var(--sans); font-size: 17px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--text); text-decoration: none; }
+  a:hover { color: var(--amber); }
+  ::selection { background: var(--amber); color: var(--amber-ink); }
+  code, kbd { font-family: var(--mono); font-size: 0.85em; color: var(--amber); }
+
+  nav { border-bottom: 1px solid var(--edge); }
+  nav .bar { max-width: 46rem; margin: 0 auto; padding: 0.85rem 1.5rem; display: flex; align-items: center; }
+  nav .wordmark { font-weight: 700; font-size: 1.1rem; letter-spacing: -0.01em; }
+  nav .back { margin-left: auto; font-size: 0.9rem; color: var(--muted); }
+
+  main { max-width: 46rem; margin: 0 auto; padding: 5rem 1.5rem 6rem; }
+  h1 { font-size: clamp(2rem, 5vw, 2.8rem); font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; margin: 0 0 1rem; text-wrap: balance; }
+  h2 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em; margin: 2.6rem 0 0.6rem; }
+  p { color: var(--muted); margin: 0 0 1.1rem; }
+  p strong, li strong { color: var(--text); font-weight: 500; }
+  .eyebrow { font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--amber); margin: 0 0 0.9rem; }
+
+  .gateform { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 1.8rem; }
+  .gateform input {
+    font-family: var(--mono); font-size: 1rem; letter-spacing: 0.06em;
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--edge); border-radius: 7px; padding: 0.75rem 1rem; min-width: 19rem;
+    text-transform: uppercase;
+  }
+  .gateform input::placeholder { color: var(--dim); text-transform: none; letter-spacing: 0; }
+  .gateform input:focus { outline: 2px solid var(--amber); outline-offset: 1px; border-color: transparent; }
+  .gateform button, .dl {
+    font-family: var(--sans); font-size: 0.98rem; font-weight: 500;
+    background: var(--amber); color: var(--amber-ink);
+    border: none; border-radius: 7px; padding: 0.75rem 1.4rem; cursor: pointer;
+    display: inline-block;
+  }
+  .gateform button:hover, .dl:hover { filter: brightness(1.08); color: var(--amber-ink); }
+  .gateform button:focus-visible, .dl:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+  .gateform button[disabled] { opacity: 0.6; cursor: progress; }
+  .status { font-family: var(--mono); font-size: 0.85rem; color: var(--amber); margin-top: 1rem; min-height: 1.3em; }
+  .note { font-size: 0.85rem; color: var(--dim); margin-top: 1rem; }
+
+  .build {
+    background: var(--surface); border: 1px solid var(--edge); border-radius: 10px;
+    padding: 1.4rem 1.6rem; margin-top: 1.6rem;
+  }
+  .build .ver { font-family: var(--mono); font-size: 0.85rem; color: var(--dim); margin-bottom: 1rem; }
+  .build .ver b { color: var(--text); font-weight: 500; }
+  .asset { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; padding: 0.9rem 0; border-top: 1px solid var(--edge); }
+  .asset:first-of-type { border-top: none; padding-top: 0; }
+  .asset .what { flex: 1; min-width: 12rem; }
+  .asset .what small { display: block; font-family: var(--mono); font-size: 0.75rem; color: var(--dim); word-break: break-all; }
+  .steps { color: var(--muted); padding-left: 1.2rem; margin: 0; }
+  .steps li { margin-bottom: 0.5rem; }
+  pre {
+    background: var(--surface); border: 1px solid var(--edge); border-radius: 8px;
+    padding: 0.9rem 1.1rem; font-family: var(--mono); font-size: 0.8rem; line-height: 1.7;
+    color: var(--muted); overflow-x: auto;
+  }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="bar">
+    <a class="wordmark" href="/">Thock</a>
+    <a class="back" href="/">← back to the site</a>
+  </div>
+</nav>
+
+<main>
+  <section id="gate" data-gate>
+    <p class="eyebrow">Early access</p>
+    <h1>Enter the invite code from your email</h1>
+    <p>Thock is in early access. When a testing slot opens, the note we send you carries a short
+    code. It unlocks this page and nothing else; it holds no account and collects nothing.</p>
+
+    <form class="gateform" id="gateform">
+      <input type="text" name="code" id="code" placeholder="THOCK-XXXX-XXXX-XXXX-XXXX" autocomplete="off"
+             autocapitalize="characters" spellcheck="false" required aria-label="Invite code" autofocus>
+      <button type="submit" id="unlock">Unlock</button>
+    </form>
+    <p class="status" id="gatestatus" aria-live="polite"></p>
+    <p class="note">No code yet? <a href="/#waitlist">Join the waitlist</a> and we'll send one when a
+    slot opens.</p>
+  </section>
+
+  <section id="unlocked" hidden>
+    <p class="eyebrow">Early access</p>
+    <h1>Thanks for testing Thock</h1>
+    <p>This is the first build you install by hand. From here on the app checks for updates on its
+    own, about once an hour, and asks before it restarts. Nothing else on this page will change.</p>
+
+    <div class="build" id="build">
+      <div class="ver">Loading the current build…</div>
+    </div>
+
+    <h2>Install on macOS</h2>
+    <ol class="steps">
+      <li>Open the <code>.dmg</code> and drag <strong>Thock</strong> into <strong>Applications</strong>.</li>
+      <li>Launch it. If macOS says the app is from an unidentified developer, right-click it once
+      and choose <strong>Open</strong>; that only happens on a build that wasn't notarized.</li>
+      <li>Point it at a folder of Markdown, new or the one you already keep. Thock adds a readable
+      <code>routines/</code> folder beside your notes and touches nothing else.</li>
+    </ol>
+
+    <h2>Install on Linux</h2>
+    <ol class="steps">
+      <li>Extract the tarball anywhere: <code>tar -xzf thock-linux-x86_64.tar.gz</code>.</li>
+      <li>Run <code>thock.app/bin/thock</code>. Updates install into the same folder.</li>
+    </ol>
+
+    <h2>Check the download, if you like</h2>
+    <p>Every build's checksum is published with it. Compare before you open:</p>
+    <pre>shasum -a 256 ~/Downloads/Thock-aarch64.dmg</pre>
+
+    <h2>Before you start</h2>
+    <p>Thock runs on <strong>your own</strong> LLM: connect Claude Code, Gemini CLI, or any agent
+    that reads <code>AGENTS.md</code>, with your own key. Your vault never leaves your machine, and
+    everything the app adds is a plain file you can open, edit, or delete.</p>
+    <p class="note">Something broke, or something delighted you? Reply to the email that brought you
+    here. That thread is the whole support desk for now.</p>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var form = document.getElementById("gateform");
+  var input = document.getElementById("code");
+  var button = document.getElementById("unlock");
+  var status = document.getElementById("gatestatus");
+
+  // Must match normalizeCode() in seal.mjs.
+  function normalizeCode(code) {
+    return code.replace(/[\s-]+/g, "").toUpperCase();
+  }
+
+  function fromBase64(text) {
+    var binary = atob(text);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  /* The gate: gate.json holds the manifest URL sealed under the invite code
+     (AES-GCM, key from PBKDF2). A wrong code fails authentication and
+     decrypt() rejects; there is nothing to compare against in the clear. */
+  function unseal(code) {
+    return fetch("/gate.json", { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error("gate unavailable");
+      return r.json();
+    }).then(function (gate) {
+      var encoder = new TextEncoder();
+      return crypto.subtle.importKey(
+        "raw", encoder.encode(normalizeCode(code)), "PBKDF2", false, ["deriveKey"]
+      ).then(function (material) {
+        return crypto.subtle.deriveKey(
+          { name: "PBKDF2", hash: "SHA-256", salt: fromBase64(gate.salt), iterations: gate.iterations },
+          material, { name: "AES-GCM", length: 256 }, false, ["decrypt"]
+        );
+      }).then(function (key) {
+        return crypto.subtle.decrypt({ name: "AES-GCM", iv: fromBase64(gate.iv) }, key, fromBase64(gate.ciphertext));
+      });
+    }).then(function (plain) {
+      return JSON.parse(new TextDecoder().decode(plain));
+    });
+  }
+
+  var platforms = {
+    "macos/aarch64": "macOS · Apple silicon",
+    "macos/x86_64": "macOS · Intel",
+    "linux/x86_64": "Linux · x86_64",
+    "linux/aarch64": "Linux · arm64"
+  };
+
+  function render(manifest) {
+    var build = document.getElementById("build");
+    build.textContent = "";
+    var ver = document.createElement("div");
+    ver.className = "ver";
+    var when = manifest.released_at ? " · " + new Date(manifest.released_at).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }) : "";
+    ver.innerHTML = "Current build <b>" + escapeHtml(manifest.version) + "</b>" + escapeHtml(when);
+    build.appendChild(ver);
+
+    var assets = (manifest.assets || []).filter(function (a) { return a.asset === "thock"; });
+    if (!assets.length) {
+      var none = document.createElement("p");
+      none.textContent = "No build is published yet. Your code stays valid; check back after the next email.";
+      build.appendChild(none);
+      return;
+    }
+    assets.forEach(function (a) {
+      var row = document.createElement("div");
+      row.className = "asset";
+      var what = document.createElement("div");
+      what.className = "what";
+      what.textContent = platforms[a.os + "/" + a.arch] || (a.os + " · " + a.arch);
+      var sha = document.createElement("small");
+      sha.textContent = a.sha256 && a.sha256 !== "test" ? "sha256 " + a.sha256 : "";
+      what.appendChild(sha);
+      var link = document.createElement("a");
+      link.className = "dl";
+      link.href = a.url;
+      link.textContent = "Download";
+      row.appendChild(what);
+      row.appendChild(link);
+      build.appendChild(row);
+    });
+  }
+
+  function escapeHtml(text) {
+    return String(text).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function showBuild(secret) {
+    document.getElementById("gate").hidden = true;
+    var unlocked = document.getElementById("unlocked");
+    unlocked.hidden = false;
+    fetch(secret.manifest, { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error("manifest " + r.status);
+      return r.json();
+    }).then(render).catch(function () {
+      var build = document.getElementById("build");
+      build.textContent = "";
+      var p = document.createElement("p");
+      p.textContent = "The release index isn't reachable right now. Your code stays valid; try again in a few minutes.";
+      build.appendChild(p);
+    });
+  }
+
+  function attempt(code) {
+    if (!normalizeCode(code)) return;
+    button.disabled = true;
+    status.textContent = "Checking…";
+    unseal(code).then(function (secret) {
+      status.textContent = "";
+      showBuild(secret);
+    }).catch(function (error) {
+      button.disabled = false;
+      status.textContent = error && error.message === "gate unavailable"
+        ? "The page can't reach its own key right now. Try again shortly."
+        : "That code didn't open anything. Check it against the email, dashes optional.";
+      input.select();
+    });
+  }
+
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    attempt(input.value);
+  });
+
+  // An approval email can link straight in: /download#THOCK-XXXX-…  The
+  // fragment never reaches the server or its logs.
+  var fragment = decodeURIComponent(location.hash.slice(1));
+  if (fragment) {
+    input.value = fragment;
+    attempt(fragment);
+  }
+})();
+</script>
+</body>
+</html>
