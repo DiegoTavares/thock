@@ -668,9 +668,8 @@ impl RoutinesPanel {
         };
         let root = vault.root.clone();
         cx.open_with_system(&root.join(getting_started::GUIDE_PATH));
-        let mark = cx.background_spawn(async move {
-            crate::getting_started::mark_introduction_read(&root)
-        });
+        let mark = cx
+            .background_spawn(async move { crate::getting_started::mark_introduction_read(&root) });
         cx.spawn(async move |this, cx| {
             mark.await?;
             this.update(cx, |this, cx| this.refresh_getting_started(cx))
@@ -704,8 +703,8 @@ impl RoutinesPanel {
                     cx,
                 );
             })?;
-            let mark = cx
-                .background_spawn(async move { getting_started::mark_customize_read(&root) });
+            let mark =
+                cx.background_spawn(async move { getting_started::mark_customize_read(&root) });
             mark.await?;
             this.update(cx, |this, cx| this.refresh_getting_started(cx))
         })
