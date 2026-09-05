@@ -129,6 +129,8 @@ struct VaultConfigContent {
     backlog: BacklogConfigContent,
     #[serde(skip_serializing_if = "MarkdownConfigContent::is_unset")]
     markdown: MarkdownConfigContent,
+    #[serde(skip_serializing_if = "LanguageConfigContent::is_unset")]
+    language: LanguageConfigContent,
 }
 
 impl VaultConfigContent {
@@ -149,6 +151,48 @@ impl VaultConfigContent {
         }
         installed
     }
+}
+
+/// The `[language]` table (spec `v19-vault-language.md` §5.1), written by the
+/// Set Language ritual. Informational: nothing branches on it yet, but the
+/// ritual must be able to record it without the vault turning invalid.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct LanguageConfigContent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+impl LanguageConfigContent {
+    fn resolve(self) -> Option<LanguageConfig> {
+        let non_empty = |value: Option<String>| {
+            value
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let tag = non_empty(self.tag);
+        let name = non_empty(self.name);
+        if tag.is_none() && name.is_none() {
+            return None;
+        }
+        Some(LanguageConfig { tag, name })
+    }
+
+    fn is_unset(&self) -> bool {
+        self.tag.is_none() && self.name.is_none()
+    }
+}
+
+/// The language the Set Language ritual moved this vault into. `None` means
+/// the ritual never ran (or recorded nothing), which reads as English.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LanguageConfig {
+    /// BCP 47 tag, for example `pt-BR`.
+    pub tag: Option<String>,
+    /// The language in the user's own words, for example `Portuguese (Brazil)`.
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -589,6 +633,7 @@ pub struct VaultConfig {
     pub agent: AgentConfig,
     pub backlog: BacklogConfig,
     pub markdown: MarkdownConfig,
+    pub language: Option<LanguageConfig>,
 }
 
 impl Default for VaultConfig {
@@ -610,6 +655,7 @@ impl VaultConfigContent {
             agent: self.agent.resolve(),
             backlog: self.backlog.resolve(),
             markdown: self.markdown.resolve(),
+            language: self.language.resolve(),
         }
     }
 }
@@ -1287,6 +1333,56 @@ mod tests {
         let parsed = crate::backlog::parse_backlog(&text, &vault.config.backlog.headings);
         assert_eq!(parsed.soon.len(), 1);
         assert_eq!(parsed.soon[0].text, "Renovar o passaporte");
+    }
+
+    #[test]
+    fn set_language_config_table_parses() {
+        // What `.thock/config.toml` looks like after step 4 of
+        // `skills/thock/set-language.md` merged its tables in (V19 §5.1).
+        // Before `[language]` had a home the config's `deny_unknown_fields`
+        // rejected it and the whole vault went invalid.
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_vault(dir.path()).unwrap();
+        let config_path = dir.path().join(VAULT_MARKER_DIR).join(VAULT_CONFIG_FILE);
+        fs::write(
+            &config_path,
+            "schema = 1\n\n[language]\ntag  = \"pt-BR\"                   # BCP 47 tag\n\
+             name = \"Portuguese (Brazil)\"\n\n[backlog]\nfile = \"backlog.md\"\n\
+             headings = { soon = \"Em breve\", someday = \"Algum dia\", \
+             completed = \"Concluído\" }\n\n[day_planner]\nheading = \"Planejamento do dia\"\n\n\
+             [[routines.installed]]\nid = \"timeline\"\nenabled = true\nversion = 9\n",
+        )
+        .unwrap();
+        let vault = match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => vault,
+            other => panic!("expected valid vault, got {other:?}"),
+        };
+        assert_eq!(
+            vault.config.language,
+            Some(LanguageConfig {
+                tag: Some("pt-BR".to_string()),
+                name: Some("Portuguese (Brazil)".to_string()),
+            })
+        );
+        assert_eq!(vault.config.backlog.headings.soon, "Em breve");
+        assert_eq!(vault.config.day_planner.heading, "Planejamento do dia");
+
+        // A registry rewrite (a later Routine install) must keep the table.
+        update_routines_registry(dir.path(), |_| {}).unwrap();
+        let raw = fs::read_to_string(&config_path).unwrap();
+        assert!(raw.contains("[language]"), "language table dropped: {raw}");
+        assert!(raw.contains("pt-BR"), "language tag dropped: {raw}");
+        assert!(
+            raw.contains("Portuguese (Brazil)"),
+            "language name dropped: {raw}"
+        );
+    }
+
+    #[test]
+    fn language_table_absent_reads_as_none() {
+        assert_eq!(VaultConfig::default().language, None);
+        let content: VaultConfigContent = toml::from_str("[language]\n").unwrap();
+        assert_eq!(content.resolve().language, None);
     }
 
     #[test]
