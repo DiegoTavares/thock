@@ -259,8 +259,9 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   release index: a static file server on Cloud Run built from `thock/site`, `www` redirecting to the apex. The
   landing page keeps its waitlist; `/download` is the only place install links appear, and it shows them to a
   visitor holding an **invite code** — the release-manifest URL sits in `gate.json` sealed under the code
-  (PBKDF2 → AES-GCM) and the browser decrypts it, so approval is a human replying to a signup with the code and
-  no backend holds anything. Unlocked, the page reads `channels/stable.json` and renders version, per-platform
+  (PBKDF2 → AES-GCM) and the browser decrypts it, so approval is a human replying to a signup with the code.
+  Signups go to the site's own `/waitlist` route, one Firestore document per address, and a Cloud Logging
+  alert emails each new one — no third-party form service. Unlocked, the page reads `channels/stable.json` and renders version, per-platform
   downloads, and checksums, so a release is still just a tag. Spec `specs/v21-site-hosting-and-download-gate.md`. _(shipped)_
 - [ ] **BYO-LLM cost visibility** — key/model choice, local vs cloud, graceful failure. _(planned)_
 
