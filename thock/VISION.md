@@ -268,9 +268,9 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   the publishing identity can write to that one bucket and nothing else. Client-side the service aliases
   the updater's built-in `asset=zed` rather than patching it, and two hardcoded Zed names in the macOS
   and Linux install paths — which broke updates only *after* a full download — are fixed. Spec
-  `specs/v20-auto-update.md`. _(shipped; infrastructure live and both workflows rehearsed end to end.
-  Existing installs predate the updater and need one last manual install; notarization is the control
-  that would make a compromised bucket insufficient on its own, and is still open.)_
+  `specs/v20-auto-update.md`. _(shipped; infrastructure live, both workflows rehearsed end to end, and the
+  macOS build Developer ID signed and notarized — so a compromised bucket is not on its own enough to
+  replace a tester's app. Existing installs predate the updater and need one last manual install.)_
 - [x] **The website, and a door with a code on it** — `thethock.com` is live from the same GCP project as the
   release index: a static file server on Cloud Run built from `thock/site`, `www` redirecting to the apex. The
   landing page keeps its waitlist; `/download` is the only place install links appear, and it shows them to a
