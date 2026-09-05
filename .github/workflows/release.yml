@@ -113,8 +113,13 @@ jobs:
           fi
           llvm-objcopy --version
 
+      # `script/bundle-linux` exports CC but not CXX, so webrtc-sys' C++ would
+      # otherwise build with g++, which rejects webrtc's `Network()` declaration
+      # ("changes meaning of 'Network'"); the -Wno-changes-meaning it passes
+      # only exists in GCC 14+ and is ignored on this runner.
       - name: Bundle
         env:
+          CXX: clang++
           THOCK_GOOGLE_CLIENT_ID: ${{ secrets.THOCK_GOOGLE_CLIENT_ID }}
           THOCK_GOOGLE_CLIENT_SECRET: ${{ secrets.THOCK_GOOGLE_CLIENT_SECRET }}
         run: script/bundle-linux
