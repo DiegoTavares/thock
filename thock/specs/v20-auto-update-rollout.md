@@ -1,6 +1,7 @@
 # Thock V20 — Rollout runbook (infrastructure & ship)
 
-**Status:** Ready to execute (2026-09-04)
+**Status:** Executed — infrastructure live, both workflows rehearsed; first stable build not yet
+shipped (2026-09-05)
 **Owner:** Diego · **Companion:** `v20-auto-update.md` (the design; §10–§15 are what this runbook executes)
 
 The V20 code is done and on this branch: the client delta, the Cloud Run service
@@ -19,6 +20,33 @@ different machine: a fresh session can execute it top to bottom without the orig
 | Bucket | **`gs://thock-releases`** — bucket names are global, so if taken fall back to `thock-releases-505921` and use that name *everywhere*: the `BUCKET` env var on the service, the `GCP_RELEASES_BUCKET` repo variable, and nowhere else (manifest URLs embed it). |
 | WIF condition | The design spec's `ref_type == tag` binding would lock out the promote workflow, which dispatches from a branch. Bind to `repository == 'DiegoTavares/thock' && (ref_type == 'tag' \|\| ref == 'refs/heads/main')` instead. |
 
+## Execution record (2026-09-05)
+
+Done: §1–§6 in full, and §7.1's pipeline rehearsal in both directions. `updates.thethock.com` serves
+all four routes over a Google-issued cert. A throwaway `v1.14.0` tag ran `publish-updates` end to end
+against a scratch bucket — artifacts uploaded with immutable cache headers, manifest archived beside
+them, channel flipped with `no-store` — and the promote workflow then created a `preview` channel
+byte-identical to the archived manifest. Both ran under WIF with no long-lived credential. Tag,
+draft release, and scratch bucket were deleted afterwards.
+
+Not done: §7.2's local client rehearsal, and §8's first stable build.
+
+Three things bit that this runbook did not predict, all now folded into §0 and §3:
+
+1. **The default compute service account had no roles**, so the first `run deploy` 403'd on its own
+   source zip.
+2. **Domain Restricted Sharing** at the org blocked every public grant.
+3. **`GET /healthz` never reaches the container** — Cloud Run's frontend answers that exact path
+   itself. Neighbouring paths (`/healthz/`, `/nope`) reach the app fine, so it presents as a routing
+   bug in your own code. The service now serves `/health`; the tell was the missing
+   `x-cloud-trace-context` header on the 404.
+
+And one that blocked the pipeline rather than the infrastructure: **the Linux release build had never
+succeeded.** `script/bundle-linux` exports `CC` but not `CXX`, so webrtc-sys' C++ compiled with g++,
+which rejects webrtc's `Network()` declaration; the `-Wno-changes-meaning` webrtc-sys passes only
+exists in GCC 14+ and is ignored on the ubuntu-22.04 runner. `CXX: clang++` on the Linux Bundle step
+fixes it, and `publish`/`publish-updates` had never run before that because they need both platforms.
+
 ## 0. Machine prerequisites
 
 ```sh
@@ -28,8 +56,47 @@ brew install --cask google-cloud-sdk   # or: brew install google-cloud-sdk
 # /opt/homebrew/share/google-cloud-sdk/bin) to PATH.
 gcloud auth login
 gcloud config set project thock-505921
+
+# The brew SDK ships without the beta component; §4's domain mapping is the only
+# step that needs it, and it cannot prompt for the install non-interactively.
+gcloud components install beta
+
 gh auth status   # needs repo admin on DiegoTavares/thock for `gh variable set`
 ```
+
+Two grants the fresh machine will not have, both of which fail in ways that look like something else:
+
+```sh
+# Source-based `gcloud run deploy` builds as the default compute SA. On a project
+# that has never run Cloud Build, that account has *zero* roles, and §3 dies with
+# a 403 reading the source zip it just uploaded — which reads like a bucket
+# permissions bug rather than a missing role.
+gcloud projects add-iam-policy-binding thock-505921 \
+  --member="serviceAccount:$(gcloud projects describe thock-505921 --format='value(projectNumber)')-compute@developer.gserviceaccount.com" \
+  --role=roles/cloudbuild.builds.builder --condition=None
+```
+
+**Domain Restricted Sharing.** `thock-505921` sits under an organization that enforces
+`constraints/iam.allowedPolicyMemberDomains`, which refuses `allUsers` outright — so §1's public read
+*and* §3's `--allow-unauthenticated` both fail with `HTTPError 412: One or more users named in the
+policy do not belong to a permitted customer`. The narrow fix does not exist: that constraint rejects
+`allUsers` and `allAuthenticatedUsers` as list values. Override it for this project only, which
+leaves the org default untouched everywhere else (needs `roles/orgpolicy.policyAdmin` at the org):
+
+```sh
+cat > /tmp/drs.yaml <<'EOF'
+name: projects/327645078899/policies/iam.allowedPolicyMemberDomains
+spec:
+  rules:
+  - allowAll: true
+EOF
+gcloud services enable orgpolicy.googleapis.com
+gcloud org-policies set-policy /tmp/drs.yaml
+# Propagation takes a couple of minutes; retry the §1 grant until it sticks.
+```
+
+`storage.publicAccessPrevention` and `run.allowedIngress` were already permissive on this project —
+DRS was the only blocker. Check all three before assuming which one is biting.
 
 Enable the APIs once:
 
