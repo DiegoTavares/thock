@@ -1,6 +1,7 @@
 # Thock V20 — Updates that arrive on their own
 
-**Status:** Implemented — client, service, and pipeline on `main`; GCP infrastructure pending (2026-09-04)
+**Status:** Implemented and deployed — client, service, and pipeline on `main`; GCP infrastructure live
+and both workflows rehearsed end to end; first stable build not yet shipped (2026-09-05)
 **Owner:** Diego · **Date:** 2026-09-04
 **Companion docs:** `../VISION.md` (§4.3 Human-in-the-loop, §12 Milestone 4),
 `v12-de-zed-ification.md` (which disabled the updater, and why), `../site/README.md` (the download
@@ -507,10 +508,17 @@ be the first run of either:
 | Repointing `server_url` breaks a Zed surface still reachable in the UI | Audit `zed_urls` callers during implementation; the service answers unknown paths with a 404 and a sentence rather than hanging. |
 | Ad-hoc signing makes the first install scary and the update path unverifiable | §13. Notarization is a prerequisite for calling this shippable beyond friendly testers. |
 
-**Open:** the Cloud Run region (match the rest of Diego's services, and check domain mapping is
-offered there); whether the download page moves into the same bucket or stays wherever `thock/site`
-is hosted today; whether `notes_url` should point at a public changelog on `thethock.com` rather than
-a GitHub release page a tester can't see, since the repo is private.
+**Resolved (2026-09-05).** Region: **`us-central1`**, which offers domain mapping and matches the
+rest of the project. Host: **`updates.thethock.com`**, mapped onto Cloud Run and serving on a Google
+Trust Services cert. Project: **`thock-505921`** — Diego's existing project rather than the dedicated
+one recommended above, accepting the shared IAM blast radius; the org's Domain Restricted Sharing had
+to be lifted for that project before anything could be public. The download page stayed in
+`thock/site` and is served by V21's own Cloud Run service, reading `channels/stable.json` from this
+bucket — so the two do share the manifest, just not the hosting.
+
+**Still open:** `notes_url` points at a GitHub release page a tester without repo access cannot read.
+A public changelog on `thethock.com` is the fix; until then **View Release Notes** 302s somewhere the
+audience cannot follow.
 
 ## 17. Future work
 

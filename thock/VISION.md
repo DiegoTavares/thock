@@ -255,6 +255,22 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   half-migrated vaults still parse, and the Backlog panel's columns render the configured headings. The daily
   template retitles to a wordless `YYYY-MM-DD` date; localized month names, chrome i18n, and divergence
   tracking for translated skills stay deferred. Spec `specs/v19-vault-language.md`. _(shipped)_
+- [x] **Updates that arrive on their own** — shipped builds replace themselves, so a fix is a tag rather
+  than an email with a link. Zed's updater is re-enabled (V12 had disabled it three separate ways) and
+  pointed at `updates.thethock.com`: a ~100-line dependency-free Go service on Cloud Run that answers the
+  updater's one question — newest build for this OS and arch — from a manifest in GCS, because the client
+  sends platform as a query string and a static object cannot vary on it. The bucket holds exactly one
+  mutable object: artifacts and their manifests are written once under `dist/<tag>/` with year-long
+  immutable cache headers, and pushing a `v*` tag uploads them, archives the manifest beside them, and
+  flips `channels/stable.json` last — so a run that dies halfway ships nothing. Rollback is a separate
+  dispatch that copies an archived manifest back onto a channel, byte-for-byte, rebuilding nothing. CI
+  authenticates by Workload Identity Federation, so no long-lived cloud credential exists in GitHub;
+  the publishing identity can write to that one bucket and nothing else. Client-side the service aliases
+  the updater's built-in `asset=zed` rather than patching it, and two hardcoded Zed names in the macOS
+  and Linux install paths — which broke updates only *after* a full download — are fixed. Spec
+  `specs/v20-auto-update.md`. _(shipped; infrastructure live and both workflows rehearsed end to end.
+  Existing installs predate the updater and need one last manual install; notarization is the control
+  that would make a compromised bucket insufficient on its own, and is still open.)_
 - [x] **The website, and a door with a code on it** — `thethock.com` is live from the same GCP project as the
   release index: a static file server on Cloud Run built from `thock/site`, `www` redirecting to the apex. The
   landing page keeps its waitlist; `/download` is the only place install links appear, and it shows them to a
