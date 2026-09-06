@@ -44,21 +44,56 @@ version = 2
 
 pub const DEFAULT_DAILY_TEMPLATE: &str = r#"# {{date:dddd, MMMM D, YYYY}}
 
+_A page for today. Write a little or a lot; it's yours._
+
+___
+
 ## Journal
+
+_What happened, what you noticed, how it went._
+
+___
 
 ## Day planner
 
+_Timed lines land on the planner beside you, like `- [ ] 09:00 - 10:00 Deep work`._
+
+___
+
 ## Personal
+
+_The people, the errands, the small good things._
 "#;
 
 pub const DEFAULT_WEEKLY_TEMPLATE: &str = r#"# Week {{date:W}}, {{date:GGGG}}
 
+_Seven days, one page. Set a direction at the start, look back at the end._
+
+___
+
 ## Goals
+
+_Two or three things that would make this a good week._
+
+___
 
 ## Notes
 
+_Anything worth keeping that doesn't belong to a single day._
+
+___
+
 ## Week review
+
+_How did it go? The **Week Review** ritual appends its take below yours._
 "#;
+
+/// The filled-in daily note a brand-new vault opens on: every kind of markup
+/// the panels understand, with real-looking content, so someone who has never
+/// written Markdown sees what a day can hold. Written once by
+/// `notes::ensure_example_day`; the templates above stay the source of every
+/// later note.
+pub const EXAMPLE_DAY_NOTE: &str = include_str!("../assets/example-day.md");
 
 pub const DEFAULT_WELCOME: &str = r#"# Welcome to Thock
 

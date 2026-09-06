@@ -407,6 +407,32 @@ pub fn ensure_note_at(
     Ok(outcome)
 }
 
+/// Writes the shipped example day (`vault::EXAMPLE_DAY_NOTE`) as today's
+/// daily note, so a brand-new vault opens on a filled-in page rather than an
+/// empty template. Returns the note's path when it was created, `None` when
+/// a note for `today` already exists (it is never touched). Blocking I/O —
+/// call from a background thread.
+pub fn ensure_example_day(
+    vault: &Vault,
+    today: NaiveDate,
+    time: NaiveTime,
+) -> Result<Option<PathBuf>> {
+    let path = vault.note_path(NoteKind::Daily, today);
+    if path.exists() {
+        return Ok(None);
+    }
+    let title = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let contents = expand_template(crate::vault::EXAMPLE_DAY_NOTE, today, time, &title);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    write_new_file(&path, &contents)?;
+    Ok(Some(path))
+}
+
 /// Creates `path` with `contents`, failing if it already exists, and removing
 /// the file again if the write fails partway so no partial note is left behind.
 fn write_new_file(path: &Path, contents: &str) -> Result<()> {
@@ -615,6 +641,51 @@ mod tests {
         assert_eq!(path, dir.path().join("weekly/2026-W30.md"));
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.starts_with("# Week 30, 2026\n"), "got: {contents}");
+    }
+
+    #[test]
+    fn ensure_example_day_writes_once_and_parses_as_a_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_vault(dir.path()).unwrap();
+        let VaultStatus::Valid(vault) = crate::vault::Vault::detect(dir.path()) else {
+            panic!("expected valid vault");
+        };
+        let d = date(2026, 7, 20);
+        let t = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+
+        let path = ensure_example_day(&vault, d, t).unwrap();
+        assert_eq!(path, Some(dir.path().join("daily/2026-07-20.md")));
+        let contents = fs::read_to_string(dir.path().join("daily/2026-07-20.md")).unwrap();
+        assert!(contents.starts_with("# Monday, July 20, 2026\n"));
+        assert!(
+            contents.contains("This first day is an example"),
+            "the example must say it is one"
+        );
+        assert!(
+            contents.contains("templates/daily.md"),
+            "the example must point at the template it invites the user to customize"
+        );
+        assert!(!contents.contains("{{"), "every template token must expand");
+
+        // The showcase planner lines must be ones the Day Planner draws.
+        let plan = crate::day_plan::parse_day_plan(
+            &contents,
+            &crate::day_plan::DayPlannerConfig::default(),
+        );
+        assert!(
+            plan.has_timed_items(),
+            "the example should land on the planner grid"
+        );
+        assert!(plan.items.iter().any(|item| item.done));
+        assert!(plan.items.iter().any(|item| !item.done));
+
+        // Today's note, once it exists, is never touched.
+        fs::write(dir.path().join("daily/2026-07-20.md"), "user edits").unwrap();
+        assert_eq!(ensure_example_day(&vault, d, t).unwrap(), None);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("daily/2026-07-20.md")).unwrap(),
+            "user edits"
+        );
     }
 
     #[test]

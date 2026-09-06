@@ -107,6 +107,11 @@ One batch at a time, confirming each before writing:
    Retitle the daily template to the wordless `# {{date:YYYY-MM-DD}}`:
    the `MMMM`/`dddd` tokens produce English month and weekday names, and a
    plain date reads the same in every language. Say that one line of why.
+   Include today's daily note in this batch **only** while it is still the
+   shipped first-day example (its opening quote says "This first day is an
+   example"): that page is shipped prose, not the user's words, and it
+   should greet them in their language. Retitle it the same wordless way.
+   The moment the user has written anything in it, it is theirs — leave it.
 2. `welcome.md` and `guide/customize.md`.
 3. Each installed Routine's explainer doc — read `routines/*/routine.toml`
    for the `doc` entries.
