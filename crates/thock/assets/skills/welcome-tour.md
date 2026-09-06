@@ -37,14 +37,22 @@ never two questions at once.
    helps with — remembering their days? tasks? journaling? Keep their answer
    in mind for step 7. Wait for it.
 
-4. **Create today's note.** Tell them every day gets its own page. Create
-   `daily/<today's date as YYYY-MM-DD>.md` from `templates/daily.md` if it
-   doesn't exist yet (fill the template's `{{date:…}}` tokens with real
-   values). Then ask them to click it open (or press the **Today** entry in
-   the left rail) and type two or three things on their mind under the
-   planner heading (`## Day planner` — or its translated name, if step 1 set
-   a language), each as a checkbox line: `- [ ] like this`. Point out the
-   right-hand rail drawing their list as a day plan while they type.
+4. **Open today's note.** Tell them every day gets its own page. On a
+   brand-new vault today's note already exists and is a filled-in
+   **example** (its first lines say so): sections, checkboxes, a few
+   emojis, showing what a day can hold. Ask them to open it (the **Today**
+   entry in the left rail), read it, and then replace the example lines
+   under the planner heading (`## Day planner` — or its translated name, if
+   step 1 set a language) with two or three things actually on their mind,
+   each as a checkbox line: `- [ ] like this`. Point out the right-hand
+   rail drawing their list as a day plan while they type. Mention once that
+   tomorrow's page starts from `templates/daily.md`, which they (or you)
+   can change any time.
+
+   If today's note doesn't exist (an older vault, or they deleted it),
+   create `daily/<today's date as YYYY-MM-DD>.md` from `templates/daily.md`
+   (fill the template's `{{date:…}}` tokens with real values) and continue
+   the same way.
 
 5. **Show the one promise that matters.** Once they've written something,
    ask permission to add a short section to today's note. On a yes, append

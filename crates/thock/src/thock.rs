@@ -120,11 +120,18 @@ pub async fn open_abs_path_as_preview(
     Ok(())
 }
 
+/// What a fresh scaffold leaves for the startup flow to open: `welcome.md`
+/// and, when today had no note yet, the filled-in example day.
+struct FreshVault {
+    example_day: Option<PathBuf>,
+}
+
 /// Opens the default vault as the workspace, scaffolding the sample vault
 /// first if it doesn't exist yet. On a fresh scaffold, `welcome.md` is opened
 /// as a rendered preview so the user lands on a readable page, not raw
-/// markup (V18 §5.2). Used at startup when there is no previous session to
-/// restore.
+/// markup (V18 §5.2), and today's note is written as a filled-in example and
+/// opened on top of it, so the first thing on screen is what a day can look
+/// like (V22). Used at startup when there is no previous session to restore.
 pub fn open_startup_vault(app_state: Arc<AppState>, cx: &mut App) -> Task<Result<()>> {
     let vault_root = vault::default_vault_path();
     let scaffold = cx.background_spawn({
@@ -134,16 +141,26 @@ pub fn open_startup_vault(app_state: Arc<AppState>, cx: &mut App) -> Task<Result
                 .join(vault::VAULT_MARKER_DIR)
                 .join(vault::VAULT_CONFIG_FILE)
                 .is_file();
-            if !already_vault {
-                vault::scaffold_vault(&vault_root)?;
+            if already_vault {
+                return anyhow::Ok(None);
             }
-            anyhow::Ok(!already_vault)
+            vault::scaffold_vault(&vault_root)?;
+            let example_day = match vault::Vault::detect(&vault_root) {
+                vault::VaultStatus::Valid(vault) => {
+                    let now = chrono::Local::now();
+                    notes::ensure_example_day(&vault, now.date_naive(), now.time())?
+                }
+                other => {
+                    anyhow::bail!("the vault just scaffolded at {vault_root:?} is {other:?}")
+                }
+            };
+            anyhow::Ok(Some(FreshVault { example_day }))
         }
     });
 
     cx.spawn(async move |cx| {
         let open_result = async {
-            let freshly_scaffolded = scaffold.await?;
+            let fresh_vault = scaffold.await?;
             let opened = cx
                 .update(|cx| {
                     workspace::open_paths(
@@ -154,12 +171,30 @@ pub fn open_startup_vault(app_state: Arc<AppState>, cx: &mut App) -> Task<Result
                     )
                 })
                 .await?;
-            if freshly_scaffolded {
+            if let Some(fresh_vault) = fresh_vault {
                 let welcome_path = vault_root.join(vault::WELCOME_FILE);
                 let workspace = opened.workspace.downgrade();
                 opened.window.update(cx, |_, window, cx| {
                     cx.spawn_in(window, async move |_, cx| {
-                        open_abs_path_as_preview(workspace, welcome_path, cx).await
+                        open_abs_path_as_preview(workspace.clone(), welcome_path, cx).await?;
+                        // Opened last so it is the active tab; the rendered
+                        // welcome stays one tab behind it.
+                        if let Some(example_day) = fresh_vault.example_day {
+                            workspace
+                                .update_in(cx, |workspace, window, cx| {
+                                    workspace.open_abs_path(
+                                        example_day,
+                                        OpenOptions {
+                                            visible: Some(OpenVisible::All),
+                                            ..Default::default()
+                                        },
+                                        window,
+                                        cx,
+                                    )
+                                })?
+                                .await?;
+                        }
+                        anyhow::Ok(())
                     })
                     .detach_and_log_err(cx);
                 })?;

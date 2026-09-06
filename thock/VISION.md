@@ -279,6 +279,16 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   Signups go to the site's own `/waitlist` route, one Firestore document per address, and a Cloud Logging
   alert emails each new one — no third-party form service. Unlocked, the page reads `channels/stable.json` and renders version, per-platform
   downloads, and checksums, so a release is still just a tag. Spec `specs/v21-site-hosting-and-download-gate.md`. _(shipped)_
+- [x] **Inviting templates and an example first day** — the first non-developer trial found three bare
+  headings taught nothing. The daily and weekly templates now carry a `___` rule between sections and one
+  italic prompt under each heading, and a fresh vault's first launch writes today's note from a shipped
+  example (`crates/thock/assets/example-day.md`): journal prose, timed and untimed checkboxes the Day
+  Planner draws, a quote, a wikilink, emojis, and a closing "how this page works" section. Its opening
+  callout says it is an example and that `templates/daily.md` is meant to be customized. Startup opens it
+  as the active tab with the rendered welcome note behind it; the Welcome Tour asks the user to replace the
+  example's planner lines rather than creating the note, and Set Language translates the example only while
+  it is still untouched. Existing vaults and **Create vault here** are unaffected. Spec
+  `specs/v22-inviting-templates-and-example-day.md`. _(shipped)_
 - [ ] **BYO-LLM cost visibility** — key/model choice, local vs cloud, graceful failure. _(planned)_
 
 ---
