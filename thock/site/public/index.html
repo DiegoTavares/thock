@@ -4,21 +4,45 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Thock</title>
-<meta name="description" content="Thock turns a folder of plain Markdown into a guided, LLM-augmented second brain: rituals for your days, weeks, money and inbox, run by the model you already trust.">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;700&family=Geist+Mono:wght@400;500&display=swap">
+<meta name="description" content="Thock turns a folder of plain Markdown into a practiced daily rhythm: rituals for your days, weeks, money and inbox, run by the model you already trust. It appends its reading beneath your words; it never rewrites them.">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Petrona:ital,wght@0,100..600;1,100..500&family=Geist+Mono:wght@400;500&family=Schibsted+Grotesk:wght@400;500&display=swap">
 <style>
+  /* ---------------------------------------------------------------
+     The page and the margin.
+
+     Two voices, two faces: Petrona is the human (everything a person
+     writes or reads), Geist Mono is the machine (annotations,
+     filenames, ritual names, declared scopes). Schibsted Grotesk is
+     demoted to small uppercase labels only.
+
+     The layout is the argument: a text column for the human, a margin
+     column for the machine's reading, and one continuous hairline
+     running between them for the length of the document. Principle 2
+     — it appends alongside, it never rewrites — drawn rather than
+     listed.
+     --------------------------------------------------------------- */
   :root {
-    --ground: #1a1918;
-    --band: #1e1d1b;
-    --surface: #232120;
-    --edge: #2f2c29;
-    --text: #ece7de;
-    --muted: #a49d92;
-    --dim: #6d675e;
-    --amber: #e2a554;
-    --amber-ink: #1a1918;
-    --sans: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
-    --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --ground:  #151413;
+    --surface: #1c1b19;
+    --rule:    #322e2a;   /* structural hairline */
+    --rule-sf: #262320;   /* softer, within a section */
+    --ink:     #ece7de;   /* the human voice */
+    --muted:   #a89f93;
+    --dim:     #6d675e;
+    --amber:   #e2a554;   /* the machine's ink */
+    --amber-d: #8a6a3c;
+    --amber-ink: #171613;
+    --cal:     #8fa5c0;   /* read-only, from the calendar */
+
+    --serif: "Petrona", Georgia, "Times New Roman", serif;
+    --mono:  "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --sans:  "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+
+    --text-col: 38rem;
+    --gutter:   3rem;
+    --marg-col: 15rem;
+    --pad:      1.75rem;
+    --navh:     3.4rem;
   }
 
   * { box-sizing: border-box; }
@@ -28,236 +52,335 @@
   body {
     margin: 0;
     background: var(--ground);
-    color: var(--text);
-    font-family: var(--sans);
-    font-size: 17px;
-    line-height: 1.6;
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 18px;
+    line-height: 1.7;
+    font-weight: 400;
+    letter-spacing: 0.004em;
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
 
-  a { color: var(--text); text-decoration: none; }
+  /* A single piece of texture: 2.5% grain, so a dark page reads as a
+     surface rather than a backlit panel. Nothing else is tactile. */
+  body::before {
+    content: "";
+    position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    opacity: 0.025;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  body > * { position: relative; z-index: 1; }
+
+  a { color: var(--ink); text-decoration: none; }
   a:hover { color: var(--amber); }
   ::selection { background: var(--amber); color: var(--amber-ink); }
-
-  .wrap { max-width: 46rem; margin: 0 auto; padding: 0 1.5rem; }
-  .wrap.wide { max-width: 72rem; }
-  .sectionhead { max-width: 46rem; }
-  @media (min-width: 120rem) { body { font-size: 18px; } }
+  :focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
 
   kbd {
     font-family: var(--mono);
     font-size: 0.72em;
     background: var(--surface);
-    border: 1px solid var(--edge);
+    border: 1px solid var(--rule);
     border-bottom-width: 2px;
     border-radius: 4px;
     padding: 0.12em 0.5em;
     color: var(--muted);
   }
-  code { font-family: var(--mono); font-size: 0.85em; color: var(--amber); }
+  code { font-family: var(--mono); font-size: 0.82em; color: var(--amber); font-weight: 400; }
+
+  /* ---------- the document, and its continuous margin rule ---------- */
+  .doc {
+    max-width: calc(var(--text-col) + var(--gutter) + var(--marg-col) + var(--pad) * 2);
+    margin: 0 auto;
+    padding: 0 var(--pad);
+    background-image: linear-gradient(
+      to right,
+      transparent calc(var(--pad) + var(--text-col) + var(--gutter) / 2),
+      var(--rule)  calc(var(--pad) + var(--text-col) + var(--gutter) / 2),
+      var(--rule)  calc(var(--pad) + var(--text-col) + var(--gutter) / 2 + 1px),
+      transparent  calc(var(--pad) + var(--text-col) + var(--gutter) / 2 + 1px)
+    );
+  }
+
+  .spread {
+    display: grid;
+    grid-template-columns: var(--text-col) var(--gutter) var(--marg-col);
+    align-items: start;
+  }
+  .page { grid-column: 1; min-width: 0; }
+  .marg {
+    grid-column: 3;
+    min-width: 0;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    line-height: 1.75;
+    font-weight: 400;
+    color: var(--dim);
+    padding-top: 0.5rem;
+  }
+  .marg b { color: var(--amber); font-weight: 500; display: block; margin-bottom: 0.15rem; }
+  .marg p { margin: 0 0 0.9rem; color: var(--dim); font-family: var(--mono); font-size: inherit; }
+  .marg p:last-child { margin-bottom: 0; }
+  .marg .f { color: var(--muted); }
+  .marg .k { color: var(--amber-d); }
+  .marg .done { color: var(--dim); text-decoration: line-through; }
 
   /* ---------- nav ---------- */
   nav {
     position: sticky; top: 0; z-index: 10;
-    background: rgba(26, 25, 24, 0.88);
+    background: rgba(21, 20, 19, 0.9);
     backdrop-filter: blur(10px);
-    border-bottom: 1px solid var(--edge);
+    border-bottom: 1px solid var(--rule-sf);
   }
   nav .bar {
-    max-width: 72rem; margin: 0 auto; padding: 0.85rem 1.5rem;
-    display: flex; align-items: center; gap: 1.5rem;
+    max-width: calc(var(--text-col) + var(--gutter) + var(--marg-col) + var(--pad) * 2);
+    margin: 0 auto; padding: 0.8rem var(--pad);
+    display: flex; align-items: baseline; gap: 1.6rem;
   }
-  nav .wordmark { font-weight: 700; font-size: 1.1rem; letter-spacing: -0.01em; margin-right: auto; }
-  nav .links { display: flex; gap: 1.4rem; font-size: 0.92rem; color: var(--muted); }
+  nav .wordmark {
+    font-family: var(--serif); font-weight: 500; font-size: 1.2rem;
+    letter-spacing: -0.005em; margin-right: auto;
+  }
+  nav .links { display: flex; gap: 1.4rem; font-family: var(--sans); font-size: 0.84rem; }
   nav .links a { color: var(--muted); }
-  nav .links a:hover { color: var(--text); }
-  nav .keys { font-family: var(--mono); font-size: 0.78rem; color: var(--dim); cursor: pointer; background: none; border: none; padding: 0; }
-  nav .keys:hover { color: var(--muted); }
+  nav .links a:hover { color: var(--ink); }
+  nav .keys {
+    font-family: var(--mono); font-size: 0.74rem; color: var(--dim);
+    cursor: pointer; background: none; border: none; padding: 0;
+  }
+  nav .keys:hover { color: var(--amber); }
   @media (max-width: 40rem) { nav .links { display: none; } }
 
   /* ---------- sections ---------- */
-  section { padding: 5.5rem 0; scroll-margin-top: 3.5rem; }
-  section.band { background: var(--band); border-top: 1px solid var(--edge); border-bottom: 1px solid var(--edge); }
+  section { padding: 4.4rem 0; scroll-margin-top: calc(var(--navh) + 1.6rem); }
+  section + section { border-top: 1px solid var(--rule-sf); }
   section:focus { outline: none; }
   section.keyed { animation: keyed 0.9s ease-out; }
   @keyframes keyed {
-    0% { box-shadow: inset 3px 0 0 var(--amber); }
+    0%   { box-shadow: inset 3px 0 0 var(--amber); }
     100% { box-shadow: inset 3px 0 0 transparent; }
   }
   @media (prefers-reduced-motion: reduce) { section.keyed { animation: none; } }
 
-  h1, h2, h3 { letter-spacing: -0.02em; text-wrap: balance; }
-  h2 { font-size: clamp(1.75rem, 2.4vw, 2.25rem); font-weight: 700; margin: 0 0 1rem; }
+  h1, h2, h3, h4 { font-weight: 200; letter-spacing: -0.012em; text-wrap: balance; margin: 0; }
+  h2 { font-size: clamp(1.75rem, 3vw, 2.3rem); line-height: 1.14; margin: 0 0 1.1rem; }
+  h3 { font-size: 1.3rem; font-weight: 300; line-height: 1.25; margin: 0 0 0.5rem; }
+  p { color: var(--muted); margin: 0 0 1.05rem; }
+  p:last-child { margin-bottom: 0; }
+  em { font-style: italic; color: var(--ink); }
+  strong { font-weight: 500; color: var(--ink); }
+
   .eyebrow {
-    font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.1em;
-    text-transform: uppercase; color: var(--amber); margin: 0 0 0.9rem;
+    font-family: var(--sans);
+    font-size: 0.68rem; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--amber);
+    margin: 0 0 1.1rem;
   }
-  p { color: var(--muted); margin: 0 0 1.1rem; }
-  p strong, li strong { color: var(--text); font-weight: 500; }
 
   /* ---------- hero ---------- */
-  #hero { padding: 6.5rem 0 5rem; text-align: center; }
+  #hero { padding: 5rem 0 4.4rem; }
   #hero h1 {
-    font-size: clamp(2.3rem, 6vw, 3.4rem);
-    font-weight: 700; line-height: 1.12; margin: 0 0 1.2rem;
+    font-size: clamp(2.3rem, 5.4vw, 3.4rem);
+    font-weight: 200; line-height: 1.06; margin: 0 0 1.3rem;
   }
-  #hero .sub { font-size: 1.14rem; max-width: 37rem; margin: 0 auto 2.2rem; }
+  #hero .sub { font-size: 1.1rem; max-width: 31rem; margin: 0 0 0.4rem; }
+  #hero .sub em { color: var(--ink); }
 
-  .waitform { display: flex; gap: 0.6rem; justify-content: center; flex-wrap: wrap; }
+  /* the writing surface — no box; a hairline, like a file */
+  .note-demo {
+    font-family: var(--mono); font-size: 0.82rem; line-height: 1.9;
+    border-left: 1px solid var(--rule);
+    padding: 0 0 0 1.15rem;
+    margin: 1.9rem 0 1.7rem;
+  }
+  .note-demo .fname { color: var(--dim); font-size: 0.76rem; letter-spacing: 0.04em; margin-bottom: 0.5rem; }
+  .note-demo .lines { min-height: 15.6em; }
+  .note-demo .line { white-space: pre-wrap; min-height: 1.9em; color: var(--ink); }
+  /* where the machine's reading begins — the promise, drawn */
+  .note-demo .line.ai-h {
+    color: var(--amber); font-weight: 500;
+    border-top: 1px dashed var(--rule);
+    padding-top: 0.55rem; margin-top: 0.35rem;
+  }
+  .note-demo .line.ai-b { color: var(--amber-d); }
+  .note-demo .caret {
+    display: inline-block; width: 0.55em; height: 1.1em; background: var(--amber);
+    vertical-align: -0.2em; animation: blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .note-demo .caret { animation: none; } }
+
+  /* ---------- waitlist form — a line, not a boxed widget ---------- */
+  .waitform { display: flex; gap: 0.6rem; align-items: stretch; flex-wrap: wrap; }
   .waitform input[type="email"] {
-    font-family: var(--mono); font-size: 0.95rem;
-    background: var(--surface); color: var(--text);
-    border: 1px solid var(--edge); border-radius: 7px;
-    padding: 0.75rem 1rem; min-width: 17rem;
+    font-family: var(--mono); font-size: 0.82rem;
+    background: transparent; color: var(--ink);
+    border: none; border-bottom: 1px solid var(--rule);
+    padding: 0.5rem 0.2rem; min-width: 14rem; flex: 1 1 14rem;
   }
   .waitform input[type="email"]::placeholder { color: var(--dim); }
-  .waitform input[type="email"]:focus { outline: 2px solid var(--amber); outline-offset: 1px; border-color: transparent; }
+  .waitform input[type="email"]:focus {
+    outline: none; border-bottom-color: var(--amber);
+  }
   .waitform button {
-    font-family: var(--sans); font-size: 0.98rem; font-weight: 500;
-    background: var(--amber); color: var(--amber-ink);
-    border: none; border-radius: 7px; padding: 0.75rem 1.4rem; cursor: pointer;
+    font-family: var(--sans); font-size: 0.82rem; font-weight: 500; letter-spacing: 0.02em;
+    background: transparent; color: var(--amber);
+    border: none; border-bottom: 1px solid var(--amber);
+    padding: 0.5rem 0.2rem; cursor: pointer; white-space: nowrap;
   }
-  .waitform button:hover { filter: brightness(1.08); }
-  .waitform button:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
-  .form-note { font-size: 0.85rem; color: var(--dim); margin-top: 1rem; }
-  .form-status { font-family: var(--mono); font-size: 0.85rem; color: var(--amber); margin-top: 1rem; min-height: 1.3em; }
-
-  /* hero note demo */
-  .note-demo {
-    margin: 3.2rem auto 0; max-width: 34rem; text-align: left;
-    background: var(--surface); border: 1px solid var(--edge); border-radius: 10px;
-    font-family: var(--mono); font-size: 0.86rem; line-height: 1.85;
-    padding: 1.3rem 1.5rem 1.4rem;
-    min-height: 13.5rem;
+  .waitform button:hover { color: var(--ink); border-bottom-color: var(--ink); }
+  .form-status {
+    font-family: var(--mono); font-size: 0.8rem; color: var(--amber);
+    margin: 0.9rem 0 0; min-height: 1.3em;
   }
-  .note-demo .fname { color: var(--dim); font-size: 0.8rem; margin-bottom: 0.6rem; }
-  .note-demo .line { white-space: pre-wrap; min-height: 1.85em; color: #cfc9be; }
-  .note-demo .line.ai-h { color: var(--amber); }
-  .note-demo .line.ai-b { color: var(--muted); }
-  .note-demo .caret { display: inline-block; width: 0.55em; height: 1.1em; background: var(--amber); vertical-align: -0.2em; animation: blink 1s steps(1) infinite; }
-  @keyframes blink { 50% { opacity: 0; } }
-  .demo-caption { font-size: 0.82rem; color: var(--dim); margin-top: 0.9rem; text-align: center; }
+  .form-note { font-family: var(--mono); font-size: 0.72rem; color: var(--dim); margin: 0.5rem 0 0; }
+  .form-note a { color: var(--muted); border-bottom: 1px solid var(--amber-d); }
 
-  /* hero goes two-column on wide displays */
-  @media (min-width: 64rem) {
-    #hero { text-align: left; padding: 7rem 0 6rem; }
-    .hero-grid { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 4.5rem; align-items: center; }
-    #hero h1 { font-size: clamp(2.6rem, 3.2vw, 3.9rem); }
-    #hero .sub { margin: 0 0 2.2rem; }
-    .waitform { justify-content: flex-start; }
-    .note-demo { margin: 0; max-width: none; font-size: 0.92rem; }
-    .demo-caption { text-align: left; }
+  /* ---------- the manifesto (was a 3x2 card grid) ---------- */
+  ol.manifesto { list-style: none; margin: 2rem 0 0; padding: 0; counter-reset: mf; }
+  ol.manifesto li {
+    counter-increment: mf;
+    padding: 0.9rem 0;
+    border-bottom: 1px solid var(--rule-sf);
+    font-size: 1.32rem; font-weight: 300; line-height: 1.3;
+    color: var(--ink);
   }
+  ol.manifesto li:last-child { border-bottom: none; padding-bottom: 0; }
+  ol.manifesto li::before {
+    content: counter(mf, decimal-leading-zero);
+    font-family: var(--mono); font-size: 0.66rem; font-weight: 400;
+    color: var(--amber-d); margin-right: 1rem; vertical-align: 0.4em;
+  }
+  ol.manifesto .gloss {
+    display: block;
+    font-family: var(--mono); font-size: 0.71rem; line-height: 1.65;
+    color: var(--dim);
+    margin: 0.35rem 0 0 2.3rem;
+  }
+  ol.manifesto .gloss code { font-size: 1em; }
 
-  /* ---------- promise list ---------- */
-  .promises { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 2rem 3rem; margin-top: 2.8rem; }
-  .promises h3 { font-size: 1rem; font-weight: 500; margin: 0 0 0.35rem; color: var(--text); }
-  .promises p { font-size: 0.92rem; margin: 0; }
-
-  /* ---------- feature rows ---------- */
-  .feature { display: grid; grid-template-columns: 1fr 1fr; gap: 2.8rem; align-items: center; margin-top: 3.2rem; }
-  .feature:first-of-type { margin-top: 2.4rem; }
-  @media (max-width: 46rem) { .feature { grid-template-columns: 1fr; gap: 1.4rem; } }
-  .feature h3 { font-size: 1.25rem; font-weight: 700; margin: 0 0 0.6rem; }
-  .feature p { font-size: 0.95rem; margin: 0 0 0.6rem; }
-  .feature .keyline { font-family: var(--mono); font-size: 0.78rem; color: var(--dim); }
-  @media (min-width: 64rem) {
-    .feature { gap: 5.5rem; margin-top: 4.5rem; }
-    .feature h3 { font-size: 1.4rem; }
-    .feature p { font-size: 1rem; }
-    .feature .vignette { font-size: 0.85rem; padding: 1.6rem 1.9rem; }
+  /* ---------- routines: stacked, constant left edge ---------- */
+  .routine { padding: 1.9rem 0 0; }
+  .routine:first-of-type { padding-top: 0.6rem; }
+  .routine + .routine { border-top: 1px solid var(--rule-sf); margin-top: 1.9rem; }
+  .routine h3 { font-size: 1.28rem; }
+  .routine p { font-size: 0.98rem; }
+  .keyline {
+    font-family: var(--mono); font-size: 0.73rem; color: var(--dim);
+    margin: 0.55rem 0 0;
   }
 
-  .vignette {
-    background: var(--surface); border: 1px solid var(--edge); border-radius: 10px;
-    padding: 1.2rem 1.4rem; font-family: var(--mono); font-size: 0.78rem; line-height: 1.9;
+  /* margin-column day planner — the one place a fill earns itself,
+     because a time block is a shape, not a line of text */
+  .blocks { display: grid; grid-template-columns: 2.9rem 1fr; gap: 0.3rem 0.6rem; }
+  .blocks .t { color: var(--dim); font-size: 0.68rem; padding-top: 0.2rem; }
+  .blocks .b {
+    border-left: 2px solid var(--amber); background: #221f1d;
+    padding: 0.2rem 0.55rem; color: var(--muted); font-size: 0.69rem;
+  }
+  .blocks .b.cal { border-left-color: var(--cal); }
+  .blocks .b.tall { padding-bottom: 1.1rem; }
+
+  /* ---------- editor ---------- */
+  .points { margin-top: 1.6rem; }
+  .points p { margin-bottom: 1.05rem; }
+
+  /* ---------- vault: files, unboxed ---------- */
+  .folder {
+    font-family: var(--mono); font-size: 0.78rem; line-height: 1.95;
+    color: var(--muted);
+    border-left: 1px solid var(--rule);
+    padding-left: 1.15rem;
+    margin-top: 1.8rem;
     overflow-x: auto;
   }
-  .vignette .dim { color: var(--dim); }
-  .vignette .mut { color: var(--muted); }
-  .vignette .amb { color: var(--amber); }
-  .vignette .done { color: var(--dim); text-decoration: line-through; }
-
-  /* backlog vignette */
-  .cols { display: flex; gap: 1.6rem; }
-  .cols > div { flex: 1; min-width: 9rem; }
-  .cols .cap { color: var(--amber); margin-bottom: 0.3rem; }
-
-  /* planner vignette */
-  .blocks { display: grid; grid-template-columns: 3.2rem 1fr; gap: 0.35rem 0.8rem; align-items: stretch; }
-  .blocks .t { color: var(--dim); font-size: 0.72rem; padding-top: 0.25rem; }
-  .blocks .b { border-left: 2px solid var(--amber); background: #2a2724; border-radius: 0 5px 5px 0; padding: 0.25rem 0.7rem; color: #cfc9be; }
-  .blocks .b.cal { border-left-color: #8fa5c0; color: var(--muted); }
-  .blocks .b.tall { padding-bottom: 1.4rem; }
-
-  /* skill vignette */
-  .skillcard .h { color: var(--amber); }
-  .skillcard .scope { color: var(--dim); }
-  .skillcard .scope b { color: var(--muted); font-weight: 500; }
-
-  /* ---------- editor / vault wide layouts ---------- */
-  #editor .points { margin-top: 0.5rem; }
-  @media (min-width: 64rem) {
-    #editor .points { display: grid; grid-template-columns: 1fr 1fr; gap: 3.5rem; margin-top: 1.5rem; }
-    #editor .points p { margin: 0; }
-    .vault-grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 4.5rem; align-items: center; }
-    #vault .folder { margin-top: 0; font-size: 0.9rem; }
-    .who-grid { gap: 4rem; margin-top: 2.5rem; }
-  }
-
-  /* ---------- vault ---------- */
-  #vault .folder {
-    font-family: var(--mono); font-size: 0.82rem; line-height: 1.9; color: var(--muted);
-    background: var(--surface); border: 1px solid var(--edge); border-radius: 10px;
-    padding: 1.2rem 1.5rem; margin-top: 1.8rem; overflow-x: auto;
-  }
-  #vault .folder .dim { color: var(--dim); }
-  #vault .folder .amb { color: var(--amber); }
+  .folder .dim { color: var(--dim); }
+  .folder .amb { color: var(--amber); }
 
   /* ---------- who ---------- */
-  .who-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2.5rem; margin-top: 2rem; }
-  @media (max-width: 40rem) { .who-grid { grid-template-columns: 1fr; } }
-  .who-grid h3 { font-size: 0.78rem; font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.1em; color: var(--dim); margin: 0 0 0.8rem; }
-  .who-grid ul { margin: 0; padding-left: 1.1rem; font-size: 0.95rem; color: var(--muted); }
-  .who-grid li { margin-bottom: 0.5rem; }
+  .who { margin-top: 1.9rem; }
+  .who + .who { margin-top: 1.7rem; padding-top: 1.7rem; border-top: 1px solid var(--rule-sf); }
+  .who h3 {
+    font-family: var(--sans); font-size: 0.68rem; font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.14em;
+    color: var(--dim); margin: 0 0 0.7rem;
+  }
+  .who ul { margin: 0; padding: 0; list-style: none; }
+  .who li {
+    font-size: 1rem; color: var(--muted);
+    padding: 0.4rem 0 0.4rem 1.5rem; position: relative;
+  }
+  .who li::before {
+    content: "—"; position: absolute; left: 0;
+    font-family: var(--mono); font-size: 0.72rem; color: var(--amber-d); top: 0.62rem;
+  }
+  .who.not li::before { content: "·"; color: var(--dim); font-size: 1rem; top: 0.38rem; }
 
   /* ---------- waitlist section ---------- */
-  #waitlist { text-align: center; }
-  #waitlist h2 { font-size: 2rem; }
-  #waitlist .sub { max-width: 32rem; margin: 0 auto 2rem; }
-  .smallprint { font-size: 0.82rem; color: var(--dim); margin-top: 2.4rem; }
+  #waitlist h2 { max-width: 30rem; }
+  #waitlist .sub { max-width: 30rem; }
+  .smallprint {
+    font-family: var(--mono); font-size: 0.72rem; color: var(--dim);
+    margin-top: 2rem; line-height: 1.8;
+  }
 
   /* ---------- footer ---------- */
-  footer { border-top: 1px solid var(--edge); padding: 2.2rem 0 3rem; }
-  footer .wrap { display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap; font-size: 0.85rem; color: var(--dim); }
+  footer { border-top: 1px solid var(--rule); padding: 2rem 0 3.2rem; }
+  footer .bar {
+    max-width: calc(var(--text-col) + var(--gutter) + var(--marg-col) + var(--pad) * 2);
+    margin: 0 auto; padding: 0 var(--pad);
+    display: flex; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+    font-family: var(--mono); font-size: 0.72rem; color: var(--dim);
+  }
   footer a { color: var(--muted); }
 
   /* ---------- keymap sheet ---------- */
   #keysheet {
     position: fixed; inset: 0; z-index: 50;
-    background: rgba(15, 14, 13, 0.7);
+    background: rgba(15, 14, 13, 0.72);
     display: none; align-items: center; justify-content: center;
   }
   #keysheet.open { display: flex; }
   #keysheet .sheet {
-    background: var(--band); border: 1px solid var(--edge); border-radius: 12px;
-    padding: 1.8rem 2.2rem; min-width: 19rem; max-width: 90vw;
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 3px;
+    padding: 1.7rem 2.1rem; min-width: 19rem; max-width: 90vw;
   }
-  #keysheet h3 { margin: 0 0 1.1rem; font-size: 1rem; }
+  #keysheet h3 {
+    font-family: var(--sans); font-size: 0.68rem; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--amber);
+    margin: 0 0 1.1rem;
+  }
   #keysheet table { border-collapse: collapse; font-size: 0.9rem; width: 100%; }
-  #keysheet td { padding: 0.32rem 0; color: var(--muted); }
+  #keysheet td { padding: 0.34rem 0; color: var(--muted); }
   #keysheet td:first-child { width: 5.5rem; }
 
-  /* key toast */
   #keytoast {
     position: fixed; right: 1.2rem; bottom: 1.2rem; z-index: 40;
-    font-family: var(--mono); font-size: 0.8rem;
-    background: var(--surface); border: 1px solid var(--edge); border-radius: 6px;
+    font-family: var(--mono); font-size: 0.78rem;
+    background: var(--surface); border: 1px solid var(--rule); border-radius: 4px;
     padding: 0.3rem 0.7rem; color: var(--amber);
     opacity: 0; transition: opacity 0.25s;
     pointer-events: none;
   }
   #keytoast.show { opacity: 1; }
+
+  /* ---------- narrow: the margin folds under the text it annotates ---------- */
+  @media (max-width: 64rem) {
+    :root { --pad: 1.25rem; }
+    body { font-size: 17px; }
+    .doc { background-image: none; max-width: 42rem; }
+    .spread { grid-template-columns: minmax(0, 1fr); }
+    .page, .marg { grid-column: 1; }
+    .marg {
+      border-left: 1px solid var(--amber-d);
+      padding: 0.7rem 0 0.1rem 0.9rem;
+      margin: 1.3rem 0 0;
+    }
+    #hero h1 { font-size: clamp(2.1rem, 8vw, 2.8rem); }
+  }
+  @media (min-width: 120rem) { body { font-size: 19px; } }
 </style>
 </head>
 <body>
@@ -268,198 +391,194 @@
     <div class="links">
       <a href="#why">Why</a>
       <a href="#routines">Routines</a>
-      <a href="#editor">Editor</a>
-      <a href="#vault">Your vault</a>
-      <a href="#waitlist">Waitlist</a>
       <a href="/download">Download</a>
     </div>
     <button class="keys" id="keysbtn" aria-label="Show keyboard shortcuts">? for keys</button>
   </div>
 </nav>
 
-<section id="hero">
-  <div class="wrap wide">
-    <div class="hero-grid">
-      <div class="hero-copy">
-        <h1>A second brain for people who savour the experience of writing</h1>
-        <p class="sub">Thock is a desktop app that turns a folder of plain Markdown files into a guided
-        daily practice: rituals for your days, weeks, money and inbox, run by the LLM you already trust.</p>
+<div class="doc">
 
-        <form class="waitform" data-waitlist>
-          <input type="email" name="email" placeholder="your@email.com" required aria-label="Email address">
-          <button type="submit">Join the waitlist</button>
-        </form>
-        <p class="form-status" aria-live="polite"></p>
-        <p class="form-note">Free while in early access &nbsp;·&nbsp; macOS first &nbsp;·&nbsp; your files stay plain Markdown</p>
-      </div>
-      <div class="hero-demo">
-        <div class="note-demo" id="notedemo" aria-label="Demo: Thock appends a Daily Closure review to a daily note">
-          <div class="fname">2026-09-02.md</div>
-          <div class="lines"></div>
-        </div>
-        <p class="demo-caption">Your words stay yours. The AI appends its reading below them. It never rewrites.</p>
-      </div>
+<section id="hero" class="spread">
+  <div class="page">
+    <h1>You write it.<br>The machine reads it back.</h1>
+    <p class="sub">A folder of plain Markdown, given a practiced rhythm — rituals for your days,
+    weeks, money and inbox, run by the model you already trust. <em>It appends its reading beneath
+    your words. It never touches them.</em></p>
+
+    <div class="note-demo" id="notedemo" aria-label="Demo: Thock appends a Daily Closure review to a daily note">
+      <div class="fname">2026-09-02.md</div>
+      <div class="lines"></div>
     </div>
+
+    <form class="waitform" data-waitlist>
+      <input type="email" name="email" placeholder="your@email.com" required aria-label="Email address">
+      <button type="submit">Join the waitlist &rarr;</button>
+    </form>
+    <p class="form-status" aria-live="polite"></p>
+    <p class="form-note">Free while in early access &nbsp;·&nbsp; macOS first &nbsp;·&nbsp; your files stay plain Markdown</p>
   </div>
+  <aside class="marg">
+    <p><b>In the margin</b> Your words stay yours. The AI appends its reading below them. It never rewrites.</p>
+    <p>Everything set in this column is the machine talking. Everything to the left is you.</p>
+  </aside>
 </section>
 
-<section id="why" class="band" tabindex="-1">
-  <div class="wrap wide">
-    <div class="sectionhead">
-      <p class="eyebrow">Why it exists</p>
-      <h2>People already build this by hand. It just doesn't transfer.</h2>
-      <p>The setup works: a vault of plain-text notes, a fast editor, an AI that reads your week and helps
-      you close it. But today it's held together by conventions, prompt files, and folder discipline that
-      only its author understands. Powerful, and completely non-transferable.</p>
-      <p>Thock ships that opinion as a product. The folder structure, the rituals, the layouts, and the
-      guardrails are <strong>visible, editable features</strong> instead of tribal knowledge.</p>
-    </div>
+<section id="why" class="spread" tabindex="-1">
+  <div class="page">
+    <p class="eyebrow">Why it exists</p>
+    <h2>People already build this by hand. It just doesn't transfer.</h2>
+    <p>The setup works: a vault of plain-text notes, a fast editor, an AI that reads your week and helps
+    you close it. But today it's held together by conventions, prompt files, and folder discipline that
+    only its author understands. Powerful, and completely non-transferable.</p>
+    <p>Thock ships that opinion as a product. The folder structure, the rituals, the layouts, and the
+    guardrails are <strong>visible, editable features</strong> instead of tribal knowledge.</p>
 
-    <div class="promises">
-      <div>
-        <h3>Your files, forever, in the open</h3>
-        <p>Plain Markdown in a normal folder. No database, no lock-in. If Thock disappeared tomorrow, your vault opens in any editor.</p>
-      </div>
-      <div>
-        <h3>Appends, never rewrites</h3>
-        <p>The AI adds its synthesis under headings like <code># Daily Closure</code>. What you wrote stays exactly as you wrote it.</p>
-      </div>
-      <div>
-        <h3>Bring your own brain</h3>
-        <p>You connect your own LLM with your own key: Claude, a local model, whatever you trust. Thock doesn't resell intelligence.</p>
-      </div>
-      <div>
-        <h3>You act, it advises</h3>
-        <p>It computes exactly what to do next, but it cannot and will not do the important things for you. Money moves when you move it.</p>
-      </div>
-      <div>
-        <h3>Invisible history</h3>
-        <p>Every meaningful change is checkpointed in the background. Restore any version of any note, with no source-control vocabulary anywhere.</p>
-      </div>
-      <div>
-        <h3>Everything is editable</h3>
-        <p>Rituals, templates and layouts are files in your vault. Rewrite them yourself, or ask your agent to.</p>
-      </div>
-    </div>
+    <ol class="manifesto">
+      <li>Your files, forever, in the open.
+        <span class="gloss">plain Markdown in a normal folder · no database, no lock-in · if Thock disappeared tomorrow, your vault opens in any editor</span></li>
+      <li>It appends. It never rewrites.
+        <span class="gloss">synthesis lands under its own heading, like <code># Daily Closure</code> · what you wrote stays exactly as you wrote it</span></li>
+      <li>Bring your own brain.
+        <span class="gloss">your own LLM, your own key: Claude, a local model, whatever you trust · Thock doesn't resell intelligence</span></li>
+      <li>You act. It only advises.
+        <span class="gloss">it computes exactly what to do next, but it cannot and will not do the important things for you · money moves when you move it</span></li>
+      <li>History without the vocabulary.
+        <span class="gloss">every meaningful change checkpointed in the background · restore any version of any note · nothing is ever called a commit</span></li>
+      <li>Everything is editable.
+        <span class="gloss">rituals, templates and layouts are files in your vault · rewrite them yourself, or ask your agent to</span></li>
+    </ol>
   </div>
+  <aside class="marg">
+    <p><b>Six invariants</b> From VISION.md &sect;4. Every design and engineering decision is checked against them.</p>
+    <p>They are ordered. The first one is the one the rest depend on.</p>
+  </aside>
 </section>
 
 <section id="routines" tabindex="-1">
-  <div class="wrap wide">
-    <div class="sectionhead">
+  <div class="spread">
+    <div class="page">
       <p class="eyebrow">Routines</p>
       <h2>Install a rhythm, not an app full of features</h2>
       <p>A Routine is one life-domain, packaged: its folders, templates, quick links and rituals. Enable
       the ones you want; ignore the rest. Each is defined by a readable file in your vault, so your own
       agent can author a new one from scratch.</p>
     </div>
+    <aside class="marg">
+      <p><b>routines/&lt;id&gt;/routine.toml</b> The whole definition. Vault-visible, hand-editable, and nothing assumes any other Routine exists.</p>
+    </aside>
+  </div>
 
-    <div class="feature">
-      <div>
-        <h3>Timeline: days and weeks</h3>
-        <p>Today, Yesterday, This Week, Last Week. One keystroke each, filenames resolved for you.
-        Wrap rituals read the day's tasks and commits and append an honest closure. A week review
-        gathers it all every Friday.</p>
-        <p class="keyline">wrap today · week review · open today</p>
-      </div>
-      <div class="vignette">
-        <span class="dim">timeline/</span><br>
-        <span class="amb">▸</span> Today <span class="dim">· 2026-09-02.md</span><br>
-        &nbsp;&nbsp;Yesterday <span class="dim">· 2026-09-01.md</span><br>
-        &nbsp;&nbsp;This Week <span class="dim">· 2026-W36.md</span><br>
-        <span class="dim">rituals</span><br>
-        &nbsp;&nbsp;<span class="mut">Wrap Today</span> <span class="dim">· appends # Daily Closure</span><br>
-        &nbsp;&nbsp;<span class="mut">Week Review</span> <span class="dim">· appends # AI Week Review</span>
-      </div>
+  <div class="routine spread">
+    <div class="page">
+      <h3>Timeline: days and weeks</h3>
+      <p>Today, Yesterday, This Week, Last Week. One keystroke each, filenames resolved for you.
+      Wrap rituals read the day's tasks and commits and append an honest closure. A week review
+      gathers it all every Friday.</p>
+      <p class="keyline">wrap today · week review · open today</p>
     </div>
+    <aside class="marg">
+      <p>
+        <span class="k">timeline/</span><br>
+        <span class="f">Today</span> · 2026-09-02.md<br>
+        <span class="f">Yesterday</span> · 2026-09-01.md<br>
+        <span class="f">This Week</span> · 2026-W36.md
+      </p>
+      <p>
+        <span class="k">rituals</span><br>
+        <span class="f">Wrap Today</span> · appends # Daily Closure<br>
+        <span class="f">Week Review</span> · appends # AI Week Review
+      </p>
+    </aside>
+  </div>
 
-    <div class="feature">
-      <div class="vignette">
-        <div class="cols">
-          <div>
-            <div class="cap">Soon</div>
-            <span class="mut">- [ ] Call the bank</span><br>
-            <span class="mut">- [ ] Renew passport</span>
-          </div>
-          <div>
-            <div class="cap">Someday</div>
-            <span class="mut">- [ ] Learn wood joinery</span><br>
-            <span class="done">- [x] Plan the trip</span>
-          </div>
-        </div>
-      </div>
-      <div>
-        <h3>Backlog: nothing dies in yesterday's note</h3>
-        <p>A plain <code>backlog.md</code> with Soon, Someday, and a dated Completed history. When you
-        wrap a day, unfinished tasks are offered a place there; you confirm all, none, or some. Checking
-        one off records it in today's note.</p>
-        <p class="keyline">soon ↔ someday · categories · complete with a keystroke</p>
-      </div>
+  <div class="routine spread">
+    <div class="page">
+      <h3>Backlog: nothing dies in yesterday's note</h3>
+      <p>A plain <code>backlog.md</code> with Soon, Someday, and a dated Completed history. When you
+      wrap a day, unfinished tasks are offered a place there; you confirm all, none, or some. Checking
+      one off records it in today's note.</p>
+      <p class="keyline">soon ↔ someday · categories · complete with a keystroke</p>
     </div>
+    <aside class="marg">
+      <p>
+        <span class="k">Soon</span><br>
+        <span class="f">- [ ] Call the bank</span><br>
+        <span class="f">- [ ] Renew passport</span>
+      </p>
+      <p>
+        <span class="k">Someday</span><br>
+        <span class="f">- [ ] Learn wood joinery</span><br>
+        <span class="done">- [x] Plan the trip</span>
+      </p>
+    </aside>
+  </div>
 
-    <div class="feature">
-      <div>
-        <h3>Day planner: your checklist as a day</h3>
-        <p>The right rail follows what you're reading. On a daily note it renders your task list as
-        time blocks, calendar-style. Connect Google Calendar and the day's events appear inside the
-        note itself, as ordinary checklist lines you can edit.</p>
-        <p class="keyline">read-only toward Google · times corrected, your edits never touched</p>
-      </div>
-      <div class="vignette">
-        <div class="blocks">
-          <div class="t">09:00</div><div class="b cal">Standup</div>
-          <div class="t">10:00</div><div class="b tall">Write the review draft</div>
-          <div class="t">13:00</div><div class="b cal">1:1 with Sam</div>
-          <div class="t">15:00</div><div class="b">Call the bank</div>
-        </div>
-      </div>
+  <div class="routine spread">
+    <div class="page">
+      <h3>Day planner: your checklist as a day</h3>
+      <p>The right rail follows what you're reading. On a daily note it renders your task list as
+      time blocks, calendar-style. Connect Google Calendar and the day's events appear inside the
+      note itself, as ordinary checklist lines you can edit.</p>
+      <p class="keyline">read-only toward Google · times corrected, your edits never touched</p>
     </div>
+    <aside class="marg">
+      <div class="blocks">
+        <div class="t">09:00</div><div class="b cal">Standup</div>
+        <div class="t">10:00</div><div class="b tall">Write the review draft</div>
+        <div class="t">13:00</div><div class="b cal">1:1 with Sam</div>
+        <div class="t">15:00</div><div class="b">Call the bank</div>
+      </div>
+    </aside>
+  </div>
 
-    <div class="feature">
-      <div class="vignette">
-        <span class="dim">inbox/</span><br>
-        <span class="mut">a-link-you-shared-from-your-phone.md</span><br>
-        <span class="mut">email-labeled-thock-inbox.md</span><br>
-        <span class="mut">that-idea-from-the-train.md</span><br>
-        <span class="amb">▸ Triage Inbox</span> <span class="dim">· 3 items waiting</span>
-      </div>
-      <div>
-        <h3>Inbox: capture anywhere, decide at the desk</h3>
-        <p>A folder anything can drop a note into: a link shared from your phone, an email you label,
-        a file dragged in. A triage ritual proposes a destination for each item and files only what you
-        confirm. Capture is dumb and instant; deciding happens where you think.</p>
-        <p class="keyline">phone share sheet · email label · plain files in a folder</p>
-      </div>
+  <div class="routine spread">
+    <div class="page">
+      <h3>Inbox: capture anywhere, decide at the desk</h3>
+      <p>A folder anything can drop a note into: a link shared from your phone, an email you label,
+      a file dragged in. A triage ritual proposes a destination for each item and files only what you
+      confirm. Capture is dumb and instant; deciding happens where you think.</p>
+      <p class="keyline">phone share sheet · email label · plain files in a folder</p>
     </div>
+    <aside class="marg">
+      <p>
+        <span class="k">inbox/</span><br>
+        <span class="f">a-link-you-shared-from-your-phone.md</span><br>
+        <span class="f">email-labeled-thock-inbox.md</span><br>
+        <span class="f">that-idea-from-the-train.md</span>
+      </p>
+      <p><span class="k">▸ Triage Inbox</span> · 3 items waiting</p>
+    </aside>
+  </div>
 
-    <div class="feature">
-      <div>
-        <h3>Skills: rituals you can read</h3>
-        <p>Every ritual is an inspectable Markdown file with a plain-language description and declared
-        scopes: what it reads, what it writes, and whether it appends or edits. Trust comes from being
-        able to open the thing and read it.</p>
-        <p class="keyline">open it · edit it · or have your agent rewrite it</p>
-      </div>
-      <div class="vignette skillcard">
-        <span class="h"># Wrap Today</span><br>
-        <span class="mut">Reads the day's tasks and commits, then appends</span><br>
-        <span class="mut">an honest closure to today's note.</span><br>
-        <span class="scope"><b>reads</b> daily notes, git log</span><br>
-        <span class="scope"><b>writes</b> today's note, append only</span>
-      </div>
+  <div class="routine spread">
+    <div class="page">
+      <h3>Skills: rituals you can read</h3>
+      <p>Every ritual is an inspectable Markdown file with a plain-language description and declared
+      scopes: what it reads, what it writes, and whether it appends or edits. Trust comes from being
+      able to open the thing and read it.</p>
+      <p class="keyline">open it · edit it · or have your agent rewrite it</p>
     </div>
+    <aside class="marg">
+      <p>
+        <b># Wrap Today</b>
+        <span class="f">Reads the day's tasks and commits, then appends an honest closure to today's note.</span>
+      </p>
+      <p>
+        <span class="k">reads</span> <span class="f">daily notes, git log</span><br>
+        <span class="k">writes</span> <span class="f">today's note, append only</span>
+      </p>
+    </aside>
   </div>
 </section>
 
-<section id="editor" class="band" tabindex="-1">
-  <div class="wrap wide">
-    <div class="sectionhead">
-      <p class="eyebrow">The editor</p>
-      <h2>Built on the bones of a fast code editor, without the face of one</h2>
-      <p>Thock inherits its editing core from <a href="https://zed.dev">Zed</a>: native, instant, and
-      happy in a ten-thousand-file folder. The code-editor chrome is gone: no diagnostics, no debugger,
-      no source-control pane. What's left is a writing instrument.</p>
-    </div>
+<section id="editor" class="spread" tabindex="-1">
+  <div class="page">
+    <p class="eyebrow">The editor</p>
+    <h2>Built on the bones of a fast code editor, without the face of one</h2>
+    <p>Thock inherits its editing core from <a href="https://zed.dev">Zed</a>: native, instant, and
+    happy in a ten-thousand-file folder. The code-editor chrome is gone: no diagnostics, no debugger,
+    no source-control pane. What's left is a writing instrument.</p>
     <div class="points">
       <p><strong>Markdown that reads like a page.</strong> While your cursor is elsewhere, heading markers
       and link syntax fold away, checkboxes draw as checkboxes, and wikilinks are visibly links. The line
@@ -469,78 +588,83 @@
       press <kbd>?</kbd>.</p>
     </div>
   </div>
+  <aside class="marg">
+    <p><b>Removed from Zed</b> <span class="f">diagnostics · debugger · source-control pane · billing</span></p>
+    <p><b>Kept</b> <span class="f">the editing core, and its speed</span></p>
+  </aside>
 </section>
 
-<section id="vault" tabindex="-1">
-  <div class="wrap wide">
-    <div class="vault-grid">
-      <div>
-        <p class="eyebrow">Your vault</p>
-        <h2>Already keep a vault? Point Thock at it.</h2>
-        <p>A Thock vault is a normal folder of Markdown, which means the one you already have probably is
-        one. No import, no conversion, no migration. <code>[[wikilinks]]</code> resolve, your folder
-        structure is respected, and everything Thock adds is a readable file sitting beside your notes.</p>
-        <p>Open the same folder in your current tools whenever you like. Nothing breaks, because nothing
-        changed shape.</p>
-      </div>
-      <div class="folder">
-        <span class="dim">~/vault/</span><br>
-        &nbsp;&nbsp;2026-09-02.md&nbsp;&nbsp;<span class="dim">← today, created on first keystroke</span><br>
-        &nbsp;&nbsp;2026-W36.md<br>
-        &nbsp;&nbsp;backlog.md<br>
-        &nbsp;&nbsp;inbox/<br>
-        &nbsp;&nbsp;<span class="amb">routines/</span>&nbsp;&nbsp;<span class="dim">← what Thock adds: readable, editable, yours</span>
-      </div>
+<section id="vault" class="spread" tabindex="-1">
+  <div class="page">
+    <p class="eyebrow">Your vault</p>
+    <h2>Already keep a vault? Point Thock at it.</h2>
+    <p>A Thock vault is a normal folder of Markdown, which means the one you already have probably is
+    one. No import, no conversion, no migration. <code>[[wikilinks]]</code> resolve, your folder
+    structure is respected, and everything Thock adds is a readable file sitting beside your notes.</p>
+    <p>Open the same folder in your current tools whenever you like. Nothing breaks, because nothing
+    changed shape.</p>
+    <div class="folder">
+      <span class="dim">~/vault/</span><br>
+      &nbsp;&nbsp;2026-09-02.md&nbsp;&nbsp;<span class="dim">← today, created on first keystroke</span><br>
+      &nbsp;&nbsp;2026-W36.md<br>
+      &nbsp;&nbsp;backlog.md<br>
+      &nbsp;&nbsp;inbox/<br>
+      &nbsp;&nbsp;<span class="amb">routines/</span>&nbsp;&nbsp;<span class="dim">← what Thock adds: readable, editable, yours</span>
     </div>
   </div>
+  <aside class="marg">
+    <p><b>No migration step</b> There is nothing to import, because there is no format to import into.</p>
+  </aside>
 </section>
 
-<section id="who" class="band" tabindex="-1">
-  <div class="wrap wide">
-    <div class="sectionhead">
-      <p class="eyebrow">Who it's for</p>
-      <h2>Opinionated and personal, by design</h2>
+<section id="who" class="spread" tabindex="-1">
+  <div class="page">
+    <p class="eyebrow">Who it's for</p>
+    <h2>Opinionated and personal, by design</h2>
+
+    <div class="who">
+      <h3>Probably for you if</h3>
+      <ul>
+        <li>You already think in plain text and live on the keyboard.</li>
+        <li>You want AI woven into your life-admin (reviews, finances, journaling) without hand-building the plumbing.</li>
+        <li>You've tried to wire an editor, a vault, and an LLM together yourself, and kept the scars.</li>
+        <li>You want your notes readable in thirty years, by anything.</li>
+      </ul>
     </div>
-    <div class="who-grid">
-      <div>
-        <h3>Probably for you if</h3>
-        <ul>
-          <li>You already think in plain text and live on the keyboard.</li>
-          <li>You want AI woven into your life-admin (reviews, finances, journaling) without hand-building the plumbing.</li>
-          <li>You've tried to wire an editor, a vault, and an LLM together yourself, and kept the scars.</li>
-          <li>You want your notes readable in thirty years, by anything.</li>
-        </ul>
-      </div>
-      <div>
-        <h3>Probably not, if</h3>
-        <ul>
-          <li>You're looking for a team wiki or a shared workspace.</li>
-          <li>You want an AI that acts on your behalf. Thock advises; you act.</li>
-          <li>You'd rather have a database app with forms and views than a folder of files.</li>
-        </ul>
-      </div>
+    <div class="who not">
+      <h3>Probably not, if</h3>
+      <ul>
+        <li>You're looking for a team wiki or a shared workspace.</li>
+        <li>You want an AI that acts on your behalf. Thock advises; you act.</li>
+        <li>You'd rather have a database app with forms and views than a folder of files.</li>
+      </ul>
     </div>
   </div>
+  <aside class="marg"></aside>
 </section>
 
-<section id="waitlist" tabindex="-1">
-  <div class="wrap">
+<section id="waitlist" class="spread" tabindex="-1">
+  <div class="page">
+    <p class="eyebrow">Early access</p>
     <h2>Free to download and test, by way of a short line</h2>
     <p class="sub">Thock is in early access. Leave an email and you'll get a download link as testing
     slots open, plus a note when things meaningfully change. Nothing else.</p>
     <form class="waitform" data-waitlist>
       <input type="email" name="email" placeholder="your@email.com" required aria-label="Email address">
-      <button type="submit">Join the waitlist</button>
+      <button type="submit">Join the waitlist &rarr;</button>
     </form>
     <p class="form-status" aria-live="polite"></p>
     <p class="form-note">Already have an invite code? <a href="/download">Download Thock</a>.</p>
     <p class="smallprint">Free while in early access · macOS first, Linux planned · bring your own LLM key ·
     your vault never leaves your machine</p>
   </div>
+  <aside class="marg"></aside>
 </section>
 
+</div>
+
 <footer>
-  <div class="wrap wide">
+  <div class="bar">
     <span>Thock · plain files, practiced rhythms.</span>
     <span>Editor core by <a href="https://zed.dev">Zed</a> · <a href="#hero">Back to top</a></span>
   </div>
@@ -681,7 +805,8 @@
     var cur = 0;
     for (var i = 0; i < sectionIds.length; i++) {
       var el = document.getElementById(sectionIds[i]);
-      if (el.offsetTop <= mid) cur = i;
+      var top = el.getBoundingClientRect().top + window.scrollY;
+      if (top <= mid) cur = i;
     }
     return cur;
   }
