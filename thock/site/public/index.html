@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Thock</title>
-<meta name="description" content="A personal notebook: journal, tasks and ideas in one folder of plain text. Thock gives the model you already trust a window into how you think — and everything in it, from rituals to theme, is a file your agent can edit.">
+<meta name="description" content="A personal notebook: journal, tasks and ideas in one folder of plain text. Thock gives the model you already trust a window into how you think. Everything in it, from rituals to theme, is a file your agent can edit.">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Petrona:ital,wght@0,100..600;1,100..500&family=Geist+Mono:wght@400;500&family=Schibsted+Grotesk:wght@400;500&display=swap">
 <style>
   /* ---------------------------------------------------------------
@@ -18,7 +18,7 @@
      The layout is the argument: a text column for the human, a margin
      column for the machine's reading, and one continuous hairline
      running between them for the length of the document. Principle 2
-     — it appends alongside, it never rewrites — drawn rather than
+     (it appends alongside, it never rewrites) drawn rather than
      listed.
      --------------------------------------------------------------- */
   :root {
@@ -189,7 +189,7 @@
   #hero .sub:last-of-type { margin-bottom: 0.4rem; }
   #hero .sub em { color: var(--ink); }
 
-  /* the writing surface — no box; a hairline, like a file */
+  /* the writing surface: no box; a hairline, like a file */
   .note-demo {
     font-family: var(--mono); font-size: 0.82rem; line-height: 1.9;
     border-left: 1px solid var(--rule);
@@ -199,7 +199,7 @@
   .note-demo .fname { color: var(--dim); font-size: 0.76rem; letter-spacing: 0.04em; margin-bottom: 0.5rem; }
   .note-demo .lines { min-height: 15.6em; }
   .note-demo .line { white-space: pre-wrap; min-height: 1.9em; color: var(--ink); }
-  /* where the machine's reading begins — the promise, drawn */
+  /* where the machine's reading begins: the promise, drawn */
   .note-demo .line.ai-h {
     color: var(--amber); font-weight: 500;
     border-top: 1px dashed var(--rule);
@@ -213,7 +213,7 @@
   @keyframes blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
   @media (prefers-reduced-motion: reduce) { .note-demo .caret { animation: none; } }
 
-  /* ---------- waitlist form — a line, not a boxed widget ---------- */
+  /* ---------- waitlist form: a line, not a boxed widget ---------- */
   .waitform { display: flex; gap: 0.6rem; align-items: stretch; flex-wrap: wrap; }
   .waitform input[type="email"] {
     font-family: var(--mono); font-size: 0.82rem;
@@ -273,7 +273,7 @@
     margin: 0.55rem 0 0;
   }
 
-  /* margin-column day planner — the one place a fill earns itself,
+  /* margin-column day planner: the one place a fill earns itself,
      because a time block is a shape, not a line of text */
   .blocks { display: grid; grid-template-columns: 2.9rem 1fr; gap: 0.3rem 0.6rem; }
   .blocks .t { color: var(--dim); font-size: 0.68rem; padding-top: 0.2rem; }
@@ -314,10 +314,10 @@
     padding: 0.4rem 0 0.4rem 1.5rem; position: relative;
   }
   .who li::before {
-    content: "—"; position: absolute; left: 0;
-    font-family: var(--mono); font-size: 0.72rem; color: var(--amber-d); top: 0.62rem;
+    content: "·"; position: absolute; left: 0;
+    font-family: var(--mono); font-size: 1rem; color: var(--amber-d); top: 0.38rem;
   }
-  .who.not li::before { content: "·"; color: var(--dim); font-size: 1rem; top: 0.38rem; }
+  .who.not li::before { color: var(--dim); }
 
   /* ---------- waitlist section ---------- */
   #waitlist h2 { max-width: 30rem; }
@@ -403,7 +403,7 @@
 <section id="hero" class="spread">
   <div class="page">
     <h1>Your personal notebook.</h1>
-    <p class="sub">Journal, tasks and half-formed ideas in one place — plain text files, and a
+    <p class="sub">Journal, tasks and half-formed ideas in one place: plain text files, and a
     rhythm of actually writing things down.</p>
     <p class="sub">Give the model you already trust a window into how you think and what matters to
     you. <em>It reads the notebook. It never touches a word you wrote.</em></p>
@@ -431,14 +431,14 @@
   <div class="page">
     <p class="eyebrow">Why it exists</p>
     <h2>Second brains already exist. None of them adapt to your taste.</h2>
-    <p>People build this by hand — a vault of plain-text notes, a fast editor, an AI that reads the
+    <p>People build this by hand: a vault of plain-text notes, a fast editor, an AI that reads the
     week and helps close it. It works, and it never transfers, because it's held together by
     conventions only its author understands.</p>
     <p>The ones you can install have the opposite problem. They arrive finished: someone else's
     folder names, someone else's rituals, someone else's idea of what a good week looks like. You
     adapt to the tool, and it never adapts back.</p>
     <p>Thock is neither, because there is nothing in it that isn't a file. The rituals, the folder
-    structure, the templates, the theme, the font, the keybindings — all of it sits in your vault in
+    structure, the templates, the theme, the font, the keybindings all sit in your vault in
     plain text. Ask your agent for a new Routine, a shorter weekly review, a quieter colour scheme,
     and it <strong>edits those files the way it would edit any others</strong>. Nothing is compiled
     in. Nothing is hidden from it.</p>
@@ -455,7 +455,7 @@
       <li>History without the vocabulary.
         <span class="gloss">every meaningful change checkpointed in the background · restore any version of any note · nothing is ever called a commit</span></li>
       <li>Everything is editable, by you or your agent.
-        <span class="gloss">rituals, templates, layouts, theme, font, keybindings — all files in your vault · rewrite them yourself, or just ask</span></li>
+        <span class="gloss">rituals, templates, layouts, theme, font, keybindings · all files in your vault · rewrite them yourself, or just ask</span></li>
     </ol>
   </div>
   <aside class="marg">
@@ -477,7 +477,7 @@
       agent can author a new one from scratch.</p>
     </div>
     <aside class="marg">
-      <p><b>routines/&lt;id&gt;/routine.toml</b> <span class="f">One file describes a whole Routine — its folders, templates, links and rituals.</span></p>
+      <p><b>routines/&lt;id&gt;/routine.toml</b> <span class="f">One file describes a whole Routine: its folders, templates, links and rituals.</span></p>
       <p>Add one, change one, or delete one, and nothing else in your vault notices.</p>
     </aside>
   </div>
@@ -751,7 +751,7 @@
   var container = document.querySelector("#notedemo .lines");
 
   /* Indices 0..3 are what the person wrote. They are already in the note
-     before Thock reads it, so they are painted at once — only the closure
+     before Thock reads it, so they are painted at once; only the closure
      below them is typed. */
   var HUMAN_LINES = 4;
 
