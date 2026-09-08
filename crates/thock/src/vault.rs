@@ -34,7 +34,7 @@ file = "backlog.md"          # the Soon / Someday / Completed holding pen
 [[routines.installed]]
 id      = "timeline"
 enabled = true
-version = 9
+version = 10
 
 [[routines.installed]]
 id      = "inbox"
