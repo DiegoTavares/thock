@@ -28,6 +28,13 @@ These are binding for any agent working in this vault:
    creating them from `templates/` is normal. Never treat a missing file or
    folder as an error.
 
+5. **Honor `profile.md`.** When the vault root has a `profile.md`, read it
+   before you start. It names who this person is, the areas they track, and
+   (under **What Thock may pull in**) the only outside sources you may go
+   and look at. An unchecked box there means *don't look and don't ask*.
+   No `profile.md` is normal in a vault that never ran the Set Profile
+   ritual; then fall back to what each skill says.
+
 When a **`## Language`** section exists in this file (the Set Language
 ritual appends one), it is as binding as the rules above: speak and write
 in that language, within the limits the section names.
@@ -37,12 +44,15 @@ in that language, within the limits the section names.
 - `daily/YYYY-MM-DD.md` — daily notes; `weekly/YYYY-Www.md` — weekly notes
   (new ones come from `templates/daily.md` and `templates/weekly.md`).
 - `backlog.md` — the Soon / Someday / Completed task lists.
+- `profile.md`: who the user is, what they track, and what you may pull in
+  on their behalf (when the Set Profile ritual has run).
 - `inbox/` — captured items awaiting triage (when the Inbox Routine is
   installed).
 - `routines/<id>/` — installed Routines: each has an explainer doc, its
   skills under `routines/<id>/skills/`, and a `routine.toml` definition.
   `routines/ROUTINES.md` documents the format.
-- `skills/` — core rituals (for example `skills/thock/new-routine.md`).
+- `skills/`: core rituals (for example `skills/thock/new-routine.md` and
+  `skills/thock/set-profile.md`, the interview behind `profile.md`).
 
 ## Rituals
 

@@ -34,7 +34,7 @@ file = "backlog.md"          # the Soon / Someday / Completed holding pen
 [[routines.installed]]
 id      = "timeline"
 enabled = true
-version = 9
+version = 10
 
 [[routines.installed]]
 id      = "inbox"
@@ -958,7 +958,7 @@ mod tests {
         assert_eq!(
             vault.config.routines.installed,
             vec![
-                InstalledRoutine::new("timeline".to_string(), true, 9),
+                InstalledRoutine::new("timeline".to_string(), true, 10),
                 InstalledRoutine::new("inbox".to_string(), true, 2),
             ]
         );

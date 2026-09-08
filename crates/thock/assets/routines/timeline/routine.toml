@@ -1,7 +1,7 @@
 schema  = 2
 id      = "timeline"
 name    = "Daily & Weekly"
-version = 9
+version = 10
 summary = "Daily & weekly rhythm — weekly review and a progress dashboard."
 icon    = "clock"
 doc     = "routines/timeline/Timeline.md"
@@ -66,24 +66,24 @@ source = "assets/data.seed.js"
 id      = "week-review"
 name    = "Week Review"
 file    = "routines/timeline/skills/week-review.md"
-summary = "Aggregate the week's notes + PRs/MRs, append a review, feed the dashboard."
-reads   = ["daily/**", "weekly/**", "backlog.md", "routines/timeline/sources.md", "the repos it lists"]
+summary = "Aggregate the week's notes into a review by area, append it, feed the dashboard."
+reads   = ["daily/**", "weekly/**", "backlog.md", "profile.md", "routines/timeline/sources.md", "the sources it lists"]
 writes  = ["weekly/<week>.md (append)", "weekly/site/data.js (append)", "backlog.md (append)"]
 
 [[skill]]
 id      = "wrap-today"
 name    = "Wrap Today"
 file    = "routines/timeline/skills/wrap-today.md"
-summary = "Close out today's note — tasks + commits + recent context, append a daily closure."
-reads   = ["daily/**", "backlog.md", "git:log", "routines/timeline/sources.md", "the repos it lists"]
+summary = "Close out today's note: tasks, recent context, and whatever your profile allows, appended as a daily closure."
+reads   = ["daily/**", "backlog.md", "profile.md", "git:log (only if your profile allows)", "routines/timeline/sources.md"]
 writes  = ["daily/<today>.md (append)", "backlog.md (append)"]
 
 [[skill]]
 id      = "wrap-yesterday"
 name    = "Wrap Yesterday"
 file    = "routines/timeline/skills/wrap-yesterday.md"
-summary = "Close out yesterday's note — tasks + commits + surrounding context, append a daily closure."
-reads   = ["daily/**", "backlog.md", "git:log", "routines/timeline/sources.md", "the repos it lists"]
+summary = "Close out yesterday's note: tasks, surrounding context, and whatever your profile allows, appended as a daily closure."
+reads   = ["daily/**", "backlog.md", "profile.md", "git:log (only if your profile allows)", "routines/timeline/sources.md"]
 writes  = ["daily/<yesterday>.md (append)", "backlog.md (append)"]
 
 [[skill]]
@@ -100,9 +100,9 @@ id      = "onboarding"
 name    = "Set Up Timeline"
 kind    = "setup"
 file    = "routines/timeline/skills/onboarding.md"
-summary = "Guided setup — migrate your existing daily notes into this vault (copies, never moves)."
-reads   = ["daily/**", "weekly/**", ".thock/config.toml", "your existing notes (read-only)"]
-writes  = ["daily/**", "weekly/**", ".thock/state/onboarded/timeline"]
+summary = "Guided setup: learn what you track, then migrate your existing daily notes into this vault (copies, never moves)."
+reads   = ["daily/**", "weekly/**", "profile.md", ".thock/config.toml", "your existing notes (read-only)"]
+writes  = ["daily/**", "weekly/**", "profile.md", "routines/timeline/sources.md", ".thock/state/onboarded/timeline"]
 
 # The skill Thock auto-launches when this Routine is added (V5).
 [onboarding]

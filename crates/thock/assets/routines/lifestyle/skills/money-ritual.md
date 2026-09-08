@@ -36,8 +36,8 @@ the recipe).
 - **No source, or a source is down:** degrade to a conversation, don't fail. Ask for the
   few balances the account rules actually need, record the entry as `quality: "manual"`,
   and say plainly that this period is self-reported. The habit survives a broken connector.
-- **Auth or network failure:** name the source and what to re-run (`gh auth login`-style,
-  whatever the source needs) — never drop it silently.
+- **Auth or network failure:** name the source and, in plain words, what the user needs to
+  do to reconnect it. Never drop it silently, and never assume they know a command.
 - **Partial data** (some accounts measured, some told): the entry is `quality: "partial"`.
 
 Periods are what they are: a week if the data is weekly, a month or statement range if

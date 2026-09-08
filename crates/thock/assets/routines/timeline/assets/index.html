@@ -306,7 +306,7 @@
   <div class="timeline" id="timeline"></div>
   <div class="legend">
     <span><i style="background:var(--accent)"></i>tasks</span>
-    <span><i style="background:var(--purple)"></i>PRs + MRs</span>
+    <span id="legendPrs"><i style="background:var(--purple)"></i>PRs + MRs</span>
   </div>
 
   <div class="stats" id="stats"></div>
@@ -325,7 +325,7 @@
       <div id="warnings"></div>
     </div>
     <div class="panel full" id="projPanel">
-      <h2>Work by Project</h2>
+      <h2 id="projTitle">Work by Project</h2>
       <div id="projects"></div>
     </div>
     <div class="panel full" id="prPanel">
@@ -379,8 +379,30 @@
     if (statusbar) statusbar.remove();
     return;
   }
+  // A week written by an agent that had nothing to put in a field may omit
+  // it entirely: a vault that doesn't track code has no `prs` to write.
+  // Fill the gaps once here so nothing below has to defend itself.
+  W.forEach((w, i) => {
+    w._i = i;
+    w.prs = w.prs || {};
+    w.prs.created = w.prs.created || [];
+    w.prs.reviewed = w.prs.reviewed || [];
+    for (const key of ["goals", "tentative", "personal", "projects", "highlights"])
+      w[key] = w[key] || [];
+    for (const p of w.projects) p.tasks = p.tasks || [];
+  });
+
   const PROJ_COLORS = ["#5eb0ef","#b58ef0","#4ec97a","#e5b454","#e06c75","#56c8d8","#d98cc4","#9db35e","#e08f5a","#7f9cf5"];
   const $ = id => document.getElementById(id);
+
+  // Who this dashboard is for (`window.PROFILE` in data.js, written by the
+  // Set Profile ritual). Code panels are for people who write code; for
+  // everyone else they are three empty tiles and a panel that never fills.
+  // "auto", the default, decides from the data itself.
+  const PROFILE = window.PROFILE || {};
+  const SHOW_CODE = PROFILE.code === true ? true
+    : PROFILE.code === false ? false
+    : W.some(w => w.prs.created.length || w.prs.reviewed.length);
 
   // Ref → web URL resolution. Refs look like "webapp#2486" (GitHub, "#")
   // or "platform-api!57" (GitLab MR, "!"). The repo short-name → full path
@@ -418,6 +440,16 @@
     .map(([pattern, name]) => [pattern instanceof RegExp ? pattern : new RegExp(pattern, "i"), name])
     .concat([[/personal|finance/i, "Personal"], [/team|people/i, "Team"]]);
   const canon = name => { for (const [re, c] of CANON) if (re.test(name)) return c; return name; };
+
+  // One colour per area, held steady across weeks: the profile's `focus`
+  // order first, then any other area in the order it first appears. Without
+  // this a project's colour shifts every week as the list reorders.
+  const COLOR_ORDER = [];
+  const claimColor = name => { const c = canon(name); if (!COLOR_ORDER.includes(c)) COLOR_ORDER.push(c); };
+  (Array.isArray(PROFILE.focus) ? PROFILE.focus : []).forEach(claimColor);
+  W.forEach(w => w.projects.forEach(p => claimColor(p.name)));
+  const projColor = name => PROJ_COLORS[Math.max(0, COLOR_ORDER.indexOf(canon(name))) % PROJ_COLORS.length];
+
   const normGoal = t => t.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
   const ord = n => n + (["th","st","nd","rd"][n % 10 > 3 || Math.floor(n / 10) === 1 ? 0 : n % 10]);
 
@@ -497,7 +529,7 @@
       <div class="tw ${i===idx?"active":""}" data-i="${i}" title="${w.label} · ${w.range}">
         <div class="bars">
           <i class="b-tasks" style="height:${Math.round(taskCount(w)/maxT*100)}%"></i>
-          <i class="b-prs" style="height:${Math.round(prCount(w)/maxP*100)}%"></i>
+          ${SHOW_CODE ? `<i class="b-prs" style="height:${Math.round(prCount(w)/maxP*100)}%"></i>` : ""}
         </div>
         <div class="lbl">W${w.week}</div>
       </div>`).join("");
@@ -508,14 +540,33 @@
   // Metric definitions — each renders a stat card with a cross-week sparkline.
   const goalsPct = w => { const g = allGoals(w); return g.length ? Math.round(g.filter(x => x.done).length / g.length * 100) : 0; };
   const mergedCount = w => w.prs.created.filter(p => p.status === "merged").length;
+  // Goals still unfinished that were also unfinished the week before: the
+  // life-side equivalent of a stalled pull request.
+  const carriedCount = w => {
+    const prior = w._i > 0 ? allGoals(W[w._i - 1]).filter(g => !g.done) : [];
+    return allGoals(w).filter(g => !g.done && prior.some(x => normGoal(x.text) === normGoal(g.text))).length;
+  };
+  const donePersonal = w => w.personal.filter(x => x.done).length;
+
+  // Two tiles either side of a swappable middle: pull requests for people
+  // who write code, the shape of their own week for everyone else.
+  const CODE_METRICS = [
+    { cap: "created",     color: "--purple", val: w => w.prs.created.length,   fmt: w => w.prs.created.length || "–" },
+    { cap: "merged",      color: "--cyan",   val: mergedCount,                 fmt: w => w.prs.created.length ? `${mergedCount(w)}<small>/${w.prs.created.length}</small>` : "–" },
+    { cap: "reviewed",    color: "--amber",  val: w => w.prs.reviewed.length,  fmt: w => w.prs.reviewed.length || "–" }
+  ];
+  const LIFE_METRICS = [
+    { cap: "carried over", color: "--amber", val: carriedCount,                fmt: w => carriedCount(w) || "–" },
+    { cap: "personal",     color: "--cyan",  val: donePersonal,
+      fmt: w => w.personal.length ? `${donePersonal(w)}<small>/${w.personal.length}</small>` : "–" }
+  ];
   const METRICS = [
     { cap: "goals done",  color: "--green",  val: goalsPct,                    unit: "%",
       fmt: w => { const g = allGoals(w); return g.length ? `${g.filter(x => x.done).length}<small>/${g.length}</small>` : "–"; } },
     { cap: "tasks",       color: "--accent", val: taskCount,                   fmt: w => taskCount(w) || "–" },
-    { cap: "created",     color: "--purple", val: w => w.prs.created.length,   fmt: w => w.prs.created.length || "–" },
-    { cap: "merged",      color: "--cyan",   val: mergedCount,                 fmt: w => w.prs.created.length ? `${mergedCount(w)}<small>/${w.prs.created.length}</small>` : "–" },
-    { cap: "reviewed",    color: "--amber",  val: w => w.prs.reviewed.length,  fmt: w => w.prs.reviewed.length || "–" },
-    { cap: "projects",    color: "--red",    val: w => w.projects.length,      fmt: w => w.projects.length || "–" }
+    ...(SHOW_CODE ? CODE_METRICS : LIFE_METRICS),
+    { cap: SHOW_CODE ? "projects" : "areas",
+                          color: "--red",    val: w => w.projects.length,      fmt: w => w.projects.length || "–" }
   ];
 
   function sparkline(series, cur) {
@@ -551,6 +602,13 @@
       <div class="num">${m.fmt(W[idx])}</div>
       ${sparkline(series, idx)}
     </div>`;
+  }
+
+  if (!SHOW_CODE) {
+    for (const id of ["prPanel", "legendPrs"]) { const el = $(id); if (el) el.remove(); }
+    $("projTitle").textContent = "Where your week went";
+    const legend = document.querySelector(".legend");
+    if (legend && !legend.children.length) legend.remove();
   }
 
   function render() {
@@ -600,13 +658,13 @@
 
     // projects
     if (w.projects.length) {
-      const max = Math.max(...w.projects.map(p => p.tasks.length));
+      const max = Math.max(...w.projects.map(p => p.tasks.length), 1);
       $("projects").innerHTML = w.projects.map((p,i) => `
         <div class="proj" data-i="${i}">
           <div class="row">
             <span class="caret">▶</span>
             <span class="name">${esc(p.name)}${p.goal ? '<span class="goalchip">goal</span>' : ""}</span>
-            <span class="track"><i style="width:${Math.round(p.tasks.length/max*100)}%;background:${PROJ_COLORS[i%PROJ_COLORS.length]}"></i></span>
+            <span class="track"><i style="width:${Math.round(p.tasks.length/max*100)}%;background:${projColor(p.name)}"></i></span>
             <span class="count">${p.tasks.length}</span>
           </div>
           <ul>${p.tasks.map(t => `<li>${esc(t)}</li>`).join("")}</ul>
@@ -617,49 +675,51 @@
       $("projects").innerHTML = `<div class="empty">No work logged yet.</div>`;
     }
 
-    // PRs + MRs
-    const revd = w.prs.reviewed.length;
-    const closed = w.prs.created.filter(p => p.status === "closed").length;
-    const open = created - merged - closed;
-    const total = created + revd;
-    if (total) {
-      const srcCount = (arr, s) => arr.filter(p => (p.src || "github") === s).length;
-      const gh = srcCount(w.prs.created, "github") + srcCount(w.prs.reviewed, "github");
-      const gl = srcCount(w.prs.created, "gitlab") + srcCount(w.prs.reviewed, "gitlab");
-      const seg = (n, c) => n ? `<i style="width:${n/total*100}%;background:${c}"></i>` : "";
-      let html = `<div class="prsplit">
-          ${seg(merged, "var(--purple)")}${seg(open, "var(--green)")}${seg(closed, "var(--red)")}${seg(revd, "var(--accent)")}
-        </div>
-        <div class="prkey">
-          <span><i style="background:var(--purple)"></i>merged (${merged})</span>
-          <span><i style="background:var(--green)"></i>open (${open})</span>
-          ${closed ? `<span><i style="background:var(--red)"></i>closed (${closed})</span>` : ""}
-          <span><i style="background:var(--accent)"></i>reviewed (${revd})</span>
-        </div>
-        <div class="srcsplit">
-          <span><b>${gh}</b> GitHub</span><span><b>${gl}</b> GitLab</span>
-        </div>`;
-      const badge = p => `<span class="src ${p.src || "github"}">${(p.src || "github") === "gitlab" ? "GL" : "GH"}</span>`;
-      const draftTag = p => p.draft ? `<span class="draft">draft</span>` : "";
-      const refEl = p => { const u = refUrl(p); return u
-        ? `<a class="ref" href="${u}" target="_blank" rel="noopener">${esc(p.ref)}</a>`
-        : `<span class="ref">${esc(p.ref)}</span>`; };
-      const pr = (p, st) => `<div class="pr">${badge(p)}${refEl(p)}<span class="t">${draftTag(p)}${esc(p.title)}</span><span class="st ${st||p.status}">${st||p.status}</span></div>`;
-      const revShown = w.prs.reviewed.slice(0, 8);
-      html += `<div class="prlist" id="prlist">`
-        + w.prs.created.map(p => pr(p)).join("")
-        + revShown.map(p => pr(p, "reviewed")).join("")
-        + `</div>`;
-      if (revd > 8) html += `<button class="prmore" id="prmore">show ${revd - 8} more reviewed</button>`;
-      $("prs").innerHTML = html;
-      const more = $("prmore");
-      if (more) more.addEventListener("click", () => {
-        $("prlist").insertAdjacentHTML("beforeend",
-          w.prs.reviewed.slice(8).map(p => pr(p, "reviewed")).join(""));
-        more.remove();
-      });
-    } else {
-      $("prs").innerHTML = `<div class="empty">No PR or MR activity recorded.</div>`;
+    // PRs + MRs (the panel is gone entirely when the profile says no code)
+    if (SHOW_CODE) {
+      const revd = w.prs.reviewed.length;
+      const closed = w.prs.created.filter(p => p.status === "closed").length;
+      const open = created - merged - closed;
+      const total = created + revd;
+      if (total) {
+        const srcCount = (arr, s) => arr.filter(p => (p.src || "github") === s).length;
+        const gh = srcCount(w.prs.created, "github") + srcCount(w.prs.reviewed, "github");
+        const gl = srcCount(w.prs.created, "gitlab") + srcCount(w.prs.reviewed, "gitlab");
+        const seg = (n, c) => n ? `<i style="width:${n/total*100}%;background:${c}"></i>` : "";
+        let html = `<div class="prsplit">
+            ${seg(merged, "var(--purple)")}${seg(open, "var(--green)")}${seg(closed, "var(--red)")}${seg(revd, "var(--accent)")}
+          </div>
+          <div class="prkey">
+            <span><i style="background:var(--purple)"></i>merged (${merged})</span>
+            <span><i style="background:var(--green)"></i>open (${open})</span>
+            ${closed ? `<span><i style="background:var(--red)"></i>closed (${closed})</span>` : ""}
+            <span><i style="background:var(--accent)"></i>reviewed (${revd})</span>
+          </div>
+          <div class="srcsplit">
+            <span><b>${gh}</b> GitHub</span><span><b>${gl}</b> GitLab</span>
+          </div>`;
+        const badge = p => `<span class="src ${p.src || "github"}">${(p.src || "github") === "gitlab" ? "GL" : "GH"}</span>`;
+        const draftTag = p => p.draft ? `<span class="draft">draft</span>` : "";
+        const refEl = p => { const u = refUrl(p); return u
+          ? `<a class="ref" href="${u}" target="_blank" rel="noopener">${esc(p.ref)}</a>`
+          : `<span class="ref">${esc(p.ref)}</span>`; };
+        const pr = (p, st) => `<div class="pr">${badge(p)}${refEl(p)}<span class="t">${draftTag(p)}${esc(p.title)}</span><span class="st ${st||p.status}">${st||p.status}</span></div>`;
+        const revShown = w.prs.reviewed.slice(0, 8);
+        html += `<div class="prlist" id="prlist">`
+          + w.prs.created.map(p => pr(p)).join("")
+          + revShown.map(p => pr(p, "reviewed")).join("")
+          + `</div>`;
+        if (revd > 8) html += `<button class="prmore" id="prmore">show ${revd - 8} more reviewed</button>`;
+        $("prs").innerHTML = html;
+        const more = $("prmore");
+        if (more) more.addEventListener("click", () => {
+          $("prlist").insertAdjacentHTML("beforeend",
+            w.prs.reviewed.slice(8).map(p => pr(p, "reviewed")).join(""));
+          more.remove();
+        });
+      } else {
+        $("prs").innerHTML = `<div class="empty">No PR or MR activity recorded.</div>`;
+      }
     }
 
     renderTimeline();

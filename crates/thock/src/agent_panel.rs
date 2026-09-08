@@ -45,7 +45,10 @@ actions!(
         ConnectAgent,
         /// Sets the language your notes and your agent use, translating the
         /// vault's templates and docs with your agent.
-        SetLanguage
+        SetLanguage,
+        /// Asks what your weeks are made of and writes it to profile.md, so
+        /// the rituals fit your life instead of the defaults.
+        SetProfile
     ]
 );
 
@@ -89,7 +92,24 @@ pub fn init(cx: &mut App) {
             }
         });
         workspace.register_action(|workspace, _: &SetLanguage, window, cx| {
-            run_set_language(workspace, window, cx);
+            run_core_skill(
+                workspace,
+                "Set Language",
+                crate::routines::SET_LANGUAGE_SKILL_PATH,
+                "This workspace isn't a Thock vault, so there is no language to set.",
+                window,
+                cx,
+            );
+        });
+        workspace.register_action(|workspace, _: &SetProfile, window, cx| {
+            run_core_skill(
+                workspace,
+                "Set Profile",
+                crate::routines::SET_PROFILE_SKILL_PATH,
+                "This workspace isn't a Thock vault, so there is no profile to set.",
+                window,
+                cx,
+            );
         });
     })
     .detach();
@@ -135,10 +155,17 @@ fn run_skill_by_id(
     }
 }
 
-/// The `thock: set language` path (V19 §5.3): launch the core Set Language
-/// ritual with the connected agent. Available in any vault, any time — the
-/// ritual is re-runnable by design.
-fn run_set_language(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+/// Launches a core ritual, one that belongs to the vault itself rather than
+/// to any Routine (Set Language, V19 §5.3; Set Profile, V23 §5.2). Available
+/// in any vault, any time: both are re-runnable by design.
+fn run_core_skill(
+    workspace: &mut Workspace,
+    title: &'static str,
+    skill_path: &'static str,
+    not_a_vault_message: &'static str,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
     let root = workspace
         .project()
         .read(cx)
@@ -149,19 +176,12 @@ fn run_set_language(workspace: &mut Workspace, window: &mut Window, cx: &mut Con
         root.as_deref().map(Vault::detect),
         Some(VaultStatus::Valid(_))
     ) {
-        workspace.show_error(
-            "This workspace isn't a Thock vault, so there is no language to set.".to_string(),
-            cx,
-        );
+        workspace.show_error(not_a_vault_message.to_string(), cx);
         return;
     }
     AgentPanel::launch_in_workspace(
         workspace,
-        LaunchRequest::run_skill(
-            "Set Language",
-            crate::routines::SET_LANGUAGE_SKILL_PATH,
-            agent::ModelTier::Default,
-        ),
+        LaunchRequest::run_skill(title, skill_path, agent::ModelTier::Default),
         window,
         cx,
     );
