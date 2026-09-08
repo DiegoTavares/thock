@@ -1,11 +1,13 @@
 # Week Review
 
-Review the previous week's daily notes and the code activity from the repositories the user names, then produce a summary organized by project, write it to the weekly markdown file, and append a structured entry to the dashboard data (`weekly/site/data.js`).
+Review the previous week's daily notes, plus whatever outside activity the vault's profile allows you to pull in, then produce a summary organized by the areas the user tracks, write it to the weekly markdown file, and append a structured entry to the dashboard data (`weekly/site/data.js`).
 
-**Reads:** the daily and weekly notes, the backlog file, and the repositories recorded in `routines/timeline/sources.md`.
+**Reads:** the daily and weekly notes, the backlog file, `profile.md`, and any sources recorded in `routines/timeline/sources.md`.
 **Writes (append-only):** the weekly `.md` file, `weekly/site/data.js`, the backlog file.
 
 > **Note paths and filenames are vault-configured.** Read `.thock/config.toml` first: `[daily]` / `[weekly]` set each note kind's `dir` and moment-style `filename` format, and `[backlog]` sets `file`. This skill's examples use the defaults (`daily/YYYY-MM-DD.md`, `weekly/GGGG-[W]WW.md`, `backlog.md`); when the config — or the vault's existing notes — use different names, follow those silently. That's configuration, not a doc mismatch worth reporting.
+
+> **Read `profile.md` at the vault root next, if it exists.** It names who this person is, the areas they track (use those names in §5 and in the dashboard entry), the tone to write in, and, under **What Thock may pull in**, the only outside sources you may go and look at. A vault without one is normal: then §3 falls back to `routines/timeline/sources.md`, and asks once if that's missing too.
 
 ## 1. Determine the week and locate the weekly file
 
@@ -19,20 +21,23 @@ Review the previous week's daily notes and the code activity from the repositori
 2. Read each one. Extract tasks and activities from day-planner sections, conversation notes, and anything else relevant.
 3. If a weekly note already exists, read it and fold in its `# Week Goals`, `# Tentative`, and `# Personal` sections (these become the goals in the dashboard) plus any context.
 
-## 3. Ask which repositories to review
+## 3. Decide whether there is anything outside the notes to review
 
-**Never assume a forge.** Don't reach for `gh`, `glab`, or any host just because the CLI is installed — read only what the user told you to read. The answer lives in `routines/timeline/sources.md`:
+**Start from the profile.** Its **What Thock may pull in** checklist is the whole permission list for this step and the next. An unchecked box means *don't look and don't ask*: skip that source in silence and don't mention it in the review. **If Code is unchecked, skip step 4 entirely**; a week reviewed from the notes alone is the normal case for most people, not a gap.
 
-1. Read `routines/timeline/sources.md`. If it lists sources, use exactly those and don't ask again.
-2. If it's missing or empty, ask the user **one** question: which repositories should this review read from? Accept local checkout paths, hosted forge accounts (host + username), or "none" — a week with no code sources is normal, it just skips step 4.
+**If there is no `profile.md`,** fall back to `routines/timeline/sources.md`:
+
+1. Read it. If it lists sources, use exactly those and don't ask again.
+2. If it's missing, ask the user **one** plain question: is there anything outside their notes this review should read (code repositories, for example)? Accept local checkout paths, hosted forge accounts (host + username), or "nothing". That last answer is common, and just skips step 4.
 3. Write the answer back to `routines/timeline/sources.md` (create it if missing; append, never rewrite) so later runs stop asking. Ask again only when the user says the list is stale or a call reveals a source that no longer exists.
 
-The file is plain markdown the user can edit at any time:
+The file is plain markdown the user can edit at any time. Two lists explicitly emptied with `_None._` are an **answer**: treat the question as settled and never raise it again.
 
 ```markdown
 # Timeline Sources
 
-Repositories the Wrap and Week Review skills read from. Edit freely.
+Where the Wrap and Week Review rituals look for work outside your notes.
+Edit freely.
 
 ## Local checkouts
 - ~/dev/webapp
@@ -44,6 +49,8 @@ Repositories the Wrap and Week Review skills read from. Edit freely.
 ```
 
 ## 4. Collect the week's pull and merge requests
+
+**Only when the profile checks Code** (or, with no profile, when `sources.md` actually names sources). Otherwise skip to step 5 without a word.
 
 Query only the sources from step 3. Each entry ends up with a repo, number, title, and status (open / merged / closed; reviewed when the user reviewed it rather than authored it). Deduplicate across sources. If a call fails with an auth error, say so in the output and tell the user which login to re-run (`gh auth login`, `glab auth login --hostname <host>`) — never drop a source silently.
 
@@ -88,7 +95,7 @@ Note: `action_name: "accepted"` means the user merged an MR (counts toward `merg
 
 ## 5. Organize the content
 
-1. **Group tasks by project.** Infer short, consistent project names from the notes and repositories themselves (e.g. Web App, Platform API, Infrastructure, Team / People, Personal / Finance). Reuse the names earlier weeks already used. Only include what was actually worked on — no padding.
+1. **Group tasks by area.** When `profile.md` lists areas under **What you track**, those are the names: use them verbatim, and only add a new one when the week genuinely contained something none of them covers. Without a profile, infer short, consistent names from the notes themselves (a developer's week might yield Web App, Platform API, Infrastructure; a teacher's, Lessons, Marking, Studio). Reuse the names earlier weeks already used. Only include what was actually worked on, with no padding. (The dashboard field is still called `projects`; the names in it are whatever the user calls their areas.)
 2. **Set the `goal: true` flag** on any project that served a `# Week Goals` item that week. This is the one judgment call the dashboard cannot make itself — it drives the "time sink" warning (share of work outside your goals). Leave it off for projects that were not goals. Never flag `Personal` or `Team` as lingering-exempt yourself; the page handles that.
 3. **Pick 2–3 highlights** — the week's most notable accomplishments, in your own words. For an unfinished in-progress week, leave highlights empty.
 
@@ -110,21 +117,36 @@ Append (never overwrite) a `# AI Week Review` section at the end of the weekly f
 ```
 ## Week Review: YYYY-MM-DD to YYYY-MM-DD
 
-### Project Name
+### Area Name
 - Task or activity completed
 - Another task
+```
 
+When step 4 ran and found something, add one more section under it:
+
+```
 ### Pull & Merge Requests
 - **webapp#2425** - [search] Add end-to-end stress tests (created, open) [GitHub]
 - **platform-api!265** - Optimize metadata search query (created, merged) [GitLab]
 - **base-image!18** - Add en_US locale to the base image (reviewed) [GitLab]
 ```
 
-Keep it short and factual. Tag each PR/MR with the forge it came from (`[GitHub]`, `[GitLab]`, or whatever `sources.md` names). No commentary unless asked.
+**Omit that heading entirely when step 4 was skipped or came back empty.** Tag each PR/MR with the forge it came from (`[GitHub]`, `[GitLab]`, or whatever `sources.md` names). Keep it short and factual, in the tone the profile names. No commentary unless asked.
 
 ## 8. Append to the dashboard (`weekly/site/data.js`)
 
 The dashboard reads `window.WEEKS` (an array, newest last). Append **one new week object** immediately before the closing `];` of the `window.WEEKS` array. Never rewrite existing entries — new weeks carry their MRs inline with `src` tags.
+
+**First, check `window.PROFILE` at the top of the file matches the vault's profile.** It is what makes the page fit this person:
+
+```js
+window.PROFILE = {
+  code: false,                      // true when profile.md checks "Code"
+  focus: ["Studying", "Teaching"]   // "What you track", in order
+};
+```
+
+With `code: false` the page drops the pull-request panel, its three stat tiles, and its timeline bar, and shows carried-over goals and personal items instead; `focus` keeps each area the same colour week after week. If the block is missing, add it above `window.WEEKS`. If the user's areas have changed, update `focus`; that list is the only part of `data.js` you may rewrite.
 
 Schema (match this exactly):
 
@@ -158,9 +180,10 @@ Schema (match this exactly):
 ```
 
 Rules:
+- **When the profile doesn't check Code**, still write `prs: { created: [], reviewed: [] }` (the field is part of the schema and the page reads it), and skip the `window.REPOS` rule below entirely.
 - Put **every** PR/MR in `prs.created` or `prs.reviewed` with an explicit `src: "github"` or `src: "gitlab"`. `status` applies to `created` entries only.
 - For a ref to become a clickable link, its repo short-name must be mapped in `window.REPOS` in `data.js` (`github: { "<short-name>": "<owner>/<repo>" }`, `gitlab: { host: "<host>", paths: { "<short-name>": "<full/project/path>" } }`). Add a row the first time a repository shows up — the same repositories `sources.md` lists. Unmapped refs still render, just as plain text.
-- The dashboard computes stats, sparklines, and warnings from this data. It infers **lingering projects** and **carried-over goals** across weeks automatically — you only need accurate `projects` (with `goal` flags), `tasks`, `goals`, and `prs`. Keep project names stable across weeks so lingering detection works (the page canonicalizes common variants, but consistency helps).
+- The dashboard computes stats, sparklines, and warnings from this data. It infers **lingering areas** and **carried-over goals** across weeks automatically; you only need accurate `projects` (with `goal` flags), `tasks`, `goals`, and `prs`. Keep the area names stable across weeks so lingering detection works (the page canonicalizes common variants, but consistency helps).
 - After editing, verify the file still parses: `node -e "global.window={};require('./weekly/site/data.js');console.log(window.WEEKS.length,'weeks')"`.
 
 ## Output

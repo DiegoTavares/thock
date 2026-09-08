@@ -1,11 +1,13 @@
 # Wrap Today
 
-Close out **today's** daily note. Read what you planned and did, pull the day's commits, scan the last few days for multi-day context, reconcile finished tasks, offer unfinished tasks to the backlog, then append an AI review with suggestions to today's note. It never rewrites your prose — the only edit it makes to what you wrote is flipping a task checkbox you confirm.
+Close out **today's** daily note. Read what you planned and did, pull in whatever outside activity your profile allows, scan the last few days for multi-day context, reconcile finished tasks, offer unfinished tasks to the backlog, then append an AI review with suggestions to today's note. It never rewrites your prose; the only edit it makes to what you wrote is flipping a task checkbox you confirm.
 
-**Reads:** today's daily note, the prior few daily notes, the backlog file, and the repositories recorded in `routines/timeline/sources.md`.
+**Reads:** today's daily note, the prior few daily notes, the backlog file, `profile.md`, and any sources recorded in `routines/timeline/sources.md`.
 **Writes:** today's daily note (append the review; check off confirmed tasks), the backlog file.
 
 > **Note paths and filenames are vault-configured.** Read `.thock/config.toml` first: `[daily]` / `[weekly]` set each note kind's `dir` and moment-style `filename` format, and `[backlog]` sets `file`. This skill's examples use the defaults (`daily/YYYY-MM-DD.md`, `weekly/GGGG-[W]WW.md`, `backlog.md`); when the config — or the vault's existing notes — use different names, follow those silently. That's configuration, not a doc mismatch worth reporting.
+
+> **Read `profile.md` at the vault root next, if it exists.** It says who this person is, which areas they track, the tone to write in, and, under **What Thock may pull in**, the only outside sources you may go and look at. Where this skill says "the profile", that's the file. A vault without one is normal: then step 3 falls back to what `routines/timeline/sources.md` already records, and asks once if that's missing too.
 
 ## 1. Locate today's note
 
@@ -17,14 +19,17 @@ Close out **today's** daily note. Read what you planned and did, pull the day's 
 1. Parse the day-planner and task sections. Separate **checked** (`- [x]`) from **unchecked** (`- [ ]`) tasks.
 2. Note anything meaningful captured during the day: decisions, conversation notes, blockers.
 
-## 3. Pull the day's commits
+## 3. Pull in the day's outside activity
 
-**Never assume a forge.** Don't reach for `gh`, `glab`, or any host just because the CLI is installed — read only the repositories the user named. They live in `routines/timeline/sources.md`, the same list the Week Review skill uses:
+Most days, everything worth reviewing is already in the note. This step is for the rest, and it only ever looks where the user said it may.
 
-1. Read `routines/timeline/sources.md`. If it lists sources, use exactly those.
-2. If it's missing or empty, ask the user **one** question: which repositories should this ritual read from? Accept local checkout paths, hosted forge accounts (host + username), or "none" — a day with no code sources is normal, it just skips this step. Write the answer back to `routines/timeline/sources.md` (create it if missing; append, never rewrite) so later runs stop asking. The Week Review skill documents the file's shape.
+**Start from the profile.** Its **What Thock may pull in** checklist is the whole permission list. An unchecked box means *don't look and don't ask*: skip that source in silence, and don't mention it in the output. If every box is unchecked, skip this step entirely and go to step 4; a day with no outside sources is the normal case, not a gap.
 
-Then fetch today's work from those sources only:
+**If there is no `profile.md`,** fall back to `routines/timeline/sources.md` (below). If that's missing too, ask **one** plain question and then stop asking forever: *"Is there anything outside your notes I should look at when I wrap the day (code repositories, for example)? 'Nothing' is a perfectly normal answer."* Record whatever they say in `routines/timeline/sources.md` (create it if missing; append, never rewrite) in the shape the Week Review skill documents. A file whose two lists are explicitly empty (`_None._`) is an **answer**, not an empty file: treat the question as settled and never raise it again.
+
+### Code, only when the checklist checks **Code**
+
+**Never assume a forge.** Don't reach for `gh`, `glab`, or any host just because the CLI is installed: read only the repositories the user named in `routines/timeline/sources.md`, the same list the Week Review skill uses. Then fetch today's work from those sources only:
 
 - Local checkout: `git -C <path> log --author="$(git -C <path> config user.email)" --since="YYYY-MM-DD 00:00" --until="YYYY-MM-DD 23:59" --oneline`.
 - GitHub (`gh`), when a GitHub account is recorded: `gh search commits --author=@me --author-date=YYYY-MM-DD` (or `gh search prs --author=@me --updated=YYYY-MM-DD..YYYY-MM-DD`).
@@ -32,6 +37,14 @@ Then fetch today's work from those sources only:
 - Any other forge: ask the user how to query it and record the recipe in `sources.md`.
 
 Deduplicate. Keep repo, short SHA / ref, and message. If a source fails to authenticate, say so in the output instead of dropping it silently.
+
+### Calendar, only when the checklist checks **Calendar**
+
+Read today's `## Calendar` section if the Connect Google Workspace setup has written one into the note. Don't call any API yourself and don't offer to set one up mid-ritual; note what the day actually held and move on.
+
+### Email, only when the checklist checks **Email**
+
+Same shape: use what has already landed in the vault (`inbox/`, the backlog's imported items). Don't reach for a mailbox from inside this ritual.
 
 ## 4. Scan recent days for context
 
@@ -41,7 +54,7 @@ Read the previous 2–3 daily notes so the review isn't myopic — catch carried
 
 Some tasks probably got done today but were never checked off. Cross-reference the unchecked (`- [ ]`) tasks from the note against what actually happened — the commits from step 3 and the decisions/notes captured in step 2.
 
-1. For each unchecked task, judge whether the day's commits or captured notes show it was finished.
+1. For each unchecked task, judge whether what step 3 pulled in, or the notes captured in step 2, show it was finished.
 2. If any look done, list them (with the evidence — the commit or note that suggests completion) and ask the user to confirm which to mark done. Default to **none**; only mark what the user explicitly confirms. If nothing looks finished, skip this step silently.
 3. For each confirmed task, flip its box in place (`- [ ]` → `- [x]`) in today's note. This checkbox flip is the **only** edit this skill makes to your own text — leave the task wording and everything else untouched.
 
@@ -72,14 +85,13 @@ Append (never overwrite) a `# Daily Closure` section at the end of today's note:
 - [ ] Unchecked task worth continuing tomorrow → backlog (Soon)
 - [ ] Task the user chose to leave in the note
 
-## Commits
-- repo@abc123 — commit message
-
 ## Suggestions
 - One or two concrete, actionable nudges (don't pad)
 ```
 
-Keep it short and factual. Base "carried forward" on the still-unchecked tasks (those you marked done in step 5 belong under `## Done`, not here) plus anything the recent-days scan shows lingering. Suffix each task that moved in step 6 with `→ backlog (Soon)` (or `(Someday)`) so the note records where it went; tasks that were skipped as duplicates get `→ already in backlog`.
+When step 3 actually pulled something in, add one section for it above `## Suggestions`: `## Commits` for code (`- repo@abc123 · commit message`), `## Calendar` for meetings. **Omit the heading entirely when there is nothing to put under it**; an empty `## Commits` on a day with no code is noise, and on a vault that doesn't track code it's someone else's life.
+
+Write it in the tone the profile names, and use the profile's area names when you group anything. Keep it short and factual. Base "carried forward" on the still-unchecked tasks (those you marked done in step 5 belong under `## Done`, not here) plus anything the recent-days scan shows lingering. Suffix each task that moved in step 6 with `→ backlog (Soon)` (or `(Someday)`) so the note records where it went; tasks that were skipped as duplicates get `→ already in backlog`.
 
 ## Output
 

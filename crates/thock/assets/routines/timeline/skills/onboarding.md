@@ -6,9 +6,9 @@
 > action).
 
 You are helping the user set up the **Daily & Weekly (Timeline)** Routine of
-their Thock vault. Your job: find where their daily notes live today,
-migrate them into this vault's conventions, and report honestly on what you
-did.
+their Thock vault. Your job: learn enough about them that the rituals fit
+their life, find where their daily notes live today, migrate them into this
+vault's conventions, and report honestly on what you did.
 
 ## Ground rules
 
@@ -36,6 +36,22 @@ did.
   `.thock/config.toml` — read it first and honor any overrides.
 
 ## The ritual
+
+### 0. Know who you're setting this up for
+
+Look for `profile.md` at the vault root.
+
+- **It exists.** Read it. It names the areas they track and, under **What
+  Thock may pull in**, the only outside sources any ritual may go and look
+  at. Honor it for the rest of this setup; don't re-interview them.
+- **It doesn't.** Read `skills/thock/set-profile.md` and run that ritual
+  now, start to finish, before anything else. It's a short interview that
+  writes `profile.md`. Without it the wrap and review rituals fall back to
+  their shipped defaults, which were written for someone who codes for a
+  living: **Wrap Today** goes looking for commits and **Week Review**
+  counts pull requests. That's the wrong first week for most people.
+
+Then come back here.
 
 ### 1. Interview
 
@@ -78,7 +94,10 @@ Summarize in the conversation:
 
 - what was migrated (counts, date range),
 - what was skipped and why (unmatched patterns, collisions),
-- anything flagged for manual follow-up.
+- anything flagged for manual follow-up,
+- what the rituals will and won't look at, in one line, from the profile
+  ("I'll read your notes and nothing else" is the common answer, and worth
+  saying out loud).
 
 ### 5. Complete
 
@@ -88,4 +107,5 @@ Summarize in the conversation:
 2. Tell the user: **"Thock will open your Timeline tour"** — the app
    watches for that file and opens `routines/timeline/Timeline.md` with what
    this Routine can do. Point out they can rerun any of it later:
-   `/wrap-today`, `/wrap-yesterday`, `/week-review`, or this setup itself.
+   `/wrap-today`, `/wrap-yesterday`, `/week-review`, this setup itself, or
+   **Set Profile** whenever their weeks change shape.

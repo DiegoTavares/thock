@@ -1,8 +1,13 @@
 # Daily & Weekly (the Timeline Routine)
 
 This Routine closes the loop on your daily and weekly rhythm: it turns a week
-of notes and code activity into a reviewed, visualized record. This page is
-the tour — each section ends with something to try right now.
+of notes into a reviewed, visualized record. This page is the tour; each
+section ends with something to try right now.
+
+The rituals below read `profile.md` at the vault root before they run, so
+they ask about *your* weeks. If you haven't written one, run **Set Profile**
+(`thock: set profile`). It's a short interview, and it's what decides
+whether these rituals go looking for code or leave your notes alone.
 
 ## The Timeline
 
@@ -41,14 +46,14 @@ open, read, and edit. Hover a skill in this Routine's section and press the
 run button, use `thock: run skill` from the palette, or invoke them as
 slash commands inside an agent conversation:
 
-- **Wrap Today** (`/wrap-today`) — close out today's note: tasks, the day's
-  commits (from the repositories you name — see `sources.md` below), recent
-  context, then an appended `# Daily Closure` review.
+- **Wrap Today** (`/wrap-today`) closes out today's note: tasks, recent
+  context, anything your profile lets it pull in from outside (commits, for
+  a vault that tracks code), then an appended `# Daily Closure` review.
 - **Wrap Yesterday** (`/wrap-yesterday`) — the same closure for yesterday,
   for when the day got away from you.
-- **Week Review** (`/week-review`) — aggregate the week's notes and your
-  PRs/MRs, append an `# AI Week Review` to the weekly note, and feed the
-  dashboard.
+- **Week Review** (`/week-review`) aggregates the week's notes into a
+  summary by area, appends an `# AI Week Review` to the weekly note, and
+  feeds the dashboard.
 - **Set Up Timeline** — the guided migration that (maybe just) ran; rerun it
   any time more old notes turn up.
 
@@ -82,6 +87,13 @@ goal completion, and warnings (time sinks, carry-overs, lingering projects)
 from the feed in `weekly/site/data.js`. It starts empty; each Week Review
 appends one entry.
 
+The page fits itself to you. `window.PROFILE` at the top of `data.js` says
+whether this vault tracks code: when it doesn't, the pull-request panel, its
+three stat tiles, and its timeline bar disappear, and carried-over goals and
+personal items take their place. Left on `"auto"`, the page decides from
+whether your weeks actually carry any. `focus` there keeps each of your
+areas the same colour week after week.
+
 ## Make it yours
 
 Everything is a plain file:
@@ -91,9 +103,13 @@ Everything is a plain file:
 - `templates/daily.md`, `templates/weekly.md` — what new notes start from.
 - `routines/timeline/skills/*.md` — the rituals themselves. Edit one and the
   next run honors your edit; the agent always reads the live file.
+- `profile.md` (vault root): who you are, the areas you track, and the only
+  outside sources any ritual may look at. **Set Profile** writes it; you can
+  edit it directly.
 - `routines/timeline/sources.md` — the repositories the wrap and review skills
-  read from. The skills ask once and record your answer here; edit the list
-  and they follow it. Nothing is queried unless it's on this list.
+  read from, when your profile lets them. The skills ask once and record your
+  answer here; edit the list and they follow it. Nothing is queried unless
+  it's on this list.
 - `.thock/config.toml` — where notes live, how they're named, and this
   vault's agent command override.
 

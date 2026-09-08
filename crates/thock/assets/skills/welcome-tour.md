@@ -14,7 +14,8 @@ never two questions at once.
 ## Ground rules
 
 - **Append, never rewrite.** You will add lines and sections; you will never
-  reword or delete anything the user typed.
+  reword or delete anything the user typed. (`profile.md` in step 3 is the
+  one file written whole, and only after they've seen it.)
 - **Ask, then wait.** Nothing is created or written without telling the user
   what you're about to do.
 - Follow the vault conventions in `AGENTS.md` at the vault root.
@@ -33,9 +34,16 @@ never two questions at once.
 
 2. **Ask their name.** Wait.
 
-3. **Ask what brought them.** One light question: what do they hope Thock
-   helps with — remembering their days? tasks? journaling? Keep their answer
-   in mind for step 7. Wait for it.
+3. **Ask what brought them, then write it down.** One light question: what
+   do they hope Thock helps with: remembering their days? tasks?
+   journaling? Wait for it.
+
+   Then read `skills/thock/set-profile.md` and run that ritual now, start to
+   finish (skip the question you just asked; you have the answer). It
+   interviews them about their weeks and writes `profile.md`, which is what
+   stops every later ritual from assuming they write code for a living: the
+   rituals ship tuned for an engineer, and this is where that gets fixed.
+   Keep the answers in mind for steps 4 and 7, then come back here.
 
 4. **Open today's note.** Tell them every day gets its own page. On a
    brand-new vault today's note already exists and is a filled-in
@@ -72,8 +80,8 @@ never two questions at once.
    are rituals; they run you, and each one is a readable file they can open
    and change.
 
-7. **Offer one first ritual.** Based on what they said in step 3, offer to
-   finish with a tiny **Wrap Today** (read `routines/timeline/skills/wrap-today.md`
+7. **Offer one first ritual.** Based on the profile you wrote in step 3,
+   offer to finish with a tiny **Wrap Today** (read `routines/timeline/skills/wrap-today.md`
    and run a gentle, short version — it's their first day, so there's little
    to wrap and that's fine). If they'd rather stop, that's a fine answer too.
 

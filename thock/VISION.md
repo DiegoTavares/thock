@@ -289,6 +289,22 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   example's planner lines rather than creating the note, and Set Language translates the example only while
   it is still untouched. Existing vaults and **Create vault here** are unaffected. Spec
   `specs/v22-inviting-templates-and-example-day.md`. _(shipped)_
+- [x] **Personalized rituals and a dashboard that fits** (the second non-developer trial found the
+  rituals still belonged to an engineer: **Wrap Today** went looking for commits and offered to
+  authenticate against GitHub and GitLab, **Week Review** counted pull requests, and the weekly
+  dashboard spent three stat tiles, a timeline bar, and a full-width panel on merge requests that
+  would never exist). A new core ritual, **Set Profile** (`thock: set profile`), interviews the user
+  about what their weeks are actually made of and writes `profile.md` at the vault root: who they
+  are, the areas they track, the tone to use, and a checklist of the outside sources any ritual may
+  look at. The Welcome Tour runs it where it already asked "what brought you here?" and discarded the
+  answer; the Timeline setup runs it first when the file is missing. The wrap and review rituals
+  treat that checklist as their whole permission list (an unchecked box means *don't look and don't
+  ask*, in silence), and omit the `## Commits` and `### Pull & Merge Requests` headings when there is
+  nothing to put under them. The dashboard reads `window.PROFILE` in `data.js`: a vault that doesn't
+  track code loses the pull-request panel, its tiles, and its bar, and gains carried-over goals and
+  personal items, with each area holding one colour across weeks. A vault with no `profile.md`
+  behaves exactly as before, and the `"auto"` default decides from the feed. Spec
+  `specs/v23-personalized-rituals.md`. _(shipped)_
 - [ ] **BYO-LLM cost visibility** — key/model choice, local vs cloud, graceful failure. _(planned)_
 
 ---

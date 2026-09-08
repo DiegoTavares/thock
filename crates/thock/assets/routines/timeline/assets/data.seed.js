@@ -1,3 +1,17 @@
+// Who this dashboard is for. The Set Profile ritual writes this from
+// `profile.md`; edit it by hand any time.
+//
+//   code   true: always show the pull-request panel, tiles and timeline bar
+//          false: hide them, and show carried-over goals and personal items
+//                 in their place
+//          "auto" (the default): show them only in weeks that carry PRs/MRs
+//   focus  the areas from profile.md's "What you track", in order. Each one
+//          keeps the same colour from week to week.
+window.PROFILE = {
+  code: "auto",
+  focus: []
+};
+
 // Weekly review data — one entry per week, newest last.
 // The Week Review skill appends a new object to this array each week.
 //
