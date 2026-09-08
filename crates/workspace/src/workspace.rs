@@ -9838,9 +9838,9 @@ pub struct OpenChannelNotesById {
 actions!(
     zed,
     [
-        /// Opens the Zed log file.
+        /// Opens the Thock log file.
         OpenLog,
-        /// Reveals the Zed log file in the system file manager.
+        /// Reveals the Thock log file in the system file manager.
         RevealLogInFileManager
     ]
 );
