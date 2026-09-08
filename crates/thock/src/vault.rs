@@ -958,7 +958,7 @@ mod tests {
         assert_eq!(
             vault.config.routines.installed,
             vec![
-                InstalledRoutine::new("timeline".to_string(), true, 9),
+                InstalledRoutine::new("timeline".to_string(), true, 10),
                 InstalledRoutine::new("inbox".to_string(), true, 2),
             ]
         );
