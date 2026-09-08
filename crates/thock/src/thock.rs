@@ -53,8 +53,8 @@ pub fn init(cx: &mut App) {
 
 /// Hides command-palette actions for the Zed subsystems Thock turns off
 /// (V12 de-Zed-ification). The subsystems stay registered so upstream rebases
-/// stay cheap, but a note-taker never sees debugger, task, collab, or
-/// account commands.
+/// stay cheap, but a note-taker never sees debugger, task, collab,
+/// account, or Zed-branded storefront commands.
 fn hide_inherited_zed_actions(cx: &mut App) {
     use std::any::TypeId;
     if CommandPaletteFilter::try_global(cx).is_none() {
@@ -84,6 +84,9 @@ fn hide_inherited_zed_actions(cx: &mut App) {
             TypeId::of::<zed_actions::OpenOnboarding>(),
             TypeId::of::<zed_actions::OpenAccountSettings>(),
             TypeId::of::<workspace::welcome::ShowWelcome>(),
+            TypeId::of::<zed_actions::OpenStatusPage>(),
+            TypeId::of::<zed_actions::GetMerch>(),
+            TypeId::of::<zed_actions::OpenTelemetryLog>(),
         ]);
     });
 }
@@ -235,6 +238,12 @@ mod tests {
             assert!(filter.is_hidden(&zed_actions::OpenOnboarding));
             assert!(filter.is_hidden(&zed_actions::OpenAccountSettings));
             assert!(filter.is_hidden(&workspace::welcome::ShowWelcome));
+            assert!(
+                filter.is_hidden(&zed_actions::GetMerch),
+                "Zed-branded storefront and status commands should be hidden"
+            );
+            assert!(filter.is_hidden(&zed_actions::OpenStatusPage));
+            assert!(filter.is_hidden(&zed_actions::OpenTelemetryLog));
 
             assert!(
                 !filter.is_hidden(&routines_panel::OpenToday),

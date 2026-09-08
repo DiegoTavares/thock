@@ -124,3 +124,52 @@ never fetch Zed release binaries; the in-app updater then shows the explanation 
 - Command palette shows no `debugger:`, `task:`, `repl:`, `collab:`, `client:` actions.
 - `git diff` against upstream outside `crates/thock/` + `thock/` + `assets/` remains ≤ 4 files for this
   feature.
+
+## 6. Follow-up: visible strings (2026-09-07)
+
+V12 turned the inherited *surfaces* off but left the inherited *copy* alone, so the word "Zed" kept
+showing up wherever a surface Thock still ships renders text. This pass swaps the product name in
+every string a Thock user can actually reach:
+
+| Surface | Where |
+|---|---|
+| Title-bar update banner ("Checking for / Downloading / Installing Thock Update…") | `crates/ui/src/components/collab/update_button.rs` |
+| About window headline and window title | `crates/release_channel/src/lib.rs` (`display_name`), `crates/zed/src/zed.rs` |
+| macOS app menu (menu title, About / Hide / Quit) | `crates/zed/src/zed/app_menus.rs` |
+| "Move to Applications" first-run prompt and progress modal | `crates/zed/src/zed/move_to_applications.rs` |
+| Launch-failure dialog and `--system-specs` output | `crates/zed/src/main.rs`, `crates/system_specs/src/system_specs.rs` |
+| Install CLI prompts and toast (the symlink was already `thock`) | `crates/install_cli/src/install_cli_binary.rs` |
+| Updater "installed via a package manager" prompt, and its install error | `crates/auto_update/src/auto_update.rs` |
+| Settings window title and setting descriptions | `crates/settings_ui/src/settings_ui.rs`, `page_data.rs` |
+| Empty-pane welcome headline | `crates/workspace/src/welcome.rs` |
+| Extensions page feature banners and incompatibility tooltip | `crates/extensions_ui/src/extensions_ui.rs` |
+| Default icon theme name ("Thock (Default)") | `crates/theme/src/icon_theme.rs`, `assets/settings/default.json` |
+| Header comment seeded into a new `settings.json` | `assets/settings/initial_user_settings.json` |
+| Command-palette descriptions for About and the log actions | `crates/zed_actions/src/lib.rs`, `crates/workspace/src/workspace.rs` |
+
+`display_name()` is the highest-leverage of these: it feeds the About headline, the "Updated to X"
+notification, and the install-CLI toast from one place.
+
+Two behavioural changes ride along, both in the spirit of §3.2:
+
+- `zed::OpenStatusPage`, `zed::GetMerch`, and `zed::OpenTelemetryLog` join the palette filter. They are
+  Zed-branded destinations (status page, merch store) or dead under `telemetry: off`, so renaming them
+  would have been a lie rather than a fix.
+- The Extensions page no longer renders the inherited `Git` and `OpenIn` feature banners. They were the
+  only place the word "Git" surfaced in Thock's own chrome, which `VISION.md` §4 forbids.
+
+### Deliberately left alone
+
+- **`ReleaseChannel::app_id` / `app_identifier`, the single-instance handshake, the HTTP user agent.**
+  These are OS and protocol identifiers, not copy. `app_id` has to keep matching the macOS bundle
+  identifier, and the handshake string is what two running builds use to find each other.
+- **The `zed::` action namespace.** The palette still reads `zed: about`, `zed: quit`. Renaming it means
+  touching `zed_actions`, every keymap entry, and the keymap-name search path in the command palette:
+  a much larger rebase bill than the rest of this pass, and it wants its own decision.
+- **Upstream comments in `assets/settings/default.json`.** Visible only via "Open Default Settings", and
+  rewriting hundreds of comment lines in the largest fork-owned file would swamp every future merge.
+- **AI, collab, debugger, onboarding, and Zeta copy.** Unreachable under `disable_ai` and the V12
+  setting flips. Some of it (Zeta, Zed's native agent) names Zed products correctly and should stay.
+- **Component-preview fixtures** in `crates/workspace/src/notifications.rs` and `crates/ui/**`, which
+  are dev-only surfaces.
+- **`crates/windows_resources`.** Thock ships macOS and Linux only.
