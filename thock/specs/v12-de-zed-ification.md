@@ -25,7 +25,7 @@ Decisions locked in with Diego (2026-08-23):
 - **AI stays BYO-CLI only.** `disable_ai: true` remains; the Thock Agent panel (user's own CLI agent) is
   the only AI surface. No Zed agent panel, no API keys in Thock — reaffirms V5.
 - **LSP survives for TOML, JSON/JSONC, and YAML only.** Markdown ships no LSP in Zed anyway. TOML support
-  arrives via the `toml` extension, auto-installed by default.
+  arrives via the `toml` extension, auto-installed by default. *(Superseded for JSON/JSONC/YAML by §7.)*
 - **Kept visible:** terminal panel, outline panel, search status button, project panel, and the full
   extension system including the store page.
 - **Hidden:** sign-in/user menu, collab panel, git panel, debugger, diagnostics/LSP status buttons,
@@ -64,8 +64,8 @@ Each flip carries a short `// Thock:` comment in the style of the existing `disa
 | Telemetry | `diagnostics`, `metrics` → `false` |
 | Updates | `auto_update` → `false` |
 | Extensions | `auto_install_extensions`: `{"html": false, "toml": true}` |
-| LSP | `enable_language_server` → `false` in `defaults`; re-enabled per-language for JSON, JSONC, YAML (TOML's block comes with the extension, so it is opted in under `languages`) |
-| Prettier | `Markdown.prettier.allowed` → `false` |
+| LSP | `enable_language_server` → `false` in `defaults`; re-enabled per-language for JSON, JSONC, YAML (TOML's block comes with the extension, so it is opted in under `languages`) — see §7, which since refuses the JSON/JSONC/YAML server binaries |
+| Prettier | `Markdown.prettier.allowed` → `false` (§7 extends this to JSON, JSONC and YAML) |
 
 Settings/Keymap/Themes remain reachable via the macOS menu bar and command palette after
 `show_user_menu` goes; the popover's only unique content was account/plan chrome.
@@ -173,3 +173,34 @@ Two behavioural changes ride along, both in the spirit of §3.2:
 - **Component-preview fixtures** in `crates/workspace/src/notifications.rs` and `crates/ui/**`, which
   are dev-only surfaces.
 - **`crates/windows_resources`.** Thock ships macOS and Linux only.
+
+---
+
+## 7. Follow-up: no Node runtime in a vault (2026-09-09)
+
+§3.1 kept the JSON, JSONC and YAML language servers so `settings.json` and `keymap.json` would still get
+schema-aware editing. Measuring a running vault showed what that costs: opening a single `.json` file
+starts `json-language-server` (a Node process, ~93 MB of `node_modules` on disk) *and*
+`package-version-server`, then npm-installs prettier and initialises the Node runtime — none of which a
+Markdown second brain has any use for. On the dogfood vault that was four resident language-server
+processes for zero Markdown benefit.
+
+The fix stays at the settings layer, as V12 requires:
+
+| Language | Change |
+|---|---|
+| JSON, JSONC | `language_servers` → `["!json-language-server", "!package-version-server", "..."]`; `prettier.allowed` → `false` |
+| YAML | `language_servers` → `["!yaml-language-server", "..."]`; `prettier.allowed` → `false` |
+
+`enable_language_server` stays `true` for these languages deliberately. Denying the *named* servers rather
+than the language's whole LSP capability keeps the machinery intact, so upstream tests that attach a fake
+server to a JSON buffer still pass and the rebase stays cheap.
+
+**Cost accepted:** no completions, schema validation or formatting in `settings.json` and `keymap.json`.
+Both remain editable as plain text, and `routine.toml` is unaffected — TOML support comes from the `toml`
+extension, which is native and pulls no Node.
+
+**Verified** by A/B on the same build against a scratch vault holding one `.json` file: with stock
+settings the log shows `starting language server json-language-server`, `package-version-server`,
+`Installing default prettier` and a `node_runtime` line; with the settings above none of the four appear
+and the process tree is the main process alone.
