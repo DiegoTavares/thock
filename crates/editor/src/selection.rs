@@ -1356,7 +1356,12 @@ impl Editor {
             let tail;
             match &mode {
                 SelectMode::Character => {
-                    head = position.to_point(&display_map);
+                    // `position` was clipped against the snapshot of the last
+                    // paint, which may be older than `display_map`; converting
+                    // it unclipped can produce an out-of-range buffer point.
+                    head = display_map
+                        .clip_point(position, Bias::Left)
+                        .to_point(&display_map);
                     tail = pending.tail().to_point(buffer);
                 }
                 SelectMode::Word(original_range) => {
