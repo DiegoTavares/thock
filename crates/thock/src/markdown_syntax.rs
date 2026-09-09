@@ -24,6 +24,17 @@ pub enum SpanKind {
     Checkbox(bool),
     /// The text between a pair of `~~` delimiters, drawn struck through.
     Strikethrough,
+    /// The text between a pair of `**` or `__` delimiters, drawn bold.
+    Bold,
+    /// The text between a pair of `*` or `_` delimiters, drawn italic.
+    Italic,
+    /// The text inside a `` `code` `` span, drawn in the theme's literal
+    /// colour once the backticks are folded away.
+    Code,
+    /// A list item's `-`, `*` or `+` marker, drawn as a bullet.
+    Bullet,
+    /// A `> quoted` line, drawn muted so it recedes from the prose around it.
+    Quote,
     /// An email note's machinery line (frontmatter fence or sync key),
     /// folded away entirely, trailing newline included (V16 §5.1).
     EmailHidden,
@@ -251,9 +262,17 @@ fn atx_heading(line: &str) -> Option<(u8, usize, usize)> {
 }
 
 fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
-    let code_spans = code_span_ranges(line);
-    let comments = html_comment_ranges(line, &code_spans);
+    let code = code_spans(line);
+    let code_ranges: Vec<Range<usize>> = code.iter().map(|span| span.range.clone()).collect();
+    let comments = html_comment_ranges(line, &code_ranges);
     let mut inline_from = 0;
+
+    if let Some(range) = blockquote_range(line) {
+        spans.push(ConcealSpan::new(
+            line_start + range.start..line_start + range.end,
+            SpanKind::Quote,
+        ));
+    }
 
     if let Some((level, marker_start, text_start)) = atx_heading(line) {
         let text = line[text_start..].trim_end();
@@ -271,12 +290,19 @@ fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
             SpanKind::Heading(level),
         ));
         inline_from = text_start;
-    } else if let Some((range, checked)) = task_checkbox(line) {
+    } else if let Some(bullet) = bullet_marker(line) {
         spans.push(ConcealSpan::new(
-            line_start + range.start..line_start + range.end,
-            SpanKind::Checkbox(checked),
+            line_start + bullet.start..line_start + bullet.end,
+            SpanKind::Bullet,
         ));
-        inline_from = range.end;
+        inline_from = bullet.end;
+        if let Some((range, checked)) = task_checkbox(line) {
+            spans.push(ConcealSpan::new(
+                line_start + range.start..line_start + range.end,
+                SpanKind::Checkbox(checked),
+            ));
+            inline_from = range.end;
+        }
     }
 
     for comment in &comments {
@@ -286,11 +312,27 @@ fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
         ));
     }
 
-    let excluded: Vec<Range<usize>> = code_spans.into_iter().chain(comments).collect();
+    for span in &code {
+        spans.push(ConcealSpan::new(
+            line_start + span.range.start..line_start + span.text.start,
+            SpanKind::Marker,
+        ));
+        spans.push(ConcealSpan::new(
+            line_start + span.text.start..line_start + span.text.end,
+            SpanKind::Code,
+        ));
+        spans.push(ConcealSpan::new(
+            line_start + span.text.end..line_start + span.range.end,
+            SpanKind::Marker,
+        ));
+    }
+
+    let excluded: Vec<Range<usize>> = code_ranges.into_iter().chain(comments).collect();
     let link_ranges = scan_inline(line, inline_from, line_start, &excluded, spans);
 
-    // A `~~` inside a link construct belongs to its destination or label, not
-    // to a strikethrough — and folding one would overlap the link's own folds.
+    // A `~~` or `*` inside a link construct belongs to its destination or
+    // label, not to an inline style, and folding one would overlap the
+    // link's own folds.
     let struck_excluded: Vec<Range<usize>> = excluded.into_iter().chain(link_ranges).collect();
     for run in each_strikethrough(line, inline_from, &struck_excluded) {
         spans.push(ConcealSpan::new(
@@ -306,12 +348,72 @@ fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
             SpanKind::Marker,
         ));
     }
+
+    for run in each_emphasis(line, inline_from, &struck_excluded, 0) {
+        spans.push(ConcealSpan::new(
+            line_start + run.range.start..line_start + run.text.start,
+            SpanKind::Marker,
+        ));
+        for kind in run.kinds() {
+            spans.push(ConcealSpan::new(
+                line_start + run.text.start..line_start + run.text.end,
+                kind,
+            ));
+        }
+        spans.push(ConcealSpan::new(
+            line_start + run.text.end..line_start + run.range.end,
+            SpanKind::Marker,
+        ));
+    }
 }
 
-/// The ranges of inline code spans in `line`, delimiters included. Backtick
-/// runs pair with the next run of the same length; an unmatched run is
-/// literal text and scanning continues past it.
-fn code_span_ranges(line: &str) -> Vec<Range<usize>> {
+/// The `-`, `*` or `+` marker of a list item, which needs whitespace after
+/// it: a `*` that opens emphasis is not a bullet, and neither is a `- - -`
+/// break, whose every character is the marker itself.
+fn bullet_marker(line: &str) -> Option<Range<usize>> {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let rest = line.get(indent..)?;
+    let marker = *rest.as_bytes().first()?;
+    if !matches!(marker, b'-' | b'*' | b'+') {
+        return None;
+    }
+    if !rest[1..].starts_with([' ', '\t']) {
+        return None;
+    }
+    let markers = rest
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .try_fold(0usize, |count, byte| (byte == marker).then_some(count + 1));
+    if markers.is_some_and(|count| count >= 3) {
+        return None;
+    }
+    Some(indent..indent + 1)
+}
+
+/// A blockquote line's text, marker included: coloured rather than folded,
+/// so the `>` still says what the line is and nothing shifts sideways.
+fn blockquote_range(line: &str) -> Option<Range<usize>> {
+    let indent = block_indent(line)?;
+    if !line[indent..].starts_with('>') {
+        return None;
+    }
+    let end = line.trim_end().len();
+    (end > indent).then_some(indent..end)
+}
+
+/// A `` `code` `` span parsed from a single line, both ranges
+/// line-relative.
+struct InlineCode {
+    /// The full construct, backtick delimiters included.
+    range: Range<usize>,
+    /// The code between the delimiters.
+    text: Range<usize>,
+}
+
+/// The inline code spans of `line`, delimiters included. Backtick runs pair
+/// with the next run of the same length; an unmatched run is literal text and
+/// scanning continues past it.
+fn code_spans(line: &str) -> Vec<InlineCode> {
     let bytes = line.as_bytes();
     let mut runs = Vec::new();
     let mut cursor = 0;
@@ -327,7 +429,7 @@ fn code_span_ranges(line: &str) -> Vec<Range<usize>> {
         }
     }
 
-    let mut ranges = Vec::new();
+    let mut spans = Vec::new();
     let mut run_index = 0;
     while run_index < runs.len() {
         let (open_start, open_length) = runs[run_index];
@@ -335,13 +437,24 @@ fn code_span_ranges(line: &str) -> Vec<Range<usize>> {
         match closing {
             Some(close_index) => {
                 let (close_start, close_length) = runs[close_index];
-                ranges.push(open_start..close_start + close_length);
+                spans.push(InlineCode {
+                    range: open_start..close_start + close_length,
+                    text: open_start + open_length..close_start,
+                });
                 run_index = close_index + 1;
             }
             None => run_index += 1,
         }
     }
-    ranges
+    spans
+}
+
+/// The ranges of `line`'s inline code spans, delimiters included.
+fn code_span_ranges(line: &str) -> Vec<Range<usize>> {
+    code_spans(line)
+        .into_iter()
+        .map(|code| code.range)
+        .collect()
 }
 
 /// The line ranges no inline construct may overlap — inline code spans and
@@ -601,6 +714,139 @@ fn parse_strikethrough(line: &str, open: usize) -> Option<InlineStrikethrough> {
         range: open..close + 2,
         text: text_start..close,
     })
+}
+
+/// A `*emphasised*` run parsed from a single line, all ranges line-relative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InlineEmphasis {
+    /// The full construct, delimiters included.
+    range: Range<usize>,
+    /// The emphasised text between the delimiters.
+    text: Range<usize>,
+    /// How long the delimiter runs are: one is italic, two bold, three both.
+    length: usize,
+}
+
+impl InlineEmphasis {
+    /// The style kinds the run's text takes. A `***both***` run yields two,
+    /// which land in separate highlight slots and merge on screen.
+    fn kinds(&self) -> impl Iterator<Item = SpanKind> {
+        let bold = (self.length >= 2).then_some(SpanKind::Bold);
+        let italic = (self.length != 2).then_some(SpanKind::Italic);
+        bold.into_iter().chain(italic)
+    }
+}
+
+/// How deep emphasis is read inside emphasis. Three levels is more nesting
+/// than any real note has, and the cap keeps a line of nothing but
+/// delimiters from recursing once per character.
+const MAX_EMPHASIS_DEPTH: usize = 3;
+
+/// Walks the emphasis runs of `line` from `from`, each construct followed by
+/// the ones nested inside it: `**bold *and italic* here**` produces the outer
+/// run and the inner one, four folded delimiters, and styles that stack. A
+/// run whose delimiters overlap an excluded range is skipped without
+/// consuming its text, so a later well-formed run is still found.
+fn each_emphasis(
+    line: &str,
+    from: usize,
+    excluded: &[Range<usize>],
+    depth: usize,
+) -> Vec<InlineEmphasis> {
+    let bytes = line.as_bytes();
+    let mut runs = Vec::new();
+    let mut cursor = from;
+    while let Some(relative) = line[cursor..].find(['*', '_']) {
+        let open = cursor + relative;
+        let marker = bytes[open];
+        cursor = open + marker_run_length(bytes, open, marker);
+        let Some(run) = parse_emphasis(line, open, marker, excluded) else {
+            continue;
+        };
+        cursor = run.range.end;
+        let text = run.text.clone();
+        runs.push(run);
+        if depth < MAX_EMPHASIS_DEPTH {
+            // Scanning a slice that stops at the closing delimiter keeps the
+            // nested runs inside the construct; the offsets stay
+            // line-relative because the slice still starts at the line's own
+            // start.
+            runs.extend(each_emphasis(
+                &line[..text.end],
+                text.start,
+                excluded,
+                depth + 1,
+            ));
+        }
+    }
+    runs
+}
+
+/// Parses the emphasis run `marker` opens at `open`. The delimiter runs must
+/// be one to three characters long and the same length at both ends, the
+/// opener must be followed by non-whitespace and the closer preceded by it,
+/// and neither may touch a word character: `snake_case` and `2*3*4` are not
+/// emphasis. Anything else stays literal (C3).
+fn parse_emphasis(
+    line: &str,
+    open: usize,
+    marker: u8,
+    excluded: &[Range<usize>],
+) -> Option<InlineEmphasis> {
+    let bytes = line.as_bytes();
+    let length = marker_run_length(bytes, open, marker);
+    if length > 3 {
+        return None;
+    }
+    let text_start = open + length;
+    if bytes.get(text_start)?.is_ascii_whitespace() {
+        return None;
+    }
+    if open > 0 && (bytes[open - 1] == b'\\' || is_word_byte(bytes[open - 1])) {
+        return None;
+    }
+
+    let mut cursor = text_start;
+    let close = loop {
+        let candidate = cursor + line[cursor..].find(marker as char)?;
+        let run = marker_run_length(bytes, candidate, marker);
+        cursor = candidate + run;
+        if run == length
+            && !bytes[candidate - 1].is_ascii_whitespace()
+            && !bytes.get(cursor).is_some_and(|&byte| is_word_byte(byte))
+        {
+            break candidate;
+        }
+    };
+
+    let range = open..close + length;
+    let delimiters = [open..text_start, close..range.end];
+    if delimiters
+        .iter()
+        .any(|delimiter| overlaps_excluded(excluded, delimiter))
+    {
+        return None;
+    }
+    Some(InlineEmphasis {
+        range,
+        text: text_start..close,
+        length,
+    })
+}
+
+/// The length of the run of `marker` starting at `start`.
+fn marker_run_length(bytes: &[u8], start: usize, marker: u8) -> usize {
+    bytes[start..]
+        .iter()
+        .take_while(|&&byte| byte == marker)
+        .count()
+}
+
+/// Whether a byte reads as part of a word, so a delimiter touching it is
+/// punctuation in the middle of one rather than emphasis. Every non-ASCII
+/// byte counts: `café*` should no more open emphasis than `cafe*` does.
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte >= 0x80
 }
 
 /// Parses `[text](dest)` at `open`. `dest` may contain balanced parens, as
@@ -1067,10 +1313,31 @@ mod tests {
     }
 
     #[test]
-    fn inline_code_spans_are_never_concealed() {
-        assert_eq!(spans("`[[x]]`"), vec![]);
-        assert_eq!(spans("a `[b](c)` d"), vec![]);
-        assert_eq!(spans("`` [x](y) ``"), vec![]);
+    fn inline_code_conceals_its_backticks_and_scans_nothing_inside() {
+        assert_eq!(
+            slices("`[[x]]`"),
+            vec![
+                ("`", SpanKind::Marker),
+                ("[[x]]", SpanKind::Code),
+                ("`", SpanKind::Marker),
+            ]
+        );
+        assert_eq!(
+            slices("a `[b](c)` d"),
+            vec![
+                ("`", SpanKind::Marker),
+                ("[b](c)", SpanKind::Code),
+                ("`", SpanKind::Marker),
+            ]
+        );
+        assert_eq!(
+            slices("`` [x](y) ``"),
+            vec![
+                ("``", SpanKind::Marker),
+                (" [x](y) ", SpanKind::Code),
+                ("``", SpanKind::Marker),
+            ]
+        );
     }
 
     #[test]
@@ -1236,6 +1503,7 @@ mod tests {
         assert_eq!(
             slices("- [ ] ~~read [[notes/spec]]~~\n"),
             vec![
+                ("-", SpanKind::Bullet),
                 ("[ ]", SpanKind::Checkbox(false)),
                 ("[[", SpanKind::Marker),
                 ("notes/spec", SpanKind::WikilinkLabel),
@@ -1317,21 +1585,26 @@ mod tests {
     fn task_checkboxes_conceal_the_brackets_and_carry_their_state() {
         assert_eq!(
             slices("- [ ] open task\n"),
-            vec![("[ ]", SpanKind::Checkbox(false))]
+            vec![("-", SpanKind::Bullet), ("[ ]", SpanKind::Checkbox(false)),]
         );
         assert_eq!(
             slices("* [x] done\n+ [X] also done\n"),
             vec![
+                ("*", SpanKind::Bullet),
                 ("[x]", SpanKind::Checkbox(true)),
+                ("+", SpanKind::Bullet),
                 ("[X]", SpanKind::Checkbox(true)),
             ]
         );
         // Nested tasks are tasks, and an empty task is still a checkbox.
         assert_eq!(
             slices("    - [ ] nested\n"),
-            vec![("[ ]", SpanKind::Checkbox(false))]
+            vec![("-", SpanKind::Bullet), ("[ ]", SpanKind::Checkbox(false)),]
         );
-        assert_eq!(slices("- [ ]\n"), vec![("[ ]", SpanKind::Checkbox(false))]);
+        assert_eq!(
+            slices("- [ ]\n"),
+            vec![("-", SpanKind::Bullet), ("[ ]", SpanKind::Checkbox(false)),]
+        );
     }
 
     #[test]
@@ -1345,7 +1618,14 @@ mod tests {
             "1. [ ] ordered lists are not task lists here\n",
             "```\n- [ ] in a fence\n```\n",
         ] {
-            assert_eq!(spans(line), vec![], "{line:?}");
+            // The bullet of a lookalike is still a bullet; the point is that
+            // nothing on the line reads as a checkbox.
+            assert!(
+                !spans(line)
+                    .iter()
+                    .any(|(_, kind)| matches!(kind, SpanKind::Checkbox(_))),
+                "{line:?}"
+            );
         }
     }
 
@@ -1354,12 +1634,186 @@ mod tests {
         assert_eq!(
             slices("- [x] read [[notes/spec]]\n"),
             vec![
+                ("-", SpanKind::Bullet),
                 ("[x]", SpanKind::Checkbox(true)),
                 ("[[", SpanKind::Marker),
                 ("notes/spec", SpanKind::WikilinkLabel),
                 ("]]", SpanKind::Marker),
             ]
         );
+    }
+
+    #[test]
+    fn emphasis_conceals_its_delimiters_and_styles_the_text() {
+        assert_eq!(
+            slices("a *word* here"),
+            vec![
+                ("*", SpanKind::Marker),
+                ("word", SpanKind::Italic),
+                ("*", SpanKind::Marker),
+            ]
+        );
+        assert_eq!(
+            slices("**loud**"),
+            vec![
+                ("**", SpanKind::Marker),
+                ("loud", SpanKind::Bold),
+                ("**", SpanKind::Marker),
+            ]
+        );
+        assert_eq!(
+            slices("***both***"),
+            vec![
+                ("***", SpanKind::Marker),
+                ("both", SpanKind::Bold),
+                ("both", SpanKind::Italic),
+                ("***", SpanKind::Marker),
+            ]
+        );
+    }
+
+    #[test]
+    fn underscore_emphasis_needs_word_boundaries() {
+        assert_eq!(
+            slices("_soft_"),
+            vec![
+                ("_", SpanKind::Marker),
+                ("soft", SpanKind::Italic),
+                ("_", SpanKind::Marker),
+            ]
+        );
+        // The shapes a note is full of: identifiers, paths, and arithmetic.
+        assert_eq!(spans("snake_case_name"), vec![]);
+        assert_eq!(spans("https://a.example/a_b_c"), vec![]);
+        assert_eq!(spans("2*3*4"), vec![]);
+    }
+
+    #[test]
+    fn nested_emphasis_stacks_its_styles() {
+        assert_eq!(
+            slices("**bold *and italic* here**"),
+            vec![
+                ("**", SpanKind::Marker),
+                ("bold *and italic* here", SpanKind::Bold),
+                ("**", SpanKind::Marker),
+                ("*", SpanKind::Marker),
+                ("and italic", SpanKind::Italic),
+                ("*", SpanKind::Marker),
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_emphasis_is_left_alone() {
+        assert_eq!(slices("* not a delimiter"), vec![("*", SpanKind::Bullet)]);
+        assert_eq!(spans("*unclosed"), vec![]);
+        assert_eq!(spans("*trailing space *"), vec![]);
+        assert_eq!(spans("\\*escaped*"), vec![]);
+        assert_eq!(spans("****too many****"), vec![]);
+        assert_eq!(spans("**"), vec![]);
+    }
+
+    #[test]
+    fn emphasis_never_reads_a_delimiter_inside_another_construct() {
+        // The `*`s belong to the destination and to the code span.
+        assert_eq!(
+            slices("[a](https://a.example/*x*)"),
+            vec![
+                ("[", SpanKind::Marker),
+                ("a", SpanKind::LinkLabel),
+                ("](https://a.example/*x*)", SpanKind::Marker),
+            ]
+        );
+        assert_eq!(
+            slices("`*x*`"),
+            vec![
+                ("`", SpanKind::Marker),
+                ("*x*", SpanKind::Code),
+                ("`", SpanKind::Marker),
+            ]
+        );
+        // Emphasis may still span a link, which keeps its own colour.
+        assert_eq!(
+            slices("*see [docs](https://a.example)*"),
+            vec![
+                ("[", SpanKind::Marker),
+                ("docs", SpanKind::LinkLabel),
+                ("](https://a.example)", SpanKind::Marker),
+                ("*", SpanKind::Marker),
+                ("see [docs](https://a.example)", SpanKind::Italic),
+                ("*", SpanKind::Marker),
+            ]
+        );
+    }
+
+    #[test]
+    fn emphasis_inside_a_heading_keeps_both() {
+        assert_eq!(
+            slices("## a **strong** title"),
+            vec![
+                ("## ", SpanKind::Marker),
+                ("a **strong** title", SpanKind::Heading(2)),
+                ("**", SpanKind::Marker),
+                ("strong", SpanKind::Bold),
+                ("**", SpanKind::Marker),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_bullets_conceal_their_marker() {
+        assert_eq!(
+            slices("- milk\n* eggs\n+ flour\n"),
+            vec![
+                ("-", SpanKind::Bullet),
+                ("*", SpanKind::Bullet),
+                ("+", SpanKind::Bullet),
+            ]
+        );
+        assert_eq!(slices("    - nested\n"), vec![("-", SpanKind::Bullet)]);
+    }
+
+    #[test]
+    fn bullet_lookalikes_are_left_alone() {
+        // No gap after the marker, an ordered list, a break, and emphasis.
+        assert_eq!(spans("-not a list\n"), vec![]);
+        assert_eq!(spans("1. ordered\n"), vec![]);
+        assert_eq!(spans("* * *\n"), vec![]);
+        assert_eq!(spans("- - -\n"), vec![]);
+        assert_eq!(spans("```\n- fenced\n```\n"), vec![]);
+    }
+
+    #[test]
+    fn a_bullet_line_still_scans_its_markup() {
+        assert_eq!(
+            slices("- read **now**\n"),
+            vec![
+                ("-", SpanKind::Bullet),
+                ("**", SpanKind::Marker),
+                ("now", SpanKind::Bold),
+                ("**", SpanKind::Marker),
+            ]
+        );
+    }
+
+    #[test]
+    fn blockquotes_colour_the_whole_line_marker_included() {
+        assert_eq!(
+            slices("> quoted\ntail\n"),
+            vec![("> quoted", SpanKind::Quote)]
+        );
+        assert_eq!(slices(">> deeper\n"), vec![(">> deeper", SpanKind::Quote)]);
+        // The line's own markup is still scanned underneath the quote colour.
+        assert_eq!(
+            slices("> see [[note]]\n"),
+            vec![
+                ("> see [[note]]", SpanKind::Quote),
+                ("[[", SpanKind::Marker),
+                ("note", SpanKind::WikilinkLabel),
+                ("]]", SpanKind::Marker),
+            ]
+        );
+        assert_eq!(spans("not > a quote\n"), vec![]);
     }
 
     #[test]
@@ -1383,7 +1837,14 @@ mod tests {
     fn unclosed_and_multi_line_comments_stay_visible() {
         assert_eq!(spans("half <!-- open\n"), vec![]);
         assert_eq!(spans("<!--\nspanning\n-->\n"), vec![]);
-        assert_eq!(spans("a `<!--code-->` b\n"), vec![]);
+        assert_eq!(
+            slices("a `<!--code-->` b\n"),
+            vec![
+                ("`", SpanKind::Marker),
+                ("<!--code-->", SpanKind::Code),
+                ("`", SpanKind::Marker),
+            ]
+        );
         assert_eq!(spans("```\n<!--fenced-->\n```\n"), vec![]);
     }
 

@@ -1,11 +1,13 @@
-//! Concealed markup in the Markdown editor (spec V10). While the cursor is
-//! elsewhere, a vault note's markup renders the way it would in preview:
-//! heading markers, link syntax, `~~` delimiters and HTML comments are folded
-//! away behind an invisible placeholder, headings and link labels are
-//! coloured, struck text takes its line, a task
-//! list's `[ ]` draws as a checkbox, and a `___` line as a rule. Putting the cursor on a line restores that whole line's
-//! source (§4.2). Everything here is display-only — folds and highlights live
-//! in the `DisplayMap` and no code path writes to the buffer (§4.3).
+//! Concealed markup in the Markdown editor (specs V10 and V24). While the
+//! cursor is elsewhere, a vault note's markup renders the way it would in
+//! preview: heading markers, link syntax, `~~` and `**` delimiters, backticks
+//! and HTML comments are folded away behind an invisible placeholder,
+//! headings and link labels are coloured, struck text takes its line,
+//! emphasis takes its weight and slant, a quoted line recedes, a task list's
+//! `[ ]` draws as a checkbox, a list bullet as a `•`, and a `___` line as a
+//! rule. Putting the cursor on a line restores that whole line's source
+//! (§4.2). Everything here is display-only: folds and highlights live in the
+//! `DisplayMap` and no code path writes to the buffer (§4.3).
 
 use crate::markdown_syntax::{self, SpanKind};
 use crate::markdown_text;
@@ -830,6 +832,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
             let placeholder = match kind {
                 SpanKind::Rule => rule_placeholder(editor_handle.clone()),
                 SpanKind::Checkbox(checked) => checkbox_placeholder(checked),
+                SpanKind::Bullet => bullet_placeholder(),
                 SpanKind::EmailMarker(own) => sender_dot_placeholder(own),
                 SpanKind::EmailLink => email_link_placeholder(),
                 _ => marker_placeholder(),
@@ -887,6 +890,7 @@ fn collapsed_text_for(kind: SpanKind) -> &'static str {
     match kind {
         SpanKind::Checkbox(false) => "☐",
         SpanKind::Checkbox(true) => "☑",
+        SpanKind::Bullet => "•",
         SpanKind::EmailMarker(_) => "●",
         SpanKind::EmailLink => "Open in Gmail ↗",
         _ => " ",
@@ -900,6 +904,7 @@ fn is_folded(kind: SpanKind) -> bool {
         kind,
         SpanKind::Marker
             | SpanKind::Rule
+            | SpanKind::Bullet
             | SpanKind::Checkbox(_)
             | SpanKind::EmailHidden
             | SpanKind::EmailLink
@@ -982,6 +987,28 @@ fn checkbox_placeholder(checked: bool) -> FoldPlaceholder {
         type_tag: Some(fold_type_tag()),
         gutter_toggle: false,
         collapsed_text: Some(if checked { "☑" } else { "☐" }.into()),
+    }
+}
+
+/// Placeholder for a list item's `-`, `*` or `+`: the bullet the marker
+/// stands for, muted so the item's own text leads. One column of source
+/// becomes one glyph, so nothing further along the line moves.
+fn bullet_placeholder() -> FoldPlaceholder {
+    FoldPlaceholder {
+        render: Arc::new(|_, _, cx| {
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .text_color(cx.theme().colors().text_muted)
+                .child("•")
+                .into_any_element()
+        }),
+        constrain_width: false,
+        merge_adjacent: false,
+        type_tag: Some(fold_type_tag()),
+        gutter_toggle: false,
+        collapsed_text: Some("•".into()),
     }
 }
 
@@ -1119,34 +1146,52 @@ fn sender_color(own: bool, cx: &App) -> Hsla {
     }
 }
 
-/// The number of highlight slots: two link colours, three heading colours,
-/// the strikethrough, and the email view's sender/own/muted trio.
-const HIGHLIGHT_SLOTS: usize = 9;
+/// The number of highlight slots: the quote tint, three heading colours,
+/// bold and italic, inline code, two link colours, the strikethrough, and the
+/// email view's sender/own/muted trio.
+const HIGHLIGHT_SLOTS: usize = 13;
 
+/// A later slot's style merges over an earlier one's, so the order below is
+/// priority order: the quote tint sits under everything else a quoted line
+/// may hold, and the link colours sit over the heading levels, so a link
+/// label inside a heading still reads as a link.
+const QUOTE_SLOT: usize = 0;
+/// Heading levels 1–3 take this slot and the two after it.
+const HEADING_SLOT: usize = 1;
+const BOLD_SLOT: usize = 4;
+const ITALIC_SLOT: usize = 5;
+const CODE_SLOT: usize = 6;
+const WIKILINK_SLOT: usize = 7;
+const LINK_SLOT: usize = 8;
 /// The slot strikethrough spans take. Late so its style merges over the
 /// colour slots, and it carries no colour of its own — a struck link keeps
 /// its link colour and gains the line.
-const STRIKETHROUGH_SLOT: usize = 5;
+const STRIKETHROUGH_SLOT: usize = 9;
 
-const EMAIL_SENDER_SLOT: usize = 6;
-const EMAIL_OWN_SENDER_SLOT: usize = 7;
-const EMAIL_MUTED_SLOT: usize = 8;
+const EMAIL_SENDER_SLOT: usize = 10;
+const EMAIL_OWN_SENDER_SLOT: usize = 11;
+const EMAIL_MUTED_SLOT: usize = 12;
 
-/// The highlight slot for a styled span. Links get the higher-priority
-/// slots so a link label inside a heading keeps its link colour.
+/// The highlight slot for a styled span, or `None` for one that folds away
+/// rather than taking a colour.
 fn highlight_slot(kind: SpanKind) -> Option<usize> {
     match kind {
-        SpanKind::WikilinkLabel => Some(0),
-        SpanKind::LinkLabel => Some(1),
+        SpanKind::Quote => Some(QUOTE_SLOT),
         // Levels 4–6 reuse level 3 — three signals are enough to read
         // structure at a glance (§7.1).
-        SpanKind::Heading(level) => Some(1 + (level.clamp(1, 3) as usize)),
+        SpanKind::Heading(level) => Some(HEADING_SLOT + level.clamp(1, 3) as usize - 1),
+        SpanKind::Bold => Some(BOLD_SLOT),
+        SpanKind::Italic => Some(ITALIC_SLOT),
+        SpanKind::Code => Some(CODE_SLOT),
+        SpanKind::WikilinkLabel => Some(WIKILINK_SLOT),
+        SpanKind::LinkLabel => Some(LINK_SLOT),
         SpanKind::Strikethrough => Some(STRIKETHROUGH_SLOT),
         SpanKind::EmailSender(false) => Some(EMAIL_SENDER_SLOT),
         SpanKind::EmailSender(true) => Some(EMAIL_OWN_SENDER_SLOT),
         SpanKind::EmailDate | SpanKind::EmailQuote => Some(EMAIL_MUTED_SLOT),
         SpanKind::Marker
         | SpanKind::Rule
+        | SpanKind::Bullet
         | SpanKind::Checkbox(_)
         | SpanKind::EmailHidden
         | SpanKind::EmailLink
@@ -1155,29 +1200,50 @@ fn highlight_slot(kind: SpanKind) -> Option<usize> {
 }
 
 fn slot_style(slot: usize, cx: &App) -> HighlightStyle {
-    if slot == STRIKETHROUGH_SLOT {
-        return HighlightStyle {
+    match slot {
+        STRIKETHROUGH_SLOT => HighlightStyle {
             strikethrough: Some(StrikethroughStyle {
                 thickness: px(1.),
                 color: None,
             }),
             ..Default::default()
-        };
-    }
-    let font_weight = matches!(slot, EMAIL_SENDER_SLOT | EMAIL_OWN_SENDER_SLOT)
-        .then_some(gpui::FontWeight::SEMIBOLD);
-    HighlightStyle {
-        color: Some(slot_color(slot, cx)),
-        font_weight,
-        ..Default::default()
+        },
+        // Weight and slant only, no colour: whatever the theme paints
+        // `**bold**` stays, and emphasis over a link keeps the link colour.
+        BOLD_SLOT => HighlightStyle {
+            font_weight: Some(gpui::FontWeight::BOLD),
+            ..Default::default()
+        },
+        ITALIC_SLOT => HighlightStyle {
+            font_style: Some(gpui::FontStyle::Italic),
+            ..Default::default()
+        },
+        _ => {
+            let font_weight = matches!(slot, EMAIL_SENDER_SLOT | EMAIL_OWN_SENDER_SLOT)
+                .then_some(gpui::FontWeight::SEMIBOLD);
+            HighlightStyle {
+                color: Some(slot_color(slot, cx)),
+                font_weight,
+                ..Default::default()
+            }
+        }
     }
 }
 
 fn slot_color(slot: usize, cx: &App) -> Hsla {
     let colors = cx.theme().colors();
     match slot {
-        0 => markdown_text::wikilink_color(cx),
-        1 => markdown_text::external_link_color(cx),
+        QUOTE_SLOT => colors.text_muted,
+        // The name the Markdown grammar gives a code span, so a vault note
+        // and a fenced block in the same theme agree on what code looks like.
+        CODE_SLOT => cx
+            .theme()
+            .syntax()
+            .style_for_name("text.literal")
+            .and_then(|style| style.color)
+            .unwrap_or(colors.text_muted),
+        WIKILINK_SLOT => markdown_text::wikilink_color(cx),
+        LINK_SLOT => markdown_text::external_link_color(cx),
         EMAIL_SENDER_SLOT => sender_color(false, cx),
         EMAIL_OWN_SENDER_SLOT => sender_color(true, cx),
         EMAIL_MUTED_SLOT => colors.text_muted,
@@ -1189,7 +1255,7 @@ fn slot_color(slot: usize, cx: &App) -> Hsla {
             players
                 .get(1..)
                 .filter(|palette| !palette.is_empty())
-                .and_then(|palette| palette.get((slot - 2) % palette.len()))
+                .and_then(|palette| palette.get((slot - HEADING_SLOT) % palette.len()))
                 .map(|player| player.cursor)
                 .unwrap_or(colors.text_accent)
         }
@@ -1409,14 +1475,14 @@ mod tests {
         move_cursor_to(&editor, 2, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            "- ☐ open  \n- ☑ done\nplain tail\n"
+            "• ☐ open  \n• ☑ done\nplain tail\n"
         );
 
         // The cursor's line shows the source it stands for, comment included.
         move_cursor_to(&editor, 0, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            "- [ ] open <!--id:7-->\n- ☑ done\nplain tail\n"
+            "- [ ] open <!--id:7-->\n• ☑ done\nplain tail\n"
         );
     }
 
@@ -1427,11 +1493,71 @@ mod tests {
         move_cursor_to(&editor, 1, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            "- ☐  dropped  task\nplain tail\n"
+            "• ☐  dropped  task\nplain tail\n"
         );
 
         move_cursor_to(&editor, 0, &mut cx);
         assert_eq!(display_text(&editor, &mut cx), note);
+    }
+
+    #[gpui::test]
+    async fn inline_styles_conceal_and_reveal(cx: &mut TestAppContext) {
+        let note = "- a **bold** and *soft* line\n> quoted `code` here\nplain tail\n";
+        let (editor, mut cx) = setup(cx, note).await;
+        move_cursor_to(&editor, 2, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "• a  bold  and  soft  line\n> quoted  code  here\nplain tail\n"
+        );
+
+        // The cursor's line shows every delimiter it stands for (§5 R1).
+        move_cursor_to(&editor, 0, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "- a **bold** and *soft* line\n> quoted  code  here\nplain tail\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn emphasis_takes_weight_and_slant_but_no_colour(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "**loud** and *soft*\n").await;
+        editor.update_in(&mut cx, |editor, _, cx| {
+            let (bold, ranges) = editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(BOLD_SLOT), cx)
+                .expect("the bold run is highlighted");
+            assert_eq!(ranges.len(), 1);
+            assert_eq!(bold.font_weight, Some(gpui::FontWeight::BOLD));
+            // Colourless, so emphasis over a link keeps the link's colour.
+            assert_eq!(bold.color, None);
+        });
+        editor.update_in(&mut cx, |editor, _, cx| {
+            let (italic, ranges) = editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(ITALIC_SLOT), cx)
+                .expect("the italic run is highlighted");
+            assert_eq!(ranges.len(), 1);
+            assert_eq!(italic.font_style, Some(gpui::FontStyle::Italic));
+            assert_eq!(italic.color, None);
+        });
+    }
+
+    #[gpui::test]
+    async fn a_quoted_line_is_tinted_under_its_own_markup(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "> see [[wiki]]\n").await;
+        editor.update_in(&mut cx, |editor, _, cx| {
+            let muted = cx.theme().colors().text_muted;
+            let (quote, ranges) = editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(QUOTE_SLOT), cx)
+                .expect("the quoted line is tinted");
+            assert_eq!(ranges.len(), 1);
+            assert_eq!(quote.color, Some(muted));
+        });
+        // The wikilink on the same line keeps its own, later, colour slot.
+        editor.update_in(&mut cx, |editor, _, cx| {
+            let (_, ranges) = editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(WIKILINK_SLOT), cx)
+                .expect("the link inside the quote is still a link");
+            assert_eq!(ranges.len(), 1);
+        });
     }
 
     #[gpui::test]
@@ -1453,7 +1579,7 @@ mod tests {
         let note = "- [x] done <!--id:7-->\nplain tail\n";
         let (editor, mut cx) = setup(cx, note).await;
         move_cursor_to(&editor, 1, &mut cx);
-        assert_eq!(display_text(&editor, &mut cx), "- ☑ done  \nplain tail\n");
+        assert_eq!(display_text(&editor, &mut cx), "• ☑ done  \nplain tail\n");
 
         editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
         cx.run_until_parked();
@@ -2032,12 +2158,12 @@ mod tests {
                 .unwrap_or_default()
         };
         editor.update_in(&mut cx, |editor, _, cx| {
-            assert_eq!(highlighted(editor, 0, cx), vec!["wiki"]);
-            assert_eq!(highlighted(editor, 1, cx), vec!["docs"]);
-            assert_eq!(highlighted(editor, 2, cx), vec!["Title"]);
+            assert_eq!(highlighted(editor, WIKILINK_SLOT, cx), vec!["wiki"]);
+            assert_eq!(highlighted(editor, LINK_SLOT, cx), vec!["docs"]);
+            assert_eq!(highlighted(editor, HEADING_SLOT, cx), vec!["Title"]);
             toggle(editor, cx);
-            assert!(highlighted(editor, 0, cx).is_empty());
-            assert!(highlighted(editor, 2, cx).is_empty());
+            assert!(highlighted(editor, WIKILINK_SLOT, cx).is_empty());
+            assert!(highlighted(editor, HEADING_SLOT, cx).is_empty());
         });
     }
 }
