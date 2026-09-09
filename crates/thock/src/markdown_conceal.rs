@@ -793,13 +793,26 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
         .filter(|fold| !desired.iter().any(|want| matches(fold, want)))
         .map(|(range, _)| range.clone())
         .collect();
-    let new: Vec<(Range<MultiBufferOffset>, SpanKind)> = desired
+    let mut new: Vec<(Range<MultiBufferOffset>, SpanKind)> = desired
         .iter()
         .filter(|want| {
             !existing.iter().any(|fold| matches(fold, want)) || restored_impostors.contains(&want.0)
         })
         .cloned()
         .collect();
+
+    // A mouse drag converts its pixel position against the display snapshot of
+    // the last paint, and several drag events can be handled between two
+    // frames. Adding a fold shortens a display row, so re-concealing mid-drag
+    // can leave the in-flight point past the end of the row it lands on.
+    // Removing one only lengthens rows, which no stale point can overshoot —
+    // so reveal immediately (§5 R3) and hold the re-conceal until the gesture
+    // ends, when the closing selection change runs this pass again.
+    let deferred = editor.has_pending_selection() && !new.is_empty();
+    if deferred {
+        new.clear();
+    }
+
     if stale.is_empty() && new.is_empty() && restored_impostors.is_empty() {
         // Nothing to repair, so there is no failed attempt to remember.
         if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
@@ -878,7 +891,9 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
         // The notify below lands back on this editor's own observer; that
         // pass is our echo, not a user fold operation, so mark it.
         addon.self_applied = true;
-        addon.last_attempt = (!converged).then_some(attempt);
+        // A deferred pass cannot converge by construction, and remembering it
+        // would suppress the identical pass that ends the drag.
+        addon.last_attempt = (!converged && !deferred).then_some(attempt);
     }
     cx.notify();
 }
@@ -1465,6 +1480,41 @@ mod tests {
         assert_eq!(
             cx.display_text(),
             "# Title\nsee [[wiki]] and [docs](https://a.example)\n \nplain tail\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_drag_never_re_conceals_the_line_it_leaves(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, NOTE).await;
+        move_cursor_to(&editor, 3, &mut cx);
+        let mut cx = EditorTestContext::for_editor_in(editor.clone(), &mut cx).await;
+        cx.run_until_parked();
+
+        // Drag from line 1 up to line 0, then back down to line 1. Line 0
+        // leaves the pending selection, but re-concealing it mid-drag would
+        // shorten a row the in-flight drag position was measured against.
+        let start = cx.pixel_position_for(DisplayPoint::new(DisplayRow(1), 0));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        let up = cx.pixel_position_for(DisplayPoint::new(DisplayRow(0), 0));
+        cx.simulate_mouse_move(up, MouseButton::Left, Modifiers::none());
+        assert_eq!(
+            cx.display_text(),
+            "# Title\nsee [[wiki]] and [docs](https://a.example)\n \nplain tail\n"
+        );
+
+        cx.simulate_mouse_move(start, MouseButton::Left, Modifiers::none());
+        assert_eq!(
+            cx.display_text(),
+            "# Title\nsee [[wiki]] and [docs](https://a.example)\n \nplain tail\n",
+            "line 0 must stay revealed while the drag is in flight"
+        );
+
+        // Ending the gesture re-conceals what the selection no longer covers.
+        cx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.display_text(),
+            " Title\nsee [[wiki]] and [docs](https://a.example)\n \nplain tail\n"
         );
     }
 

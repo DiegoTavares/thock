@@ -41896,6 +41896,47 @@ async fn test_columnar_selection_with_multibyte_chars(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_drag_selection_past_end_of_row(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let mut cx = EditorTestContext::new(cx).await;
+    cx.set_state(indoc! {"
+        ˇabcde
+        fghij
+    "});
+
+    // A drag's position is clipped against the display snapshot of the last
+    // paint, which can be older than the one the selection update reads — a
+    // fold added in between shortens the row under it. The update must clip
+    // rather than convert a column the row no longer has.
+    cx.update_editor(|editor, window, cx| {
+        editor.select(
+            SelectPhase::Begin {
+                position: DisplayPoint::new(DisplayRow(0), 0),
+                add: false,
+                click_count: 1,
+            },
+            window,
+            cx,
+        );
+        editor.select(
+            SelectPhase::Update {
+                position: DisplayPoint::new(DisplayRow(0), 99),
+                goal_column: 99,
+                scroll_delta: gpui::Point::default(),
+            },
+            window,
+            cx,
+        );
+    });
+
+    cx.assert_editor_state(indoc! {"
+        «abcdeˇ»
+        fghij
+    "});
+}
+
+#[gpui::test]
 async fn test_columnar_selection_past_end_of_line(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 
