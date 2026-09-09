@@ -2335,16 +2335,22 @@
       },
     },
     "JSON": {
-      // Thock: keep schema-aware editing for settings and keymap files.
+      // Thock: settings.json and keymap.json are the only JSON a vault ever
+      // sees, and the servers behind them cost a Node runtime plus a ~93 MB
+      // download resident behind a notes app. The language machinery stays on
+      // so tests can still attach a server; only the real ones are refused
+      // (V12 de-Zed-ification follow-up).
       "enable_language_server": true,
+      "language_servers": ["!json-language-server", "!package-version-server", "..."],
       "prettier": {
-        "allowed": true,
+        "allowed": false,
       },
     },
     "JSONC": {
       "enable_language_server": true,
+      "language_servers": ["!json-language-server", "!package-version-server", "..."],
       "prettier": {
-        "allowed": true,
+        "allowed": false,
       },
     },
     "JS+ERB": {
@@ -2476,9 +2482,11 @@
       },
     },
     "YAML": {
+      // Thock: a YAML server is one more Node runtime a vault never asked for.
       "enable_language_server": true,
+      "language_servers": ["!yaml-language-server", "..."],
       "prettier": {
-        "allowed": true,
+        "allowed": false,
       },
     },
     "YAML+ERB": {
