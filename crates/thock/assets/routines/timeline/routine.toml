@@ -1,7 +1,7 @@
 schema  = 2
 id      = "timeline"
 name    = "Daily & Weekly"
-version = 10
+version = 11
 summary = "Daily & weekly rhythm — weekly review and a progress dashboard."
 icon    = "clock"
 doc     = "routines/timeline/Timeline.md"

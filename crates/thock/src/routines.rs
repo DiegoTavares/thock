@@ -2119,7 +2119,7 @@ mod tests {
         let manifest = &catalog[0].manifest;
         assert_eq!(manifest.id, TIMELINE_ROUTINE_ID);
         assert_eq!(manifest.schema, 2);
-        assert_eq!(manifest.version, 10);
+        assert_eq!(manifest.version, 11);
         assert_eq!(manifest.icon.as_deref(), Some("clock"));
         assert_eq!(manifest.doc, "routines/timeline/Timeline.md");
         assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
@@ -3168,7 +3168,7 @@ open = "weekly/site/index.html"
         assert!(raw.contains("[[routines.installed]]"), "{raw}");
         assert!(!raw.contains("[[areas.installed]]"), "{raw}");
         let vault = detect(root);
-        assert_eq!(vault.config.routines.installed[0].version, 10);
+        assert_eq!(vault.config.routines.installed[0].version, 11);
 
         // Idempotent: a second pass changes nothing.
         let vault = detect(root);

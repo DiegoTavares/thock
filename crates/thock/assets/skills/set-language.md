@@ -87,8 +87,12 @@ name = "Portuguese (Brazil)"     # the language, in the user's words
 headings = { soon = "…", someday = "…", completed = "…" }
 
 [day_planner]
-heading = "…"
+heading = ["…", "Day planner"]   # new name first, the old one kept as an alias
 ```
+
+Keeping the old name in that list is what lets notes written before today —
+which still say `## Day planner` — keep working while the vault catches up.
+Drop it later if the user ever wants to.
 
 ### 5. Rename the headings that are parsed
 

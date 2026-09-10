@@ -145,8 +145,9 @@ pub struct CalendarConfig {
     pub poll_interval: Duration,
     pub filters: EventFilters,
     pub google: GoogleClientOverride,
-    /// `[day_planner].heading` from the vault config.
-    pub planner_heading: String,
+    /// `[day_planner].heading` from the vault config — the canonical name
+    /// first, then its aliases (spec v26 §6.2).
+    pub planner_heading: Vec<String>,
 }
 
 impl CalendarConfig {
@@ -158,8 +159,18 @@ impl CalendarConfig {
             poll_interval: Duration::from_secs(300),
             filters: EventFilters::default(),
             google: GoogleClientOverride::default(),
-            planner_heading: planner_heading.to_string(),
+            planner_heading: vec![planner_heading.to_string()],
         }
+    }
+
+    /// Every name today's note may spell the planner heading as.
+    pub fn planner_heading_names(&self) -> day_plan::HeadingNames {
+        day_plan::HeadingNames::new(self.planner_heading.iter().map(String::as_str))
+    }
+
+    /// The name Thock writes when it adds the heading itself.
+    pub fn canonical_planner_heading(&self) -> &str {
+        self.planner_heading.first().map_or("", String::as_str)
     }
 }
 
@@ -195,7 +206,10 @@ struct GoogleContent {
 /// unknown fields are ignored so future keys don't break this build. An
 /// unparseable file is the caller's cue to log and disable sync — never a
 /// panic.
-pub fn parse_calendar_config(text: &str, planner_heading: &str) -> Result<CalendarConfig> {
+pub fn parse_calendar_config(
+    text: &str,
+    day_planner: &day_plan::DayPlannerConfig,
+) -> Result<CalendarConfig> {
     let content: CalendarConfigContent = toml::from_str(text)?;
     let defaults = EventFilters::default();
     Ok(CalendarConfig {
@@ -225,7 +239,9 @@ pub fn parse_calendar_config(text: &str, planner_heading: &str) -> Result<Calend
             client_id: content.google.client_id,
             client_secret: content.google.client_secret,
         },
-        planner_heading: planner_heading.to_string(),
+        planner_heading: std::iter::once(day_planner.heading.clone())
+            .chain(day_planner.heading_aliases.iter().cloned())
+            .collect(),
     })
 }
 
@@ -327,6 +343,10 @@ pub enum Reconciled {
     /// The planner heading is absent from the note; sync holds rather than
     /// inventing one (spec §5.1 rule 4).
     NoPlannerSection,
+    /// The planner heading is level 6, so the Calendar subsection it needs
+    /// would be level 7 — not a heading at all. Reported only once there are
+    /// events that would have gone there (spec v26 §7.2).
+    NoSectionRoom,
     Edits {
         edits: Vec<LineEdit>,
         diverged: Vec<Divergence>,
@@ -341,7 +361,7 @@ pub enum Reconciled {
 pub fn reconcile(note: &str, events: &[CalendarEvent], config: &CalendarConfig) -> Reconciled {
     let lines: Vec<&str> = note.lines().collect();
     let Some((planner_range, planner_level)) =
-        day_plan::planner_section(&lines, &config.planner_heading)
+        day_plan::planner_section(&lines, &config.planner_heading_names())
     else {
         return Reconciled::NoPlannerSection;
     };
@@ -369,16 +389,20 @@ pub fn reconcile(note: &str, events: &[CalendarEvent], config: &CalendarConfig) 
         // never speculatively (spec §5.1 rule 2, G6). A level-6 planner
         // heading can have no child heading, so creating one would terminate
         // the planner section and re-duplicate events on every poll; the
-        // events simply hold instead.
-        if !events.is_empty() && planner_level < 6 {
-            edits.extend(section_creation_edits(
-                &lines,
-                &planner_range,
-                planner_level,
-                &config.section,
-                &events,
-            ));
+        // events hold instead, and say so.
+        if events.is_empty() {
+            return Reconciled::Edits { edits, diverged };
         }
+        if planner_level >= 6 {
+            return Reconciled::NoSectionRoom;
+        }
+        edits.extend(section_creation_edits(
+            &lines,
+            &planner_range,
+            planner_level,
+            &config.section,
+            &events,
+        ));
         return Reconciled::Edits { edits, diverged };
     };
 
@@ -543,12 +567,15 @@ fn find_child_section(
     planner_level: usize,
     section: &str,
 ) -> Option<Range<usize>> {
-    let wanted = section.trim().to_lowercase();
     let child_level = planner_level + 1;
-    let start = planner_range.clone().find(|&row| {
-        day_plan::heading_level_and_text(lines[row])
-            .is_some_and(|(level, text)| level == child_level && text.to_lowercase() == wanted)
-    })?;
+    let names = day_plan::HeadingNames::new([section]);
+    let (start, _) = day_plan::best_heading(
+        planner_range
+            .clone()
+            .filter_map(|row| lines.get(row).map(|line| (row, *line))),
+        &names,
+        Some(child_level),
+    )?;
     let end = (start + 1..planner_range.end)
         .find(|&row| {
             day_plan::heading_level_and_text(lines[row])
@@ -861,21 +888,28 @@ mod tests {
 
     fn run(note: &str, events: &[CalendarEvent]) -> (String, Vec<Divergence>) {
         match reconcile(note, events, &config()) {
-            Reconciled::NoPlannerSection => panic!("unexpected NoPlannerSection"),
             Reconciled::Edits { edits, diverged } => (apply_line_edits(note, &edits), diverged),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    fn planner(heading: &str) -> day_plan::DayPlannerConfig {
+        day_plan::DayPlannerConfig {
+            heading: heading.to_string(),
+            ..Default::default()
         }
     }
 
     #[test]
     fn config_defaults_and_clamping() {
-        let parsed = parse_calendar_config("", "Day planner").unwrap();
+        let parsed = parse_calendar_config("", &planner("Day planner")).unwrap();
         assert_eq!(parsed, config());
 
         let parsed = parse_calendar_config(
             "schema = 1\naccount = \"diego@example.com\"\ncalendars = [\"primary\"]\n\
              section = \"Meetings\"\npoll_seconds = 5\n\n[filters]\nall_day = true\n\
              \n[google]\nclient_id = \"me\"\n\nfuture_key = 1\n",
-            "Plan",
+            &planner("Plan"),
         )
         .unwrap();
         assert_eq!(parsed.account.as_deref(), Some("diego@example.com"));
@@ -885,15 +919,15 @@ mod tests {
         assert!(parsed.filters.all_day);
         assert!(parsed.filters.accepted_only);
         assert_eq!(parsed.google.client_id.as_deref(), Some("me"));
-        assert_eq!(parsed.planner_heading, "Plan");
+        assert_eq!(parsed.planner_heading, vec!["Plan".to_string()]);
 
         assert_eq!(
-            parse_calendar_config("poll_seconds = 999999", "x")
+            parse_calendar_config("poll_seconds = 999999", &planner("x"))
                 .unwrap()
                 .poll_interval,
             Duration::from_secs(3600)
         );
-        assert!(parse_calendar_config("not [valid", "x").is_err());
+        assert!(parse_calendar_config("not [valid", &planner("x")).is_err());
     }
 
     #[test]
@@ -980,6 +1014,41 @@ mod tests {
             &config(),
         );
         assert_eq!(result, Reconciled::NoPlannerSection);
+    }
+
+    #[test]
+    fn a_decorated_planner_heading_still_reconciles() {
+        let note = "# Monday\n\n## 📅 **Day-planner**:\n\n- [ ] Workout\n";
+        let (applied, _) = run(note, &[event("aaaaaaaaaaaa", "Standup", 600, 630)]);
+        assert!(
+            applied.contains("### Calendar\n"),
+            "section not created: {applied:?}"
+        );
+        assert!(applied.contains("- [ ] 10:00 - 10:30 Standup <!--gcal:aaaaaaaaaaaa-->"));
+    }
+
+    #[test]
+    fn a_decorated_calendar_section_is_maintained_in_place() {
+        let note = "# Day planner\n\n## 🗓 Calendar\n\n\
+                    - [ ] 10:00 - 10:30 Standup <!--gcal:aaaaaaaaaaaa-->\n";
+        let (applied, _) = run(note, &[event("aaaaaaaaaaaa", "Standup", 660, 690)]);
+        // The existing decorated heading is followed, not duplicated.
+        assert_eq!(applied.matches("Calendar").count(), 1);
+        assert!(applied.contains("- [ ] 11:00 - 11:30 Standup <!--gcal:aaaaaaaaaaaa-->"));
+    }
+
+    #[test]
+    fn heading_aliases_reconcile_a_half_migrated_vault() {
+        let mut config = config();
+        config.planner_heading = vec!["Agenda".to_string(), "Day planner".to_string()];
+        // Yesterday's wording still resolves while the vault catches up.
+        let note = "## Day planner\n\n- [ ] Workout\n";
+        match reconcile(note, &[event("aaaaaaaaaaaa", "Standup", 600, 630)], &config) {
+            Reconciled::Edits { edits, .. } => {
+                assert!(apply_line_edits(note, &edits).contains("### Calendar\n"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
@@ -1072,10 +1141,20 @@ mod tests {
     fn level_six_planner_heading_never_creates_the_section() {
         let note = "###### Day planner\n\n- [ ] Workout\n";
         let events = [event("aaaaaaaaaaaa", "Standup", 600, 630)];
-        let (applied, _) = run(note, &events);
-        assert_eq!(applied, note);
-        let (again, _) = run(&applied, &events);
-        assert_eq!(again, applied);
+        // Events with nowhere to go are a reportable hold (spec v26 §7.2),
+        // not a silent no-op — but the note is still never touched.
+        assert_eq!(
+            reconcile(note, &events, &config()),
+            Reconciled::NoSectionRoom
+        );
+        assert_eq!(
+            reconcile(note, &[], &config()),
+            Reconciled::Edits {
+                edits: Vec::new(),
+                diverged: Vec::new()
+            },
+            "an empty day has nothing to complain about"
+        );
     }
 
     #[test]
