@@ -20,8 +20,8 @@ use git::status::GitSummary;
 use gpui::{
     Action, AnyElement, App, AsyncWindowContext, Bounds, ClipboardEntry as GpuiClipboardEntry,
     ClipboardItem, Context, CursorStyle, DismissEvent, Div, DragMoveEvent, Entity, EventEmitter,
-    ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement, KeyContext,
-    ListHorizontalSizingBehavior, ListSizingBehavior, Modifiers, ModifiersChangedEvent,
+    ExternalPaths, FileDropEvent, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement,
+    KeyContext, ListHorizontalSizingBehavior, ListSizingBehavior, Modifiers, ModifiersChangedEvent,
     MouseButton, MouseDownEvent, MouseExitEvent, ParentElement, PathPromptOptions, Pixels, Point,
     PromptLevel, Render, ScrollStrategy, Stateful, Styled, Subscription, Task,
     UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred, div, hsla,
@@ -6812,6 +6812,10 @@ fn item_width_estimate(depth: usize, item_text_chars: usize, is_symlink: bool) -
 
 impl Render for ProjectPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !cx.has_active_drag() {
+            self.clear_drag_state(cx);
+        }
+
         let has_worktree = !self.state.visible_entries.is_empty();
         let project = self.project.read(cx);
         let panel_settings = ProjectPanelSettings::get_global(cx);
@@ -6923,6 +6927,9 @@ impl Render for ProjectPanel {
                         .on_drag_move(cx.listener(handle_drag_move::<DraggedSelection>))
                         .on_mouse_exit(cx.listener(|this, _: &MouseExitEvent, window, cx| {
                             cx.stop_active_drag(window);
+                            this.clear_drag_state(cx);
+                        }))
+                        .on_file_drop_exit(cx.listener(|this, _: &FileDropEvent, _window, cx| {
                             this.clear_drag_state(cx);
                         }))
                 })
