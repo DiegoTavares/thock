@@ -44,8 +44,8 @@ These are the invariants. Design and engineering decisions should be checkable a
 
 1. **Your files, forever, in the open.** Everything is plain Markdown (or whatever format the user prefers) in a normal folder on disk. No proprietary database, no lock-in. If Thock vanished tomorrow, the vault still opens in any editor.
 2. **Augmentation, not replacement.** The AI *appends* its synthesis alongside your raw words — it never silently rewrites what you wrote. Your capture and the machine's reflection coexist in the same file (`# LLM Review`, `# AI Week Review`, `# Friday Finance`).
-3. **Bring your own brain.** The user chooses and pays for their own LLM (Claude, local model, etc.) via their own key or a console integration. Thock is not a subscription reseller of intelligence.
-4. **Human-in-the-loop for anything that matters.** The AI computes and recommends; the human acts. It will tell you exactly how much to pay down your line of credit — it will not (and cannot) move the money.
+3. **Bring your own brain — or borrow ours, never locked in.** _(Amended 2026-09-11; originally "Thock is not a subscription reseller of intelligence.")_ The free path is unchanged forever: the user chooses and pays for their own LLM (Claude, local model, etc.) via their own key or a console integration, first-class, no degradation. What changed: an optional **Thock Plus** subscription adds a hosted Thock Agent — and, over time, every feature that costs Thock money to serve (sync storage next) — for people who will never install a CLI or manage an API key. Same vault, same skills, same files; cancel and the BYO path is exactly what it was. Your agent, or ours — never a lock-in. Spec: `specs/v25-thock-plus-hosted-agent.md`.
+4. **Human-in-the-loop where it can't be undone.** _(Amended 2026-09-11 — originally "for anything that matters", with confirmation gates planned on every agent write. Living with the rituals taught us per-change approval prompts are friction, not trust.)_ Inside the vault the agent acts freely: writes are scoped to the vault, the append-don't-rewrite convention protects the user's words, and invisible versioning checkpoints every session — any change is one restore away from undone. The human stays in the loop for what leaves the vault or can't be taken back: it will tell you exactly how much to pay down your line of credit — it will not (and cannot) move the money.
 5. **Living plans over frozen advice.** Canonical files are the source of truth. The AI reads them before advising and edits them when reality shifts, so the plan never drifts from the person.
 6. **Modular life.** Nobody wants every module. Routines are opt-in. A user can run only daily notes, or add finance, journaling, team notes — each independently.
 7. **Invisible versioning.** Git runs underneath for full history and safety, but the user never types a git command or sees a git pane. Time-travel, not source control.
@@ -107,7 +107,7 @@ deferred third transport. Spec: `specs/v13-inbox-routine.md`.
 - Zed's AI integration path that talks to external models via console/agent, so users bring their own LLM.
 
 **Removed / disabled (initially)**
-- The subscription-gated AI/billing model — Thock users bring their own key; no reselling of intelligence.
+- The subscription-gated AI/billing model — Thock users bring their own key. _(2026-09-11: partially walked back on Thock's own terms — the optional Thock Plus hosted agent, §4.3 — while BYO stays the free default.)_
 - The Git pane and manual git surface — versioning becomes invisible (see §7).
 - Editor chrome and affordances that assume "you are writing software," where they conflict with the life-OS framing.
 
@@ -164,7 +164,7 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
 **Hard parts to respect**
 - **Forking Zed is a serious commitment.** Rust + GPUI is a real codebase; keeping a private fork current with upstream is ongoing tax. We should decide early: deep fork vs. thin layer (extension/overlay) vs. building panes as Zed extensions where possible. This is the single biggest architectural fork-in-the-road.
 - **Invisible git is deceptively subtle.** Autosave churn, merge conflicts, large binaries (the vault already holds multi-MB images), and "restore" UX are all edge-case minefields. Getting "never lose data, never show git" right is a project of its own.
-- **Skills need a real trust + safety model.** The moment an AI can write to a user's files and read financial data, scope declarations, dry-runs, previews, and confirmation gates stop being nice-to-haves.
+- **Skills need a real trust + safety model.** The moment an AI can write to a user's files and read financial data, the guardrails stop being nice-to-haves. _(Revised 2026-09-11: the model is **scope + undo**, not gates — writes confined to the vault (OS-enforced on the hosted agent), append-don't-rewrite, a checkpoint before every session so anything is restorable. Per-change confirmation prompts were the original plan and were dropped after real use showed them to be friction.)_
 - **BYO-LLM UX is fiddly.** Keys, model choice, local vs. cloud, cost visibility, and graceful failure need thought so non-experts aren't stranded.
 - **Onboarding a non-technical user into a fork of a code editor** is a real design challenge — the gap between "engineer's dream" and "my mom could use it" is wide, and v1 should pick a lane honestly.
 
@@ -177,7 +177,7 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
 3. **Skill contract:** how do we declare/enforce a skill's read/write scope so users can trust it and the app can sandbox it?
 4. **Audience for v1:** technical-first (ship rough, powerful) or approachable-first (invest in onboarding early)? These pull the design in different directions.
 5. **Invisible git:** what exactly triggers a checkpoint, and what does "restore" look like to someone who's never heard of a commit?
-6. **Distribution & model:** open-source core? paid Routines? one-time vs. subscription (for the app, never the intelligence)?
+6. **Distribution & model:** open-source core? paid Routines? one-time vs. subscription (for the app, never the intelligence)? _(Partially answered 2026-09-11: a **Thock Plus** subscription gates the features that cost money to serve — hosted agent first, sync storage later; BYO intelligence stays free. Spec `specs/v25-thock-plus-hosted-agent.md`.)_
 7. **The name & tagline:** does "Thock" land, and how do we say the value in one line? (see below)
 
 ## 11. Tagline candidates (to workshop)
@@ -306,6 +306,11 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   behaves exactly as before, and the `"auto"` default decides from the feed. Spec
   `specs/v23-personalized-rituals.md`. _(shipped)_
 - [ ] **BYO-LLM cost visibility** — key/model choice, local vs cloud, graceful failure. _(planned)_
+
+### Milestone 5 — Thock Plus & the hosted agent
+- [ ] **Subscription core, billing-agnostic** — a small backend with plans as hot-changeable config (allowance in normalized units, model-tier mapping, per-plan limits), its own usage ledger, per-user budget-capped OpenRouter keys, and dev entitlements via invite codes — the whole agent experience runs before any billing exists. Spec `specs/v25-thock-plus-hosted-agent.md`. _(planned)_
+- [ ] **Hosted Thock Agent — chat panel** — a Thock-owned chat panel over the inherited ACP crates hosting **Pi** (minimal harness, ~1k-token fixed overhead) on cheap/fast models; no per-change approval prompts — trust is vault-scoped writes plus a checkpoint before every session; allowance balance in the footer, hard stop at zero, BYO terminal panel untouched beside it. _(planned)_
+- [ ] **Money + safety** — Polar products referencing backend plans by id (credits with hard stop, top-up packs, license-key credential), OS sandbox on every hosted session (write = vault, network = gateway allowlist), per-session ceilings, anomaly alerts. _(planned)_
 
 ---
 
