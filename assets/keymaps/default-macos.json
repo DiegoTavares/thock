@@ -714,6 +714,7 @@
       "cmd-alt-u": "thock::ToggleBacklogFocus",
       "cmd-alt-t": "thock::ToggleAgentFocus",
       "cmd-alt-p": "thock::ToggleDayPlannerFocus",
+      "cmd-alt-n": "thock::ToggleChatFocus",
       "cmd-3": ["workspace::ActivatePane", 2],
       "cmd-4": ["workspace::ActivatePane", 3],
       "cmd-5": ["workspace::ActivatePane", 4],
@@ -1734,6 +1735,31 @@
       "cmd-c": "thock::CopyBacklogTask",
       "shift-left": "thock::CollapseBacklogCategory",
       "shift-right": "thock::ExpandBacklogCategory",
+    },
+  },
+  {
+    "context": "ThockChatPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "menu::Confirm",
+      "escape": "menu::Cancel",
+      "alt-enter": "thock::OpenChatEntry",
+    },
+  },
+  {
+    "context": "ThockChatPanel > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "menu::Confirm",
+      "shift-enter": "editor::Newline",
+      "escape": "menu::Cancel",
+    },
+  },
+  {
+    "context": "ThockChatPanel && !editing",
+    "use_key_equivalents": true,
+    "bindings": {
+      "tab": "thock::FocusChatInput",
     },
   },
   {

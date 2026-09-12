@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "units_per_dollar": 100,
+  "plans": {
+    "plus": {
+      "name": "Thock Plus",
+      "allowance_units": 1000,
+      "cycle_days": 30,
+      "models": {
+        "default": "google/gemini-2.5-flash",
+        "fast": "google/gemini-2.5-flash-lite"
+      },
+      "limits": {
+        "warn_at_percent": 80,
+        "max_turns_per_session": 200
+      }
+    },
+    "dev": {
+      "name": "Thock Plus (dev)",
+      "allowance_units": 300,
+      "cycle_days": 30,
+      "models": {
+        "default": "google/gemini-2.5-flash",
+        "fast": "google/gemini-2.5-flash-lite"
+      },
+      "limits": {
+        "warn_at_percent": 80,
+        "max_turns_per_session": 200
+      }
+    }
+  }
+}

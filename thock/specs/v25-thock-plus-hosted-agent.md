@@ -1,6 +1,6 @@
 # Thock V25 — Thock Plus Subscription & Hosted Agent
 
-**Status:** Decisions locked from research review (2026-09-09), pre-implementation
+**Status:** Stage 1 implemented (2026-09-11: backend, connect flow, chat panel, allowance loop); Stage 2 (Polar, sandbox) pending
 **Owner:** Diego · **Date:** 2026-09-09
 **Companion docs:** `../VISION.md` (§4.3 "Bring your own brain" — amended by this spec, §9 trust model, §12 roadmap), `v5-agent-and-onboarding.md` (BYO rails this builds beside — and whose "no ACP client work" non-goal this supersedes), research brief: https://claude.ai/code/artifact/b6ac65e0-8012-4a51-aac2-f920a4598b7d
 
@@ -201,3 +201,24 @@ path changes when Polar arrives — Stage 2 swaps the credential and adds ingest
 4. ~~VISION amendment text~~ — done 2026-09-11: §4.3 (Thock Plus, BYO first-class), §4.4 (trust =
    scope + undo, gates dropped), §6/§9/§10 annotations, Milestone 5 added; artifact republished at
    its existing URL. Review the diff before committing.
+
+## 8. Stage 1 implementation notes (2026-09-11)
+
+- **Backend:** `thock/services/plus` (Go, standard library). `plans.json` is the plan config
+  (re-read whenever its mtime changes); `state.json` is the store; `OPENROUTER_MANAGEMENT_KEY`
+  selects the real gateway, otherwise a fake one mints keys so the loop can be exercised offline.
+  See its README for the endpoints, the admin flow (mint invite, top up, reset, revoke), and deploy.
+- **Model selection:** `pi-acp` spawns `pi --mode rpc` with no extra arguments, so the
+  `--provider openrouter --model <id>` shape in item 3 is realized through a private Pi config
+  directory per tier (`PI_CODING_AGENT_DIR`, holding `settings.json` with `defaultProvider` /
+  `defaultModel` and the note-taking `SYSTEM.md`) plus `OPENROUTER_API_KEY` in the process
+  environment. The user's own `~/.pi` is never read or written.
+- **Pinned versions:** `pi-acp@0.0.33` and `@earendil-works/pi-coding-agent@0.85.1`, installed
+  into `<external agents dir>/thock-hosted` with the managed Node runtime. Bumping either is a
+  code change on purpose (risk: "`pi-acp` is nobody's product").
+- **Connection mode:** `[agent] mode = "hosted" | "byo"` in the user-level settings; unset means
+  hosted once a Thock Plus credential exists. `AgentPanel::launch_in_workspace` is the single
+  router, so every Run path (rail, palette, keybinding) honors it without changes.
+- **Not yet done from Stage 1's list:** the OS sandbox (Stage 2 by design), the internal
+  cheap-model eval (item under §6), and the live smoke test against OpenRouter, which needs a
+  deployed backend and a management key.
