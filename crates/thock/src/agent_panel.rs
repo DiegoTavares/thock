@@ -307,13 +307,19 @@ impl AgentPanel {
 
     /// Opens the panel and launches `request`, routing through the connect
     /// flow first when no agent is configured. The one entry point for every
-    /// Run/onboarding/conversation action.
+    /// Run/onboarding/conversation action. When the hosted Thock Agent is the
+    /// chosen connection (V25 item 9), the launch goes to the chat panel
+    /// instead; the terminal rails below are untouched either way.
     pub fn launch_in_workspace(
         workspace: &mut Workspace,
         request: LaunchRequest,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        if crate::chat_panel::hosted_mode_active(workspace, cx) {
+            crate::chat_panel::ChatPanel::launch_in_workspace(workspace, request, window, cx);
+            return;
+        }
         let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
             log::warn!("Thock: the Agent panel isn't registered yet; launch dropped");
             return;

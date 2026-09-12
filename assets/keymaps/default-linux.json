@@ -703,6 +703,7 @@
       "ctrl-alt-u": "thock::ToggleBacklogFocus",
       "ctrl-alt-t": "thock::ToggleAgentFocus",
       "ctrl-alt-p": "thock::ToggleDayPlannerFocus",
+      "ctrl-alt-n": "thock::ToggleChatFocus",
       "ctrl-?": "agent::ToggleFocus",
       "alt-save": "workspace::SaveAll",
       "ctrl-alt-s": "workspace::SaveAll",
@@ -1645,6 +1646,31 @@
       "ctrl-c": "thock::CopyBacklogTask",
       "shift-left": "thock::CollapseBacklogCategory",
       "shift-right": "thock::ExpandBacklogCategory",
+    },
+  },
+  {
+    "context": "ThockChatPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "menu::Confirm",
+      "escape": "menu::Cancel",
+      "alt-enter": "thock::OpenChatEntry",
+    },
+  },
+  {
+    "context": "ThockChatPanel > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "menu::Confirm",
+      "shift-enter": "editor::Newline",
+      "escape": "menu::Cancel",
+    },
+  },
+  {
+    "context": "ThockChatPanel && !editing",
+    "use_key_equivalents": true,
+    "bindings": {
+      "tab": "thock::FocusChatInput",
     },
   },
   {
