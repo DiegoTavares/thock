@@ -198,6 +198,20 @@ func (g *fakeGateway) spend(hash string, usd float64) error {
 	return nil
 }
 
+// mintedAndRevoked reports whether exactly `minted` keys were ever created
+// and `revoked` of them have since been deleted.
+func (g *fakeGateway) mintedAndRevoked(minted, revoked int) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	count := 0
+	for _, key := range g.keys {
+		if key.Revoked {
+			count++
+		}
+	}
+	return len(g.keys) == minted && count == revoked
+}
+
 func (g *fakeGateway) lookup(hash string) (fakeKey, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

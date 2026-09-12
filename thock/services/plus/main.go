@@ -1,9 +1,9 @@
 // The Thock Plus backend (spec: thock/specs/v25-thock-plus-hosted-agent.md,
-// Stage 1): users and entitlements in its own store, plans as hot-changeable
-// configuration, per-user budget-capped gateway keys, and a usage ledger in
-// normalized units. Billing is deliberately absent; a dev invite code is how
-// anyone gets a plan for now, and a Polar driver grants into the same store
-// later without the app noticing.
+// Stage 1): users and entitlements in Postgres, plans as hot-changeable rows,
+// per-user budget-capped gateway keys, and a usage ledger in normalized
+// units. Billing is deliberately absent; a dev invite code is how anyone gets
+// a plan for now, and a Polar driver grants into the same store later without
+// the app noticing.
 //
 // Every error body is a plain sentence: the app shows it to the person who
 // typed the invite code.
@@ -34,44 +34,57 @@ const usageSyncInterval = 30 * time.Second
 var logf = log.Printf
 
 type server struct {
-	plans      *planCatalog
 	store      *store
 	gateway    gateway
 	adminToken string
 	now        func() time.Time
 	syncEvery  time.Duration
 
-	// Serializes the sync-and-enforce path per user so two concurrent polls
-	// can't both disable (or both re-enable) a key.
+	// Serializes the sync-and-enforce path so two concurrent polls can't
+	// both disable (or both re-enable) a key. Per process, which is why the
+	// deployment runs one instance.
 	syncMu sync.Mutex
 }
 
 func main() {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatal("DATABASE_URL is required (a postgres:// URL)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		pool, err := openPool(ctx, databaseURL)
+		if err != nil {
+			log.Fatalf("database: %v", err)
+		}
+		defer pool.Close()
+		applied, err := migrate(ctx, pool)
+		for _, name := range applied {
+			log.Printf("applied %s", name)
+		}
+		if err != nil {
+			log.Fatalf("migrate: %v", err)
+		}
+		log.Printf("schema is up to date (%d applied now)", len(applied))
+		return
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
-	}
-	plansPath := os.Getenv("PLANS_PATH")
-	if plansPath == "" {
-		plansPath = "plans.json"
-	}
-	statePath := os.Getenv("STATE_PATH")
-	if statePath == "" {
-		statePath = "data/state.json"
 	}
 	adminToken := os.Getenv("ADMIN_TOKEN")
 	if adminToken == "" {
 		log.Fatal("ADMIN_TOKEN is required; it protects invite minting and allowance edits")
 	}
 
-	plans, err := loadPlanCatalog(plansPath)
+	store, err := openStore(ctx, databaseURL)
 	if err != nil {
-		log.Fatalf("plans: %v", err)
+		log.Fatalf("database: %v", err)
 	}
-	store, err := openStore(statePath)
-	if err != nil {
-		log.Fatalf("state: %v", err)
-	}
+	defer store.close()
 	var gw gateway
 	if managementKey := os.Getenv("OPENROUTER_MANAGEMENT_KEY"); managementKey != "" {
 		gw = newOpenRouterGateway(managementKey)
@@ -79,14 +92,13 @@ func main() {
 		log.Print("OPENROUTER_MANAGEMENT_KEY is not set; minting fake keys (nothing will reach a model)")
 		gw = newFakeGateway()
 	}
-	s := newServer(plans, store, gw, adminToken)
-	log.Printf("thock plus backend listening on :%s (plans from %s, state in %s)", port, plansPath, statePath)
+	s := newServer(store, gw, adminToken)
+	log.Printf("thock plus backend listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, s.routes()))
 }
 
-func newServer(plans *planCatalog, store *store, gw gateway, adminToken string) *server {
+func newServer(store *store, gw gateway, adminToken string) *server {
 	return &server{
-		plans:      plans,
 		store:      store,
 		gateway:    gw,
 		adminToken: adminToken,
@@ -102,7 +114,8 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/disconnect", s.withUser(s.handleDisconnect))
 
 	mux.HandleFunc("GET /admin/plans", s.withAdmin(s.handleAdminPlans))
-	mux.HandleFunc("POST /admin/plans/reload", s.withAdmin(s.handleAdminReloadPlans))
+	mux.HandleFunc("PUT /admin/plans/{id}", s.withAdmin(s.handleAdminPutPlan))
+	mux.HandleFunc("PUT /admin/settings", s.withAdmin(s.handleAdminPutSettings))
 	mux.HandleFunc("POST /admin/invites", s.withAdmin(s.handleAdminCreateInvite))
 	mux.HandleFunc("GET /admin/invites", s.withAdmin(s.handleAdminListInvites))
 	mux.HandleFunc("GET /admin/users", s.withAdmin(s.handleAdminListUsers))
@@ -110,7 +123,13 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /admin/users/{id}/revoke", s.withAdmin(s.handleAdminRevoke))
 	mux.HandleFunc("GET /admin/users/{id}/ledger", s.withAdmin(s.handleAdminLedger))
 
-	health := func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") }
+	health := func(w http.ResponseWriter, r *http.Request) {
+		if err := s.store.pool.Ping(r.Context()); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "The database isn't reachable.")
+			return
+		}
+		fmt.Fprintln(w, "ok")
+	}
 	mux.HandleFunc("GET /health", health)
 	mux.HandleFunc("GET /healthz", health)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -165,18 +184,23 @@ func (s *server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var invitePlan string
-	s.store.read(func(state state) {
-		if invite, ok := state.Invites[code]; ok {
-			invitePlan = invite.Plan
-		}
-	})
-	if invitePlan == "" {
+	found, err := s.store.inviteByCode(r.Context(), code)
+	if errors.Is(err, errNotFound) {
 		writeError(w, http.StatusNotFound, "That invite code isn't one we recognize. Check it and try again.")
 		return
 	}
-	plan, config, ok := s.plans.plan(invitePlan)
-	if !ok {
+	if err != nil {
+		logf("error: looking up invite %s: %v", code, err)
+		writeError(w, http.StatusInternalServerError, "Couldn't check that invite right now. Try again.")
+		return
+	}
+	if found.MaxUses > 0 && found.Uses >= found.MaxUses {
+		writeError(w, http.StatusGone, "That invite code has been used up.")
+		return
+	}
+	plan, config, err := s.store.plan(r.Context(), found.Plan)
+	if err != nil {
+		logf("error: plan %s for invite %s: %v", found.Plan, code, err)
 		writeError(w, http.StatusServiceUnavailable, "That invite points at a plan that isn't configured right now. Try again later.")
 		return
 	}
@@ -212,19 +236,7 @@ func (s *server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		Gateway:        key,
 		LastSyncAt:     now,
 	}
-	err = s.store.update(func(state *state) error {
-		invite, ok := state.Invites[code]
-		if !ok {
-			return errNotFound
-		}
-		if invite.MaxUses > 0 && invite.Uses >= invite.MaxUses {
-			return errInviteExhausted
-		}
-		invite.Uses++
-		state.Users[userID] = &created
-		state.Ledger = append(state.Ledger, ledgerEntry{At: now, UserID: userID, Source: "connect", Note: "invite " + code})
-		return nil
-	})
+	err = s.store.createUser(r.Context(), created, ledgerEntry{At: now, UserID: userID, Source: "connect", Note: "invite " + code})
 	if err != nil {
 		if revokeErr := s.gateway.revoke(context.Background(), key.Hash); revokeErr != nil {
 			logf("warning: couldn't revoke the key minted for a failed connect: %v", revokeErr)
@@ -249,8 +261,6 @@ func (s *server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, connectResponse{Credential: credential, Entitlement: entitlement})
 }
-
-var errInviteExhausted = errors.New("invite exhausted")
 
 func (s *server) handleEntitlement(w http.ResponseWriter, r *http.Request, u user) {
 	entitlement, err := s.entitlementFor(r.Context(), u)
@@ -286,9 +296,12 @@ func (s *server) entitlementFor(ctx context.Context, u user) (entitlementRespons
 	s.syncMu.Lock()
 	defer s.syncMu.Unlock()
 
-	plan, config, ok := s.plans.plan(u.Plan)
-	if !ok {
+	plan, config, err := s.store.plan(ctx, u.Plan)
+	if errors.Is(err, errNotFound) {
 		return entitlementResponse{}, errPlanMissing
+	}
+	if err != nil {
+		return entitlementResponse{}, err
 	}
 	now := s.now()
 	if u.Status == userRevoked {
@@ -303,6 +316,7 @@ func (s *server) entitlementFor(ctx context.Context, u user) (entitlementRespons
 		}, nil
 	}
 
+	before := u
 	changed := false
 	cycleEnds := u.CycleStartedAt.Add(plan.cycleLength())
 	rolledOver := false
@@ -354,38 +368,21 @@ func (s *server) entitlementFor(ctx context.Context, u user) (entitlementRespons
 	}
 
 	if changed {
-		snapshot := u
-		err := s.store.update(func(state *state) error {
-			stored, ok := state.Users[snapshot.ID]
-			if !ok {
-				return errNotFound
-			}
-			if rolledOver {
-				state.Ledger = append(state.Ledger, ledgerEntry{At: now, UserID: snapshot.ID, Source: "reset", Note: "new cycle"})
-			} else if snapshot.UsedUnits != stored.UsedUnits {
-				state.Ledger = append(state.Ledger, ledgerEntry{At: now, UserID: snapshot.ID, Units: snapshot.UsedUnits - stored.UsedUnits, Source: "sync"})
-			}
-			stored.CycleStartedAt = snapshot.CycleStartedAt
-			stored.UsageBaselineUSD = snapshot.UsageBaselineUSD
-			stored.UsedUnits = snapshot.UsedUnits
-			stored.AdjustUnits = snapshot.AdjustUnits
-			stored.LastSyncAt = snapshot.LastSyncAt
-			stored.Exhausted = snapshot.Exhausted
-			stored.Gateway = snapshot.Gateway
-			return nil
-		})
-		if err != nil {
+		var entries []ledgerEntry
+		if rolledOver {
+			entries = append(entries, ledgerEntry{At: now, UserID: u.ID, Source: "reset", Note: "new cycle"})
+		} else if u.UsedUnits != before.UsedUnits {
+			entries = append(entries, ledgerEntry{At: now, UserID: u.ID, Units: u.UsedUnits - before.UsedUnits, Source: "sync"})
+		}
+		if err := s.store.saveAllowance(ctx, u, entries); err != nil {
 			return entitlementResponse{}, err
 		}
-	} else {
-		// A sync that changed nothing still moves the clock, and losing that
-		// only costs an extra gateway call, so it isn't worth a file write.
-		_ = s.store.update(func(state *state) error {
-			if stored, ok := state.Users[u.ID]; ok && stored.LastSyncAt.Before(u.LastSyncAt) {
-				stored.LastSyncAt = u.LastSyncAt
-			}
-			return nil
-		})
+	} else if u.LastSyncAt.After(before.LastSyncAt) {
+		// A sync that changed nothing still moves the clock. Losing that only
+		// costs an extra gateway call, so a failure here is logged, not fatal.
+		if err := s.store.touchSync(ctx, u.ID, u.LastSyncAt); err != nil {
+			logf("warning: recording the sync time for %s: %v", u.ID, err)
+		}
 	}
 
 	status := "active"
@@ -412,52 +409,73 @@ func (s *server) entitlementFor(ctx context.Context, u user) (entitlementRespons
 }
 
 // revokeUser kills the gateway key first so a revocation holds even if the
-// state write fails afterwards.
+// database write fails afterwards.
 func (s *server) revokeUser(ctx context.Context, userID, note string) error {
-	var hash string
-	var found bool
-	s.store.read(func(state state) {
-		if u, ok := state.Users[userID]; ok {
-			hash = u.Gateway.Hash
-			found = ok && u.Status != userRevoked
-		}
-	})
-	if !found {
-		return errNotFound
-	}
-	if err := s.gateway.revoke(ctx, hash); err != nil {
+	u, err := s.store.userByID(ctx, userID)
+	if err != nil {
 		return err
 	}
-	return s.store.update(func(state *state) error {
-		u, ok := state.Users[userID]
-		if !ok {
-			return errNotFound
-		}
-		u.Status = userRevoked
-		u.Gateway.Secret = ""
-		u.Exhausted = true
-		state.Ledger = append(state.Ledger, ledgerEntry{At: s.now(), UserID: userID, Source: "revoke", Note: note})
-		return nil
-	})
+	if u.Status == userRevoked {
+		return errNotFound
+	}
+	if err := s.gateway.revoke(ctx, u.Gateway.Hash); err != nil {
+		return err
+	}
+	return s.store.revokeUser(ctx, userID, s.now(), note)
 }
 
 // --- admin ---
 
-func (s *server) handleAdminPlans(w http.ResponseWriter, _ *http.Request) {
-	config := s.plans.current()
+func (s *server) handleAdminPlans(w http.ResponseWriter, r *http.Request) {
+	config, err := s.store.settings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Couldn't read the settings: "+err.Error())
+		return
+	}
+	plans, err := s.store.listPlans(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Couldn't read the plans: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":          config.Version,
 		"units_per_dollar": config.UnitsPerDollar,
-		"plans":            config.sortedPlans(),
+		"plans":            plans,
 	})
 }
 
-func (s *server) handleAdminReloadPlans(w http.ResponseWriter, _ *http.Request) {
-	if err := s.plans.reload(); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "The plans file didn't load, the previous plans stay in effect: "+err.Error())
+func (s *server) handleAdminPutPlan(w http.ResponseWriter, r *http.Request) {
+	var body plan
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "The plan wasn't readable.")
 		return
 	}
-	s.handleAdminPlans(w, nil)
+	normalized, err := body.normalize(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "That plan isn't valid: "+err.Error())
+		return
+	}
+	if err := s.store.upsertPlan(r.Context(), normalized); err != nil {
+		writeError(w, http.StatusInternalServerError, "Couldn't save the plan: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, normalized)
+}
+
+func (s *server) handleAdminPutSettings(w http.ResponseWriter, r *http.Request) {
+	var body settings
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "The settings weren't readable.")
+		return
+	}
+	if body.UnitsPerDollar <= 0 {
+		writeError(w, http.StatusUnprocessableEntity, "units_per_dollar must be above zero.")
+		return
+	}
+	if err := s.store.updateSettings(r.Context(), body.UnitsPerDollar); err != nil {
+		writeError(w, http.StatusInternalServerError, "Couldn't save the settings: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 type createInviteRequest struct {
@@ -472,8 +490,11 @@ func (s *server) handleAdminCreateInvite(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "The invite request wasn't readable.")
 		return
 	}
-	if _, _, ok := s.plans.plan(request.Plan); !ok {
-		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("There is no plan %q in the plans file.", request.Plan))
+	if !s.planExists(w, r, request.Plan) {
+		return
+	}
+	if request.MaxUses < 0 {
+		writeError(w, http.StatusUnprocessableEntity, "max_uses can't be negative; 0 means unlimited.")
 		return
 	}
 	code, err := inviteCode()
@@ -482,24 +503,34 @@ func (s *server) handleAdminCreateInvite(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	created := invite{Code: code, Plan: request.Plan, MaxUses: request.MaxUses, Note: request.Note, CreatedAt: s.now()}
-	err = s.store.update(func(state *state) error {
-		state.Invites[code] = &created
-		return nil
-	})
-	if err != nil {
+	if err := s.store.createInvite(r.Context(), created); err != nil {
 		writeError(w, http.StatusInternalServerError, "Couldn't save the invite: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, created)
 }
 
-func (s *server) handleAdminListInvites(w http.ResponseWriter, _ *http.Request) {
-	var invites []invite
-	s.store.read(func(state state) {
-		for _, invite := range state.Invites {
-			invites = append(invites, *invite)
-		}
-	})
+// planExists answers the request itself when the plan is unknown or the
+// lookup fails, so handlers can just return.
+func (s *server) planExists(w http.ResponseWriter, r *http.Request, id string) bool {
+	_, _, err := s.store.plan(r.Context(), id)
+	switch {
+	case errors.Is(err, errNotFound):
+		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("There is no plan %q.", id))
+		return false
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "Couldn't read the plans: "+err.Error())
+		return false
+	}
+	return true
+}
+
+func (s *server) handleAdminListInvites(w http.ResponseWriter, r *http.Request) {
+	invites, err := s.store.listInvites(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Couldn't read the invites: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, invites)
 }
 
@@ -517,17 +548,20 @@ type adminUser struct {
 	GatewayKeyHash string     `json:"gateway_key_hash"`
 }
 
-func (s *server) handleAdminListUsers(w http.ResponseWriter, _ *http.Request) {
-	var users []adminUser
-	s.store.read(func(state state) {
-		for _, u := range state.Users {
-			users = append(users, adminUser{
-				ID: u.ID, Plan: u.Plan, Device: u.Device, InviteCode: u.InviteCode, Status: u.Status,
-				CreatedAt: u.CreatedAt, CycleStartedAt: u.CycleStartedAt, UsedUnits: u.UsedUnits,
-				AdjustUnits: u.AdjustUnits, Exhausted: u.Exhausted, GatewayKeyHash: u.Gateway.Hash,
-			})
-		}
-	})
+func (s *server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
+	stored, err := s.store.listUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Couldn't read the users: "+err.Error())
+		return
+	}
+	users := make([]adminUser, 0, len(stored))
+	for _, u := range stored {
+		users = append(users, adminUser{
+			ID: u.ID, Plan: u.Plan, Device: u.Device, InviteCode: u.InviteCode, Status: u.Status,
+			CreatedAt: u.CreatedAt, CycleStartedAt: u.CycleStartedAt, UsedUnits: u.UsedUnits,
+			AdjustUnits: u.AdjustUnits, Exhausted: u.Exhausted, GatewayKeyHash: u.Gateway.Hash,
+		})
+	}
 	writeJSON(w, http.StatusOK, users)
 }
 
@@ -548,65 +582,36 @@ func (s *server) handleAdminAllowance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := r.PathValue("id")
-	if request.Plan != "" {
-		if _, _, ok := s.plans.plan(request.Plan); !ok {
-			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("There is no plan %q in the plans file.", request.Plan))
-			return
-		}
+	if request.Plan != "" && !s.planExists(w, r, request.Plan) {
+		return
 	}
-	var hash string
-	s.store.read(func(state state) {
-		if u, ok := state.Users[userID]; ok {
-			hash = u.Gateway.Hash
-		}
-	})
-	if hash == "" {
+	u, err := s.store.userByID(r.Context(), userID)
+	if errors.Is(err, errNotFound) {
 		writeError(w, http.StatusNotFound, "No such user.")
 		return
 	}
-	var baseline float64
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Couldn't read the user: "+err.Error())
+		return
+	}
+	change := allowanceChange{Plan: request.Plan, Reset: request.Reset, AdjustUnits: request.AdjustUnits, Note: request.Note, At: s.now()}
 	if request.Reset {
-		usage, err := s.gateway.usage(r.Context(), hash)
+		usage, err := s.gateway.usage(r.Context(), u.Gateway.Hash)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "Couldn't read the gateway usage to reset from: "+err.Error())
 			return
 		}
-		baseline = usage
+		change.BaselineUSD = usage
 	}
-	now := s.now()
-	err := s.store.update(func(state *state) error {
-		u, ok := state.Users[userID]
-		if !ok {
-			return errNotFound
-		}
-		if request.Plan != "" {
-			u.Plan = request.Plan
-		}
-		if request.Reset {
-			u.CycleStartedAt = now
-			u.UsageBaselineUSD = baseline
-			u.UsedUnits = 0
-			u.AdjustUnits = 0
-			state.Ledger = append(state.Ledger, ledgerEntry{At: now, UserID: userID, Source: "reset", Note: request.Note})
-		}
-		if request.AdjustUnits != 0 {
-			u.AdjustUnits += request.AdjustUnits
-			state.Ledger = append(state.Ledger, ledgerEntry{At: now, UserID: userID, Units: -request.AdjustUnits, Source: "adjust", Note: request.Note})
-		}
-		// Force the next entitlement read to re-sync and re-enforce.
-		u.LastSyncAt = time.Time{}
-		return nil
-	})
-	if err != nil {
+	if err := s.store.applyAllowance(r.Context(), userID, change); err != nil {
 		writeError(w, http.StatusInternalServerError, "Couldn't update the allowance: "+err.Error())
 		return
 	}
-	var updated user
-	s.store.read(func(state state) {
-		if u, ok := state.Users[userID]; ok {
-			updated = *u
-		}
-	})
+	updated, err := s.store.userByID(r.Context(), userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "The allowance was saved but the user couldn't be re-read: "+err.Error())
+		return
+	}
 	entitlement, err := s.entitlementFor(r.Context(), updated)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "The allowance was saved but couldn't be applied at the gateway: "+err.Error())
@@ -629,15 +634,11 @@ func (s *server) handleAdminRevoke(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleAdminLedger(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("id")
-	entries := []ledgerEntry{}
-	s.store.read(func(state state) {
-		for _, entry := range state.Ledger {
-			if entry.UserID == userID {
-				entries = append(entries, entry)
-			}
-		}
-	})
+	entries, err := s.store.ledgerFor(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Couldn't read the ledger: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, entries)
 }
 
@@ -650,9 +651,14 @@ func (s *server) withUser(next func(http.ResponseWriter, *http.Request, user)) h
 			writeError(w, http.StatusUnauthorized, "This request needs your Thock Plus credential.")
 			return
 		}
-		u, ok := s.store.userByCredential(hashCredential(credential))
-		if !ok {
+		u, err := s.store.userByCredential(r.Context(), hashCredential(credential))
+		if errors.Is(err, errNotFound) {
 			writeError(w, http.StatusUnauthorized, "That Thock Plus connection is no longer valid. Connect again with an invite code.")
+			return
+		}
+		if err != nil {
+			logf("error: looking up a credential: %v", err)
+			writeError(w, http.StatusInternalServerError, "Couldn't check your connection right now. Try again.")
 			return
 		}
 		if u.Status == userRevoked {

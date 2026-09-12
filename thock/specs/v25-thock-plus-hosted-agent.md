@@ -205,10 +205,14 @@ path changes when Polar arrives: Stage 2 swaps the credential and adds ingestion
 
 ## 8. Stage 1 implementation notes (2026-09-11)
 
-- **Backend:** `thock/services/plus` (Go, standard library). `plans.json` is the plan config
-  (re-read whenever its mtime changes); `state.json` is the store; `OPENROUTER_MANAGEMENT_KEY`
-  selects the real gateway, otherwise a fake one mints keys so the loop can be exercised offline.
-  See its README for the endpoints, the admin flow (mint invite, top up, reset, revoke), and deploy.
+- **Backend:** `thock/services/plus` (Go, `pgx` as the one dependency). Postgres is the store
+  (Supabase in production): settings, plans, invites, users, and the ledger, with numbered SQL
+  migrations embedded in the binary and applied at startup. Plans are rows edited through
+  `PUT /admin/plans/{id}`, so decision 14 holds on Cloud Run where there is no file to edit; a
+  first version kept plans and users in JSON files and was replaced on 2026-09-12 before any real
+  user existed. `OPENROUTER_MANAGEMENT_KEY` selects the real gateway, otherwise a fake one mints
+  keys so the loop can be exercised offline. See its README for the endpoints, the admin flow
+  (mint invite, top up, reset, revoke), and `deploy.sh`.
 - **Model selection:** `pi-acp` spawns `pi --mode rpc` with no extra arguments, so the
   `--provider openrouter --model <id>` shape in item 3 is realized through a private Pi config
   directory per tier (`PI_CODING_AGENT_DIR`, holding `settings.json` with `defaultProvider` /

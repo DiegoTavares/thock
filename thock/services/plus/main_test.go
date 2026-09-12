@@ -2,56 +2,45 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
-const testPlans = `{
-  "version": 1,
-  "units_per_dollar": 100,
-  "plans": {
-    "dev": {
-      "name": "Dev",
-      "allowance_units": 500,
-      "cycle_days": 30,
-      "models": {"default": "google/gemini-2.5-flash", "fast": "google/gemini-2.5-flash-lite"},
-      "limits": {"warn_at_percent": 80, "max_turns_per_session": 50}
-    }
-  }
-}`
+// The plan every test connects under, on top of the seeded catalog.
+var testPlan = plan{
+	ID:             "test",
+	Name:           "Dev",
+	AllowanceUnits: 500,
+	CycleDays:      30,
+	Models:         modelTiers{Default: "google/gemini-2.5-flash", Fast: "google/gemini-2.5-flash-lite"},
+	Limits:         planLimits{WarnAtPercent: 80, MaxTurnsPerSession: 50},
+}
 
 type harness struct {
 	t       *testing.T
 	server  *server
 	gateway *fakeGateway
-	plans   string
 	clock   time.Time
 	http    *httptest.Server
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	dir := t.TempDir()
-	plansPath := filepath.Join(dir, "plans.json")
-	if err := os.WriteFile(plansPath, []byte(testPlans), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	catalog, err := loadPlanCatalog(plansPath)
+	store, err := openStore(context.Background(), freshDatabaseURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := openStore(filepath.Join(dir, "data", "state.json"))
-	if err != nil {
+	t.Cleanup(store.close)
+	if err := store.upsertPlan(context.Background(), testPlan); err != nil {
 		t.Fatal(err)
 	}
 	gw := newFakeGateway()
-	s := newServer(catalog, store, gw, "admin-secret")
-	h := &harness{t: t, server: s, gateway: gw, plans: plansPath, clock: time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)}
+	s := newServer(store, gw, "admin-secret")
+	h := &harness{t: t, server: s, gateway: gw, clock: time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)}
 	s.now = func() time.Time { return h.clock }
 	h.http = httptest.NewServer(s.routes())
 	t.Cleanup(h.http.Close)
@@ -93,7 +82,7 @@ func (h *harness) call(method, path, token string, body any) (int, map[string]an
 
 func (h *harness) invite() string {
 	h.t.Helper()
-	status, body := h.call("POST", "/admin/invites", "admin-secret", map[string]any{"plan": "dev", "max_uses": 1, "note": "test"})
+	status, body := h.call("POST", "/admin/invites", "admin-secret", map[string]any{"plan": "test", "max_uses": 1, "note": "test"})
 	if status != 200 {
 		h.t.Fatalf("invite: %d %v", status, body)
 	}
@@ -114,13 +103,18 @@ func (h *harness) entitlement(credential string) (int, map[string]any) {
 	return h.call("GET", "/v1/entitlement", credential, nil)
 }
 
+func (h *harness) user(credential string) user {
+	h.t.Helper()
+	u, err := h.server.store.userByCredential(context.Background(), hashCredential(credential))
+	if err != nil {
+		h.t.Fatalf("user not found: %v", err)
+	}
+	return u
+}
+
 func (h *harness) keyHash(credential string) string {
 	h.t.Helper()
-	u, ok := h.server.store.userByCredential(hashCredential(credential))
-	if !ok {
-		h.t.Fatal("user not found")
-	}
-	return u.Gateway.Hash
+	return h.user(credential).Gateway.Hash
 }
 
 func TestConnectMintsACappedKeyAndReportsTheAllowance(t *testing.T) {
@@ -193,12 +187,7 @@ func TestUsageCountsDownAndExhaustionDisablesTheKey(t *testing.T) {
 	}
 
 	// A top-up brings it back.
-	var userID string
-	h.server.store.read(func(state state) {
-		for id := range state.Users {
-			userID = id
-		}
-	})
+	userID := h.user(credential).ID
 	status, body := h.call("POST", "/admin/users/"+userID+"/allowance", "admin-secret", map[string]any{"adjust_units": 200, "note": "top-up"})
 	if status != 200 || body["status"] != "active" || body["remaining_units"].(float64) != 195 {
 		t.Fatalf("top-up: %d %v", status, body)
@@ -267,12 +256,7 @@ func TestRevocationLocksTheUserOutAndKillsTheKey(t *testing.T) {
 	h := newHarness(t)
 	credential, _ := h.connect(h.invite())
 	hash := h.keyHash(credential)
-	var userID string
-	h.server.store.read(func(state state) {
-		for id := range state.Users {
-			userID = id
-		}
-	})
+	userID := h.user(credential).ID
 	status, _ := h.call("POST", "/admin/users/"+userID+"/revoke", "admin-secret", nil)
 	if status != http.StatusNoContent {
 		t.Fatalf("revoke: %d", status)
@@ -302,17 +286,14 @@ func TestRevocationLocksTheUserOutAndKillsTheKey(t *testing.T) {
 	}
 }
 
-func TestPlansAreHotReloadedFromTheFile(t *testing.T) {
+func TestPlanEditsApplyOnTheNextRead(t *testing.T) {
 	h := newHarness(t)
 	credential, _ := h.connect(h.invite())
-	edited := []byte(`{"plans": {"dev": {"name": "Dev", "allowance_units": 900, "models": {"default": "x/y"}}}}`)
-	// Bump mtime explicitly: some filesystems round it to the second.
-	if err := os.WriteFile(h.plans, edited, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	future := time.Now().Add(2 * time.Second)
-	if err := os.Chtimes(h.plans, future, future); err != nil {
-		t.Fatal(err)
+	status, body := h.call("PUT", "/admin/plans/test", "admin-secret", map[string]any{
+		"name": "Dev", "allowance_units": 900, "models": map[string]any{"default": "x/y"},
+	})
+	if status != 200 || body["cycle_days"].(float64) != 30 {
+		t.Fatalf("edit: %d %v", status, body)
 	}
 	_, entitlement := h.entitlement(credential)
 	if entitlement["allowance_units"].(float64) != 900 || entitlement["remaining_units"].(float64) != 900 {
@@ -323,21 +304,94 @@ func TestPlansAreHotReloadedFromTheFile(t *testing.T) {
 		t.Fatalf("fast should fall back to default: %v", models)
 	}
 
-	// A broken edit keeps the last good plans.
-	if err := os.WriteFile(h.plans, []byte("{not json"), 0o600); err != nil {
-		t.Fatal(err)
+	// An invalid edit changes nothing.
+	status, body = h.call("PUT", "/admin/plans/test", "admin-secret", map[string]any{"allowance_units": -1, "models": map[string]any{"default": "x/y"}})
+	if status != http.StatusUnprocessableEntity || body["error"] == "" {
+		t.Fatalf("negative allowance: %d %v", status, body)
 	}
-	later := future.Add(2 * time.Second)
-	if err := os.Chtimes(h.plans, later, later); err != nil {
-		t.Fatal(err)
+	status, body = h.call("PUT", "/admin/plans/test", "admin-secret", map[string]any{"id": "other", "models": map[string]any{"default": "x/y"}})
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("mismatched id: %d %v", status, body)
 	}
 	_, entitlement = h.entitlement(credential)
 	if entitlement["allowance_units"].(float64) != 900 {
-		t.Fatalf("a broken plans file must not change anything: %v", entitlement)
+		t.Fatalf("a rejected edit must not change anything: %v", entitlement)
 	}
-	status, body := h.call("POST", "/admin/plans/reload", "admin-secret", nil)
-	if status != http.StatusUnprocessableEntity || body["error"] == "" {
-		t.Fatalf("explicit reload of a broken file should say so: %d %v", status, body)
+
+	// The seeded catalog is there alongside, and the listing shows the edit.
+	status, body = h.call("GET", "/admin/plans", "admin-secret", nil)
+	if status != 200 || body["units_per_dollar"].(float64) != 100 {
+		t.Fatalf("plans: %d %v", status, body)
+	}
+	ids := map[string]float64{}
+	for _, entry := range body["plans"].([]any) {
+		p := entry.(map[string]any)
+		ids[p["id"].(string)] = p["allowance_units"].(float64)
+	}
+	if ids["test"] != 900 || ids["plus"] != 1000 || ids["dev"] != 300 {
+		t.Fatalf("plan listing: %v", ids)
+	}
+
+	// units_per_dollar reprices the next mint.
+	status, body = h.call("PUT", "/admin/settings", "admin-secret", map[string]any{"units_per_dollar": 1000})
+	if status != 200 {
+		t.Fatalf("settings: %d %v", status, body)
+	}
+	credential2, _ := h.connect(h.invite())
+	key, _ := h.gateway.lookup(h.keyHash(credential2))
+	if key.LimitUSD != 0.9 {
+		t.Fatalf("900 units at 1000 per dollar should cap at $0.90: %+v", key)
+	}
+}
+
+func TestInvitesAreSpentAtomically(t *testing.T) {
+	h := newHarness(t)
+	status, body := h.call("POST", "/admin/invites", "admin-secret", map[string]any{"plan": "test", "max_uses": 2, "note": "pair"})
+	if status != 200 {
+		t.Fatalf("invite: %d %v", status, body)
+	}
+	code := body["code"].(string)
+	results := make(chan int, 3)
+	for range 3 {
+		go func() {
+			status, _ := h.call("POST", "/v1/connect", "", map[string]any{"invite_code": code})
+			results <- status
+		}()
+	}
+	counts := map[int]int{}
+	for range 3 {
+		counts[<-results]++
+	}
+	if counts[200] != 2 || counts[http.StatusGone] != 1 {
+		t.Fatalf("two of three racing connects should win: %v", counts)
+	}
+	spent, err := h.server.store.inviteByCode(context.Background(), code)
+	if err != nil || spent.Uses != 2 {
+		t.Fatalf("the invite should record exactly two uses: %+v %v", spent, err)
+	}
+	users, err := h.server.store.listUsers(context.Background())
+	if err != nil || len(users) != 2 {
+		t.Fatalf("expected two users, got %d (%v)", len(users), err)
+	}
+	if !h.gateway.mintedAndRevoked(3, 1) {
+		t.Fatal("the loser's minted key must be revoked again")
+	}
+}
+
+func TestStateSurvivesARestart(t *testing.T) {
+	h := newHarness(t)
+	credential, _ := h.connect(h.invite())
+	reopened, err := openStore(context.Background(), h.server.store.pool.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.close()
+	if _, err := reopened.userByCredential(context.Background(), hashCredential(credential)); err != nil {
+		t.Fatalf("the user should be there after a reopen: %v", err)
+	}
+	applied, err := migrate(context.Background(), reopened.pool)
+	if err != nil || len(applied) != 0 {
+		t.Fatalf("a second migrate should apply nothing: %v %v", applied, err)
 	}
 }
 
@@ -351,16 +405,9 @@ func TestAdminEndpointsNeedTheToken(t *testing.T) {
 	if status != http.StatusUnprocessableEntity || body["error"] == "" {
 		t.Fatalf("unknown plan: %d %v", status, body)
 	}
-}
-
-func TestStateSurvivesARestart(t *testing.T) {
-	h := newHarness(t)
-	credential, _ := h.connect(h.invite())
-	reopened, err := openStore(h.server.store.path)
-	if err != nil {
-		t.Fatal(err)
+	response, err := http.Get(h.http.URL + "/health")
+	if err != nil || response.StatusCode != 200 {
+		t.Fatalf("health: %v %v", response, err)
 	}
-	if _, ok := reopened.userByCredential(hashCredential(credential)); !ok {
-		t.Fatal("the credential index should be rebuilt from the file")
-	}
+	response.Body.Close()
 }
