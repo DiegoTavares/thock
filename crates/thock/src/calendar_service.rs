@@ -63,6 +63,12 @@ actions!(
         /// forgets the Google sign-in. Everything already in your notes
         /// stays where it is.
         DisconnectGoogleWorkspace,
+        /// Adds the day planner heading to today's note, so your meetings
+        /// have somewhere to land.
+        AddPlannerHeading,
+        /// Points the day planner at a heading today's note already has,
+        /// instead of the one Thock was looking for.
+        ChoosePlannerHeading,
     ]
 );
 
@@ -119,6 +125,27 @@ pub fn init(cx: &mut App) {
                 service.update(cx, |service, cx| service.sync_now(cx));
             }
         });
+        workspace.register_action(|workspace, _: &AddPlannerHeading, _window, cx| {
+            if let Some(service) = service_for_workspace(workspace, cx) {
+                if !service.read(cx).has_vault() {
+                    show_no_vault_error(workspace, cx);
+                    return;
+                }
+                service.update(cx, |service, cx| service.add_planner_heading(cx));
+            }
+        });
+        workspace.register_action(|workspace, _: &ChoosePlannerHeading, window, cx| {
+            let workspace_handle = workspace.weak_handle();
+            if let Some(service) = service_for_workspace(workspace, cx) {
+                if !service.read(cx).has_vault() {
+                    show_no_vault_error(workspace, cx);
+                    return;
+                }
+                service.update(cx, |service, cx| {
+                    service.choose_planner_heading(workspace_handle, window, cx)
+                });
+            }
+        });
         workspace.register_action(|workspace, _: &DisconnectGoogleWorkspace, _window, cx| {
             let gmail = crate::gmail_service::service_for_project(workspace.project(), cx);
             let inbox = crate::inbox_service::service_for_project(workspace.project(), cx);
@@ -171,13 +198,76 @@ pub enum SyncState {
     /// Connected but holding — no daily note yet, no planner heading, no
     /// calendars selected.
     Holding {
-        reason: SharedString,
+        reason: HoldReason,
     },
     Failing {
         error: SharedString,
     },
     /// The sign-in expired or was revoked (spec §6.4).
     Disconnected,
+}
+
+/// Why sync is holding (spec v26 §7.1). The two structural reasons are the
+/// ones the status row can offer a fix for; everything else is a wait.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HoldReason {
+    /// Nothing to act on: no calendars chosen yet, no note for today.
+    Waiting(SharedString),
+    /// Today's note has no heading resolving to `[day_planner] heading`.
+    NoPlannerHeading { heading: SharedString },
+    /// The planner heading is level 6, so its Calendar child would be level 7.
+    PlannerHeadingTooDeep { heading: SharedString },
+}
+
+/// The Gmail and Inbox services share [`SyncState`] and only ever wait, so
+/// their reasons stay plain strings.
+impl From<SharedString> for HoldReason {
+    fn from(reason: SharedString) -> Self {
+        Self::Waiting(reason)
+    }
+}
+
+impl std::fmt::Display for HoldReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.summary())
+    }
+}
+
+impl HoldReason {
+    /// The sentence that follows `Calendar · ` in the status row.
+    pub fn summary(&self) -> SharedString {
+        match self {
+            Self::Waiting(reason) => reason.clone(),
+            Self::NoPlannerHeading { heading } => {
+                format!("no “{heading}” heading in today's note").into()
+            }
+            Self::PlannerHeadingTooDeep { heading } => {
+                format!("“{heading}” is too deep for a Calendar section").into()
+            }
+        }
+    }
+
+    /// The tooltip that explains what to do about it, for the two structural
+    /// reasons that have a fix.
+    pub fn detail(&self) -> Option<SharedString> {
+        match self {
+            Self::Waiting(_) => None,
+            Self::NoPlannerHeading { heading } => Some(
+                format!(
+                    "Today's meetings go under a “{heading}” heading. Add it to today's \
+                     note, or point Thock at a heading the note already has."
+                )
+                .into(),
+            ),
+            Self::PlannerHeadingTooDeep { heading } => Some(
+                format!(
+                    "“{heading}” is a level-6 heading, which can't have a Calendar \
+                     subsection beneath it. Make it level 5 or shallower."
+                )
+                .into(),
+            ),
+        }
+    }
 }
 
 /// A user-triggered `Sync*Now` finished. Only manual syncs emit this — a
@@ -204,7 +294,7 @@ enum SyncOutcome {
     Synced {
         diverged: Vec<Divergence>,
     },
-    Held(SharedString),
+    Held(HoldReason),
     Failed(anyhow::Error),
     AuthRevoked,
     /// The service was reconfigured or released mid-sync.
@@ -221,6 +311,9 @@ pub struct CalendarService {
     /// apply work it spawns is awaited inside it, never stored separately.
     poll_task: Option<Task<()>>,
     connect_task: Option<Task<()>>,
+    /// The in-flight `AddPlannerHeading` / `ChoosePlannerHeading` work. One
+    /// slot: both fix the same thing, and the later click wins.
+    heading_task: Option<Task<()>>,
     /// Divergences already written to the log, so a frozen line is recorded
     /// once and not on every poll.
     logged_divergences: HashSet<String>,
@@ -243,6 +336,7 @@ impl CalendarService {
             state: SyncState::NoConfig,
             poll_task: None,
             connect_task: None,
+            heading_task: None,
             logged_divergences: HashSet::new(),
             announce_next_sync: false,
             _subscriptions: vec![project_subscription],
@@ -318,7 +412,7 @@ impl CalendarService {
         // Same synchronous read as `Vault::detect`; the file is tiny.
         let config = match std::fs::read_to_string(&config_path) {
             Err(_) => None,
-            Ok(text) => match parse_calendar_config(&text, &vault.config.day_planner.heading) {
+            Ok(text) => match parse_calendar_config(&text, &vault.config.day_planner) {
                 Ok(mut config) => {
                     // The account and client override belong to the
                     // connection, resolved across the Google config files
@@ -429,7 +523,9 @@ impl CalendarService {
             .then(|| match &outcome {
                 SyncOutcome::Aborted => None,
                 SyncOutcome::Synced { .. } => Some("Calendar synced".into()),
-                SyncOutcome::Held(reason) => Some(format!("Calendar sync held — {reason}").into()),
+                SyncOutcome::Held(reason) => {
+                    Some(format!("Calendar sync held — {}", reason.summary()).into())
+                }
                 SyncOutcome::Failed(error) => {
                     Some(format!("Calendar sync failed — {error:#}").into())
                 }
@@ -495,7 +591,7 @@ impl CalendarService {
             return SyncOutcome::Aborted;
         };
         if config.calendars.is_empty() {
-            return SyncOutcome::Held("no calendars selected".into());
+            return SyncOutcome::Held(HoldReason::Waiting("no calendars selected".into()));
         }
 
         // Recomputed every tick, so an app left open follows midnight to the
@@ -511,7 +607,7 @@ impl CalendarService {
 
         // Existence guard (§9 guard 2): sync never creates the daily note.
         if buffer.is_none() && !fs.is_file(&note_path).await {
-            return SyncOutcome::Held("waiting for today's note".into());
+            return SyncOutcome::Held(HoldReason::Waiting("waiting for today's note".into()));
         }
 
         let events = match provider.fetch_day(date, cx).await {
@@ -545,9 +641,12 @@ impl CalendarService {
             Err(error) => return SyncOutcome::Failed(error),
         };
         match reconcile(&text, events, config) {
-            Reconciled::NoPlannerSection => {
-                SyncOutcome::Held("no planner heading in today's note".into())
-            }
+            Reconciled::NoPlannerSection => SyncOutcome::Held(HoldReason::NoPlannerHeading {
+                heading: config.canonical_planner_heading().to_string().into(),
+            }),
+            Reconciled::NoSectionRoom => SyncOutcome::Held(HoldReason::PlannerHeadingTooDeep {
+                heading: config.canonical_planner_heading().to_string().into(),
+            }),
             Reconciled::Edits { edits, diverged } => {
                 if !edits.is_empty()
                     && let Err(error) = fs
@@ -585,7 +684,14 @@ impl CalendarService {
             let text = buffer.read_with(cx, |buffer, _| buffer.text());
             let (edits, diverged) = match reconcile(&text, events, config) {
                 Reconciled::NoPlannerSection => {
-                    return SyncOutcome::Held("no planner heading in today's note".into());
+                    return SyncOutcome::Held(HoldReason::NoPlannerHeading {
+                        heading: config.canonical_planner_heading().to_string().into(),
+                    });
+                }
+                Reconciled::NoSectionRoom => {
+                    return SyncOutcome::Held(HoldReason::PlannerHeadingTooDeep {
+                        heading: config.canonical_planner_heading().to_string().into(),
+                    });
                 }
                 Reconciled::Edits { edits, diverged } => (edits, diverged),
             };
@@ -861,6 +967,183 @@ impl CalendarService {
             .log_err();
     }
 
+    /// `thock::AddPlannerHeading` (spec v26 §8): appends the vault's day
+    /// planner heading to today's note, so a hold on a missing heading is one
+    /// click from fixed. Appends only — the level is inferred from the note
+    /// (§8.1), and nothing already written is touched. Today's note must
+    /// exist; sync never creates it, and neither does this.
+    fn add_planner_heading(&mut self, cx: &mut Context<Self>) {
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let heading = vault.config.day_planner.heading.trim().to_string();
+        if heading.is_empty() {
+            self.announce(
+                "Set “[day_planner] heading” in your vault config first".into(),
+                IconName::Warning,
+                cx,
+            );
+            return;
+        }
+        let note_path = vault.note_path(NoteKind::Daily, Local::now().date_naive());
+        let project = self.project.clone();
+        self.heading_task = Some(cx.spawn(async move |this, cx| {
+            let result = async {
+                let fs = project.read_with(cx, |project, _| project.fs().clone());
+                let buffer = project.update(cx, |project, cx| {
+                    project
+                        .project_path_for_absolute_path(&note_path, cx)
+                        .and_then(|path| project.get_open_buffer(&path, cx))
+                });
+                match buffer {
+                    Some(buffer) => {
+                        let addition = buffer.read_with(cx, |buffer, _| {
+                            planner_heading_addition(&buffer.text(), &heading)
+                        });
+                        buffer.update(cx, |buffer, cx| {
+                            let end = buffer.len();
+                            buffer.start_transaction();
+                            buffer.edit([(end..end, addition)], None, cx);
+                            buffer.end_transaction(cx);
+                        });
+                        project
+                            .update(cx, |project, cx| project.save_buffer(buffer, cx))
+                            .await?;
+                    }
+                    None => {
+                        anyhow::ensure!(
+                            fs.is_file(&note_path).await,
+                            "today's note doesn't exist yet"
+                        );
+                        let text = fs.load(&note_path).await?;
+                        let addition = planner_heading_addition(&text, &heading);
+                        fs.atomic_write(note_path.clone(), format!("{text}{addition}"))
+                            .await?;
+                    }
+                }
+                anyhow::Ok(())
+            }
+            .await;
+            this.update(cx, |service, cx| match result {
+                Ok(()) => {
+                    service.announce(
+                        format!("Added the “{heading}” heading to today's note").into(),
+                        IconName::Check,
+                        cx,
+                    );
+                    service.sync_now(cx);
+                }
+                Err(error) => {
+                    log::warn!("Thock: adding the planner heading failed: {error:#}");
+                    service.announce(
+                        format!("Couldn't add the heading — {error:#}").into(),
+                        IconName::Warning,
+                        cx,
+                    );
+                }
+            })
+            .log_err();
+        }));
+    }
+
+    /// `thock::ChoosePlannerHeading` (spec v26 §8): lists today's note's own
+    /// headings and writes the chosen one to `[day_planner] heading`, which is
+    /// how a renamed or translated heading gets adopted without the user
+    /// opening a config file.
+    fn choose_planner_heading(
+        &mut self,
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let note_path = vault.note_path(NoteKind::Daily, Local::now().date_naive());
+        let project = self.project.clone();
+        self.heading_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let text = async {
+                let fs = project.read_with(cx, |project, _| project.fs().clone());
+                let buffer = project.update(cx, |project, cx| {
+                    project
+                        .project_path_for_absolute_path(&note_path, cx)
+                        .and_then(|path| project.get_open_buffer(&path, cx))
+                });
+                match buffer {
+                    Some(buffer) => anyhow::Ok(buffer.read_with(cx, |buffer, _| buffer.text())),
+                    None => fs.load(&note_path).await,
+                }
+            }
+            .await;
+            let text = match text {
+                Ok(text) => text,
+                Err(error) => {
+                    log::warn!("Thock: reading today's note failed: {error:#}");
+                    this.update(cx, |service, cx| {
+                        service.announce(
+                            "Today's note doesn't exist yet".into(),
+                            IconName::Warning,
+                            cx,
+                        );
+                    })
+                    .log_err();
+                    return;
+                }
+            };
+            let headings = note_headings(&text);
+            if headings.is_empty() {
+                this.update(cx, |service, cx| {
+                    service.announce(
+                        "Today's note has no headings to choose from".into(),
+                        IconName::Warning,
+                        cx,
+                    );
+                })
+                .log_err();
+                return;
+            }
+            this.update_in(cx, |service, window, cx| {
+                service.open_heading_picker(workspace, headings, window, cx);
+            })
+            .log_err();
+        }));
+    }
+
+    fn open_heading_picker(
+        &mut self,
+        workspace: WeakEntity<Workspace>,
+        headings: Vec<NoteHeading>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(vault) = &self.vault else {
+            return;
+        };
+        let vault_root = vault.root.clone();
+        let fs = self.project.read(cx).fs().clone();
+        let service = cx.weak_entity();
+        workspace
+            .update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, |window, cx| {
+                    let delegate = PlannerHeadingPickerDelegate {
+                        picker_entity: cx.entity().downgrade(),
+                        service,
+                        fs,
+                        vault_root,
+                        matches: (0..headings.len()).collect(),
+                        headings,
+                        selected_index: 0,
+                    };
+                    PlannerHeadingPicker::new(delegate, window, cx)
+                });
+            })
+            .log_err();
+    }
+
+    fn announce(&mut self, message: SharedString, icon: IconName, cx: &mut Context<Self>) {
+        cx.emit(ManualSyncFinished { message, icon });
+    }
+
     /// `thock::SyncCalendarNow`: restarts the loop, which syncs immediately.
     fn sync_now(&mut self, cx: &mut Context<Self>) {
         if self.provider.is_some() {
@@ -926,6 +1209,221 @@ pub(crate) async fn update_config_file(
     mutate(&mut table);
     let serialized = toml::to_string_pretty(&table).context("serializing calendar.toml")?;
     fs.atomic_write(path, serialized).await
+}
+
+/// Rewrites `[day_planner] heading` in `.thock/config.toml` through
+/// `toml_edit`, so the user's comments and key order in their own config
+/// survive the write (spec v26 §8).
+pub(crate) async fn write_planner_heading(
+    fs: &Arc<dyn Fs>,
+    vault_root: &Path,
+    heading: &str,
+) -> Result<()> {
+    let path = vault_root.join(VAULT_MARKER_DIR).join(VAULT_CONFIG_FILE);
+    let existing = fs.load(&path).await.unwrap_or_default();
+    let mut document: toml_edit::DocumentMut = existing
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    document["day_planner"]["heading"] = toml_edit::value(heading);
+    fs.atomic_write(path, document.to_string()).await
+}
+
+/// The text `AddPlannerHeading` appends: the heading at the level inferred
+/// from the note, separated from what is already there by one blank line.
+/// Append-only — every existing byte is left alone.
+fn planner_heading_addition(text: &str, heading: &str) -> String {
+    let mut addition = String::new();
+    if !text.trim().is_empty() {
+        let trailing_newlines = text.len() - text.trim_end_matches('\n').len();
+        for _ in trailing_newlines..2 {
+            addition.push('\n');
+        }
+    }
+    let level = crate::day_plan::section_heading_level(text);
+    addition.push_str(&"#".repeat(level));
+    addition.push(' ');
+    addition.push_str(heading);
+    addition.push('\n');
+    addition
+}
+
+/// One ATX heading of today's note, as offered by the heading picker.
+pub struct NoteHeading {
+    level: usize,
+    text: String,
+}
+
+fn note_headings(text: &str) -> Vec<NoteHeading> {
+    text.lines()
+        .filter_map(|line| crate::day_plan::heading_level_and_text(line))
+        .filter(|(_, text)| !text.trim().is_empty())
+        .map(|(level, text)| NoteHeading {
+            level,
+            text: text.trim().to_string(),
+        })
+        .collect()
+}
+
+pub struct PlannerHeadingPicker {
+    picker: Entity<Picker<PlannerHeadingPickerDelegate>>,
+}
+
+impl PlannerHeadingPicker {
+    fn new(
+        delegate: PlannerHeadingPickerDelegate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let picker = cx.new(|cx| Picker::uniform_list(delegate, window, cx));
+        Self { picker }
+    }
+}
+
+impl ModalView for PlannerHeadingPicker {}
+impl EventEmitter<DismissEvent> for PlannerHeadingPicker {}
+
+impl Focusable for PlannerHeadingPicker {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.picker.focus_handle(cx)
+    }
+}
+
+impl Render for PlannerHeadingPicker {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .key_context("PlannerHeadingPicker")
+            .w(rems(34.))
+            .child(self.picker.clone())
+    }
+}
+
+/// Every heading today's note has; enter adopts one as `[day_planner]
+/// heading`, escape leaves the config alone.
+pub struct PlannerHeadingPickerDelegate {
+    picker_entity: WeakEntity<PlannerHeadingPicker>,
+    service: WeakEntity<CalendarService>,
+    fs: Arc<dyn Fs>,
+    vault_root: PathBuf,
+    headings: Vec<NoteHeading>,
+    matches: Vec<usize>,
+    selected_index: usize,
+}
+
+impl PickerDelegate for PlannerHeadingPickerDelegate {
+    type ListItem = ListItem;
+
+    fn name() -> &'static str {
+        "choose planner heading"
+    }
+
+    fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
+        "Which heading holds your day's plan?".into()
+    }
+
+    fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+
+    fn selected_index(&self) -> usize {
+        self.selected_index
+    }
+
+    fn set_selected_index(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        _cx: &mut Context<Picker<Self>>,
+    ) {
+        self.selected_index = index;
+    }
+
+    fn update_matches(
+        &mut self,
+        query: String,
+        _window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) -> Task<()> {
+        let query = query.to_lowercase();
+        self.matches = self
+            .headings
+            .iter()
+            .enumerate()
+            .filter(|(_, heading)| query.is_empty() || heading.text.to_lowercase().contains(&query))
+            .map(|(index, _)| index)
+            .collect();
+        self.selected_index = self
+            .selected_index
+            .min(self.matches.len().saturating_sub(1));
+        cx.notify();
+        Task::ready(())
+    }
+
+    fn confirm(&mut self, _secondary: bool, _window: &mut Window, cx: &mut Context<Picker<Self>>) {
+        let Some(heading) = self
+            .matches
+            .get(self.selected_index)
+            .and_then(|&index| self.headings.get(index))
+        else {
+            return;
+        };
+        let heading = heading.text.clone();
+        let fs = self.fs.clone();
+        let vault_root = self.vault_root.clone();
+        let service = self.service.clone();
+        cx.spawn(async move |_, cx| {
+            let written = write_planner_heading(&fs, &vault_root, &heading).await;
+            service.update(cx, |service, cx| match written {
+                Ok(()) => {
+                    service.announce(
+                        format!("The day planner now follows “{heading}”").into(),
+                        IconName::Check,
+                        cx,
+                    );
+                    service.reload(cx);
+                }
+                Err(error) => {
+                    log::warn!("Thock: writing the planner heading failed: {error:#}");
+                    service.announce(
+                        format!("Couldn't save the heading — {error:#}").into(),
+                        IconName::Warning,
+                        cx,
+                    );
+                }
+            })
+        })
+        .detach_and_log_err(cx);
+        self.picker_entity
+            .update(cx, |_, cx| cx.emit(DismissEvent))
+            .log_err();
+    }
+
+    fn dismissed(&mut self, _window: &mut Window, cx: &mut Context<Picker<Self>>) {
+        self.picker_entity
+            .update(cx, |_, cx| cx.emit(DismissEvent))
+            .log_err();
+    }
+
+    fn render_match(
+        &self,
+        index: usize,
+        selected: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Picker<Self>>,
+    ) -> Option<Self::ListItem> {
+        let heading = self.headings.get(*self.matches.get(index)?)?;
+        Some(
+            ListItem::new(index)
+                .inset(true)
+                .spacing(ListItemSpacing::Sparse)
+                .toggle_state(selected)
+                .child(Label::new(heading.text.clone()))
+                .end_slot(
+                    Label::new("#".repeat(heading.level))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+        )
+    }
 }
 
 pub struct CalendarPicker {
@@ -1210,6 +1708,130 @@ mod tests {
         assert!(
             text.contains("- [x] 11:00 - 11:30 ~~Standup~~ (cancelled) <!--gcal:aaaaaaaaaaaa-->"),
             "cancellation not marked:\n{text}"
+        );
+    }
+
+    #[test]
+    fn planner_heading_addition_matches_the_note() {
+        // The shipped template's shape: `#` title, `##` sections.
+        assert_eq!(
+            planner_heading_addition("# Monday\n\n## Journal\n\nprose\n", "Day planner"),
+            "\n## Day planner\n"
+        );
+        // A missing trailing newline still gets a blank line before it.
+        assert_eq!(
+            planner_heading_addition("# Monday\n\n## Journal", "Day planner"),
+            "\n\n## Day planner\n"
+        );
+        // Already blank-terminated: no third newline.
+        assert_eq!(
+            planner_heading_addition("# Monday\n\n## Journal\n\n", "Day planner"),
+            "## Day planner\n"
+        );
+        assert_eq!(
+            planner_heading_addition("", "Day planner"),
+            "## Day planner\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_missing_planner_heading_holds_and_add_heading_fixes_it(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let today = Local::now().date_naive();
+        let note_path = PathBuf::from(format!("/vault/daily/{}.md", today.format("%Y-%m-%d")));
+        fs.create_dir(Path::new("/vault/daily")).await.unwrap();
+        // The template drifted: the planner section is gone entirely.
+        fs.insert_file(&note_path, b"# Monday\n\n## Journal\n\nprose\n".to_vec())
+            .await;
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+
+        let service = cx.new(|cx| CalendarService::new(project.clone(), cx));
+        let provider = Arc::new(StubProvider {
+            events: Mutex::new(vec![CalendarEvent {
+                id: "aaaaaaaaaaaa".to_string(),
+                title: "Standup".to_string(),
+                time: Some((600, 630)),
+                kind: EventKind::Default,
+            }]),
+        });
+        let vault = Vault {
+            root: PathBuf::from("/vault"),
+            config: VaultConfig::default(),
+        };
+        let mut config = CalendarConfig::with_planner_heading("Day planner");
+        config.account = Some("diego@example.com".to_string());
+        config.calendars = vec!["primary".to_string()];
+        service.update(cx, |service, cx| {
+            service.configure_for_test(vault, config, provider.clone(), cx)
+        });
+        cx.run_until_parked();
+
+        // The hold names the heading it wanted, so the row can offer the fix.
+        service.read_with(cx, |service, _| match service.state() {
+            SyncState::Holding {
+                reason: reason @ HoldReason::NoPlannerHeading { heading },
+            } => {
+                assert_eq!(heading.as_ref(), "Day planner");
+                assert!(reason.detail().is_some());
+            }
+            other => panic!("expected a planner-heading hold, got {other:?}"),
+        });
+
+        service.update(cx, |service, cx| service.add_planner_heading(cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(301));
+        cx.run_until_parked();
+
+        // The heading was appended at the note's own level, nothing else was
+        // touched, and the meeting landed under it.
+        let text = fs.load(&note_path).await.unwrap();
+        assert_eq!(
+            text,
+            "# Monday\n\n## Journal\n\nprose\n\n## Day planner\n\n### Calendar\n\n\
+             - [ ] 10:00 - 10:30 Standup <!--gcal:aaaaaaaaaaaa-->\n",
+            "unexpected note:\n{text}"
+        );
+        service.read_with(cx, |service, _| {
+            assert!(
+                matches!(service.state(), SyncState::Synced { .. }),
+                "unexpected state {:?}",
+                service.state()
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn writing_the_planner_heading_keeps_the_rest_of_the_config(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let config_path = PathBuf::from("/vault/.thock/config.toml");
+        fs.create_dir(Path::new("/vault/.thock")).await.unwrap();
+        fs.insert_file(
+            &config_path,
+            b"schema = 1\n\n# Where the daily notes live\n[daily]\ndir = \"daily\"\n".to_vec(),
+        )
+        .await;
+        let fs: Arc<dyn Fs> = fs.clone();
+
+        write_planner_heading(&fs, Path::new("/vault"), "Agenda")
+            .await
+            .unwrap();
+
+        let written = fs.load(&config_path).await.unwrap();
+        assert!(
+            written.contains("# Where the daily notes live"),
+            "{written}"
+        );
+        assert!(written.contains("schema = 1"), "{written}");
+        assert!(written.contains("dir = \"daily\""), "{written}");
+        // And the new key is where `[day_planner] heading` is read from.
+        let table: toml::Table = toml::from_str(&written).expect("config still parses");
+        assert_eq!(
+            table["day_planner"]["heading"].as_str(),
+            Some("Agenda"),
+            "{written}"
         );
     }
 

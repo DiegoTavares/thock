@@ -25,7 +25,8 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::calendar_service::{
-    self, CalendarService, ConnectGoogleWorkspace, SyncCalendarNow, SyncState,
+    self, AddPlannerHeading, CalendarService, ChoosePlannerHeading, ConnectGoogleWorkspace,
+    HoldReason, SyncCalendarNow, SyncState,
 };
 use crate::day_plan::{self, DayPlan, PlacedBlock, PlanItem, parse_day_plan};
 use crate::markdown_text::render_markdown_row;
@@ -567,7 +568,41 @@ impl DayPlannerPanel {
                     format_ago(at.elapsed())
                 ))]
             }
-            SyncState::Holding { reason } => vec![muted(format!("Calendar · {reason}"))],
+            // A structural hold is a question with an answer, so it comes
+            // with the buttons that answer it (spec v26 §7.3).
+            SyncState::Holding { reason } => {
+                let mut row = vec![match reason.detail() {
+                    None => muted(format!("Calendar · {}", reason.summary())),
+                    Some(detail) => div()
+                        .id("thock-calendar-hold")
+                        .child(
+                            Label::new(format!("Calendar · {}", reason.summary()))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .tooltip(ui::Tooltip::text(detail))
+                        .into_any_element(),
+                }];
+                if matches!(reason, HoldReason::NoPlannerHeading { .. }) {
+                    row.push(
+                        Button::new("thock-add-planner-heading", "Add heading")
+                            .label_size(LabelSize::Small)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(AddPlannerHeading.boxed_clone(), cx);
+                            })
+                            .into_any_element(),
+                    );
+                    row.push(
+                        Button::new("thock-choose-planner-heading", "Use another…")
+                            .label_size(LabelSize::Small)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(ChoosePlannerHeading.boxed_clone(), cx);
+                            })
+                            .into_any_element(),
+                    );
+                }
+                row
+            }
             SyncState::Failing { error } => vec![
                 muted("Calendar · sync failed".to_string()),
                 Button::new("thock-retry-calendar-sync", "Retry")

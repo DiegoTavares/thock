@@ -34,7 +34,7 @@ file = "backlog.md"          # the Soon / Someday / Completed holding pen
 [[routines.installed]]
 id      = "timeline"
 enabled = true
-version = 10
+version = 11
 
 [[routines.installed]]
 id      = "inbox"
@@ -380,11 +380,37 @@ pub struct AgentConfig {
     pub fast_command: Option<String>,
 }
 
+/// `[day_planner] heading` is either one name or a list whose first entry is
+/// canonical and whose rest are aliases (spec v26 §6.2). The scalar form is
+/// the one-element list, so existing vaults parse and re-serialize unchanged.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum HeadingNamesContent {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl HeadingNamesContent {
+    /// `(canonical, aliases)`; blank entries are dropped, and a list with
+    /// nothing left in it is an unset heading — as an empty string always was.
+    fn resolve(self) -> (String, Vec<String>) {
+        let names = match self {
+            Self::One(name) => vec![name],
+            Self::Many(names) => names,
+        };
+        let mut names = names.into_iter().filter_map(|name| {
+            let name = name.trim();
+            (!name.is_empty()).then(|| name.to_string())
+        });
+        (names.next().unwrap_or_default(), names.collect())
+    }
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct DayPlannerConfigContent {
     #[serde(skip_serializing_if = "Option::is_none")]
-    heading: Option<String>,
+    heading: Option<HeadingNamesContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     day_start: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -422,8 +448,13 @@ impl DayPlannerConfigContent {
             day_start = defaults.day_start;
             day_end = defaults.day_end;
         }
+        let (heading, heading_aliases) = match self.heading {
+            Some(heading) => heading.resolve(),
+            None => (defaults.heading, defaults.heading_aliases),
+        };
         DayPlannerConfig {
-            heading: self.heading.unwrap_or(defaults.heading),
+            heading,
+            heading_aliases,
             day_start,
             day_end,
             default_duration: match self.default_duration_minutes {
@@ -958,7 +989,7 @@ mod tests {
         assert_eq!(
             vault.config.routines.installed,
             vec![
-                InstalledRoutine::new("timeline".to_string(), true, 10),
+                InstalledRoutine::new("timeline".to_string(), true, 11),
                 InstalledRoutine::new("inbox".to_string(), true, 2),
             ]
         );
@@ -1123,6 +1154,42 @@ mod tests {
             }
             other => panic!("expected valid vault, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn day_planner_heading_accepts_one_name_or_a_list() {
+        let parse = |raw: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let marker = dir.path().join(VAULT_MARKER_DIR);
+            fs::create_dir_all(&marker).unwrap();
+            fs::write(
+                marker.join(VAULT_CONFIG_FILE),
+                format!("schema = 1\n[day_planner]\nheading = {raw}\n"),
+            )
+            .unwrap();
+            match Vault::detect(dir.path()) {
+                VaultStatus::Valid(vault) => vault.config.day_planner,
+                other => panic!("expected valid vault, got {other:?}"),
+            }
+        };
+
+        let config = parse("\"Agenda\"");
+        assert_eq!(config.heading, "Agenda");
+        assert!(config.heading_aliases.is_empty());
+
+        // First entry is canonical, the rest are aliases; blanks drop out.
+        let config = parse("[\" Agenda \", \"\", \"Day planner\"]");
+        assert_eq!(config.heading, "Agenda");
+        assert_eq!(config.heading_aliases, vec!["Day planner".to_string()]);
+        assert_eq!(
+            config.heading_names(),
+            crate::day_plan::HeadingNames::new(["Agenda", "Day planner"])
+        );
+
+        // Nothing left to match on is an unset heading, as `""` always was.
+        assert!(parse("[]").heading_names().is_empty());
+        assert!(parse("[\"  \"]").heading_names().is_empty());
+        assert!(parse("\"\"").heading_names().is_empty());
     }
 
     #[test]

@@ -26,7 +26,7 @@ Link a Google account to this vault with one sign-in that powers three rituals: 
   The trailing HTML comment is the meeting's identity — invisible in rendered Markdown, and what lets a moved meeting keep its checkbox. Tell the user to leave it in place; everything else on the line is theirs.
 - Ticking a meeting off, adding sub-bullets, or rewriting its title is always safe. A renamed line becomes the user's — Thock stops correcting it entirely.
 - A cancelled meeting is struck through and marked `(cancelled)`, never deleted. Sync is read-only toward Google: editing the note never changes the calendar.
-- Sync waits for the user to create the daily note and for the Day planner heading to exist — it never creates either.
+- Sync waits for the user to create the daily note and for the Day planner heading to exist — it never creates either on its own. Decoration doesn't matter: `## 📅 Day planner`, `## Day planner:` and `## Day-planner` all resolve. A *renamed* heading does matter, and the Day Planner's status row says so with two buttons — **Add heading** writes the heading into today's note, **Use another…** points `[day_planner] heading` at a heading the note already has. That key also takes a list (`heading = ["Agenda", "Day planner"]`), which is how a rename or a translation keeps yesterday's notes parsing.
 
 ## 3. Explain the email ritual (only if asked)
 

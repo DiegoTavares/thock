@@ -397,7 +397,9 @@ impl GmailService {
                 true
             }
             SyncOutcome::Held(reason) => {
-                self.state = SyncState::Holding { reason };
+                self.state = SyncState::Holding {
+                    reason: reason.into(),
+                };
                 *delay = interval;
                 true
             }
@@ -1191,7 +1193,7 @@ mod tests {
         cx.run_until_parked();
         service.read_with(cx, |service, _| match service.state() {
             SyncState::Holding { reason } => {
-                assert!(reason.contains("thock/backlog"), "{reason}");
+                assert!(reason.summary().contains("thock/backlog"), "{reason}");
             }
             other => panic!("expected holding, got {other:?}"),
         });

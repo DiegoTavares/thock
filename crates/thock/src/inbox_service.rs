@@ -475,7 +475,9 @@ impl InboxService {
                 true
             }
             SyncOutcome::Held(reason) => {
-                self.state = SyncState::Holding { reason };
+                self.state = SyncState::Holding {
+                    reason: reason.into(),
+                };
                 *delay = interval;
                 true
             }
@@ -1067,7 +1069,7 @@ mod tests {
         // …and the holding source's reason is what the row shows.
         service.read_with(cx, |service, _| match service.state() {
             SyncState::Holding { reason } => {
-                assert!(reason.contains("thock/inbox"), "{reason}");
+                assert!(reason.summary().contains("thock/inbox"), "{reason}");
             }
             other => panic!("expected holding, got {other:?}"),
         });

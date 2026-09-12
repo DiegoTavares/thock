@@ -1094,7 +1094,7 @@ impl BacklogPanel {
         cx.notify();
 
         let project = self.project.clone();
-        let heading = vault.config.day_planner.heading.clone();
+        let heading = vault.config.day_planner.heading_names();
         let now = Local::now();
         let today = now.date_naive();
         let time = now.time();

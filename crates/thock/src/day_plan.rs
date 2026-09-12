@@ -7,9 +7,14 @@
 /// lives in `vault.rs`; times here are minutes since midnight.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DayPlannerConfig {
-    /// Heading whose section is parsed (matched case-insensitively against
-    /// any ATX heading). Empty means the whole note is always parsed.
+    /// Heading whose section is parsed, matched against any ATX heading
+    /// exactly and then on its normalized key (spec v26 §5). This is also the
+    /// name Thock writes when it adds the heading. Empty means the whole note
+    /// is always parsed.
     pub heading: String,
+    /// Further names the planner heading may be written as, matched alongside
+    /// `heading` but never written (spec v26 §6.2).
+    pub heading_aliases: Vec<String>,
     /// Top of the grid, in minutes since midnight. The grid auto-expands
     /// earlier when a task starts before this.
     pub day_start: u32,
@@ -29,12 +34,23 @@ impl Default for DayPlannerConfig {
     fn default() -> Self {
         Self {
             heading: "Day planner".to_string(),
+            heading_aliases: Vec::new(),
             day_start: 6 * 60,
             day_end: 24 * 60,
             default_duration: 30,
             show_now_indicator: true,
             sections: std::collections::HashMap::new(),
         }
+    }
+}
+
+impl DayPlannerConfig {
+    /// Every name the planner heading may be written as, canonical first.
+    pub fn heading_names(&self) -> HeadingNames {
+        HeadingNames::new(
+            std::iter::once(self.heading.as_str())
+                .chain(self.heading_aliases.iter().map(String::as_str)),
+        )
     }
 }
 
@@ -119,7 +135,7 @@ impl DayPlan {
 /// it just becomes unscheduled with its raw text as the label.
 pub fn parse_day_plan(text: &str, config: &DayPlannerConfig) -> DayPlan {
     let lines: Vec<&str> = text.lines().collect();
-    let (range, planner_level) = match planner_section(&lines, &config.heading) {
+    let (range, planner_level) = match planner_section(&lines, &config.heading_names()) {
         Some((range, level)) => (range, Some(level)),
         None => (0..lines.len(), None),
     };
@@ -229,29 +245,163 @@ pub fn section_palette_slot(name: &str, config: &DayPlannerConfig, palette_len: 
     section_palette_index(name, palette_len)
 }
 
-/// The line range under the first heading matching `heading`
-/// (case-insensitively), ending before the next heading of equal or higher
-/// level, plus the matched heading's level. `None` when the heading is unset
-/// or not found.
-pub(crate) fn planner_section(
-    lines: &[&str],
-    heading: &str,
-) -> Option<(std::ops::Range<usize>, usize)> {
-    let wanted = heading.trim();
-    if wanted.is_empty() {
+/// A heading's decoration-insensitive comparison key (spec v26 §5.1): links
+/// reduced to their label, every character that is not a letter or digit
+/// folded to a single space, lowercased and trimmed. `## 📅 **Day planner**:`
+/// and `## Day-planner` both key as `day planner`.
+///
+/// The fold is Unicode-wide on purpose, so a heading in any language keys to
+/// itself.
+pub fn heading_key(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for link in crate::markdown_syntax::inline_links(text) {
+        if link.range.start < cursor {
+            continue;
+        }
+        plain.push_str(&text[cursor..link.range.start]);
+        plain.push_str(&text[link.label]);
+        cursor = link.range.end;
+    }
+    plain.push_str(&text[cursor..]);
+
+    let mut key = String::with_capacity(plain.len());
+    for character in plain.chars() {
+        if character.is_alphanumeric() {
+            key.extend(character.to_lowercase());
+        } else if !key.is_empty() && !key.ends_with(' ') {
+            key.push(' ');
+        }
+    }
+    let trimmed = key.trim_end();
+    key.truncate(trimmed.len());
+    key
+}
+
+/// The names a section may be written as — the canonical one plus any
+/// aliases (spec v26 §6.2) — precomputed for matching.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeadingNames {
+    lowercased: Vec<String>,
+    keys: Vec<String>,
+}
+
+impl HeadingNames {
+    /// Blank names are dropped, so an all-blank list is an unset heading.
+    pub fn new<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut lowercased = Vec::new();
+        let mut keys = Vec::new();
+        for name in names {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            lowercased.push(name.to_lowercase());
+            let key = heading_key(name);
+            if !key.is_empty() && !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        Self { lowercased, keys }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lowercased.is_empty()
+    }
+
+    /// The canonical name's rank tier is its position, so an exact match on
+    /// any name beats a normalized match on every name (spec v26 §5.2).
+    /// Lower is a better match; `None` means `text` doesn't name this heading.
+    pub(crate) fn rank(&self, text: &str) -> Option<usize> {
+        let lowercased = text.trim().to_lowercase();
+        if let Some(index) = self.lowercased.iter().position(|name| *name == lowercased) {
+            return Some(index);
+        }
+        let key = heading_key(text);
+        if key.is_empty() {
+            return None;
+        }
+        let index = self.keys.iter().position(|name| *name == key)?;
+        Some(self.lowercased.len() + index)
+    }
+}
+
+/// The best-ranked heading among `lines` (each a `(row, text)` pair) naming
+/// `names`, as `(row, level)`. Exact matches beat normalized ones and ties go
+/// to the earliest row (spec v26 §5.2). `level` restricts the search to
+/// headings of exactly that depth.
+pub(crate) fn best_heading<'a>(
+    lines: impl IntoIterator<Item = (usize, &'a str)>,
+    names: &HeadingNames,
+    level: Option<usize>,
+) -> Option<(usize, usize)> {
+    if names.is_empty() {
         return None;
     }
-    let wanted = wanted.to_lowercase();
-    let (start, level) = lines.iter().enumerate().find_map(|(index, line)| {
-        let (level, text) = heading_level_and_text(line)?;
-        (text.to_lowercase() == wanted).then_some((index, level))
-    })?;
+    let mut best: Option<(usize, usize, usize)> = None;
+    for (row, line) in lines {
+        let Some((heading_level, text)) = heading_level_and_text(line) else {
+            continue;
+        };
+        if level.is_some_and(|wanted| wanted != heading_level) {
+            continue;
+        }
+        let Some(rank) = names.rank(text) else {
+            continue;
+        };
+        if rank == 0 {
+            return Some((row, heading_level));
+        }
+        if best.is_none_or(|(best_rank, _, _)| rank < best_rank) {
+            best = Some((rank, row, heading_level));
+        }
+    }
+    best.map(|(_, row, level)| (row, level))
+}
+
+/// The line range under the heading naming `names`, ending before the next
+/// heading of equal or higher level, plus the matched heading's level.
+/// `None` when the heading is unset or not found.
+pub(crate) fn planner_section(
+    lines: &[&str],
+    names: &HeadingNames,
+) -> Option<(std::ops::Range<usize>, usize)> {
+    let (start, level) = best_heading(
+        lines.iter().enumerate().map(|(row, line)| (row, *line)),
+        names,
+        None,
+    )?;
     let end = lines[start + 1..]
         .iter()
         .position(|line| heading_level_and_text(line).is_some_and(|(l, _)| l <= level))
         .map(|offset| start + 1 + offset)
         .unwrap_or(lines.len());
     Some((start + 1..end, level))
+}
+
+/// The heading level a new top-level section should be written at (spec v26
+/// §8.1): the most common level among the headings *after* the note's title,
+/// then one below the title, then 2. Never deeper than 5, so the new section
+/// can still hold a child of its own.
+pub fn section_heading_level(text: &str) -> usize {
+    let levels: Vec<usize> = text
+        .lines()
+        .filter_map(|line| heading_level_and_text(line).map(|(level, _)| level))
+        .collect();
+    let Some((&title_level, rest)) = levels.split_first() else {
+        return 2;
+    };
+    let mut counts = [0usize; 7];
+    for &level in rest {
+        counts[level] += 1;
+    }
+    // Ties break shallower, so a note with one `##` and one `###` section
+    // gains a `##` sibling rather than a nested heading.
+    (1..=6)
+        .filter(|&level| counts[level] > 0)
+        .max_by_key(|&level| (counts[level], std::cmp::Reverse(level)))
+        .map(|level| level.min(5))
+        .unwrap_or_else(|| (title_level + 1).clamp(2, 5))
 }
 
 pub(crate) fn heading_level_and_text(line: &str) -> Option<(usize, &str)> {
@@ -709,6 +859,112 @@ mod tests {
         );
         assert_eq!(plan.items.len(), 1);
         assert_eq!(plan.items[0].label, "First");
+    }
+
+    #[test]
+    fn heading_key_folds_decoration_but_keeps_words() {
+        for decorated in [
+            "Day planner",
+            "  DAY PLANNER  ",
+            "📅 Day planner",
+            "Day planner:",
+            "Day planner ##",
+            "**Day planner**",
+            "Day-planner",
+            "~~Day~~ `planner`",
+            "[Day planner](plan.md)",
+            "[[Day planner]]",
+        ] {
+            assert_eq!(heading_key(decorated), "day planner", "{decorated:?}");
+        }
+        // Extra words are a rename, not decoration (spec v26 §5.1, G4).
+        assert_eq!(heading_key("Day planner (today)"), "day planner today");
+        assert_eq!(heading_key("✨"), "");
+        // Any language keys to itself.
+        assert_eq!(heading_key("**Planejamento**"), "planejamento");
+        assert_eq!(heading_key("日次計画"), "日次計画");
+    }
+
+    #[test]
+    fn planner_section_tolerates_a_decorated_heading() {
+        for heading in [
+            "## 📅 Day planner",
+            "## Day planner:",
+            "## **Day Planner**",
+            "## Day-planner",
+            "## Day planner ##",
+        ] {
+            let plan = parse_day_plan(&format!("{heading}\n- [ ] 09:00 Standup\n"), &config());
+            assert_eq!(plan.items.len(), 1, "{heading:?}");
+            assert_eq!(plan.items[0].label, "Standup");
+        }
+    }
+
+    #[test]
+    fn planner_section_does_not_match_extra_words() {
+        // No planner heading resolves, so the whole note is parsed — which
+        // is the pre-existing fallback, not a match on this heading.
+        let plan = parse_day_plan(
+            "## Yesterday's day planner review\n- [ ] 09:00 Standup\n## Other\n- [ ] Loose\n",
+            &config(),
+        );
+        assert_eq!(plan.items.len(), 2);
+    }
+
+    #[test]
+    fn an_exact_heading_beats_a_decorated_one_anywhere_in_the_note() {
+        let plan = parse_day_plan(
+            "## Day-planner\n- [ ] First\n## Break\n## Day planner\n- [ ] Second\n",
+            &config(),
+        );
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].label, "Second");
+    }
+
+    #[test]
+    fn heading_aliases_resolve_exactly_and_normalized() {
+        let config = DayPlannerConfig {
+            heading: "Agenda".to_string(),
+            heading_aliases: vec!["Day planner".to_string()],
+            ..DayPlannerConfig::default()
+        };
+        for heading in [
+            "## Agenda",
+            "## 📅 Agenda",
+            "## Day planner",
+            "## Day-planner",
+        ] {
+            let plan = parse_day_plan(&format!("{heading}\n- [ ] 09:00 Standup\n"), &config);
+            assert_eq!(plan.items.len(), 1, "{heading:?}");
+        }
+        // The canonical name still wins over an alias in the same note.
+        let plan = parse_day_plan(
+            "## Day planner\n- [ ] Alias\n## Agenda\n- [ ] Canonical\n",
+            &config,
+        );
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].label, "Canonical");
+    }
+
+    #[test]
+    fn section_heading_level_follows_the_note() {
+        // The shipped template: a `#` title over `##` sections.
+        assert_eq!(
+            section_heading_level("# Monday\n\n## Journal\n\n## Personal\n"),
+            2
+        );
+        // A note whose sections are `#` gets a `#` sibling.
+        assert_eq!(section_heading_level("# Journal\n\n# Personal\n"), 1);
+        // Ties break shallower.
+        assert_eq!(
+            section_heading_level("# Monday\n## Journal\n### Detail\n"),
+            2
+        );
+        // Title only, and no headings at all.
+        assert_eq!(section_heading_level("# Monday\n\nprose\n"), 2);
+        assert_eq!(section_heading_level("prose\n"), 2);
+        // Never deeper than 5, so the new section can still hold a child.
+        assert_eq!(section_heading_level("# Monday\n###### A\n###### B\n"), 5);
     }
 
     #[test]

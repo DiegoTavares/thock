@@ -8,7 +8,7 @@
 use chrono::NaiveDate;
 use std::ops::Range;
 
-use crate::day_plan::heading_level_and_text;
+use crate::day_plan::{self, heading_level_and_text};
 
 pub const DEFAULT_BACKLOG: &str = r#"# Backlog
 
@@ -254,18 +254,23 @@ fn line_table(text: &str) -> Vec<Line<'_>> {
     lines
 }
 
-/// The lines belonging to the first heading matching `heading`
-/// (case-insensitively, at any level) plus that heading's level, ending
-/// before the next heading of equal or higher level. `None` when the heading
-/// doesn't exist. Unicode lowercasing, matching the Day Planner's heading
-/// resolution, so the two features agree on which section a configured
-/// heading names.
-fn section_line_range(lines: &[Line<'_>], heading: &str) -> Option<(Range<usize>, usize)> {
-    let wanted = heading.to_lowercase();
-    let (start, level) = lines.iter().enumerate().find_map(|(index, line)| {
-        let (level, text) = heading_level_and_text(line.content)?;
-        (text.to_lowercase() == wanted).then_some((index, level))
-    })?;
+/// The lines belonging to the best heading naming `names` (at any level) plus
+/// that heading's level, ending before the next heading of equal or higher
+/// level. `None` when no heading names it. Shares the Day Planner's resolution
+/// (spec v26 §5), so the two features agree on which section a configured
+/// heading names and both tolerate a decorated one.
+fn section_line_range(
+    lines: &[Line<'_>],
+    names: &day_plan::HeadingNames,
+) -> Option<(Range<usize>, usize)> {
+    let (start, level) = day_plan::best_heading(
+        lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| (index, line.content)),
+        names,
+        None,
+    )?;
     let end = lines[start + 1..]
         .iter()
         .position(|line| {
@@ -285,13 +290,8 @@ fn resolve_section(
     kind: SectionKind,
     headings: &BacklogHeadings,
 ) -> Option<(Range<usize>, usize)> {
-    let configured = kind.heading(headings);
-    section_line_range(lines, configured).or_else(|| {
-        let default = kind.default_heading();
-        (!configured.eq_ignore_ascii_case(default))
-            .then(|| section_line_range(lines, default))
-            .flatten()
-    })
+    let names = day_plan::HeadingNames::new([kind.heading(headings), kind.default_heading()]);
+    section_line_range(lines, &names)
 }
 
 /// The rows of a section that belong to `category`: `None` addresses the
@@ -575,14 +575,14 @@ pub fn append_to_section_edit(
 /// planner/task section (matched like the Day Planner panel), or at the end
 /// of the file when the heading is missing (spec §6.3 step 1). Never touches
 /// existing content.
-pub fn append_done_to_note_edit(note_text: &str, heading: &str, task_text: &str) -> Edit {
+pub fn append_done_to_note_edit(
+    note_text: &str,
+    heading: &day_plan::HeadingNames,
+    task_text: &str,
+) -> Edit {
     let line = format!("- [x] {task_text}\n");
     let lines = line_table(note_text);
-    let section = heading
-        .trim()
-        .is_empty()
-        .then_some(None)
-        .unwrap_or_else(|| section_line_range(&lines, heading.trim()).map(|(range, _)| range));
+    let section = section_line_range(&lines, heading).map(|(range, _)| range);
     match section {
         Some(range) => {
             let anchor = lines[range.clone()]
@@ -958,7 +958,11 @@ Some orienting prose the model must never touch.
     #[test]
     fn append_done_to_note_targets_planner_section() {
         let note = "# Monday\n\n## Day planner\n\n- [ ] 09:00 Standup\n\n## Personal\n\nprose\n";
-        let edit = append_done_to_note_edit(note, "Day planner", "Renew passport");
+        let edit = append_done_to_note_edit(
+            note,
+            &day_plan::HeadingNames::new(["Day planner"]),
+            "Renew passport",
+        );
         let edited = apply_edits(note, vec![edit]);
         assert_eq!(
             edited,
@@ -974,7 +978,11 @@ Some orienting prose the model must never touch.
             "# Monday\nno planner heading\n",
             "",
         ] {
-            let edit = append_done_to_note_edit(note, "Day planner", "Task");
+            let edit = append_done_to_note_edit(
+                note,
+                &day_plan::HeadingNames::new(["Day planner"]),
+                "Task",
+            );
             let edited = apply_edits(note, vec![edit]);
             assert!(edited.ends_with("- [x] Task\n"), "got {edited:?}");
             assert!(edited.starts_with(note.trim_end_matches('\n')));
@@ -986,7 +994,11 @@ Some orienting prose the model must never touch.
         let note = "## Day planner\n\n## Personal\n";
         let edited = apply_edits(
             note,
-            vec![append_done_to_note_edit(note, "Day planner", "Task")],
+            vec![append_done_to_note_edit(
+                note,
+                &day_plan::HeadingNames::new(["Day planner"]),
+                "Task",
+            )],
         );
         assert_eq!(edited, "## Day planner\n- [x] Task\n\n## Personal\n");
     }
