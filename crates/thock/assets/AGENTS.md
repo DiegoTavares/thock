@@ -16,9 +16,13 @@ These are binding for any agent working in this vault:
    lines in an existing section) below what the user wrote. Never reword,
    reorder, or delete the user's own words unless they explicitly ask for
    an edit.
-2. **The human confirms anything that matters.** Propose, then wait.
-   Filing, moving, deleting, or acting on the user's behalf happens only
-   after they say yes.
+2. **Act freely inside the vault; confirm what can't be undone.** File,
+   move, and organize notes, run rituals, and write your part without
+   asking first: every session starts from a checkpoint, so any change is
+   one restore away from undone. The user's own words are the exception,
+   as rule 1 says. What leaves the vault or can't be taken back (money,
+   email, messages to other people) is the user's to do: prepare it, then
+   hand it over.
 3. **Never write under `.thock/`, `.claude/`, or `.gemini/`.** Thock owns
    that machinery. Two exceptions, both for skills, never incidental:
    state markers a skill explicitly documents (ready and done markers under
