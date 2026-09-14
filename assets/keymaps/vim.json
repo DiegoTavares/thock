@@ -1099,6 +1099,8 @@
       "a": "thock::FocusChatInput",
       "o": "thock::NewChat",
       "g space": "thock::OpenChatEntry",
+      "l": "thock::ExpandChatActivity",
+      "h": "thock::CollapseChatActivity",
       "0": ["vim::Number", 0],
       "1": ["vim::Number", 1],
       "2": ["vim::Number", 2],
