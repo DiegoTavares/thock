@@ -95,9 +95,28 @@ pub async fn ensure_installed(node: &NodeRuntime, fs: &Arc<dyn Fs>) -> Result<In
         )
         .await;
     if needs_pi_acp || needs_pi {
-        node.npm_install_packages(
-            &dir,
-            &[(PI_ACP_PACKAGE, PI_ACP_VERSION), (PI_PACKAGE, PI_VERSION)],
+        // Not `npm_install_packages`: its 5-second fetch timeout is sized for
+        // small language servers, and Pi's dependency tree has hundreds of
+        // tarballs, so one slow download fails the whole install on an
+        // ordinary connection.
+        let pi_acp = format!("{PI_ACP_PACKAGE}@{PI_ACP_VERSION}");
+        let pi = format!("{PI_PACKAGE}@{PI_VERSION}");
+        node.run_npm_subcommand(
+            Some(&dir),
+            "install",
+            &[
+                pi_acp.as_str(),
+                pi.as_str(),
+                "--save-exact",
+                "--fetch-retries",
+                "5",
+                "--fetch-retry-mintimeout",
+                "2000",
+                "--fetch-retry-maxtimeout",
+                "30000",
+                "--fetch-timeout",
+                "120000",
+            ],
         )
         .await
         .context("installing the Thock Agent")?;
