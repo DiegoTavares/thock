@@ -26,6 +26,7 @@ use language::language_settings::SoftWrap;
 use markdown::{MarkdownElement, MarkdownFont, MarkdownStyle};
 use project::Project;
 use project::project_settings::DiagnosticSeverity;
+use settings::Settings as _;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -77,6 +78,9 @@ actions!(
         /// Sends your last message to the Thock Agent again after a turn
         /// that couldn't finish.
         RetryChatTurn,
+        /// Shows or hides how much of the Thock Agent's allowance this
+        /// cycle has used.
+        ToggleChatUsage,
     ]
 );
 
@@ -471,6 +475,9 @@ pub struct ChatPanel {
     /// Read-only editors over the diffs tool calls produced, keyed by the
     /// diff entity so a re-render never rebuilds them.
     diff_editors: HashMap<EntityId, Entity<Editor>>,
+    /// Whether the allowance bar is showing; off by default so the balance
+    /// is a glance away, not a permanent fixture.
+    show_usage: bool,
     /// A launch that is waiting on the connect flow or the keychain read.
     pending_launch: Option<LaunchRequest>,
     _subscriptions: Vec<Subscription>,
@@ -529,6 +536,7 @@ impl ChatPanel {
                 elicitation_choices: HashMap::default(),
                 elicitation_editors: HashMap::default(),
                 diff_editors: HashMap::default(),
+                show_usage: false,
                 pending_launch: None,
                 _subscriptions: vec![project_subscription],
             };
@@ -1159,6 +1167,11 @@ impl ChatPanel {
         cx.notify();
     }
 
+    fn toggle_usage(&mut self, _: &ToggleChatUsage, _window: &mut Window, cx: &mut Context<Self>) {
+        self.show_usage = !self.show_usage;
+        cx.notify();
+    }
+
     fn retry_turn(&mut self, _: &RetryChatTurn, _window: &mut Window, cx: &mut Context<Self>) {
         let last_sent = self
             .session
@@ -1716,7 +1729,16 @@ impl ChatPanel {
     // --- rendering ---
 
     fn markdown_style(&self, muted: bool, window: &Window, cx: &App) -> MarkdownStyle {
-        let style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
+        let mut style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
+        // The agent type scale reads oversized beside the rest of the panel
+        // chrome; pin the chat to the app's UI font size, with inline code a
+        // step under it so commands never out-shout the prose.
+        let theme_settings = theme_settings::ThemeSettings::get_global(cx);
+        let ui_font_size = theme_settings.ui_font_size(cx);
+        style.base_text_style.font_size = ui_font_size.into();
+        style.base_text_style.line_height = (ui_font_size * 1.6).into();
+        style.inline_code.font_size = Some((ui_font_size * 0.9).into());
+        style.code_block.text.font_size = Some((ui_font_size * 0.9).into());
         if muted {
             style.with_muted_text(cx)
         } else {
@@ -1762,7 +1784,7 @@ impl ChatPanel {
                 Some(AgentThreadEntry::ToolCall(_)) | None => div().into_any_element(),
             },
             ChatItem::Activity { key, calls } => {
-                self.render_activity(key, calls, entries, vault_root, window, cx)
+                self.render_activity(key, calls, entries, vault_root, cx)
             }
         };
         let item_key = item.key();
@@ -1856,7 +1878,6 @@ impl ChatPanel {
         calls: &[(usize, acp::ToolCallId)],
         entries: &[AgentThreadEntry],
         vault_root: Option<&Path>,
-        window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
         let tool_calls: Vec<&ToolCall> = calls
@@ -1927,7 +1948,7 @@ impl ChatPanel {
                 .border_color(cx.theme().colors().border_variant)
                 .gap_0p5();
             for tool_call in &tool_calls {
-                detail = detail.child(self.render_activity_call(tool_call, vault_root, window, cx));
+                detail = detail.child(self.render_activity_call(tool_call, vault_root, cx));
             }
             column = column.child(detail);
         }
@@ -1942,7 +1963,6 @@ impl ChatPanel {
         &self,
         tool_call: &ToolCall,
         vault_root: Option<&Path>,
-        window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
         let (verb, icon) = call_verb_and_icon(&tool_call.kind);
@@ -1965,15 +1985,23 @@ impl ChatPanel {
                     .as_ref()
                     .is_some_and(|name| name.as_ref() == label_text.as_ref());
                 if !label_text.is_empty() && !matches_tool_name {
+                    // Plain text at row size — a command must not out-shout
+                    // the verbs beside it.
+                    let label = Label::new(label_text)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .truncate();
+                    let label = if matches!(tool_call.kind, acp::ToolKind::Execute) {
+                        label.buffer_font(cx)
+                    } else {
+                        label
+                    };
                     Some(
                         div()
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .child(MarkdownElement::new(
-                                tool_call.label.clone(),
-                                self.markdown_style(true, window, cx),
-                            ))
+                            .child(label)
                             .into_any_element(),
                     )
                 } else {
@@ -2159,6 +2187,7 @@ impl ChatPanel {
                                 })),
                         )
                     })
+                    .children(self.render_usage_button(cx))
                     .child(
                         IconButton::new("thock-chat-new", IconName::Plus)
                             .icon_size(IconSize::Small)
@@ -2175,8 +2204,9 @@ impl ChatPanel {
             .flex_1()
             .min_h_0()
             .w_full()
-            .px_1()
-            .gap_1()
+            .px_2()
+            .py_2()
+            .gap_2()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
             .children(items.iter().enumerate().map(|(position, item)| {
@@ -2293,9 +2323,37 @@ impl ChatPanel {
             .into_any_element()
     }
 
+    /// The header toggle that stands in for the always-on allowance bar:
+    /// quiet while there is plenty left, amber once the warning mark is
+    /// crossed, red at zero — so the signal still arrives when it matters.
+    fn render_usage_button(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let entitlement = self.entitlement()?;
+        let (icon, color) = if entitlement.is_exhausted() {
+            (IconName::SignalLow, Color::Error)
+        } else if entitlement.is_running_low() {
+            (IconName::SignalMedium, Color::Warning)
+        } else {
+            (IconName::SignalHigh, Color::Muted)
+        };
+        let summary: SharedString = entitlement.balance_summary().into();
+        Some(
+            IconButton::new("thock-chat-usage", icon)
+                .icon_size(IconSize::Small)
+                .icon_color(color)
+                .toggle_state(self.show_usage)
+                .tooltip(move |_window, cx| {
+                    Tooltip::with_meta("Usage", Some(&ToggleChatUsage), summary.clone(), cx)
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_usage(&ToggleChatUsage, window, cx)
+                }))
+                .into_any_element(),
+        )
+    }
+
     /// The allowance, as a bar the wife test can read: how much of this
     /// cycle is used, in the plan's own words, turning amber at the warning
-    /// mark and red at zero.
+    /// mark and red at zero. Hidden behind the header's usage toggle.
     fn render_footer(&self, cx: &Context<Self>) -> AnyElement {
         let Some(entitlement) = self.entitlement() else {
             return div().into_any_element();
@@ -2584,7 +2642,7 @@ impl Render for ChatPanel {
                         |this| {
                             this.child(Divider::horizontal())
                                 .child(self.render_composer(cx))
-                                .child(self.render_footer(cx))
+                                .when(self.show_usage, |this| this.child(self.render_footer(cx)))
                         },
                     )
                     .into_any_element()
@@ -2613,6 +2671,7 @@ impl Render for ChatPanel {
             .on_action(cx.listener(Self::expand_activity))
             .on_action(cx.listener(Self::collapse_activity))
             .on_action(cx.listener(Self::retry_turn))
+            .on_action(cx.listener(Self::toggle_usage))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::select_first))
