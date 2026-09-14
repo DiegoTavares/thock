@@ -26,7 +26,6 @@ use language::language_settings::SoftWrap;
 use markdown::{MarkdownElement, MarkdownFont, MarkdownStyle};
 use project::Project;
 use project::project_settings::DiagnosticSeverity;
-use settings::Settings as _;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -1730,15 +1729,15 @@ impl ChatPanel {
 
     fn markdown_style(&self, muted: bool, window: &Window, cx: &App) -> MarkdownStyle {
         let mut style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
-        // The agent type scale reads oversized beside the rest of the panel
-        // chrome; pin the chat to the app's UI font size, with inline code a
-        // step under it so commands never out-shout the prose.
-        let theme_settings = theme_settings::ThemeSettings::get_global(cx);
-        let ui_font_size = theme_settings.ui_font_size(cx);
-        style.base_text_style.font_size = ui_font_size.into();
-        style.base_text_style.line_height = (ui_font_size * 1.6).into();
-        style.inline_code.font_size = Some((ui_font_size * 0.9).into());
-        style.code_block.text.font_size = Some((ui_font_size * 0.9).into());
+        // Pin the prose to the same rem scale panel Labels use
+        // (`TextSize::Default`, 14px at the default rem base) — the agent
+        // style's `ui_font_size` is the 16px rem base itself, which reads
+        // oversized beside the rest of the panel chrome. Code steps down to
+        // the Small label size so commands never out-shout the prose.
+        style.base_text_style.font_size = rems_from_px(14.).into();
+        style.base_text_style.line_height = relative(1.55);
+        style.inline_code.font_size = Some(rems_from_px(12.).into());
+        style.code_block.text.font_size = Some(rems_from_px(12.).into());
         if muted {
             style.with_muted_text(cx)
         } else {
@@ -2204,9 +2203,9 @@ impl ChatPanel {
             .flex_1()
             .min_h_0()
             .w_full()
-            .px_2()
-            .py_2()
-            .gap_2()
+            .px_3()
+            .py_3()
+            .gap_3()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
             .children(items.iter().enumerate().map(|(position, item)| {
