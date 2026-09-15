@@ -633,4 +633,3 @@ mod tests {
         assert!(gather_vault_context(None, today()).is_none());
     }
 }
-
