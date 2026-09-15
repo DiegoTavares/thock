@@ -73,6 +73,44 @@ impl ModelTier {
     }
 }
 
+/// Which rails a Run goes down (V25 §3 item 9): the user's own CLI in the
+/// terminal panel, or the hosted Thock Agent in the chat panel. Stored as
+/// `[agent] mode` in the user-level settings; when unset, the hosted path is
+/// used only once a Thock Plus credential exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionMode {
+    Byo,
+    Hosted,
+}
+
+impl ConnectionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Byo => "byo",
+            Self::Hosted => "hosted",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "byo" | "own" | "terminal" => Some(Self::Byo),
+            "hosted" | "thock" | "plus" => Some(Self::Hosted),
+            _ => None,
+        }
+    }
+}
+
+/// The explicitly chosen connection mode, if any. Reads the global settings
+/// file; call from a background thread when latency matters.
+pub fn load_global_connection_mode() -> Option<ConnectionMode> {
+    load_global_agent_field("mode").and_then(|value| ConnectionMode::parse(&value))
+}
+
+/// Persists the connection mode. Blocking I/O.
+pub fn save_global_connection_mode(mode: ConnectionMode) -> Result<()> {
+    save_global_agent_field_to(&global_settings_path(), "mode", mode.as_str())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnectedAgent {
     pub command: String,
@@ -227,6 +265,22 @@ fn load_global_agent_field_from(path: &Path, key: &str) -> Result<Option<String>
         .map(String::from))
 }
 
+/// A string field from any `[section]` of the user-level settings, for
+/// modules (Thock Plus) that keep their own table there. Read errors are
+/// logged and treated as unset.
+pub fn load_global_field(section: &str, key: &str) -> Option<String> {
+    load_global_settings(&global_settings_path())
+        .map_err(|error| log::error!("Thock: couldn't read the settings file: {error:?}"))
+        .ok()?
+        .get(section)
+        .and_then(|table| table.as_table())
+        .and_then(|table| table.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from)
+}
+
 fn load_global_agent_field(key: &str) -> Option<String> {
     load_global_agent_field_from(&global_settings_path(), key)
         .map_err(|error| log::error!("Thock: couldn't read the agent settings: {error:?}"))
@@ -241,6 +295,10 @@ pub fn load_global_command() -> Option<String> {
 }
 
 fn save_global_command_to(path: &Path, command: &str) -> Result<()> {
+    save_global_agent_field_to(path, "command", command)
+}
+
+fn save_global_agent_field_to(path: &Path, key: &str, value: &str) -> Result<()> {
     let mut settings = load_global_settings(path)?;
     let agent = settings
         .entry("agent")
@@ -250,10 +308,7 @@ fn save_global_command_to(path: &Path, command: &str) -> Result<()> {
         *agent = toml::Value::Table(toml::Table::new());
     }
     if let Some(agent) = agent.as_table_mut() {
-        agent.insert(
-            "command".to_string(),
-            toml::Value::String(command.to_string()),
-        );
+        agent.insert(key.to_string(), toml::Value::String(value.to_string()));
     }
     let serialized = toml::to_string_pretty(&settings).context("serializing agent settings")?;
     if let Some(parent) = path.parent() {
@@ -450,6 +505,27 @@ mod tests {
             load_global_agent_field_from(&path, "fast_command").unwrap(),
             Some("claude --model haiku".to_string())
         );
+    }
+
+    #[test]
+    fn connection_mode_roundtrips_beside_the_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        save_global_command_to(&path, "claude").unwrap();
+        save_global_agent_field_to(&path, "mode", ConnectionMode::Hosted.as_str()).unwrap();
+        assert_eq!(
+            load_global_agent_field_from(&path, "mode")
+                .unwrap()
+                .as_deref()
+                .and_then(ConnectionMode::parse),
+            Some(ConnectionMode::Hosted)
+        );
+        assert_eq!(
+            load_global_agent_field_from(&path, "command").unwrap(),
+            Some("claude".to_string())
+        );
+        assert_eq!(ConnectionMode::parse("byo"), Some(ConnectionMode::Byo));
+        assert_eq!(ConnectionMode::parse("nonsense"), None);
     }
 
     #[test]

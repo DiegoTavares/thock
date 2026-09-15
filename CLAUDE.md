@@ -11,7 +11,7 @@ templates, quick links, and **Skills** — inspectable Markdown rituals the user
 (Routines rail, Day Planner, Backlog, Agent) are the fork's reason to exist, because Zed's extension API
 cannot render UI.
 
-_(`CLAUDE.md` is a symlink to this file — edit one, you edit both.)_
+_(`AGENTS.md` links to `.rules`, the shorter sibling of this file that every other agent reads. When you change a rule here, mirror it there.)_
 
 ## Product invariants
 
@@ -21,7 +21,9 @@ Check design and implementation decisions against these (VISION.md §4 is the fu
   must still open in any editor if Thock disappears.
 - **Augmentation, not replacement.** AI *appends* its synthesis (`# Daily Closure`, `# AI Week Review`); it
   never silently rewrites what the user wrote.
-- **Human-in-the-loop for anything that matters.** Compute and recommend; the human acts and confirms.
+- **Human-in-the-loop where it can't be undone.** Inside the vault the agent acts freely: writes are
+  vault-scoped, the user's own words are never changed unless they ask, and a checkpoint precedes every
+  session. Confirmation is for what leaves the vault or can't be taken back (money, email).
 - **Invisible versioning.** Git runs underneath for history and safety. The word "git" must never appear in
   the UI — it's time-travel, not source control.
 - **Everything is editable.** Skills, layouts, prompts, and templates are files the user (or their agent) can
