@@ -73,7 +73,7 @@ Never move a task without the user's answer. Apart from the confirmed checkbox f
 
 ## 7. Append the review
 
-Append (never overwrite) a `# Daily Closure` section at the end of today's note:
+Append a `# Daily Closure` section at the end of today's note with the `append` tool, in one call, after everything already there. Never re-create the note and never paste the review into the chat in place of writing it:
 
 ```
 # Daily Closure
@@ -89,10 +89,10 @@ Append (never overwrite) a `# Daily Closure` section at the end of today's note:
 - One or two concrete, actionable nudges (don't pad)
 ```
 
-When step 3 actually pulled something in, add one section for it above `## Suggestions`: `## Commits` for code (`- repo@abc123 · commit message`), `## Calendar` for meetings. **Omit the heading entirely when there is nothing to put under it**; an empty `## Commits` on a day with no code is noise, and on a vault that doesn't track code it's someone else's life.
+When step 3 actually pulled something in, add one section for it above `## Suggestions`: `## Commits` for code (`- repo@abc123 · commit message`), `## Calendar` for meetings. **Omit the heading entirely when there is nothing to put under it**; never write `N/A` or "not configured" under it. An empty `## Commits` on a day with no code is noise, and on a vault that doesn't track code it's someone else's life. Under `## Open (carried forward)` copy each task line exactly as `- [ ] text`, one dash, not a dash in front of another dash.
 
 Write it in the tone the profile names, and use the profile's area names when you group anything. Keep it short and factual. Base "carried forward" on the still-unchecked tasks (those you marked done in step 5 belong under `## Done`, not here) plus anything the recent-days scan shows lingering. Suffix each task that moved in step 6 with `→ backlog (Soon)` (or `(Someday)`) so the note records where it went; tasks that were skipped as duplicates get `→ already in backlog`.
 
 ## Output
 
-Show the user the review and confirm it was appended to today's note, including which tasks (if any) were marked done in place and which moved to the backlog.
+After the append has happened, tell the user in two or three sentences what the review says, that it is at the end of today's note, which tasks (if any) were marked done in place, and which moved to the backlog. The review lives in the note; don't repeat it whole in the chat.

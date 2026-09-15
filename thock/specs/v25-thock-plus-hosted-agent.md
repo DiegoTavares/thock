@@ -218,6 +218,13 @@ path changes when Polar arrives: Stage 2 swaps the credential and adds ingestion
   directory per tier (`PI_CODING_AGENT_DIR`, holding `settings.json` with `defaultProvider` /
   `defaultModel` and the note-taking `SYSTEM.md`) plus `OPENROUTER_API_KEY` in the process
   environment. The user's own `~/.pi` is never read or written.
+- **Vault guard (2026-09-15):** the first real session on Gemini 2.5 Flash rewrote the daily
+  note whole, pasted the closure into the chat instead of writing it, and stopped after
+  announcing a step. `SYSTEM.md` replaces Pi's default prompt, which is where Pi's own tool
+  guidance ("write only for new files") lived, so the prompt now has a tools section, and a Pi
+  extension (`assets/hosted-agent/vault-guard.ts`, written into the private config directory)
+  adds an `append` tool and refuses `write` over a note with content and any edit outside the
+  vault. A refusal returns to the model as an error with the reason.
 - **Pinned versions:** `pi-acp@0.0.33` and `@earendil-works/pi-coding-agent@0.85.1`, installed
   into `<external agents dir>/thock-hosted` with the managed Node runtime. Bumping either is a
   code change on purpose (risk: "`pi-acp` is nobody's product").
