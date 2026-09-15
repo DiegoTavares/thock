@@ -846,6 +846,7 @@ impl ChatPanel {
         cx.notify();
 
         let project = self.project.clone();
+        let vault = self.vault().cloned();
         let window_handle = self.window_handle;
         let max_turns = self
             .entitlement()
@@ -855,7 +856,8 @@ impl ChatPanel {
         cx.spawn(async move |this, cx| {
             let started = async {
                 let command =
-                    hosted_agent::prepare_launch(&project, tier, &model, &api_key, cx).await?;
+                    hosted_agent::prepare_launch(&project, vault, tier, &model, &api_key, cx)
+                        .await?;
                 this.update(cx, |this, cx| {
                     this.starting = Some("Starting the Thock Agent…".into());
                     cx.notify();
