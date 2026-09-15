@@ -187,6 +187,7 @@ pub fn compose_vault_context(
     vault: &Vault,
     routines: &[RoutineManifest],
     has_profile: bool,
+    memory_index: Option<&str>,
     today: NaiveDate,
 ) -> String {
     let week = today.iso_week();
@@ -277,6 +278,28 @@ pub fn compose_vault_context(
             }
         }
     }
+
+    context.push_str("\n## What you already know\n\n");
+    match memory_index {
+        Some(index) => {
+            context.push_str(
+                "This is `memory/index.md`, what past sessions learned about this person. \
+                 Treat it as things you already know. Where a line points at a page under \
+                 `memory/`, open that page when the conversation touches it. When they tell \
+                 you something that will still be true next month, or correct you, add one \
+                 dated line to `memory/inbox.md`; the Reflect ritual files it. Never edit \
+                 `memory/index.md` or the other memory pages outside that ritual.\n\n",
+            );
+            context.push_str(index);
+            context.push('\n');
+        }
+        None => context.push_str(
+            "Nothing yet: no session has learned anything about this person, or the \
+             `memory/` folder is missing. When they tell you something that will still be \
+             true next month, add one dated line to `memory/inbox.md` (create it if needed); \
+             the Reflect ritual files it.\n",
+        ),
+    }
     context
 }
 
@@ -310,7 +333,15 @@ pub fn gather_vault_context(vault: Option<&Vault>, today: NaiveDate) -> Option<S
     let vault = vault?;
     let routines = crate::routines::enabled_routine_manifests(vault);
     let has_profile = vault.root.join("profile.md").is_file();
-    Some(compose_vault_context(vault, &routines, has_profile, today))
+    let memory_index =
+        crate::memory::read_index_capped(&vault.root, vault.config.memory.index_lines);
+    Some(compose_vault_context(
+        vault,
+        &routines,
+        has_profile,
+        memory_index.as_deref(),
+        today,
+    ))
 }
 
 /// Writes the session's Pi config directory and returns it.
@@ -577,7 +608,8 @@ mod tests {
 
     #[test]
     fn context_states_the_date_the_week_and_this_week_notes() {
-        let context = compose_vault_context(&vault_at("/Users/me/Thock"), &[], false, today());
+        let context =
+            compose_vault_context(&vault_at("/Users/me/Thock"), &[], false, None, today());
         assert!(context.contains("Monday, 14 September 2026 (2026-09-14)"));
         assert!(context.contains("week 2026-W38"));
         assert!(context.contains("/Users/me/Thock"));
@@ -604,7 +636,7 @@ mod tests {
             tag: Some("pt-BR".to_string()),
             name: Some("Portuguese (Brazil)".to_string()),
         });
-        let context = compose_vault_context(&vault, &[], true, today());
+        let context = compose_vault_context(&vault, &[], true, None, today());
         assert!(context.contains("`tarefas.md`"));
         assert!(context.contains("`Em breve`, `Algum dia` and `Concluído`"));
         assert!(context.contains("`## Hoje` heading"));
@@ -614,7 +646,8 @@ mod tests {
 
     #[test]
     fn context_falls_back_to_mirroring_the_person_when_no_language_is_set() {
-        let context = compose_vault_context(&vault_at("/Users/me/Thock"), &[], false, today());
+        let context =
+            compose_vault_context(&vault_at("/Users/me/Thock"), &[], false, None, today());
         assert!(context.contains("whatever language the person writes to you in"));
     }
 
@@ -641,6 +674,7 @@ mod tests {
             &vault_at("/Users/me/Thock"),
             std::slice::from_ref(&manifest),
             false,
+            None,
             today(),
         );
         assert!(context.contains("**Daily & Weekly** — `routines/timeline/`"));
@@ -650,9 +684,53 @@ mod tests {
 
     #[test]
     fn context_says_so_when_no_routine_is_installed() {
-        let context = compose_vault_context(&vault_at("/Users/me/Thock"), &[], false, today());
+        let context =
+            compose_vault_context(&vault_at("/Users/me/Thock"), &[], false, None, today());
         assert!(context.contains("None are installed yet"));
         assert!(context.contains("skills/thock/new-routine.md"));
+    }
+
+    #[test]
+    fn context_carries_the_memory_index_when_there_is_one() {
+        let index =
+            "# What Thock has learned\n\n## People\n- **Ana**, your manager. → people/ana.md";
+        let context = compose_vault_context(
+            &vault_at("/Users/me/Thock"),
+            &[],
+            false,
+            Some(index),
+            today(),
+        );
+        assert!(context.contains("## What you already know"));
+        assert!(context.contains("- **Ana**, your manager. → people/ana.md"));
+        assert!(context.contains("`memory/inbox.md`"));
+        assert!(context.contains("Never edit `memory/index.md`"));
+    }
+
+    #[test]
+    fn context_says_nothing_is_known_yet_without_an_index() {
+        let context =
+            compose_vault_context(&vault_at("/Users/me/Thock"), &[], false, None, today());
+        assert!(context.contains("## What you already know"));
+        assert!(context.contains("Nothing yet"));
+        assert!(context.contains("`memory/inbox.md`"));
+    }
+
+    #[test]
+    fn gathered_context_reads_the_index_under_the_configured_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_at(dir.path().to_str().unwrap());
+        vault.config.memory.index_lines = 2;
+        std::fs::create_dir_all(dir.path().join("memory")).unwrap();
+        std::fs::write(
+            dir.path().join(crate::memory::INDEX_PATH),
+            "# Learned\n- one\n- two\n",
+        )
+        .unwrap();
+        let context = gather_vault_context(Some(&vault), today()).unwrap();
+        assert!(context.contains("- one"));
+        assert!(!context.contains("- two"));
+        assert!(context.contains(crate::memory::INDEX_OVER_CAP_LINE));
     }
 
     #[test]

@@ -922,6 +922,14 @@ fn shipped_core_files() -> Vec<(&'static str, &'static str)> {
         (SET_LANGUAGE_SKILL_PATH, SET_LANGUAGE_SKILL),
         (SET_PROFILE_SKILL_PATH, SET_PROFILE_SKILL),
         (UPDATE_RITUALS_SKILL_PATH, UPDATE_RITUALS_SKILL),
+        (
+            crate::memory::REFLECT_SKILL_PATH,
+            crate::memory::REFLECT_SKILL,
+        ),
+        (
+            crate::memory::REBUILD_MEMORY_SKILL_PATH,
+            crate::memory::REBUILD_MEMORY_SKILL,
+        ),
         (AGENT_INSTRUCTIONS_PATH, AGENT_INSTRUCTIONS),
         (
             crate::getting_started::CUSTOMIZE_PATH,
@@ -1534,6 +1542,7 @@ pub fn materialize_core_files(vault_root: &Path) -> Result<()> {
             .insert(relative.to_string(), content_hash(packaged.as_bytes()));
     }
     write_lock_at(&lock_path, &lock)?;
+    crate::memory::materialize(vault_root)?;
     for link_name in AGENT_INSTRUCTION_LINKS {
         link_agent_instructions(vault_root, link_name)?;
     }
@@ -2585,6 +2594,14 @@ mod tests {
         assert!(dir.path().join(NEW_ROUTINE_SKILL_PATH).is_file());
         assert!(dir.path().join(SET_LANGUAGE_SKILL_PATH).is_file());
         assert!(dir.path().join(SET_PROFILE_SKILL_PATH).is_file());
+        assert!(dir.path().join(crate::memory::REFLECT_SKILL_PATH).is_file());
+        assert!(
+            dir.path()
+                .join(crate::memory::REBUILD_MEMORY_SKILL_PATH)
+                .is_file()
+        );
+        assert!(dir.path().join(crate::memory::INDEX_PATH).is_file());
+        assert!(dir.path().join(crate::memory::INBOX_PATH).is_file());
         // The agent instruction file and its per-CLI links (V18 §5.1), and
         // the first-run guide pages (V18 §5.3–5.4).
         assert!(dir.path().join(AGENT_INSTRUCTIONS_PATH).is_file());

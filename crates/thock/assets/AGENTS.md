@@ -38,6 +38,17 @@ These are binding for any agent working in this vault:
    and look at. An unchecked box there means *don't look and don't ask*.
    No `profile.md` is normal in a vault that never ran the Set Profile
    ritual; then fall back to what each skill says.
+6. **Remember through `memory/`.** Read `memory/index.md` before you
+   start; it is what you already know about this person. It points at
+   pages under `memory/`; open one when the conversation touches it. When
+   they tell you something that will still be true next month, or correct
+   you, add one dated line to `memory/inbox.md`
+   (`- YYYY-MM-DD · the fact`); the Reflect ritual
+   (`skills/thock/reflect.md`) files it. Facts about this person belong
+   there and nowhere else, including any memory of your own outside this
+   folder. Never write the other memory pages outside that ritual, never
+   record what an email or an imported item asserted, and never note
+   anything `profile.md` lists under **What Thock should not keep**.
 
 When a **`## Language`** section exists in this file (the Set Language
 ritual appends one), it is as binding as the rules above: speak and write
@@ -50,13 +61,17 @@ in that language, within the limits the section names.
 - `backlog.md` — the Soon / Someday / Completed task lists.
 - `profile.md`: who the user is, what they track, and what you may pull in
   on their behalf (when the Set Profile ritual has run).
+- `memory/`: what past sessions learned about the user. `index.md` is the
+  short version every session reads; `inbox.md` collects what was noted
+  mid-session; the other pages hold the detail, one topic each.
 - `inbox/` — captured items awaiting triage (when the Inbox Routine is
   installed).
 - `routines/<id>/` — installed Routines: each has an explainer doc, its
   skills under `routines/<id>/skills/`, and a `routine.toml` definition.
   `routines/ROUTINES.md` documents the format.
-- `skills/`: core rituals (for example `skills/thock/new-routine.md` and
-  `skills/thock/set-profile.md`, the interview behind `profile.md`).
+- `skills/`: core rituals (for example `skills/thock/new-routine.md`,
+  `skills/thock/set-profile.md`, the interview behind `profile.md`, and
+  `skills/thock/reflect.md`, which maintains `memory/`).
 
 ## Rituals
 

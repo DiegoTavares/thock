@@ -186,6 +186,10 @@ Rules:
 - The dashboard computes stats, sparklines, and warnings from this data. It infers **lingering areas** and **carried-over goals** across weeks automatically; you only need accurate `projects` (with `goal` flags), `tasks`, `goals`, and `prs`. Keep the area names stable across weeks so lingering detection works (the page canonicalizes common variants, but consistency helps).
 - After editing, verify the file still parses: `node -e "global.window={};require('./weekly/site/data.js');console.log(window.WEEKS.length,'weeks')"`.
 
+## 9. Reflect
+
+Read `skills/thock/reflect.md` at the vault root and run it in **weekly** mode over the week's daily notes, which you have already read. It folds the week into `memory/` (patterns, people, threads), resolves what changed, and appends a `## Things Thock could forget` checklist to the weekly note when anything has gone quiet for long enough. Skip this step in silence if that file is missing.
+
 ## Output
 
-After the appends have happened, tell the user in a few sentences what the review (§7) found, that it is at the end of the weekly note, which tasks (if any) moved to the backlog, that the dashboard entry was appended, and that they can open `weekly/site/index.html` to view it. The review lives in the note; don't repeat it whole in the chat.
+After the appends have happened, tell the user in a few sentences what the review (§7) found, that it is at the end of the weekly note, which tasks (if any) moved to the backlog, that the dashboard entry was appended, and that they can open `weekly/site/index.html` to view it, plus Reflect's one line on what it learned and whether there is a forgetting list to look at. The review lives in the note; don't repeat it whole in the chat.

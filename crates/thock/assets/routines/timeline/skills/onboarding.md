@@ -109,3 +109,8 @@ Summarize in the conversation:
    this Routine can do. Point out they can rerun any of it later:
    `/wrap-today`, `/wrap-yesterday`, `/week-review`, this setup itself, or
    **Set Profile** whenever their weeks change shape.
+3. If step 3 brought in existing notes, offer one more thing, in one
+   sentence: **Rebuild Memory** (`skills/thock/rebuild-memory.md`) reads
+   through those notes a fortnight at a time and builds `memory/`, the page
+   the agent starts every session from, so it doesn't begin from zero. Don't
+   run it here; say it exists and that it can be stopped and resumed.

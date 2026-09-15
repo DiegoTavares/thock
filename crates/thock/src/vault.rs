@@ -31,10 +31,15 @@ file = "backlog.md"          # the Soon / Someday / Completed holding pen
 # conceal = true             # hide markup while the cursor is off the line
 # email_view = true          # render synced email notes as conversations
 
+# [memory]
+# index_lines = 120          # how long memory/index.md may grow
+# stale_after_days = 90      # unmentioned this long → proposed for forgetting
+# nudge_after_sessions = 5   # chats with unfiled notes before "Reflect now?"
+
 [[routines.installed]]
 id      = "timeline"
 enabled = true
-version = 11
+version = 12
 
 [[routines.installed]]
 id      = "inbox"
@@ -166,6 +171,8 @@ struct VaultConfigContent {
     markdown: MarkdownConfigContent,
     #[serde(skip_serializing_if = "LanguageConfigContent::is_unset")]
     language: LanguageConfigContent,
+    #[serde(skip_serializing_if = "MemoryConfigContent::is_unset")]
+    memory: MemoryConfigContent,
 }
 
 impl VaultConfigContent {
@@ -326,6 +333,57 @@ impl AgentConfigContent {
 
     fn is_unset(&self) -> bool {
         self.command.is_none() && self.fast_command.is_none()
+    }
+}
+
+/// The `[memory]` table (V28): how much of `memory/index.md` a session
+/// carries, when a fact counts as stale, and how patient the chat panel's
+/// "Reflect now?" nudge is. Every field is optional; the resolved defaults
+/// are what the Reflect ritual assumes when the table is absent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryConfig {
+    pub index_lines: usize,
+    pub stale_after_days: u32,
+    pub nudge_after_sessions: usize,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            index_lines: 120,
+            stale_after_days: 90,
+            nudge_after_sessions: 5,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct MemoryConfigContent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index_lines: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stale_after_days: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nudge_after_sessions: Option<usize>,
+}
+
+impl MemoryConfigContent {
+    fn resolve(self) -> MemoryConfig {
+        let defaults = MemoryConfig::default();
+        MemoryConfig {
+            index_lines: self.index_lines.unwrap_or(defaults.index_lines),
+            stale_after_days: self.stale_after_days.unwrap_or(defaults.stale_after_days),
+            nudge_after_sessions: self
+                .nudge_after_sessions
+                .unwrap_or(defaults.nudge_after_sessions),
+        }
+    }
+
+    fn is_unset(&self) -> bool {
+        self.index_lines.is_none()
+            && self.stale_after_days.is_none()
+            && self.nudge_after_sessions.is_none()
     }
 }
 
@@ -700,6 +758,7 @@ pub struct VaultConfig {
     pub backlog: BacklogConfig,
     pub markdown: MarkdownConfig,
     pub language: Option<LanguageConfig>,
+    pub memory: MemoryConfig,
 }
 
 impl Default for VaultConfig {
@@ -722,6 +781,7 @@ impl VaultConfigContent {
             backlog: self.backlog.resolve(),
             markdown: self.markdown.resolve(),
             language: self.language.resolve(),
+            memory: self.memory.resolve(),
         }
     }
 }
@@ -1485,6 +1545,54 @@ mod tests {
         assert_eq!(VaultConfig::default().language, None);
         let content: VaultConfigContent = toml::from_str("[language]\n").unwrap();
         assert_eq!(content.resolve().language, None);
+    }
+
+    #[test]
+    fn memory_table_defaults_and_partial_overrides() {
+        assert_eq!(
+            VaultConfig::default().memory,
+            MemoryConfig {
+                index_lines: 120,
+                stale_after_days: 90,
+                nudge_after_sessions: 5,
+            }
+        );
+        let content: VaultConfigContent =
+            toml::from_str("[memory]\nindex_lines = 80\nnudge_after_sessions = 0\n").unwrap();
+        assert_eq!(
+            content.resolve().memory,
+            MemoryConfig {
+                index_lines: 80,
+                stale_after_days: 90,
+                nudge_after_sessions: 0,
+            }
+        );
+
+        // A registry rewrite keeps the table, and an absent one is never
+        // written out.
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_vault(dir.path()).unwrap();
+        let config_path = dir.path().join(VAULT_MARKER_DIR).join(VAULT_CONFIG_FILE);
+        update_routines_registry(dir.path(), |_| {}).unwrap();
+        let raw = fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !raw.contains("[memory]"),
+            "unset memory table written: {raw}"
+        );
+        fs::write(
+            &config_path,
+            "schema = 1\n\n[memory]\nstale_after_days = 30\n\n[[routines.installed]]\n\
+             id = \"timeline\"\nenabled = true\nversion = 12\n",
+        )
+        .unwrap();
+        update_routines_registry(dir.path(), |_| {}).unwrap();
+        let raw = fs::read_to_string(&config_path).unwrap();
+        assert!(raw.contains("[memory]"), "memory table dropped: {raw}");
+        assert!(raw.contains("stale_after_days = 30"), "{raw}");
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => assert_eq!(vault.config.memory.stale_after_days, 30),
+            other => panic!("expected valid vault, got {other:?}"),
+        }
     }
 
     #[test]

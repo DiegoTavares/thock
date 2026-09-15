@@ -80,6 +80,9 @@ actions!(
         /// Shows or hides how much of the Thock Agent's allowance this
         /// cycle has used.
         ToggleChatUsage,
+        /// Puts away the "Reflect now?" suggestion until the agent has noted
+        /// more about you.
+        DismissMemoryNudge,
     ]
 );
 
@@ -479,6 +482,10 @@ pub struct ChatPanel {
     show_usage: bool,
     /// A launch that is waiting on the connect flow or the keychain read.
     pending_launch: Option<LaunchRequest>,
+    /// Whether enough sessions have started with unfiled notes in
+    /// `memory/inbox.md` that the panel suggests running Reflect (V28
+    /// decision 5). Recomputed off the UI thread at every launch.
+    memory_nudge_due: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -537,6 +544,7 @@ impl ChatPanel {
                 diff_editors: HashMap::default(),
                 show_usage: false,
                 pending_launch: None,
+                memory_nudge_due: false,
                 _subscriptions: vec![project_subscription],
             };
             this.refresh_vault_status(cx);
@@ -825,9 +833,103 @@ impl ChatPanel {
                 // every gate-free session relies on. Soft dependency; never
                 // waits.
                 crate::history::checkpoint_before_ai_write(&self.project, cx);
+                self.note_session_for_memory_nudge(cx);
                 self.start_session(request, api_key, model, cx);
             }
         }
+    }
+
+    /// Counts this launch toward the "Reflect now?" suggestion and refreshes
+    /// whether it is due. The count lives in the vault's `.thock/state/` so
+    /// it survives restarts; the read is blocking, so it runs off the UI
+    /// thread.
+    fn note_session_for_memory_nudge(&mut self, cx: &mut Context<Self>) {
+        let Some(vault) = self.vault() else {
+            return;
+        };
+        let root = vault.root.clone();
+        let nudge_after = vault.config.memory.nudge_after_sessions;
+        cx.spawn(async move |this, cx| {
+            let due = cx
+                .background_spawn(
+                    async move { crate::memory::note_session_started(&root, nudge_after) },
+                )
+                .await;
+            this.update(cx, |this, cx| {
+                if this.memory_nudge_due != due {
+                    this.memory_nudge_due = due;
+                    cx.notify();
+                }
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn dismiss_memory_nudge(
+        &mut self,
+        _: &DismissMemoryNudge,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.memory_nudge_due = false;
+        cx.notify();
+        let Some(vault) = self.vault() else {
+            return;
+        };
+        let root = vault.root.clone();
+        cx.background_spawn(async move { crate::memory::dismiss_nudge(&root) })
+            .detach_and_log_err(cx);
+    }
+
+    fn reflect_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.memory_nudge_due = false;
+        self.launch(
+            LaunchRequest::run_skill(
+                "Reflect",
+                crate::memory::REFLECT_SKILL_PATH,
+                ModelTier::Fast,
+            ),
+            window,
+            cx,
+        );
+    }
+
+    /// One quiet line above the composer: the agent has noted things it
+    /// hasn't filed, and Reflect is one click (or `thock::Reflect`) away.
+    fn render_memory_nudge(&self, cx: &Context<Self>) -> AnyElement {
+        h_flex()
+            .w_full()
+            .px_2()
+            .py_1()
+            .gap_2()
+            .items_center()
+            .justify_between()
+            .child(
+                Label::new("Thock has a few things to file about you.")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("thock-chat-reflect-now", "Reflect now")
+                            .style(ButtonStyle::Filled)
+                            .label_size(LabelSize::Small)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.reflect_now(window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("thock-chat-nudge-dismiss", "Not now")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.dismiss_memory_nudge(&DismissMemoryNudge, window, cx)
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn start_session(
@@ -2642,6 +2744,9 @@ impl Render for ChatPanel {
                         matches!(self.connection, PlusConnection::Connected { .. }),
                         |this| {
                             this.child(Divider::horizontal())
+                                .when(self.memory_nudge_due, |this| {
+                                    this.child(self.render_memory_nudge(cx))
+                                })
                                 .child(self.render_composer(cx))
                                 .when(self.show_usage, |this| this.child(self.render_footer(cx)))
                         },
@@ -2673,6 +2778,7 @@ impl Render for ChatPanel {
             .on_action(cx.listener(Self::collapse_activity))
             .on_action(cx.listener(Self::retry_turn))
             .on_action(cx.listener(Self::toggle_usage))
+            .on_action(cx.listener(Self::dismiss_memory_nudge))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::select_first))
