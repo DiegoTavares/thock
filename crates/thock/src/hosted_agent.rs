@@ -39,6 +39,10 @@ pub const AGENT_ID: &str = "thock-hosted-agent";
 /// speaks, and the rules that must hold even in a vault whose `AGENTS.md` was
 /// edited away (spec `v27-agent-session-prompt.md` §5.2).
 pub const SYSTEM_PROMPT: &str = include_str!("../assets/hosted-agent/SYSTEM.md");
+/// The Pi extension that adds the `append` tool and refuses whole-file
+/// writes over a note with content, so "append, don't rewrite" holds even
+/// when the model forgets the prompt.
+pub const VAULT_GUARD_EXTENSION: &str = include_str!("../assets/hosted-agent/vault-guard.ts");
 
 /// Where the npm packages land, beside Zed's own registry-installed agents.
 pub fn install_dir() -> PathBuf {
@@ -327,6 +331,16 @@ pub async fn write_pi_config(
     fs.atomic_write(dir.join("SYSTEM.md"), SYSTEM_PROMPT.to_string())
         .await
         .context("writing the Thock Agent prompt")?;
+    let extensions = dir.join("extensions");
+    fs.create_dir(&extensions)
+        .await
+        .with_context(|| format!("creating {}", extensions.display()))?;
+    fs.atomic_write(
+        extensions.join("vault-guard.ts"),
+        VAULT_GUARD_EXTENSION.to_string(),
+    )
+    .await
+    .context("writing the Thock Agent vault guard")?;
     let context_path = dir.join("APPEND_SYSTEM.md");
     match vault_context {
         Some(context) => fs
@@ -535,6 +549,19 @@ mod tests {
             "the same vault must resolve to the same directory across launches"
         );
         assert!(!SYSTEM_PROMPT.trim().is_empty());
+    }
+
+    #[test]
+    fn the_prompt_and_the_guard_agree_on_the_tools() {
+        for tool in ["`append`", "`edit`", "`write`", "`read`"] {
+            assert!(
+                SYSTEM_PROMPT.contains(tool),
+                "the prompt must explain {tool}"
+            );
+        }
+        assert!(VAULT_GUARD_EXTENSION.contains("name: \"append\""));
+        assert!(VAULT_GUARD_EXTENSION.contains("pi.on(\"tool_call\""));
+        assert!(VAULT_GUARD_EXTENSION.contains("export default function"));
     }
 
     fn vault_at(root: &str) -> Vault {

@@ -112,7 +112,7 @@ Record the moves in the review you write next (e.g. suffix a goal with `→ back
 
 ## 7. Write the markdown review
 
-Append (never overwrite) a `# AI Week Review` section at the end of the weekly file, in this format:
+Append a `# AI Week Review` section at the end of the weekly file with the `append` tool, in one call, after everything already there (never re-create the file), in this format:
 
 ```
 ## Week Review: YYYY-MM-DD to YYYY-MM-DD
@@ -188,4 +188,4 @@ Rules:
 
 ## Output
 
-Show the user the markdown review (§7). Mention which tasks (if any) moved to the backlog, that the dashboard entry was appended, and that they can open `weekly/site/index.html` to view it.
+After the appends have happened, tell the user in a few sentences what the review (§7) found, that it is at the end of the weekly note, which tasks (if any) moved to the backlog, that the dashboard entry was appended, and that they can open `weekly/site/index.html` to view it. The review lives in the note; don't repeat it whole in the chat.
