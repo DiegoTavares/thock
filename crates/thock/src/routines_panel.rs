@@ -476,6 +476,10 @@ pub struct RoutinesPanel {
     discovered: Vec<DiscoveredRoutine>,
     /// Catalog Routines without an enabled registry entry.
     addable_catalog: Vec<RoutineManifest>,
+    /// Vault-relative paths whose newer shipped version waits under
+    /// `.thock/pending/` for the Update Rituals ritual (V29); drives the
+    /// "Updates available" row. Folded into the refresh fingerprint.
+    pending_updates: Vec<String>,
     /// Sections start expanded; this tracks the ones the user collapsed.
     collapsed_routines: HashSet<String>,
     /// Groups (demoted links, setup steps) start collapsed; this tracks the
@@ -575,6 +579,7 @@ impl RoutinesPanel {
                 routines: Vec::new(),
                 discovered: Vec::new(),
                 addable_catalog: Vec::new(),
+                pending_updates: Vec::new(),
                 collapsed_routines: HashSet::new(),
                 expanded_groups: HashSet::new(),
                 show_add_routines: false,
@@ -779,9 +784,11 @@ impl RoutinesPanel {
             self.routines = Vec::new();
             self.discovered = Vec::new();
             self.addable_catalog = Vec::new();
+            self.pending_updates = Vec::new();
             return;
         };
         self.routines = routines::enabled_routines(vault);
+        self.pending_updates = routines::pending_updates(&vault.root);
         let registered: HashSet<&str> = vault
             .config
             .routines
@@ -2459,6 +2466,45 @@ impl RoutinesPanel {
                     this.new_routine(window, cx);
                 })),
         );
+        if !self.pending_updates.is_empty() {
+            let count = self.pending_updates.len();
+            let tooltip = format!(
+                "Thock ships newer versions of {} you edited: {}. Update Rituals merges them \
+                 with your changes, one file at a time, and asks before writing.",
+                if count == 1 { "a file" } else { "files" },
+                self.pending_updates.join(", ")
+            );
+            list = list.child(
+                ListItem::new("thock-update-rituals")
+                    .indent_level(1)
+                    .indent_step_size(px(12.))
+                    .start_slot(
+                        Icon::new(IconName::ArrowCircle)
+                            .size(IconSize::XSmall)
+                            .color(Color::Accent),
+                    )
+                    .child(
+                        Label::new(if count == 1 {
+                            "1 ritual to update".to_string()
+                        } else {
+                            format!("{count} rituals to update")
+                        })
+                        .size(LabelSize::Small),
+                    )
+                    .tooltip(Tooltip::text(tooltip))
+                    .end_slot(
+                        KeyBinding::for_action_in(
+                            &crate::agent_panel::UpdateRituals,
+                            &self.focus_handle,
+                            cx,
+                        )
+                        .size(rems_from_px(10.)),
+                    )
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        window.dispatch_action(crate::agent_panel::UpdateRituals.boxed_clone(), cx);
+                    })),
+            );
+        }
         list
     }
 

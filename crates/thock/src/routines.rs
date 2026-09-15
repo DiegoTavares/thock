@@ -25,6 +25,17 @@ pub const ROUTINE_MANIFEST_FILE: &str = "routine.toml";
 /// App-owned provenance (`files.lock`) under `.thock/`.
 pub const INSTALLED_ROUTINES_DIR: &str = "routines";
 const FILES_LOCK_FILE: &str = "files.lock";
+/// Where a newer shipped version of a user-edited file waits for the Update
+/// Rituals ritual (V29): `.thock/pending/<vault-relative path>`.
+pub const PENDING_UPDATES_DIR: &str = "pending";
+/// Hashes of the shipped versions already staged or applied per path, so a
+/// version the user declined is never staged twice (V29 §5.2).
+const UPDATES_LOCK_FILE: &str = "updates.lock";
+/// Hashes of the core files as last shipped, the core-file counterpart of a
+/// Routine's `files.lock` (V29 §5.1).
+const CORE_FILES_LOCK_FILE: &str = "core-files.lock";
+pub const UPDATE_RITUALS_SKILL_PATH: &str = "skills/thock/update-rituals.md";
+const UPDATE_RITUALS_SKILL: &str = include_str!("../assets/skills/update-rituals.md");
 /// Pre-V7 provenance locations, migrated by `reconcile_vault`.
 const LEGACY_INSTALLED_AREAS_DIR: &str = "areas";
 const LEGACY_MANIFEST_FILE: &str = "manifest.toml";
@@ -647,6 +658,11 @@ pub const GEMINI_COMMANDS_DIR: &str = ".gemini/commands";
 /// destination with the asset path inside the catalog package it came from
 /// (when it has one).
 struct DeclaredFile {
+    /// Whether a newer shipped version may replace an unmodified copy in
+    /// place, or be staged for the Update Rituals ritual when the user edited
+    /// it (V29). Seeds like the dashboard's `data.js` are the user's data
+    /// once written and never upgrade.
+    upgradeable: bool,
     destination: String,
     source: Option<String>,
 }
@@ -749,22 +765,26 @@ fn agent_bridge_files(manifest: &RoutineManifest) -> Vec<AgentBridge> {
 fn declared_files(manifest: &RoutineManifest) -> Vec<DeclaredFile> {
     let mut files = vec![
         DeclaredFile {
+            upgradeable: false,
             destination: vault_manifest_rel_path(&manifest.id),
             source: None,
         },
         DeclaredFile {
+            upgradeable: true,
             destination: manifest.doc.clone(),
             source: Some("doc.md".to_string()),
         },
     ];
     if let Some(agent_doc) = &manifest.agent_doc {
         files.push(DeclaredFile {
+            upgradeable: false,
             destination: agent_doc.clone(),
             source: None,
         });
     }
     for skill in &manifest.skills {
         files.push(DeclaredFile {
+            upgradeable: true,
             destination: skill.file.clone(),
             source: Some(format!("skills/{}.md", skill.id)),
         });
@@ -772,12 +792,146 @@ fn declared_files(manifest: &RoutineManifest) -> Vec<DeclaredFile> {
     for entry in &manifest.scaffold {
         if let ScaffoldEntry::File { path, source } = entry {
             files.push(DeclaredFile {
+                upgradeable: false,
                 destination: path.clone(),
                 source: source.clone(),
             });
         }
     }
     files
+}
+
+// --- Shipped-file upgrades (V29) ---
+
+fn pending_updates_dir(vault_root: &Path) -> PathBuf {
+    vault_root.join(VAULT_MARKER_DIR).join(PENDING_UPDATES_DIR)
+}
+
+fn updates_lock_path(vault_root: &Path) -> PathBuf {
+    vault_root.join(VAULT_MARKER_DIR).join(UPDATES_LOCK_FILE)
+}
+
+fn core_files_lock_path(vault_root: &Path) -> PathBuf {
+    vault_root.join(VAULT_MARKER_DIR).join(CORE_FILES_LOCK_FILE)
+}
+
+fn load_lock_at(path: &Path) -> Result<Option<FilesLock>> {
+    match read_optional(path)? {
+        Some(raw) => Ok(Some(
+            toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+fn write_lock_at(path: &Path, lock: &FilesLock) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let raw = toml::to_string_pretty(lock).context("serializing lock")?;
+    fs::write(path, raw).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Brings one shipped file up to date without ever losing the user's words:
+/// a missing file is written; a file identical to the shipped one needs
+/// nothing; a file whose hash still matches what the app last shipped
+/// (`previous_hash`) is untouched by the user and is replaced in place; any
+/// other content is the user's edit, so the shipped version is staged under
+/// `.thock/pending/` for the Update Rituals ritual to merge, once per shipped
+/// version. Blocking I/O.
+fn upgrade_shipped_file(
+    vault_root: &Path,
+    relative: &str,
+    packaged: &str,
+    previous_hash: Option<&str>,
+) -> Result<()> {
+    let path = vault_file_path(vault_root, relative)?;
+    let pending = pending_updates_dir(vault_root).join(relative);
+    match read_optional(&path)? {
+        None => {
+            write_if_missing(&path, packaged)?;
+            clear_pending(&pending)
+        }
+        Some(current) if current == packaged => clear_pending(&pending),
+        Some(current) if previous_hash == Some(content_hash(current.as_bytes()).as_str()) => {
+            fs::write(&path, packaged).with_context(|| format!("writing {}", path.display()))?;
+            clear_pending(&pending)
+        }
+        Some(_) => stage_pending(vault_root, relative, &pending, packaged),
+    }
+}
+
+fn clear_pending(pending: &Path) -> Result<()> {
+    match fs::remove_file(pending) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("removing {}", pending.display())),
+    }
+}
+
+/// Stages `packaged` for `relative` unless this exact shipped version was
+/// already offered: the updates lock remembers what the ritual has seen, so
+/// a declined update stays declined until the next release changes the file.
+fn stage_pending(vault_root: &Path, relative: &str, pending: &Path, packaged: &str) -> Result<()> {
+    let lock_path = updates_lock_path(vault_root);
+    let mut lock = load_lock_at(&lock_path)?.unwrap_or_default();
+    let hash = content_hash(packaged.as_bytes());
+    if lock.files.get(relative) == Some(&hash) {
+        return Ok(());
+    }
+    if let Some(parent) = pending.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    fs::write(pending, packaged).with_context(|| format!("writing {}", pending.display()))?;
+    lock.files.insert(relative.to_string(), hash);
+    write_lock_at(&lock_path, &lock)
+}
+
+/// Vault-relative paths with a newer shipped version waiting under
+/// `.thock/pending/`, sorted. Empty when nothing is pending. Blocking I/O.
+pub fn pending_updates(vault_root: &Path) -> Vec<String> {
+    let dir = pending_updates_dir(vault_root);
+    let mut found = Vec::new();
+    collect_pending(&dir, &dir, &mut found);
+    found.sort();
+    found
+}
+
+fn collect_pending(base: &Path, dir: &Path, found: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_pending(base, &path, found);
+        } else if let Ok(relative) = path.strip_prefix(base) {
+            found.push(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+/// The core files every vault carries and the content the app ships for
+/// them, in vault-relative form. `AGENTS.md` is on the list even though the
+/// Set Language ritual appends to it: that edit makes it "modified", so a
+/// newer shipped version is staged rather than written over it.
+fn shipped_core_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (ROUTINES_REFERENCE_PATH, ROUTINES_REFERENCE),
+        (NEW_ROUTINE_SKILL_PATH, NEW_ROUTINE_SKILL),
+        (SET_LANGUAGE_SKILL_PATH, SET_LANGUAGE_SKILL),
+        (SET_PROFILE_SKILL_PATH, SET_PROFILE_SKILL),
+        (UPDATE_RITUALS_SKILL_PATH, UPDATE_RITUALS_SKILL),
+        (AGENT_INSTRUCTIONS_PATH, AGENT_INSTRUCTIONS),
+        (
+            crate::getting_started::CUSTOMIZE_PATH,
+            crate::getting_started::CUSTOMIZE_NOTE,
+        ),
+        (
+            crate::getting_started::WELCOME_TOUR_SKILL_PATH,
+            crate::getting_started::WELCOME_TOUR_SKILL,
+        ),
+    ]
 }
 
 /// A Routine package shipped inside the Thock binary.
@@ -1081,6 +1235,9 @@ pub fn refresh_fingerprint(vault_root: &Path) -> Vec<(String, String)> {
     for marker in pending_ready_markers(vault_root) {
         fingerprint.push((format!("ready:{marker}"), String::new()));
     }
+    for path in pending_updates(vault_root) {
+        fingerprint.push((format!("update:{path}"), String::new()));
+    }
     fingerprint.extend(crate::getting_started::fingerprint(vault_root));
     fingerprint.sort();
     fingerprint
@@ -1189,6 +1346,7 @@ pub fn materialize_routine(vault_root: &Path, routine: &CatalogRoutine) -> Resul
             fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         }
     }
+    let previous_lock = load_files_lock(vault_root, &routine.manifest.id)?;
     for file in declared_files(&routine.manifest) {
         let Some(source) = &file.source else {
             continue;
@@ -1199,7 +1357,15 @@ pub fn materialize_routine(vault_root: &Path, routine: &CatalogRoutine) -> Resul
                 routine.manifest.id
             )
         })?;
-        write_if_missing(&vault_file_path(vault_root, &file.destination)?, contents)?;
+        if file.upgradeable {
+            let previous_hash = previous_lock
+                .as_ref()
+                .and_then(|lock| lock.files.get(&file.destination))
+                .map(String::as_str);
+            upgrade_shipped_file(vault_root, &file.destination, contents, previous_hash)?;
+        } else {
+            write_if_missing(&vault_file_path(vault_root, &file.destination)?, contents)?;
+        }
     }
     for bridge in agent_bridge_files(&routine.manifest) {
         write_if_missing(
@@ -1211,7 +1377,6 @@ pub fn materialize_routine(vault_root: &Path, routine: &CatalogRoutine) -> Resul
     let routine_id = &routine.manifest.id;
     let manifest_path = vault_manifest_path(vault_root, routine_id);
     let existing = read_optional(&manifest_path)?;
-    let previous_lock = load_files_lock(vault_root, routine_id)?;
     match existing {
         None => {
             write_if_missing(&manifest_path, routine.manifest_toml)?;
@@ -1356,34 +1521,27 @@ pub fn set_onboarding_state(
 /// the New Routine ritual) and the vault-root agent instructions —
 /// create-if-missing, like the rest of the vault scaffold.
 pub fn materialize_core_files(vault_root: &Path) -> Result<()> {
-    write_if_missing(
-        &vault_root.join(ROUTINES_REFERENCE_PATH),
-        ROUTINES_REFERENCE,
-    )?;
-    write_if_missing(&vault_root.join(NEW_ROUTINE_SKILL_PATH), NEW_ROUTINE_SKILL)?;
-    write_if_missing(
-        &vault_root.join(SET_LANGUAGE_SKILL_PATH),
-        SET_LANGUAGE_SKILL,
-    )?;
-    write_if_missing(&vault_root.join(SET_PROFILE_SKILL_PATH), SET_PROFILE_SKILL)?;
-    write_if_missing(
-        &vault_root.join(AGENT_INSTRUCTIONS_PATH),
-        AGENT_INSTRUCTIONS,
-    )?;
+    let lock_path = core_files_lock_path(vault_root);
+    let previous_lock = load_lock_at(&lock_path)?;
+    let mut lock = FilesLock::default();
+    for (relative, packaged) in shipped_core_files() {
+        let previous_hash = previous_lock
+            .as_ref()
+            .and_then(|lock| lock.files.get(relative))
+            .map(String::as_str);
+        upgrade_shipped_file(vault_root, relative, packaged, previous_hash)?;
+        lock.files
+            .insert(relative.to_string(), content_hash(packaged.as_bytes()));
+    }
+    write_lock_at(&lock_path, &lock)?;
     for link_name in AGENT_INSTRUCTION_LINKS {
         link_agent_instructions(vault_root, link_name)?;
     }
+    // The guide is regenerated per release and never hand-edited in
+    // practice, but it is also not a ritual to merge: create-if-missing.
     write_if_missing(
         &vault_root.join(crate::getting_started::GUIDE_PATH),
         crate::getting_started::GUIDE_HTML,
-    )?;
-    write_if_missing(
-        &vault_root.join(crate::getting_started::CUSTOMIZE_PATH),
-        crate::getting_started::CUSTOMIZE_NOTE,
-    )?;
-    write_if_missing(
-        &vault_root.join(crate::getting_started::WELCOME_TOUR_SKILL_PATH),
-        crate::getting_started::WELCOME_TOUR_SKILL,
     )?;
     Ok(())
 }
@@ -2625,6 +2783,113 @@ mod tests {
         let vault = detect(dir.path());
         reconcile_vault(&vault).unwrap();
         assert!(!dir.path().join(".claude").exists());
+    }
+
+    #[test]
+    fn an_unmodified_shipped_file_is_upgraded_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_vault(dir.path()).unwrap();
+        // Simulate a vault whose Week Review is an older shipped version:
+        // the file differs from the catalog, but its hash is what the lock
+        // recorded when it was last materialized.
+        let relative = "routines/timeline/skills/week-review.md";
+        let older = "# Week Review\n\nThe previous release's text.\n";
+        fs::write(dir.path().join(relative), older).unwrap();
+        let mut lock = load_files_lock(dir.path(), TIMELINE_ROUTINE_ID)
+            .unwrap()
+            .unwrap();
+        lock.files
+            .insert(relative.to_string(), content_hash(older.as_bytes()));
+        write_files_lock(dir.path(), TIMELINE_ROUTINE_ID, &lock).unwrap();
+
+        let vault = detect(dir.path());
+        reconcile_vault(&vault).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join(relative)).unwrap(),
+            TIMELINE_WEEK_REVIEW_SKILL
+        );
+        assert!(pending_updates(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_user_edited_file_is_staged_once_and_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_vault(dir.path()).unwrap();
+        let relative = "routines/timeline/skills/week-review.md";
+        let skill_path = dir.path().join(relative);
+        fs::write(&skill_path, "my edited skill").unwrap();
+        // The release changed the shipped file since the lock was written.
+        let mut lock = load_files_lock(dir.path(), TIMELINE_ROUTINE_ID)
+            .unwrap()
+            .unwrap();
+        lock.files
+            .insert(relative.to_string(), content_hash(b"an older shipped text"));
+        write_files_lock(dir.path(), TIMELINE_ROUTINE_ID, &lock).unwrap();
+
+        let vault = detect(dir.path());
+        reconcile_vault(&vault).unwrap();
+        assert_eq!(fs::read_to_string(&skill_path).unwrap(), "my edited skill");
+        assert_eq!(pending_updates(dir.path()), vec![relative.to_string()]);
+        let pending = dir
+            .path()
+            .join(VAULT_MARKER_DIR)
+            .join(PENDING_UPDATES_DIR)
+            .join(relative);
+        assert_eq!(
+            fs::read_to_string(&pending).unwrap(),
+            TIMELINE_WEEK_REVIEW_SKILL
+        );
+
+        // The ritual handled it (declined, say): the same shipped version is
+        // not staged again, and the user's file still stands.
+        fs::remove_file(&pending).unwrap();
+        reconcile_vault(&vault).unwrap();
+        assert!(pending_updates(dir.path()).is_empty());
+        assert_eq!(fs::read_to_string(&skill_path).unwrap(), "my edited skill");
+
+        // The user brought the file back to the shipped text by hand: the
+        // pending copy, had it been left behind, is cleared.
+        fs::write(&pending, "stale").unwrap();
+        fs::write(&skill_path, TIMELINE_WEEK_REVIEW_SKILL).unwrap();
+        reconcile_vault(&vault).unwrap();
+        assert!(!pending.exists());
+    }
+
+    #[test]
+    fn edited_core_files_are_staged_and_pristine_ones_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_vault(dir.path()).unwrap();
+        // Set Language appended to AGENTS.md: the user's file now, so a newer
+        // shipped version must wait under pending rather than replace it.
+        let agents = dir.path().join(AGENT_INSTRUCTIONS_PATH);
+        let edited = format!("{AGENT_INSTRUCTIONS}\n## Language\n\nPortuguese.\n");
+        fs::write(&agents, &edited).unwrap();
+        let lock_path = core_files_lock_path(dir.path());
+        let mut lock = load_lock_at(&lock_path).unwrap().unwrap();
+        lock.files.insert(
+            AGENT_INSTRUCTIONS_PATH.to_string(),
+            content_hash(b"an older shipped AGENTS.md"),
+        );
+        // And Set Profile is an older shipped version nobody edited.
+        let profile_skill = dir.path().join(SET_PROFILE_SKILL_PATH);
+        fs::write(&profile_skill, "older shipped set-profile").unwrap();
+        lock.files.insert(
+            SET_PROFILE_SKILL_PATH.to_string(),
+            content_hash(b"older shipped set-profile"),
+        );
+        write_lock_at(&lock_path, &lock).unwrap();
+
+        materialize_core_files(dir.path()).unwrap();
+        assert_eq!(fs::read_to_string(&agents).unwrap(), edited);
+        assert_eq!(
+            fs::read_to_string(&profile_skill).unwrap(),
+            SET_PROFILE_SKILL
+        );
+        assert_eq!(
+            pending_updates(dir.path()),
+            vec![AGENT_INSTRUCTIONS_PATH.to_string()]
+        );
+        assert!(dir.path().join(UPDATE_RITUALS_SKILL_PATH).is_file());
     }
 
     #[test]
