@@ -15,7 +15,7 @@ use settings::Settings;
 use sum_tree::Bias;
 use text::SelectionGoal;
 use theme_settings::BufferLineHeight;
-use util::{RangeExt, debug_panic, post_inc};
+use util::{RangeExt, debug_panic};
 
 use super::{EditorElement, EditorLayout, LineNumberLayout, PositionMap, SplitSide};
 use crate::{
@@ -1083,7 +1083,7 @@ impl EditorElement {
                     );
                     if mouse_down_time.elapsed() >= drag_and_drop_delay {
                         let drop_cursor = Selection {
-                            id: post_inc(&mut editor.selections.next_selection_id()),
+                            id: editor.selections.next_selection_id(),
                             start: drop_anchor,
                             end: drop_anchor,
                             reversed: false,
