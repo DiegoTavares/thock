@@ -48,7 +48,10 @@ actions!(
         SetLanguage,
         /// Asks what your weeks are made of and writes it to profile.md, so
         /// the rituals fit your life instead of the defaults.
-        SetProfile
+        SetProfile,
+        /// Brings the rituals you edited up to date with what Thock now
+        /// ships, keeping your changes; you approve each file.
+        UpdateRituals
     ]
 );
 
@@ -107,6 +110,16 @@ pub fn init(cx: &mut App) {
                 "Set Profile",
                 crate::routines::SET_PROFILE_SKILL_PATH,
                 "This workspace isn't a Thock vault, so there is no profile to set.",
+                window,
+                cx,
+            );
+        });
+        workspace.register_action(|workspace, _: &UpdateRituals, window, cx| {
+            run_core_skill(
+                workspace,
+                "Update Rituals",
+                crate::routines::UPDATE_RITUALS_SKILL_PATH,
+                "This workspace isn't a Thock vault, so there are no rituals to update.",
                 window,
                 cx,
             );
