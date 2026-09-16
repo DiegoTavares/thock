@@ -297,10 +297,10 @@ unbounded bill for loading recent notes into every prompt. The proposal page car
   under `.thock/state/memory/sessions-with-inbox`, all unit-tested.
 - `[memory]` in `vault.rs` (`index_lines`, `stale_after_days`, `nudge_after_sessions`); never
   written unless set. `compose_vault_context` appends `## What you already know`.
-- Existing vaults gain `memory/` and the two core rituals on their next reconcile pass. Their
-  already-materialised Wrap Today / Week Review skill files are create-if-missing and keep the
-  pre-V28 text; the standalone Reflect row, the nudge and the palette actions cover them until the
-  Timeline Routine is reinstalled.
+- Existing vaults gain `memory/` and the two core rituals on their next reconcile pass. Reflect and
+  Rebuild Memory are shipped core files, so V29's reconcile keeps them current; Wrap Today, Wrap
+  Yesterday and Week Review upgrade in place where they were never edited, and otherwise wait
+  under `.thock/pending/` for the Update Rituals ritual.
 - The chat nudge is one row above the composer with "Reflect now" and "Not now";
   `thock::DismissMemoryNudge` and `thock::Reflect` are the keyboard paths.
 
