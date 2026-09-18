@@ -70,6 +70,7 @@ const TIMELINE_WRAP_YESTERDAY_SKILL: &str =
     include_str!("../assets/routines/timeline/skills/wrap-yesterday.md");
 const TIMELINE_ONBOARDING_SKILL: &str =
     include_str!("../assets/routines/timeline/skills/onboarding.md");
+const TIMELINE_REFLECT_SKILL: &str = include_str!("../assets/routines/timeline/skills/reflect.md");
 const TIMELINE_CONNECT_GOOGLE_WORKSPACE_SKILL: &str =
     include_str!("../assets/routines/timeline/skills/connect-google-workspace.md");
 const TIMELINE_DASHBOARD_HTML: &str = include_str!("../assets/routines/timeline/assets/index.html");
@@ -971,6 +972,7 @@ pub fn catalog() -> Result<Vec<CatalogRoutine>> {
                 ("skills/wrap-today.md", TIMELINE_WRAP_TODAY_SKILL),
                 ("skills/wrap-yesterday.md", TIMELINE_WRAP_YESTERDAY_SKILL),
                 ("skills/onboarding.md", TIMELINE_ONBOARDING_SKILL),
+                ("skills/reflect.md", TIMELINE_REFLECT_SKILL),
                 (
                     "skills/connect-google-workspace.md",
                     TIMELINE_CONNECT_GOOGLE_WORKSPACE_SKILL,
@@ -2286,11 +2288,11 @@ mod tests {
         let manifest = &catalog[0].manifest;
         assert_eq!(manifest.id, TIMELINE_ROUTINE_ID);
         assert_eq!(manifest.schema, 2);
-        assert_eq!(manifest.version, 11);
+        assert_eq!(manifest.version, 12);
         assert_eq!(manifest.icon.as_deref(), Some("clock"));
         assert_eq!(manifest.doc, "routines/timeline/Timeline.md");
         assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
-        assert_eq!(manifest.skills.len(), 5);
+        assert_eq!(manifest.skills.len(), 6);
         for skill in &manifest.skills {
             assert!(
                 skill.file.starts_with("routines/timeline/skills/"),
@@ -2313,6 +2315,7 @@ mod tests {
                 ("this-week", "weekly/{this_week}.md"),
                 ("last-week", "weekly/{last_week}.md"),
                 ("weekly-dashboard", "weekly/site/index.html"),
+                ("memory", "memory/index.md"),
             ]
         );
         assert!(manifest.links[0].create);
@@ -2331,6 +2334,7 @@ mod tests {
                 ("this-week", None),
                 ("last-week", Some("Older notes")),
                 ("weekly-dashboard", None),
+                ("memory", Some("Older notes")),
             ]
         );
         // The one-time steps are setup, not rituals — that classification is
@@ -2351,13 +2355,18 @@ mod tests {
                 .iter()
                 .any(|skill| skill.file == onboarding.skill)
         );
-        // Every declared file with a source must have a bundled asset.
-        for file in declared_files(manifest) {
-            if let Some(source) = &file.source {
-                assert!(
-                    catalog[0].asset(source).is_some(),
-                    "missing asset {source:?}"
-                );
+        // Every declared file with a source must have a bundled asset, in
+        // every catalog Routine — a manifest entry without one makes
+        // `materialize_routine` fail for every vault.
+        for routine in &catalog {
+            for file in declared_files(&routine.manifest) {
+                if let Some(source) = &file.source {
+                    assert!(
+                        routine.asset(source).is_some(),
+                        "{} is missing asset {source:?}",
+                        routine.manifest.id
+                    );
+                }
             }
         }
     }
@@ -3450,7 +3459,7 @@ open = "weekly/site/index.html"
         assert!(raw.contains("[[routines.installed]]"), "{raw}");
         assert!(!raw.contains("[[areas.installed]]"), "{raw}");
         let vault = detect(root);
-        assert_eq!(vault.config.routines.installed[0].version, 11);
+        assert_eq!(vault.config.routines.installed[0].version, 12);
 
         // Idempotent: a second pass changes nothing.
         let vault = detect(root);
