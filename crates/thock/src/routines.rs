@@ -70,6 +70,7 @@ const TIMELINE_WRAP_YESTERDAY_SKILL: &str =
     include_str!("../assets/routines/timeline/skills/wrap-yesterday.md");
 const TIMELINE_ONBOARDING_SKILL: &str =
     include_str!("../assets/routines/timeline/skills/onboarding.md");
+const TIMELINE_REFLECT_SKILL: &str = include_str!("../assets/routines/timeline/skills/reflect.md");
 const TIMELINE_CONNECT_GOOGLE_WORKSPACE_SKILL: &str =
     include_str!("../assets/routines/timeline/skills/connect-google-workspace.md");
 const TIMELINE_DASHBOARD_HTML: &str = include_str!("../assets/routines/timeline/assets/index.html");
@@ -922,6 +923,14 @@ fn shipped_core_files() -> Vec<(&'static str, &'static str)> {
         (SET_LANGUAGE_SKILL_PATH, SET_LANGUAGE_SKILL),
         (SET_PROFILE_SKILL_PATH, SET_PROFILE_SKILL),
         (UPDATE_RITUALS_SKILL_PATH, UPDATE_RITUALS_SKILL),
+        (
+            crate::memory::REFLECT_SKILL_PATH,
+            crate::memory::REFLECT_SKILL,
+        ),
+        (
+            crate::memory::REBUILD_MEMORY_SKILL_PATH,
+            crate::memory::REBUILD_MEMORY_SKILL,
+        ),
         (AGENT_INSTRUCTIONS_PATH, AGENT_INSTRUCTIONS),
         (
             crate::getting_started::CUSTOMIZE_PATH,
@@ -963,6 +972,7 @@ pub fn catalog() -> Result<Vec<CatalogRoutine>> {
                 ("skills/wrap-today.md", TIMELINE_WRAP_TODAY_SKILL),
                 ("skills/wrap-yesterday.md", TIMELINE_WRAP_YESTERDAY_SKILL),
                 ("skills/onboarding.md", TIMELINE_ONBOARDING_SKILL),
+                ("skills/reflect.md", TIMELINE_REFLECT_SKILL),
                 (
                     "skills/connect-google-workspace.md",
                     TIMELINE_CONNECT_GOOGLE_WORKSPACE_SKILL,
@@ -1534,6 +1544,7 @@ pub fn materialize_core_files(vault_root: &Path) -> Result<()> {
             .insert(relative.to_string(), content_hash(packaged.as_bytes()));
     }
     write_lock_at(&lock_path, &lock)?;
+    crate::memory::materialize(vault_root)?;
     for link_name in AGENT_INSTRUCTION_LINKS {
         link_agent_instructions(vault_root, link_name)?;
     }
@@ -2277,11 +2288,11 @@ mod tests {
         let manifest = &catalog[0].manifest;
         assert_eq!(manifest.id, TIMELINE_ROUTINE_ID);
         assert_eq!(manifest.schema, 2);
-        assert_eq!(manifest.version, 11);
+        assert_eq!(manifest.version, 12);
         assert_eq!(manifest.icon.as_deref(), Some("clock"));
         assert_eq!(manifest.doc, "routines/timeline/Timeline.md");
         assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
-        assert_eq!(manifest.skills.len(), 5);
+        assert_eq!(manifest.skills.len(), 6);
         for skill in &manifest.skills {
             assert!(
                 skill.file.starts_with("routines/timeline/skills/"),
@@ -2304,6 +2315,7 @@ mod tests {
                 ("this-week", "weekly/{this_week}.md"),
                 ("last-week", "weekly/{last_week}.md"),
                 ("weekly-dashboard", "weekly/site/index.html"),
+                ("memory", "memory/index.md"),
             ]
         );
         assert!(manifest.links[0].create);
@@ -2322,6 +2334,7 @@ mod tests {
                 ("this-week", None),
                 ("last-week", Some("Older notes")),
                 ("weekly-dashboard", None),
+                ("memory", Some("Older notes")),
             ]
         );
         // The one-time steps are setup, not rituals — that classification is
@@ -2342,13 +2355,18 @@ mod tests {
                 .iter()
                 .any(|skill| skill.file == onboarding.skill)
         );
-        // Every declared file with a source must have a bundled asset.
-        for file in declared_files(manifest) {
-            if let Some(source) = &file.source {
-                assert!(
-                    catalog[0].asset(source).is_some(),
-                    "missing asset {source:?}"
-                );
+        // Every declared file with a source must have a bundled asset, in
+        // every catalog Routine — a manifest entry without one makes
+        // `materialize_routine` fail for every vault.
+        for routine in &catalog {
+            for file in declared_files(&routine.manifest) {
+                if let Some(source) = &file.source {
+                    assert!(
+                        routine.asset(source).is_some(),
+                        "{} is missing asset {source:?}",
+                        routine.manifest.id
+                    );
+                }
             }
         }
     }
@@ -2585,6 +2603,14 @@ mod tests {
         assert!(dir.path().join(NEW_ROUTINE_SKILL_PATH).is_file());
         assert!(dir.path().join(SET_LANGUAGE_SKILL_PATH).is_file());
         assert!(dir.path().join(SET_PROFILE_SKILL_PATH).is_file());
+        assert!(dir.path().join(crate::memory::REFLECT_SKILL_PATH).is_file());
+        assert!(
+            dir.path()
+                .join(crate::memory::REBUILD_MEMORY_SKILL_PATH)
+                .is_file()
+        );
+        assert!(dir.path().join(crate::memory::INDEX_PATH).is_file());
+        assert!(dir.path().join(crate::memory::INBOX_PATH).is_file());
         // The agent instruction file and its per-CLI links (V18 §5.1), and
         // the first-run guide pages (V18 §5.3–5.4).
         assert!(dir.path().join(AGENT_INSTRUCTIONS_PATH).is_file());
@@ -3433,7 +3459,7 @@ open = "weekly/site/index.html"
         assert!(raw.contains("[[routines.installed]]"), "{raw}");
         assert!(!raw.contains("[[areas.installed]]"), "{raw}");
         let vault = detect(root);
-        assert_eq!(vault.config.routines.installed[0].version, 11);
+        assert_eq!(vault.config.routines.installed[0].version, 12);
 
         // Idempotent: a second pass changes nothing.
         let vault = detect(root);

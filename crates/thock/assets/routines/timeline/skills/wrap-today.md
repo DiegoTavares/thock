@@ -93,6 +93,10 @@ When step 3 actually pulled something in, add one section for it above `## Sugge
 
 Write it in the tone the profile names, and use the profile's area names when you group anything. Keep it short and factual. Base "carried forward" on the still-unchecked tasks (those you marked done in step 5 belong under `## Done`, not here) plus anything the recent-days scan shows lingering. Suffix each task that moved in step 6 with `→ backlog (Soon)` (or `(Someday)`) so the note records where it went; tasks that were skipped as duplicates get `→ already in backlog`.
 
+## 8. Reflect
+
+Read `skills/thock/reflect.md` at the vault root and run it in **daily** mode over today's note, which you have already read. It files whatever was noted in `memory/inbox.md` and anything durable today held into `memory/`, so the next session starts knowing it. Skip this step in silence if that file is missing.
+
 ## Output
 
-After the append has happened, tell the user in two or three sentences what the review says, that it is at the end of today's note, which tasks (if any) were marked done in place, and which moved to the backlog. The review lives in the note; don't repeat it whole in the chat.
+After the appends have happened, tell the user in two or three sentences what the review says, that it is at the end of today's note, which tasks (if any) were marked done in place, and which moved to the backlog, plus Reflect's one line on what it learned when there was something. The review lives in the note; don't repeat it whole in the chat.

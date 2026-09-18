@@ -51,7 +51,13 @@ actions!(
         SetProfile,
         /// Brings the rituals you edited up to date with what Thock now
         /// ships, keeping your changes; you approve each file.
-        UpdateRituals
+        UpdateRituals,
+        /// Files what your agent noted about you lately into memory/, so the
+        /// next session starts knowing it.
+        Reflect,
+        /// Reads through the notes you already have and builds memory/ from
+        /// them, a fortnight at a time. Can be stopped and resumed.
+        RebuildMemory
     ]
 );
 
@@ -99,6 +105,7 @@ pub fn init(cx: &mut App) {
                 workspace,
                 "Set Language",
                 crate::routines::SET_LANGUAGE_SKILL_PATH,
+                agent::ModelTier::Default,
                 "This workspace isn't a Thock vault, so there is no language to set.",
                 window,
                 cx,
@@ -109,6 +116,7 @@ pub fn init(cx: &mut App) {
                 workspace,
                 "Set Profile",
                 crate::routines::SET_PROFILE_SKILL_PATH,
+                agent::ModelTier::Default,
                 "This workspace isn't a Thock vault, so there is no profile to set.",
                 window,
                 cx,
@@ -119,7 +127,30 @@ pub fn init(cx: &mut App) {
                 workspace,
                 "Update Rituals",
                 crate::routines::UPDATE_RITUALS_SKILL_PATH,
+                agent::ModelTier::Default,
                 "This workspace isn't a Thock vault, so there are no rituals to update.",
+                window,
+                cx,
+            );
+        });
+        workspace.register_action(|workspace, _: &Reflect, window, cx| {
+            run_core_skill(
+                workspace,
+                "Reflect",
+                crate::memory::REFLECT_SKILL_PATH,
+                agent::ModelTier::Fast,
+                "This workspace isn't a Thock vault, so there are no notes to reflect on.",
+                window,
+                cx,
+            );
+        });
+        workspace.register_action(|workspace, _: &RebuildMemory, window, cx| {
+            run_core_skill(
+                workspace,
+                "Rebuild Memory",
+                crate::memory::REBUILD_MEMORY_SKILL_PATH,
+                agent::ModelTier::Fast,
+                "This workspace isn't a Thock vault, so there are no notes to read.",
                 window,
                 cx,
             );
@@ -175,6 +206,7 @@ fn run_core_skill(
     workspace: &mut Workspace,
     title: &'static str,
     skill_path: &'static str,
+    tier: agent::ModelTier,
     not_a_vault_message: &'static str,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -194,7 +226,7 @@ fn run_core_skill(
     }
     AgentPanel::launch_in_workspace(
         workspace,
-        LaunchRequest::run_skill(title, skill_path, agent::ModelTier::Default),
+        LaunchRequest::run_skill(title, skill_path, tier),
         window,
         cx,
     );

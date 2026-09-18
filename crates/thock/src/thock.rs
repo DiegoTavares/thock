@@ -20,6 +20,7 @@ pub mod inbox_service;
 pub mod markdown_conceal;
 pub mod markdown_syntax;
 pub mod markdown_text;
+pub mod memory;
 pub mod notes;
 pub mod plus;
 pub mod routines;

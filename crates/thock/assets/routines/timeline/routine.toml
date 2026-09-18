@@ -1,7 +1,7 @@
 schema  = 2
 id      = "timeline"
 name    = "Daily & Weekly"
-version = 11
+version = 12
 summary = "Daily & weekly rhythm — weekly review and a progress dashboard."
 icon    = "clock"
 doc     = "routines/timeline/Timeline.md"
@@ -47,6 +47,13 @@ name = "Weekly Dashboard"
 open = "weekly/site/index.html"
 kind = "browser"
 
+[[link]]
+id    = "memory"
+name  = "What Thock Knows"
+open  = "memory/index.md"
+kind  = "editor"
+group = "Older notes"
+
 # Folders/files created in the vault on install. create-if-missing; never clobber.
 [[scaffold]]
 kind = "dir"
@@ -67,24 +74,33 @@ id      = "week-review"
 name    = "Week Review"
 file    = "routines/timeline/skills/week-review.md"
 summary = "Aggregate the week's notes into a review by area, append it, feed the dashboard."
-reads   = ["daily/**", "weekly/**", "backlog.md", "profile.md", "routines/timeline/sources.md", "the sources it lists"]
-writes  = ["weekly/<week>.md (append)", "weekly/site/data.js (append)", "backlog.md (append)"]
+reads   = ["daily/**", "weekly/**", "backlog.md", "profile.md", "memory/**", "routines/timeline/sources.md", "the sources it lists"]
+writes  = ["weekly/<week>.md (append)", "weekly/site/data.js (append)", "backlog.md (append)", "memory/** (rewrite)"]
 
 [[skill]]
 id      = "wrap-today"
 name    = "Wrap Today"
 file    = "routines/timeline/skills/wrap-today.md"
 summary = "Close out today's note: tasks, recent context, and whatever your profile allows, appended as a daily closure."
-reads   = ["daily/**", "backlog.md", "profile.md", "git:log (only if your profile allows)", "routines/timeline/sources.md"]
-writes  = ["daily/<today>.md (append)", "backlog.md (append)"]
+reads   = ["daily/**", "backlog.md", "profile.md", "memory/**", "git:log (only if your profile allows)", "routines/timeline/sources.md"]
+writes  = ["daily/<today>.md (append)", "backlog.md (append)", "memory/** (rewrite)"]
 
 [[skill]]
 id      = "wrap-yesterday"
 name    = "Wrap Yesterday"
 file    = "routines/timeline/skills/wrap-yesterday.md"
 summary = "Close out yesterday's note: tasks, surrounding context, and whatever your profile allows, appended as a daily closure."
-reads   = ["daily/**", "backlog.md", "profile.md", "git:log (only if your profile allows)", "routines/timeline/sources.md"]
-writes  = ["daily/<yesterday>.md (append)", "backlog.md (append)"]
+reads   = ["daily/**", "backlog.md", "profile.md", "memory/**", "git:log (only if your profile allows)", "routines/timeline/sources.md"]
+writes  = ["daily/<yesterday>.md (append)", "backlog.md (append)", "memory/** (rewrite)"]
+
+[[skill]]
+id      = "reflect"
+name    = "Reflect"
+file    = "routines/timeline/skills/reflect.md"
+summary = "File what your agent noted about you lately into memory/, so the next session starts knowing it."
+model   = "fast"
+reads   = ["memory/**", "daily/**", "weekly/**", "profile.md", ".thock/config.toml"]
+writes  = ["memory/** (rewrite)", "weekly/<week>.md (append)", ".thock/state/memory/reflected"]
 
 [[skill]]
 id      = "connect-google-workspace"

@@ -64,8 +64,14 @@ already asked some of it. Say what you already have and move on.
 
    Default everything to off. Off means *never look and never ask again*.
 
-5. **Tone.** One last light question: how should you talk to them? Plain
-   and warm, brief and businesslike, something else? Wait.
+5. **Tone.** A light question: how should you talk to them? Plain and
+   warm, brief and businesslike, something else? Wait.
+
+6. **What to keep out of memory.** Explain in one sentence: as it goes,
+   Thock keeps short notes about their life in a page they can read
+   (`memory/index.md`), so it doesn't start from zero each time. Is there
+   anything it should never write down? Health, money, a person, a
+   subject: their words, one line each. "Nothing" is a fine answer. Wait.
 
 ## Writing the profile
 
@@ -103,10 +109,16 @@ box unchecked skips that step in silence.
 ## Tone
 
 One line, from question 5.
+
+## What Thock should not keep
+
+- One line per topic, from question 6, or nothing under the heading.
 ```
 
 Check the boxes the user chose in question 4 and leave the rest unchecked.
 Keep every heading even when a section is short; the rituals match on them.
+The Reflect ritual reads **What Thock should not keep** before it writes
+anything, and skips those topics without a word.
 
 If `profile.md` already exists, read it first, show the user what would
 change, and rewrite it only on a yes. This is the one file this ritual owns,

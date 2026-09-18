@@ -8,4 +8,4 @@ This is the [Wrap Today](./wrap-today.md) ritual run against yesterday instead o
 - **The context scan** (step 4) reads the 2–3 daily notes *before* yesterday, plus today's note if it already exists, to catch threads that lingered into today.
 - **The backlog offer** (step 5) is about yesterday's unfinished tasks. Skip any task the user has visibly picked up again in today's note — it isn't lingering, it's in progress.
 
-Everything else is identical to Wrap Today: reading tasks, the profile-gated pull-in step (it looks only where `profile.md` allows, and skips itself in silence when nothing is allowed), the backlog question (all / none / some, deduplicated), the `# Daily Closure` section format, and the output.
+Everything else is identical to Wrap Today: reading tasks, the profile-gated pull-in step (it looks only where `profile.md` allows, and skips itself in silence when nothing is allowed), the backlog question (all / none / some, deduplicated), the `# Daily Closure` section format, the Reflect step (daily mode, over yesterday's note), and the output.
