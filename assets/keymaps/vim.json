@@ -1128,6 +1128,7 @@
       "o": "thock::AddBacklogTask",
       "space": "thock::CompleteBacklogTask",
       "x": "thock::CompleteBacklogTask",
+      "t": "thock::MoveBacklogTaskToToday",
       ">": "thock::MoveBacklogTaskRight",
       "<": "thock::MoveBacklogTaskLeft",
       "y y": "thock::CopyBacklogTask",
