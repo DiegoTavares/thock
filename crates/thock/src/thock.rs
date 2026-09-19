@@ -27,6 +27,7 @@ pub mod routines;
 pub mod routines_panel;
 pub mod tasks_google;
 pub mod vault;
+pub mod wikilink_completion;
 
 use anyhow::{Context as _, Result};
 use command_palette_hooks::CommandPaletteFilter;
@@ -54,6 +55,7 @@ pub fn init(cx: &mut App) {
     gmail_service::init(cx);
     inbox_service::init(cx);
     markdown_conceal::init(cx);
+    wikilink_completion::init(cx);
     hide_inherited_zed_actions(cx);
 }
 
