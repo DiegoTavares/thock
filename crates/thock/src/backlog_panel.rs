@@ -12,8 +12,8 @@ use db::kvp::KeyValueStore;
 use editor::{Editor, EditorEvent, SelectionEffects, scroll::Autoscroll};
 use gpui::{
     Action, AnyElement, App, AsyncWindowContext, ClipboardItem, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, Hsla, KeyContext, Pixels, Subscription, Task, WeakEntity, Window,
-    actions, div, px,
+    FocusHandle, Focusable, Hsla, KeyContext, Pixels, ScrollHandle, Subscription, Task, WeakEntity,
+    Window, actions, div, px,
 };
 use language::{Buffer, BufferEvent};
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
@@ -66,6 +66,8 @@ actions!(
         MoveBacklogTaskRight,
         /// Moves the selected task from Someday to Soon.
         MoveBacklogTaskLeft,
+        /// Moves the selected backlog task onto today's note's task list.
+        MoveBacklogTaskToToday,
         /// Copies the selected task to the clipboard as Markdown.
         CopyBacklogTask,
         /// Opens backlog.md at the selected task's line.
@@ -120,6 +122,14 @@ struct EditState {
     _subscription: Subscription,
 }
 
+/// How a task leaves the backlog for today's note: checked off into the
+/// Completed section, or moved wholesale onto today's plan.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TodayWrite {
+    Done,
+    Move,
+}
+
 /// A row of an open column: a category header, or a task. Both the renderer
 /// and the keyboard cursor index into this list, so there is one ordering to
 /// keep in step (V17 §5.2).
@@ -166,6 +176,9 @@ pub struct BacklogPanel {
     collapsed: HashSet<(SectionKind, String)>,
     pending_serialization: Option<Task<()>>,
     selected: Option<TaskSelection>,
+    /// One scroll position per column, indexed by `SectionKind::index`, so a
+    /// keyboard motion can bring the selected row into view.
+    scroll_handles: [ScrollHandle; 3],
     /// The row lit by the copy flash, if one is running.
     copy_flash: Option<TaskSelection>,
     copy_flash_task: Option<Task<()>>,
@@ -263,6 +276,7 @@ impl BacklogPanel {
                 collapsed,
                 pending_serialization: None,
                 selected: None,
+                scroll_handles: std::array::from_fn(|_| ScrollHandle::new()),
                 copy_flash: None,
                 copy_flash_task: None,
                 edit_state: None,
@@ -577,6 +591,7 @@ impl BacklogPanel {
             |row| matches!(row, BacklogRow::Category { name: header, .. } if *header == name),
         ) {
             self.selected = Some(TaskSelection { section, index });
+            self.scroll_handles[section.index()].scroll_to_item(index);
         }
     }
 
@@ -590,6 +605,7 @@ impl BacklogPanel {
 
     fn select_row(&mut self, section: SectionKind, index: usize, cx: &mut Context<Self>) {
         self.selected = Some(TaskSelection { section, index });
+        self.scroll_handles[section.index()].scroll_to_item(index);
         cx.notify();
     }
 
@@ -766,6 +782,21 @@ impl BacklogPanel {
             return;
         };
         self.mark_done(section, task.line, task.text, window, cx);
+    }
+
+    fn move_selected_task_to_today(
+        &mut self,
+        _: &MoveBacklogTaskToToday,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((section, task)) = self
+            .selected_task()
+            .filter(|(section, _)| *section != SectionKind::Completed)
+        else {
+            return;
+        };
+        self.send_to_today(section, task.line, task.text, TodayWrite::Move, window, cx);
     }
 
     fn move_selected_task_right(
@@ -1070,7 +1101,7 @@ impl BacklogPanel {
         .detach();
     }
 
-    // --- Mark done (spec §6.3) ---
+    // --- Mark done / move to today (spec §6.3) ---
 
     /// Checking a task runs two ordered writes: append `- [x] …` to today's
     /// daily note (created from template if missing), then move the task to
@@ -1084,11 +1115,46 @@ impl BacklogPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.send_to_today(section, line, task_text, TodayWrite::Done, window, cx);
+    }
+
+    /// Sends a task to today's daily note with the same two ordered writes as
+    /// `mark_done`: the note write first, and only if it succeeds is the
+    /// backlog touched — completed for a mark-done, removed for a move.
+    fn send_to_today(
+        &mut self,
+        section: SectionKind,
+        line: u32,
+        task_text: String,
+        write: TodayWrite,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.mark_in_flight || self.buffer.is_none() {
             return;
         }
         let Some(vault) = self.vault().cloned() else {
             return;
+        };
+        // A moved task lands in the note verbatim — children included — so
+        // the block is captured before the backlog loses it.
+        let note_block = match write {
+            TodayWrite::Done => format!("- [x] {task_text}\n"),
+            TodayWrite::Move => {
+                let Some(buffer) = self.buffer.as_ref() else {
+                    return;
+                };
+                let text = buffer.read(cx).text();
+                let backlog = parse_backlog(&text, &self.headings());
+                let Some(task) = backlog.locate_task(section, line, &task_text) else {
+                    self.show_error(
+                        "That task changed outside the panel, so it wasn't moved.".to_string(),
+                        cx,
+                    );
+                    return;
+                };
+                backlog::task_block(&text, task)
+            }
         };
         self.mark_in_flight = true;
         cx.notify();
@@ -1098,7 +1164,6 @@ impl BacklogPanel {
         let now = Local::now();
         let today = now.date_naive();
         let time = now.time();
-        let note_line_text = task_text.clone();
         let ensure =
             cx.background_spawn(async move { ensure_note(&vault, NoteKind::Daily, today, time) });
         cx.spawn_in(window, async move |this, cx| {
@@ -1117,11 +1182,8 @@ impl BacklogPanel {
                     .update(cx, |project, cx| project.open_local_buffer(&note_path, cx))
                     .await?;
                 note_buffer.update(cx, |buffer, cx| {
-                    let edit = backlog::append_done_to_note_edit(
-                        &buffer.text(),
-                        &heading,
-                        &note_line_text,
-                    );
+                    let edit =
+                        backlog::append_block_to_note_edit(&buffer.text(), &heading, &note_block);
                     buffer.edit([(edit.range, edit.new_text)], None, cx);
                 });
                 project
@@ -1133,10 +1195,15 @@ impl BacklogPanel {
             if let Err(error) = note_result {
                 this.update(cx, |this, cx| {
                     this.mark_in_flight = false;
-                    this.show_error(
-                        format!("Couldn't record the task in today's note: {error}"),
-                        cx,
-                    );
+                    let message = match write {
+                        TodayWrite::Done => {
+                            format!("Couldn't record the task in today's note: {error}")
+                        }
+                        TodayWrite::Move => {
+                            format!("Couldn't move the task to today's note: {error}")
+                        }
+                    };
+                    this.show_error(message, cx);
                     cx.notify();
                 })
                 .log_err();
@@ -1153,8 +1220,14 @@ impl BacklogPanel {
                 let backlog = parse_backlog(&text, &headings);
                 let task = backlog
                     .locate_task(section, line, &task_text)
-                    .context("the task changed while it was being completed")?;
-                let mut edits = backlog::complete_task_edits(&text, task, today, &headings);
+                    .context("the task changed while it was being sent to today")?;
+                let mut edits = match write {
+                    TodayWrite::Done => backlog::complete_task_edits(&text, task, today, &headings),
+                    TodayWrite::Move => vec![backlog::Edit {
+                        range: task.span.clone(),
+                        new_text: String::new(),
+                    }],
+                };
                 edits.sort_by_key(|edit| edit.range.start);
                 buffer.update(cx, |buffer, cx| {
                     buffer.edit(
@@ -1176,15 +1249,19 @@ impl BacklogPanel {
             this.update(cx, |this, cx| {
                 this.mark_in_flight = false;
                 if let Err(error) = backlog_result {
-                    // Re-checking is safe: the panel re-renders from the file,
+                    // Retrying is safe: the panel re-renders from the file,
                     // which still shows the task open (spec §6.5).
-                    this.show_error(
-                        format!(
+                    let message = match write {
+                        TodayWrite::Done => format!(
                             "The task was recorded in today's note, but the backlog couldn't \
                              be updated: {error}"
                         ),
-                        cx,
-                    );
+                        TodayWrite::Move => format!(
+                            "The task was added to today's note, but the backlog couldn't \
+                             be updated: {error}"
+                        ),
+                    };
+                    this.show_error(message, cx);
                 }
                 cx.notify();
             })
@@ -1349,6 +1426,7 @@ impl BacklogPanel {
         }
         let section_key = section.id();
         let task_text = task.text.clone();
+        let today_task_text = task.text.clone();
         let task_line = task.line;
         // Chevrons, matching the `>` / `<` keys that do the same thing.
         let (move_icon, move_tooltip, move_action) = match section {
@@ -1452,6 +1530,40 @@ impl BacklogPanel {
                         },
                         cx,
                     );
+                })),
+            )
+            .child(
+                IconButton::new(
+                    ElementId::Name(format!("backlog-today-{section_key}-{index}").into()),
+                    IconName::ListTodo,
+                )
+                .icon_size(IconSize::XSmall)
+                .icon_color(Color::Muted)
+                .disabled(self.mark_in_flight)
+                .tooltip({
+                    let focus_handle = self.focus_handle.clone();
+                    move |_, cx| {
+                        Tooltip::for_action_in(
+                            "Move to today",
+                            &MoveBacklogTaskToToday,
+                            &focus_handle,
+                            cx,
+                        )
+                    }
+                })
+                .on_click(cx.listener({
+                    let task_text = today_task_text;
+                    move |this, _, window, cx| {
+                        this.select_row(section, index, cx);
+                        this.send_to_today(
+                            section,
+                            task_line,
+                            task_text.clone(),
+                            TodayWrite::Move,
+                            window,
+                            cx,
+                        );
+                    }
                 })),
             )
             .child(
@@ -1651,13 +1763,17 @@ impl BacklogPanel {
             .border_color(colors.border_variant)
             .child(header)
             .child(
-                div()
-                    .id(ElementId::Name(
-                        format!("backlog-section-{section_key}").into(),
-                    ))
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .child(list),
+                // The rows are direct children of the tracked element, so
+                // `scroll_to_item` indices line up with `visible_rows`; without
+                // `min_h_0` the flex child grows to its content and the tail of
+                // the list is clipped instead of scrollable.
+                list.id(ElementId::Name(
+                    format!("backlog-section-{section_key}").into(),
+                ))
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll_handles[section.index()]),
             )
             .into_any_element()
     }
@@ -1725,11 +1841,11 @@ impl BacklogPanel {
             .h_full()
             .child(header)
             .child(
-                div()
-                    .id("backlog-completed-list")
+                list.id("backlog-completed-list")
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
-                    .child(list),
+                    .track_scroll(&self.scroll_handles[SectionKind::Completed.index()]),
             )
             .into_any_element()
     }
@@ -2075,6 +2191,7 @@ impl Render for BacklogPanel {
             .on_action(cx.listener(Self::complete_selected_task))
             .on_action(cx.listener(Self::move_selected_task_right))
             .on_action(cx.listener(Self::move_selected_task_left))
+            .on_action(cx.listener(Self::move_selected_task_to_today))
             .on_action(cx.listener(Self::copy_selected_task))
             .on_action(cx.listener(Self::reveal_selected_task))
             .on_action(cx.listener(Self::collapse_category))

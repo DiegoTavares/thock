@@ -109,7 +109,7 @@ impl SectionKind {
             .find(|kind| kind.id().eq_ignore_ascii_case(id))
     }
 
-    fn index(self) -> usize {
+    pub fn index(self) -> usize {
         match self {
             Self::Soon => 0,
             Self::Someday => 1,
@@ -440,7 +440,7 @@ pub fn rename_task_edit(task: &BacklogTask, new_text: &str) -> Edit {
 }
 
 /// The task line + children as a newline-terminated block, verbatim.
-fn task_block(text: &str, task: &BacklogTask) -> String {
+pub fn task_block(text: &str, task: &BacklogTask) -> String {
     let raw = text.get(task.span.clone()).unwrap_or("");
     if raw.ends_with('\n') {
         raw.to_string()
@@ -580,7 +580,18 @@ pub fn append_done_to_note_edit(
     heading: &day_plan::HeadingNames,
     task_text: &str,
 ) -> Edit {
-    let line = format!("- [x] {task_text}\n");
+    append_block_to_note_edit(note_text, heading, &format!("- [x] {task_text}\n"))
+}
+
+/// The edit appending `block` (newline-terminated lines, e.g. a task with its
+/// children) at the end of a daily note's planner/task section, or at the end
+/// of the file when the heading is missing. Never touches existing content.
+pub fn append_block_to_note_edit(
+    note_text: &str,
+    heading: &day_plan::HeadingNames,
+    block: &str,
+) -> Edit {
+    let line = block.to_string();
     let lines = line_table(note_text);
     let section = section_line_range(&lines, heading).map(|(range, _)| range);
     match section {

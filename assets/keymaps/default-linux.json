@@ -1639,6 +1639,7 @@
       "right": "thock::SelectNextBacklogColumn",
       "space": "thock::CompleteBacklogTask",
       "x": "thock::CompleteBacklogTask",
+      "t": "thock::MoveBacklogTaskToToday",
       "shift-enter": "thock::AddBacklogTask",
       "alt-enter": "thock::RevealBacklogTask",
       "alt-left": "thock::MoveBacklogTaskLeft",
