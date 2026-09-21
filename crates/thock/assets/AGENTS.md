@@ -69,9 +69,10 @@ in that language, within the limits the section names.
 - `routines/<id>/` — installed Routines: each has an explainer doc, its
   skills under `routines/<id>/skills/`, and a `routine.toml` definition.
   `routines/ROUTINES.md` documents the format.
-- `skills/`: core rituals (for example `skills/thock/new-routine.md`,
-  `skills/thock/set-profile.md`, the interview behind `profile.md`, and
-  `skills/thock/reflect.md`, which maintains `memory/`).
+- `skills/`: core rituals — `skills/thock/new-routine.md`,
+  `skills/thock/set-profile.md` (the interview behind `profile.md`),
+  `skills/thock/reflect.md` (which maintains `memory/`), and
+  `skills/thock/customize-app.md` (the app's settings and shortcuts).
 
 ## Rituals
 
@@ -82,10 +83,13 @@ rules above. Skills are also available as slash commands (`/wrap-today`,
 
 ## Beyond the vault
 
-Keyboard shortcuts live outside the vault, in `~/.config/thock/keymap.json`
-(Zed keymap format — bindings like `"cmd-alt-u": "thock::ToggleBacklogFocus"`).
-If the user asks to change a shortcut, edit that file, keeping its existing
-structure; changes apply live. `guide/customize.md` lists the defaults.
+How the app looks and which keys do what live outside the vault, in
+`~/.config/thock/settings.json` and `~/.config/thock/keymap.json`. When the
+user asks for a bigger font, a different theme, or a new shortcut, read
+`skills/thock/customize-app.md` first — it has the file locations, the
+setting names, the keymap syntax, and Thock's own actions and contexts, so
+you can make the change in one pass. Changes apply live.
+`guide/customize.md` lists the defaults for the user.
 
 The user may edit any of these files, including this one. The file on disk
 is always the source of truth.

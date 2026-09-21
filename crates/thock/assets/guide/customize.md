@@ -53,8 +53,12 @@ Every shortcut can be rebound — they live in a small settings file, like
 everything else in Thock.
 
 - **Ask your agent.** Open it (`⌘ ⌥ T`), start a conversation, and say
-  something like *"change my backlog shortcut to cmd-alt-b"*. The keyboard
-  settings file lives at `~/.config/thock/keymap.json`.
+  something like *"change my backlog shortcut to cmd-alt-b"* — or run
+  **thock: customize app** from the command bar (`⌘ ⇧ P`) and it will ask
+  what you'd like to change. It knows where these files live and what
+  belongs in them, so the look, the text size and the keys are all one
+  sentence away. The files themselves are `~/.config/thock/settings.json`
+  and `~/.config/thock/keymap.json`.
 - **Or do it yourself.** `⌘ ⇧ P` → `zed: open keymap` shows every binding
   and lets you change them in place.
 
