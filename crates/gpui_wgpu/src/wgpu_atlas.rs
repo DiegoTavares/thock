@@ -74,12 +74,16 @@ impl WgpuAtlas {
         lock.flush_uploads();
     }
 
-    pub fn get_texture_info(&self, id: AtlasTextureId) -> WgpuTextureInfo {
+    /// Returns the view backing `id`, or `None` once every tile in it has been
+    /// removed. A scene can still reference such a texture when a cached view
+    /// replays a paint from before the image was dropped, so callers must skip
+    /// those sprites rather than assume the texture exists.
+    pub fn get_texture_info(&self, id: AtlasTextureId) -> Option<WgpuTextureInfo> {
         let lock = self.0.lock();
-        let texture = &lock.storage[id];
-        WgpuTextureInfo {
+        let texture = lock.storage.get(id)?;
+        Some(WgpuTextureInfo {
             view: texture.view.clone(),
-        }
+        })
     }
 
     /// Clears all cached textures and tiles, forcing them to be recreated.
@@ -329,20 +333,6 @@ impl WgpuAtlasStorage {
     }
 }
 
-impl ops::Index<AtlasTextureId> for WgpuAtlasStorage {
-    type Output = WgpuAtlasTexture;
-    fn index(&self, id: AtlasTextureId) -> &Self::Output {
-        let textures = match id.kind {
-            AtlasTextureKind::Monochrome => &self.monochrome_textures,
-            AtlasTextureKind::Subpixel => &self.subpixel_textures,
-            AtlasTextureKind::Polychrome => &self.polychrome_textures,
-        };
-        textures[id.index as usize]
-            .as_ref()
-            .expect("texture must exist")
-    }
-}
-
 struct WgpuAtlasTexture {
     id: AtlasTextureId,
     allocator: BucketedAtlasAllocator,
@@ -455,10 +445,11 @@ mod tests {
         let mut build = || Ok(Some((size, Cow::Owned(vec![0, 0, 0, 255]))));
 
         // Regression test: before the fix, this panicked in flush_uploads
-        atlas
+        let tile = atlas
             .get_or_insert_with(&key, &mut build)?
             .expect("tile should be created");
         atlas.remove(&key);
+        assert!(atlas.get_texture_info(tile.texture_id).is_none());
         atlas.before_frame();
         Ok(())
     }
