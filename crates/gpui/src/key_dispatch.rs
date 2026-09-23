@@ -634,9 +634,9 @@ mod tests {
 
     use crate::{
         ActionRegistry, App, Bounds, Context, DispatchPhase, DispatchTree, FocusHandle,
-        InputHandler, IntoElement, KeyBinding, KeyContext, Keymap, Pixels, PlatformWindow, Point,
-        Render, Subscription, TestAppContext, UTF16Selection, Unbind, VisualContext,
-        VisualTestContext, Window,
+        InputHandler, IntoElement, KeyBinding, KeyContext, Keymap, Modifiers, Pixels,
+        PlatformWindow, Point, Render, Subscription, TestAppContext, UTF16Selection, Unbind,
+        VisualContext, VisualTestContext, Window,
     };
 
     actions!(dispatch_test, [TestAction, SecondaryTestAction]);
@@ -648,6 +648,41 @@ mod tests {
             Rc::new(RefCell::new(Keymap::new(bindings))),
             Rc::new(registry),
         )
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ObservedKeystroke {
+        keystroke: Keystroke,
+        action_name: Option<&'static str>,
+        context_stack: Vec<KeyContext>,
+    }
+
+    fn capture_observed_keystrokes(
+        cx: &mut VisualTestContext,
+    ) -> (Rc<RefCell<Vec<ObservedKeystroke>>>, Subscription) {
+        let observed_keystrokes = Rc::new(RefCell::new(Vec::new()));
+        let subscription = cx.update(|_, cx| {
+            cx.observe_keystrokes({
+                let observed_keystrokes = observed_keystrokes.clone();
+                move |event, _, _| {
+                    observed_keystrokes.borrow_mut().push(ObservedKeystroke {
+                        keystroke: event.keystroke.clone(),
+                        action_name: event.action.as_ref().map(|action| action.name()),
+                        context_stack: event.context_stack.clone(),
+                    });
+                }
+            })
+        });
+        (observed_keystrokes, subscription)
+    }
+
+    fn simulate_modifier_tap(cx: &mut VisualTestContext, modifiers: Modifiers) {
+        cx.simulate_modifiers_change(modifiers);
+        cx.simulate_modifiers_change(Modifiers::none());
+    }
+
+    fn terminal_context() -> KeyContext {
+        KeyContext::parse("Terminal").expect("valid key context")
     }
 
     #[test]
@@ -1060,6 +1095,69 @@ mod tests {
             window.blur(cx);
             assert!(window.pending_input_is_none());
         });
+    }
+
+    #[crate::test]
+    fn test_raw_modifier_handler_can_suppress_observation(cx: &mut TestAppContext) {
+        struct ModifierListenerTestView {
+            focus_handle: FocusHandle,
+            consume: Rc<Cell<bool>>,
+            releases: Rc<Cell<usize>>,
+        }
+
+        impl Render for ModifierListenerTestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                use crate::{InteractiveElement as _, Styled as _};
+                let consume = self.consume.clone();
+                let releases = self.releases.clone();
+                crate::div()
+                    .key_context("Terminal")
+                    .track_focus(&self.focus_handle)
+                    .size_full()
+                    .on_action(|_: &TestAction, _, cx| cx.propagate())
+                    .on_modifiers_changed(move |event, _, cx| {
+                        if !event.modifiers.modified() {
+                            releases.set(releases.get() + 1);
+                            if consume.get() {
+                                cx.stop_propagation();
+                            }
+                        }
+                    })
+            }
+        }
+
+        cx.update(|cx| {
+            cx.bind_keys([KeyBinding::new("shift", TestAction, Some("Terminal"))]);
+        });
+        let consume = Rc::new(Cell::new(true));
+        let releases = Rc::new(Cell::new(0));
+        let (view, cx) = cx.add_window_view(|_, cx| ModifierListenerTestView {
+            focus_handle: cx.focus_handle(),
+            consume: consume.clone(),
+            releases: releases.clone(),
+        });
+        cx.update(|window, cx| {
+            let focus_handle = view.read(cx).focus_handle.clone();
+            window.focus(&focus_handle, cx);
+            window.activate_window();
+        });
+        let (observed_keystrokes, _observer) = capture_observed_keystrokes(cx);
+
+        simulate_modifier_tap(cx, Modifiers::shift());
+        assert_eq!(releases.get(), 1);
+        assert!(observed_keystrokes.borrow().is_empty());
+
+        consume.set(false);
+        simulate_modifier_tap(cx, Modifiers::shift());
+        assert_eq!(releases.get(), 2);
+        assert_eq!(
+            observed_keystrokes.borrow().as_slice(),
+            &[ObservedKeystroke {
+                keystroke: Keystroke::parse("shift").expect("valid modifier"),
+                action_name: None,
+                context_stack: vec![terminal_context()],
+            }]
+        );
     }
 
     #[crate::test]
