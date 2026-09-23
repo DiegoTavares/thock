@@ -306,6 +306,17 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   personal items, with each area holding one colour across weeks. A vault with no `profile.md`
   behaves exactly as before, and the `"auto"` default decides from the feed. Spec
   `specs/v23-personalized-rituals.md`. _(shipped)_
+- [x] **The app itself, changed by asking** — a core **Customize App** ritual
+  (`skills/thock/customize-app.md`, `thock: customize app`) that carries everything an agent needs to
+  edit `~/.config/thock/settings.json` and `~/.config/thock/keymap.json` in one pass instead of
+  reverse-engineering the environment: the four config files and which one owns what (with
+  `.thock/config.toml` explicitly handed back to the rituals that own it), the JSONC merge rules, the
+  settings people actually ask for with exact keys and value shapes, the bundled theme names, the full
+  keystroke and context-predicate syntax, Thock's own actions with the contexts they live in, and the
+  precedence rule that decides whether a rebind wins. It names the fork's own traps too — Thock's
+  defaults that differ from stock Zed, and the hidden `dev` namespace that makes Zed's usual
+  "open the key context view" advice a dead end. `AGENTS.md` points every agent at it the moment a
+  user asks for a bigger font or a new shortcut. _(shipped)_
 - [ ] **BYO-LLM cost visibility** — key/model choice, local vs cloud, graceful failure. _(planned)_
 
 ### Milestone 5: Thock Plus & the hosted agent

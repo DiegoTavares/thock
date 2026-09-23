@@ -47,11 +47,13 @@ pub const ROUTINES_REFERENCE_PATH: &str = "routines/ROUTINES.md";
 pub const NEW_ROUTINE_SKILL_PATH: &str = "skills/thock/new-routine.md";
 pub const SET_LANGUAGE_SKILL_PATH: &str = "skills/thock/set-language.md";
 pub const SET_PROFILE_SKILL_PATH: &str = "skills/thock/set-profile.md";
+pub const CUSTOMIZE_APP_SKILL_PATH: &str = "skills/thock/customize-app.md";
 pub const AGENT_INSTRUCTIONS_PATH: &str = "AGENTS.md";
 const ROUTINES_REFERENCE: &str = include_str!("../assets/routines/ROUTINES.md");
 const NEW_ROUTINE_SKILL: &str = include_str!("../assets/skills/new-routine.md");
 const SET_LANGUAGE_SKILL: &str = include_str!("../assets/skills/set-language.md");
 const SET_PROFILE_SKILL: &str = include_str!("../assets/skills/set-profile.md");
+const CUSTOMIZE_APP_SKILL: &str = include_str!("../assets/skills/customize-app.md");
 const AGENT_INSTRUCTIONS: &str = include_str!("../assets/AGENTS.md");
 
 /// Per-CLI names for the vault-root instruction file, each linked to
@@ -922,6 +924,7 @@ fn shipped_core_files() -> Vec<(&'static str, &'static str)> {
         (NEW_ROUTINE_SKILL_PATH, NEW_ROUTINE_SKILL),
         (SET_LANGUAGE_SKILL_PATH, SET_LANGUAGE_SKILL),
         (SET_PROFILE_SKILL_PATH, SET_PROFILE_SKILL),
+        (CUSTOMIZE_APP_SKILL_PATH, CUSTOMIZE_APP_SKILL),
         (UPDATE_RITUALS_SKILL_PATH, UPDATE_RITUALS_SKILL),
         (
             crate::memory::REFLECT_SKILL_PATH,
@@ -2603,6 +2606,7 @@ mod tests {
         assert!(dir.path().join(NEW_ROUTINE_SKILL_PATH).is_file());
         assert!(dir.path().join(SET_LANGUAGE_SKILL_PATH).is_file());
         assert!(dir.path().join(SET_PROFILE_SKILL_PATH).is_file());
+        assert!(dir.path().join(CUSTOMIZE_APP_SKILL_PATH).is_file());
         assert!(dir.path().join(crate::memory::REFLECT_SKILL_PATH).is_file());
         assert!(
             dir.path()

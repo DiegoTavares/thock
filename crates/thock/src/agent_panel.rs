@@ -49,6 +49,9 @@ actions!(
         /// Asks what your weeks are made of and writes it to profile.md, so
         /// the rituals fit your life instead of the defaults.
         SetProfile,
+        /// Changes how Thock looks and which keys do what, with your agent
+        /// editing the settings and keyboard files for you.
+        CustomizeApp,
         /// Brings the rituals you edited up to date with what Thock now
         /// ships, keeping your changes; you approve each file.
         UpdateRituals,
@@ -118,6 +121,17 @@ pub fn init(cx: &mut App) {
                 crate::routines::SET_PROFILE_SKILL_PATH,
                 agent::ModelTier::Default,
                 "This workspace isn't a Thock vault, so there is no profile to set.",
+                window,
+                cx,
+            );
+        });
+        workspace.register_action(|workspace, _: &CustomizeApp, window, cx| {
+            run_core_skill(
+                workspace,
+                "Customize App",
+                crate::routines::CUSTOMIZE_APP_SKILL_PATH,
+                agent::ModelTier::Default,
+                "This workspace isn't a Thock vault, so the customize ritual isn't here.",
                 window,
                 cx,
             );
