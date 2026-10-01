@@ -127,6 +127,8 @@ struct RoutineManifestContent {
     scaffold: Vec<ScaffoldEntryContent>,
     #[serde(default)]
     skill: Vec<RoutineSkillContent>,
+    #[serde(default)]
+    collection: Vec<RoutineCollectionContent>,
     /// Deprecated schema-1 alias for `[[link]] kind = "browser"`.
     #[serde(default)]
     surface: Vec<RoutineSurfaceContent>,
@@ -157,6 +159,21 @@ impl RoutineManifestContent {
         for skill in self.skill {
             skills.push(skill.resolve(&mut warnings));
         }
+        let mut collections: Vec<RoutineCollection> = Vec::new();
+        for collection in self.collection {
+            let collection = collection.resolve(&mut warnings);
+            if collections
+                .iter()
+                .any(|existing| existing.id == collection.id)
+            {
+                warnings.push(format!(
+                    "duplicate collection id {:?}; keeping the first",
+                    collection.id
+                ));
+                continue;
+            }
+            collections.push(collection);
+        }
         let mut scaffold = Vec::new();
         for entry in self.scaffold {
             scaffold.push(entry.resolve(&mut warnings)?);
@@ -175,6 +192,7 @@ impl RoutineManifestContent {
             doc: self.doc,
             agent_doc: self.agent_doc,
             links,
+            collections,
             scaffold,
             skills,
             onboarding: self.onboarding.map(|onboarding| RoutineOnboarding {
@@ -245,6 +263,31 @@ impl RoutineLinkContent {
             icon: self.icon.filter(|icon| !icon.is_empty()),
             group: self.group.filter(|group| !group.is_empty()),
             create: self.create,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RoutineCollectionContent {
+    id: Option<String>,
+    name: String,
+    path: String,
+    group_by: Option<String>,
+    #[serde(flatten)]
+    unknown: toml::Table,
+}
+
+impl RoutineCollectionContent {
+    fn resolve(self, warnings: &mut Vec<String>) -> RoutineCollection {
+        collect_unknown_keys(warnings, "collection.", &self.unknown);
+        RoutineCollection {
+            id: self
+                .id
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| slugify(&self.name)),
+            name: self.name,
+            path: self.path.trim_end_matches('/').to_string(),
+            group_by: self.group_by.filter(|field| !field.is_empty()),
         }
     }
 }
@@ -386,6 +429,8 @@ pub struct RoutineManifest {
     pub agent_doc: Option<String>,
     /// The Routine's navigation rows, in order.
     pub links: Vec<RoutineLink>,
+    /// Folders whose notes the panel lists as collapsible groups.
+    pub collections: Vec<RoutineCollection>,
     pub scaffold: Vec<ScaffoldEntry>,
     pub skills: Vec<RoutineSkill>,
     /// The agentic-onboarding ritual (V5 §7.1), when the Routine ships one.
@@ -447,6 +492,20 @@ pub struct RoutineLink {
     /// Create the target from the matching note template when missing,
     /// like the core Today action.
     pub create: bool,
+}
+
+/// A `[[collection]]`: every note directly inside a vault folder, listed by
+/// title under one collapsed group row — optionally nested one level deeper
+/// by a field the notes carry (frontmatter `key:` or a `- Key: value` line).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutineCollection {
+    /// Stable handle; entries are bindable as `thock::OpenLink` with link
+    /// id `<collection id>/<note stem>`. Defaults to the slugified name.
+    pub id: String,
+    pub name: String,
+    /// Vault-relative folder. Not recursive.
+    pub path: String,
+    pub group_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -537,6 +596,15 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
     }
 
     #[derive(Serialize)]
+    struct CollectionOut<'a> {
+        id: &'a str,
+        name: &'a str,
+        path: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        group_by: Option<&'a str>,
+    }
+
+    #[derive(Serialize)]
     struct ScaffoldOut<'a> {
         kind: &'a str,
         path: &'a str,
@@ -584,6 +652,8 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         link: Vec<LinkOut<'a>>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
+        collection: Vec<CollectionOut<'a>>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         scaffold: Vec<ScaffoldOut<'a>>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         skill: Vec<SkillOut<'a>>,
@@ -611,6 +681,16 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
                 icon: link.icon.as_deref(),
                 group: link.group.as_deref(),
                 create: link.create,
+            })
+            .collect(),
+        collection: manifest
+            .collections
+            .iter()
+            .map(|collection| CollectionOut {
+                id: &collection.id,
+                name: &collection.name,
+                path: &collection.path,
+                group_by: collection.group_by.as_deref(),
             })
             .collect(),
         scaffold: manifest
@@ -2432,6 +2512,45 @@ mod tests {
     }
 
     #[test]
+    fn collections_parse_and_round_trip() {
+        let manifest = parse_manifest(
+            r#"
+            schema = 2
+            id = "reading"
+            name = "Reading"
+            doc = "routines/reading/Reading.md"
+            [[collection]]
+            name = "Books"
+            path = "reference/readwise/books/"
+            [[collection]]
+            name = "Authors"
+            path = "reference/readwise/books"
+            group_by = "author"
+            [[collection]]
+            id = "books"
+            name = "Again"
+            path = "elsewhere"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.warnings,
+            vec!["duplicate collection id \"books\"; keeping the first".to_string()]
+        );
+        assert_eq!(manifest.collections.len(), 2);
+        assert_eq!(manifest.collections[0].id, "books");
+        assert_eq!(manifest.collections[0].path, "reference/readwise/books");
+        assert_eq!(manifest.collections[0].group_by, None);
+        assert_eq!(manifest.collections[1].id, "authors");
+        assert_eq!(manifest.collections[1].group_by.as_deref(), Some("author"));
+
+        let rendered = render_manifest_toml(&manifest).unwrap();
+        let mut reparsed = parse_manifest(&rendered).unwrap();
+        reparsed.warnings = manifest.warnings.clone();
+        assert_eq!(reparsed, manifest);
+    }
+
+    #[test]
     fn skill_model_tiers_parse_and_round_trip() {
         let manifest = parse_manifest(
             r#"
@@ -3480,7 +3599,7 @@ open = "weekly/site/index.html"
         assert!(raw.contains("[[routines.installed]]"), "{raw}");
         assert!(!raw.contains("[[areas.installed]]"), "{raw}");
         let vault = detect(root);
-        assert_eq!(vault.config.routines.installed[0].version, 12);
+        assert_eq!(vault.config.routines.installed[0].version, 13);
 
         // Idempotent: a second pass changes nothing.
         let vault = detect(root);

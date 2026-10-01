@@ -1,7 +1,7 @@
 schema  = 2
 id      = "reading"
 name    = "Reading"
-version = 1
+version = 2
 summary = "Your book highlights from Readwise, kept as notes you own."
 icon    = "book"
 doc     = "routines/reading/Reading.md"
@@ -11,6 +11,17 @@ doc     = "routines/reading/Reading.md"
 [[scaffold]]
 kind = "dir"
 path = "reference/readwise/books"
+
+# Every synced book, by title — and the same books by author. Follow a remap
+# in .thock/readwise.toml by changing `path` here too.
+[[collection]]
+name = "Books"
+path = "reference/readwise/books"
+
+[[collection]]
+name     = "Authors"
+path     = "reference/readwise/books"
+group_by = "author"
 
 [[skill]]
 id      = "connect-readwise"

@@ -429,6 +429,51 @@ lines. Both files gain the same narrow exception:
 `profile.md`'s **What Thock should not keep** still wins. A topic listed there is skipped in the
 review block *and* the memory lines.
 
+### 10.5 Books and Authors in the Routines rail
+
+The Reading section lists the synced books itself, so a book is a keypress away without the
+file tree:
+
+```
+Reading
+  > Books
+      A Fé Na Era Do Ceticismo
+  > Authors
+    > Timothy Keller
+        A Fé Na Era Do Ceticismo
+```
+
+This is a generic Routine format addition, **`[[collection]]`**, not Reading-specific code:
+
+```toml
+[[collection]]
+name = "Books"
+path = "reference/readwise/books"
+
+[[collection]]
+name     = "Authors"
+path     = "reference/readwise/books"
+group_by = "author"
+```
+
+- A collection lists every `*.md` directly inside `path` (not recursive), titled by the note's
+  first `# ` heading (the file stem when there is none), sorted case-insensitively.
+- `group_by` nests the notes one level deeper by a field: frontmatter `author:` first, else the
+  first `- Author: …` list line, so Readwise's `## Metadata` block works without changing the note
+  format. A `[[wikilink]]` value groups by its target. Notes without the field go last, under
+  "No author".
+- Collections render after the link groups and count as places for the Notes/Rituals captions.
+  They start collapsed, like every group, and an empty collection takes no row.
+- Keyboard: the panel's existing model. `enter` opens a book or toggles a group, `right`/`left`
+  open and close, and `left` on a closed author closes Authors. A book is bindable through the
+  generic `thock::OpenLink` as `{ "routine": "reading", "link": "books/<file stem>" }`.
+- The rail reloads a collection on worktree events under its folder, through the project `Fs`, so
+  a newly synced book shows up without a restart.
+- `path` is literal: a user who remaps `books` in `.thock/readwise.toml` changes it here as well.
+  The manifest comment says so.
+
+The Reading Routine's `version` bumps to 2 for the new manifest.
+
 ## 11. Implementation notes
 
 New files, all inside `crates/thock/`: `src/readwise.rs`, `src/readwise_service.rs`,
@@ -439,7 +484,9 @@ Also new: `assets/routines/reading/skills/reading-week.md`.
 Changed: `thock.rs` (modules + init), `routines.rs` (catalog registration), `backlog_panel.rs`
 (the row), `inbox.rs` (only if `sanitize_title` / collision helpers need widening for reuse),
 `assets/routines/timeline/skills/week-review.md` + `routine.toml` (the §10.2 paragraph and a version
-bump), `assets/skills/reflect.md` and `assets/AGENTS.md` (§10.3, §10.4).
+bump), `assets/skills/reflect.md` and `assets/AGENTS.md` (§10.3, §10.4), and for §10.5
+`routines.rs` (`[[collection]]` parse/render), `routines_panel.rs` (collection and nested-group
+rows), a new `routine_collections.rs` (scan, titles, grouping), and `assets/routines/ROUTINES.md`.
 
 **Outside `crates/thock/`:** nothing. No keymap entries are needed; the actions are palette-reachable
 and the row uses the panel's existing `menu::Confirm`.
