@@ -24,8 +24,8 @@ never touches your phone-side lists. Completing a task on the phone *before* Tho
 
 ## Triage
 
-At the desk, run **Triage Inbox** (`/triage-inbox`, or press enter on the Backlog panel's Inbox
-row). It reads your policy (`routines/inbox/triage-policy.md`), shows one line per item with a
+At the desk, run **Triage Inbox** (`/triage-inbox`, or press enter on the Inbox row — it shows at
+the top of the Backlog panel while items are waiting, and always in the sync icon in the bottom bar). It reads your policy (`routines/inbox/triage-policy.md`), shows one line per item with a
 proposed destination and a one-line reason, and waits. You confirm, re-assign, defer, or drop —
 **nothing is filed without your say-so**, and accepting the whole batch is one word.
 

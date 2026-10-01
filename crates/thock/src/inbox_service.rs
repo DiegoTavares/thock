@@ -11,8 +11,8 @@ use chrono::Local;
 use fs::Fs;
 use gpui::TaskExt as _;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, Subscription,
-    Task, WeakEntity, actions,
+    Action, App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global,
+    Subscription, Task, WeakEntity, Window, actions,
 };
 use project::Project;
 use std::collections::HashSet;
@@ -45,7 +45,9 @@ actions!(
         SyncInboxNow,
         /// Shows the inbox folder — where captured items wait for triage —
         /// in the project panel.
-        OpenInbox
+        OpenInbox,
+        /// Runs the Triage Inbox ritual on what's waiting in the inbox.
+        TriageInbox
     ]
 );
 
@@ -81,14 +83,60 @@ pub fn init(cx: &mut App) {
                 service.update(cx, |service, cx| service.open_inbox(cx));
             }
         });
+        workspace.register_action(|workspace, _: &TriageInbox, window, cx| {
+            let vault_root = service_for_project(workspace.project(), cx)
+                .and_then(|service| service.read(cx).vault_root());
+            dispatch_triage(vault_root, window, cx);
+        });
     })
     .detach();
+}
+
+/// `thock::TriageInbox` runs the Triage Inbox ritual (the generic
+/// `thock::RunSkill`, per the repo's rule about dynamic content). A vault
+/// whose Inbox Routine was removed must not get a dead row (V13 §10.4), so
+/// with no `triage-inbox` skill registered this falls back to
+/// `thock::OpenInbox`, which reveals the landing zone in the project panel.
+fn dispatch_triage(vault_root: Option<PathBuf>, window: &mut Window, cx: &mut App) {
+    let has_triage_skill = vault_root
+        .and_then(|root| match crate::vault::Vault::detect(&root) {
+            crate::vault::VaultStatus::Valid(vault) => Some(vault),
+            _ => None,
+        })
+        .is_some_and(|vault| {
+            crate::routines::enabled_routine_manifests(&vault)
+                .iter()
+                .flat_map(|manifest| &manifest.skills)
+                .any(|skill| skill.id == "triage-inbox")
+        });
+    if has_triage_skill {
+        window.dispatch_action(
+            crate::agent_panel::RunSkill {
+                skill: Some("triage-inbox".to_string()),
+            }
+            .boxed_clone(),
+            cx,
+        );
+    } else {
+        window.dispatch_action(OpenInbox.boxed_clone(), cx);
+    }
 }
 
 #[derive(Default)]
 struct GlobalInboxServices(HashMap<EntityId, Entity<InboxService>>);
 
 impl Global for GlobalInboxServices {}
+
+/// A service for `project`, registered the way `init` would, without a
+/// workspace.
+#[cfg(test)]
+pub(crate) fn new_for_test(project: &Entity<Project>, cx: &mut App) -> Entity<InboxService> {
+    let service = cx.new(|cx| InboxService::new(project.clone(), cx));
+    cx.default_global::<GlobalInboxServices>()
+        .0
+        .insert(project.entity_id(), service.clone());
+    service
+}
 
 use std::collections::HashMap;
 
@@ -183,6 +231,10 @@ impl InboxService {
     /// How many items are waiting in the landing zone.
     pub fn queue_depth(&self) -> usize {
         self.queue_depth
+    }
+
+    pub fn vault_root(&self) -> Option<PathBuf> {
+        self.vault.as_ref().map(|vault| vault.root.clone())
     }
 
     /// The workspace connect flow started (it is owned by the calendar
@@ -686,6 +738,12 @@ impl InboxService {
             fs.create_dir(parent).await?;
         }
         fs.atomic_write(path, contents).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_state_for_test(&mut self, state: SyncState, cx: &mut Context<Self>) {
+        self.state = state;
+        cx.notify();
     }
 
     #[cfg(test)]

@@ -28,6 +28,7 @@ pub mod readwise_service;
 pub mod routine_collections;
 pub mod routines;
 pub mod routines_panel;
+pub mod sync_status;
 pub mod tasks_google;
 pub mod vault;
 pub mod wikilink_completion;
@@ -46,6 +47,7 @@ pub use backlog_panel::BacklogPanel;
 pub use chat_panel::ChatPanel;
 pub use day_planner_panel::DayPlannerPanel;
 pub use routines_panel::{RoutinesPanel, show_panel_if_vault};
+pub use sync_status::SyncStatusIndicator;
 pub use vault::{Vault, VaultStatus, default_vault_path, scaffold_vault};
 
 pub fn init(cx: &mut App) {
@@ -58,6 +60,7 @@ pub fn init(cx: &mut App) {
     gmail_service::init(cx);
     inbox_service::init(cx);
     readwise_service::init(cx);
+    sync_status::init(cx);
     markdown_conceal::init(cx);
     wikilink_completion::init(cx);
     hide_inherited_zed_actions(cx);

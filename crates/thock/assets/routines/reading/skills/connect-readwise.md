@@ -9,10 +9,10 @@ Link the user's Readwise account to this vault so their highlights — Kindle, a
 
 ## 1. Start the connection
 
-1. Ask the user to run **`thock: connect readwise`** from the command palette (or click **Connect Readwise** on the Backlog panel's Readwise row).
+1. Ask the user to run **`thock: connect readwise`** from the command palette (or click **Connect Readwise** on the Readwise row — behind the sync icon in the bottom bar, and at the top of the Backlog panel until it's connected).
 2. Their browser opens `readwise.io/access_token`. They copy the token, paste it into Thock's prompt, and press `enter`. Thock checks it against Readwise, keeps it in the keychain, and writes `.thock/readwise.toml` if it doesn't exist yet.
 3. Within a minute `reference/readwise/books/` fills with one note per book. From then on, a highlight made on the Kindle shows up in its book's note within one poll (hourly by default).
-4. That's it. The Backlog panel's row says `Readwise · synced …` once the first import is done.
+4. That's it. The sync icon's Readwise row says `synced …` once the first import is done, and the row leaves the Backlog panel.
 
 ## 2. Explain the note format (only if asked)
 

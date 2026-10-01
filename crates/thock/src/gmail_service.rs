@@ -92,6 +92,17 @@ struct GlobalGmailServices(HashMap<EntityId, Entity<GmailService>>);
 
 impl Global for GlobalGmailServices {}
 
+/// A service for `project`, registered the way `init` would, without a
+/// workspace.
+#[cfg(test)]
+pub(crate) fn new_for_test(project: &Entity<Project>, cx: &mut App) -> Entity<GmailService> {
+    let service = cx.new(|cx| GmailService::new(project.clone(), cx));
+    cx.default_global::<GlobalGmailServices>()
+        .0
+        .insert(project.entity_id(), service.clone());
+    service
+}
+
 /// The sync service for `project`, if one is running.
 pub fn service_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity<GmailService>> {
     cx.try_global::<GlobalGmailServices>()?
@@ -791,6 +802,12 @@ impl GmailService {
             fs.create_dir(parent).await?;
         }
         fs.atomic_write(path, contents).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_state_for_test(&mut self, state: SyncState, cx: &mut Context<Self>) {
+        self.state = state;
+        cx.notify();
     }
 
     #[cfg(test)]

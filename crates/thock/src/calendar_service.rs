@@ -162,6 +162,17 @@ struct GlobalCalendarServices(HashMap<EntityId, Entity<CalendarService>>);
 
 impl Global for GlobalCalendarServices {}
 
+/// A service for `project`, registered the way `init` would, without a
+/// workspace.
+#[cfg(test)]
+pub(crate) fn new_for_test(project: &Entity<Project>, cx: &mut App) -> Entity<CalendarService> {
+    let service = cx.new(|cx| CalendarService::new(project.clone(), cx));
+    cx.default_global::<GlobalCalendarServices>()
+        .0
+        .insert(project.entity_id(), service.clone());
+    service
+}
+
 /// The sync service for `project`, if one is running.
 pub fn service_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity<CalendarService>> {
     cx.try_global::<GlobalCalendarServices>()?
@@ -1175,6 +1186,12 @@ impl CalendarService {
         }
         cx.spawn(async move |_, cx| google_auth::delete_refresh_token(cx).await)
             .detach_and_log_err(cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_state_for_test(&mut self, state: SyncState, cx: &mut Context<Self>) {
+        self.state = state;
+        cx.notify();
     }
 
     #[cfg(test)]

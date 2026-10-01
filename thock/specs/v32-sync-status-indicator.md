@@ -1,6 +1,6 @@
 # Thock V32 — One sync indicator: status out of the way until it needs you
 
-**Status:** Draft (2026-10-01)
+**Status:** Shipped (2026-10-01)
 **Owner:** Diego · **Date:** 2026-10-01
 **Companion docs:** `v8-calendar-sync.md` §10.3 (the status-row grammar this keeps),
 `v13-inbox-routine.md` §10.4 (the Inbox row and its triage entry point),
@@ -187,10 +187,10 @@ Two lines, mechanical, re-applied trivially after a rebase. Plus the keymap entr
 
 ## 10. Open questions
 
-1. **Default chord** for `thock::ToggleSyncStatus`. Pick one free in both keymaps and under vim
-   mode at implementation time, and note it in the PR.
-2. **Icon glyph.** `ArrowCircle` (reads as "sync") vs. a cloud-style glyph if one ships in
-   `assets/icons/`. Decide with the first screenshot.
+1. **Default chord** for `thock::ToggleSyncStatus`. _Resolved:_ `ctrl-alt-o` (Linux) /
+   `cmd-alt-o` (macOS), free in both keymaps and under vim mode, next to the other panel toggles.
+2. **Icon glyph.** _Resolved:_ `ArrowCircle`, which also spins while a connector is in flight.
+   Revisit with a screenshot if a cloud-style glyph lands in `assets/icons/`.
 
 ## 11. Decision log (2026-10-01)
 

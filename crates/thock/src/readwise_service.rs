@@ -131,6 +131,17 @@ struct GlobalReadwiseServices(HashMap<EntityId, Entity<ReadwiseService>>);
 
 impl Global for GlobalReadwiseServices {}
 
+/// A service for `project`, registered the way `init` would, without a
+/// workspace.
+#[cfg(test)]
+pub(crate) fn new_for_test(project: &Entity<Project>, cx: &mut App) -> Entity<ReadwiseService> {
+    let service = cx.new(|cx| ReadwiseService::new(project.clone(), cx));
+    cx.default_global::<GlobalReadwiseServices>()
+        .0
+        .insert(project.entity_id(), service.clone());
+    service
+}
+
 /// The sync service for `project`, if one is running.
 pub fn service_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity<ReadwiseService>> {
     cx.try_global::<GlobalReadwiseServices>()?
@@ -901,6 +912,12 @@ impl ReadwiseService {
             "{} kept changing while landing highlights",
             path.display()
         ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_state_for_test(&mut self, state: SyncState, cx: &mut Context<Self>) {
+        self.state = state;
+        cx.notify();
     }
 
     #[cfg(test)]

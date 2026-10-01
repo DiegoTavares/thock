@@ -337,6 +337,15 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   whole pass lands, and the Backlog panel gains a Readwise row. A **Reading Week** ritual joins Week
   Review conditionally, and Reflect and `AGENTS.md` gain the narrow carve-out that lets the agent
   remember *which* passages the person kept. Spec `specs/v31-readwise-sync.md`. _(shipped)_
+- [x] **One sync indicator — status out of the way until it needs you:** the four connector rows
+  (Calendar in the Day Planner; Gmail, Inbox, Readwise in the Backlog) stopped spending panel height
+  on "everything is fine". One icon in the bottom status bar carries a dot for the worst attention
+  across connectors (or spins while one is connecting or importing); clicking it, or
+  `thock: toggle sync status`, opens a keyboard-navigable popover with one row per connector and
+  its action (Sync now, Retry, Reconnect, Add heading, Triage). A panel keeps a row only while the
+  user has to act — a failure, a lost sign-in, a fixable hold, inbox items waiting. One pure
+  `ConnectorStatus` per service feeds both the popover and the inline rows, replacing four
+  hand-rolled copies of the same row grammar. Spec `specs/v32-sync-status-indicator.md`. _(shipped)_
 - [ ] **Money + safety:** Polar products referencing backend plans by id (credits with hard stop, top-up packs, license-key credential), OS sandbox on every hosted session (write = vault, network = gateway allowlist), per-session ceilings, anomaly alerts. _(planned)_
 
 ---

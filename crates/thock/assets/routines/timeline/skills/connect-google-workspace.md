@@ -9,9 +9,9 @@ Link a Google account to this vault with one sign-in that powers three rituals: 
 
 ## 1. Start the connection
 
-1. Ask the user to run **`thock: connect google workspace`** from the command palette (or click **Connect Google Workspace** at the top of the Day Planner or Backlog panel).
+1. Ask the user to run **`thock: connect google workspace`** from the command palette (or click **Connect Google Workspace** at the top of the Day Planner or Backlog panel, or in the sync icon in the bottom bar).
 2. Their browser opens a Google sign-in. One consent screen grants read-only access to Calendar, Gmail, and Tasks together. Afterwards Thock shows a calendar picker: `enter` toggles a calendar, `escape` saves the choice. The primary calendar starts selected.
-3. For the Gmail gestures there is one more human step: **create the labels in Gmail** — `thock/backlog` (email → archived + Backlog task, directly) and `thock/inbox` (email → inbox note, for triage). Gmail nests them under one `thock` parent. Until a label exists, the Backlog panel's status row says so and nothing else happens.
+3. For the Gmail gestures there is one more human step: **create the labels in Gmail** — `thock/backlog` (email → archived + Backlog task, directly) and `thock/inbox` (email → inbox note, for triage). Gmail nests them under one `thock` parent. Until a label exists, the Gmail row at the top of the Backlog panel (and in the sync icon in the bottom bar) says so and nothing else happens.
 4. Google Tasks needs no setup at all: sharing a link (or typing a thought) into the default **My Tasks** list on a phone is enough. Thock polls it read-only and never completes or deletes a task — completing it on the phone *before* Thock sees it simply means "never mind".
 5. That's it — the account lands in `.thock/google.toml`; the sign-in itself lives in the system keychain.
 
@@ -26,7 +26,7 @@ Link a Google account to this vault with one sign-in that powers three rituals: 
   The trailing HTML comment is the meeting's identity — invisible in rendered Markdown, and what lets a moved meeting keep its checkbox. Tell the user to leave it in place; everything else on the line is theirs.
 - Ticking a meeting off, adding sub-bullets, or rewriting its title is always safe. A renamed line becomes the user's — Thock stops correcting it entirely.
 - A cancelled meeting is struck through and marked `(cancelled)`, never deleted. Sync is read-only toward Google: editing the note never changes the calendar.
-- Sync waits for the user to create the daily note and for the Day planner heading to exist — it never creates either on its own. Decoration doesn't matter: `## 📅 Day planner`, `## Day planner:` and `## Day-planner` all resolve. A *renamed* heading does matter, and the Day Planner's status row says so with two buttons — **Add heading** writes the heading into today's note, **Use another…** points `[day_planner] heading` at a heading the note already has. That key also takes a list (`heading = ["Agenda", "Day planner"]`), which is how a rename or a translation keeps yesterday's notes parsing.
+- Sync waits for the user to create the daily note and for the Day planner heading to exist — it never creates either on its own. Decoration doesn't matter: `## 📅 Day planner`, `## Day planner:` and `## Day-planner` all resolve. A *renamed* heading does matter, and the Calendar row at the top of the Day Planner (and in the sync icon in the bottom bar) says so with two buttons — **Add heading** writes the heading into today's note, **Use another…** points `[day_planner] heading` at a heading the note already has. That key also takes a list (`heading = ["Agenda", "Day planner"]`), which is how a rename or a translation keeps yesterday's notes parsing.
 
 ## 3. Explain the email ritual (only if asked)
 

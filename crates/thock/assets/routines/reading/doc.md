@@ -9,7 +9,7 @@ ever adds to them.
 ## Connecting
 
 Run **Connect Readwise** (`thock: connect readwise` from the command palette,
-or the Backlog panel's Readwise row). Thock opens `readwise.io/access_token`
+or the Readwise row behind the sync icon in the bottom bar). Thock opens `readwise.io/access_token`
 in your browser; copy the token, paste it into the prompt, press `enter`.
 The token is checked, then kept in your system keychain — it never touches
 the vault. Within a minute `reference/readwise/books/` fills with one note
