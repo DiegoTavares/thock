@@ -39,6 +39,7 @@ use crate::gmail_service::{self, GmailService, SyncGmailNow};
 use crate::inbox_service::{self, InboxService, OpenInbox, SyncInboxNow};
 use crate::markdown_text::render_markdown_row;
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
+use crate::readwise_service::{self, ConnectReadwise, ReadwiseService, SyncReadwiseNow};
 use crate::vault::{Vault, VaultStatus};
 
 const BACKLOG_PANEL_KEY: &str = "ThockBacklogPanel";
@@ -194,6 +195,9 @@ pub struct BacklogPanel {
     /// The inbox-capture service, for its status row (V13 §10.4) — display
     /// only, like the Gmail one.
     inbox_service: Option<Entity<InboxService>>,
+    /// The Readwise sync service, for its status row (V31 §8.5) — display
+    /// only, like the other two.
+    readwise_service: Option<Entity<ReadwiseService>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -256,11 +260,15 @@ impl BacklogPanel {
             });
             let gmail_service = gmail_service::service_for_project(&project, cx);
             let inbox_service = inbox_service::service_for_project(&project, cx);
+            let readwise_service = readwise_service::service_for_project(&project, cx);
             let mut subscriptions = vec![project_subscription];
             if let Some(service) = &gmail_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
             }
             if let Some(service) = &inbox_service {
+                subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
+            }
+            if let Some(service) = &readwise_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
             }
             let mut this = Self {
@@ -285,6 +293,7 @@ impl BacklogPanel {
                 reparse_task: None,
                 gmail_service,
                 inbox_service,
+                readwise_service,
                 _subscriptions: subscriptions,
             };
             this.vault_status = this.detect_vault_status(cx);
@@ -1916,6 +1925,89 @@ impl BacklogPanel {
         )
     }
 
+    /// The Readwise status row (V31 §8.5), shown only when the vault has
+    /// `.thock/readwise.toml`. Every button here is also a palette action
+    /// (`thock: connect readwise`, `thock: sync readwise now`).
+    fn render_readwise_status_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let service = self.readwise_service.as_ref()?.read(cx);
+        if !service.has_config() {
+            return None;
+        }
+        let muted = |text: String| {
+            Label::new(text)
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .into_any_element()
+        };
+        let connect_button = |id: &'static str, label: &'static str| {
+            Button::new(id, label)
+                .label_size(LabelSize::Small)
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(ConnectReadwise.boxed_clone(), cx);
+                })
+                .into_any_element()
+        };
+        let content = if let Some(error) = service.config_error() {
+            vec![
+                Label::new(format!("Readwise · {error}"))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .into_any_element(),
+                Label::new("in .thock/readwise.toml")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .into_any_element(),
+            ]
+        } else {
+            match service.state() {
+                SyncState::NoConfig => return None,
+                SyncState::NeverConnected => {
+                    vec![connect_button("thock-connect-readwise", "Connect Readwise")]
+                }
+                SyncState::Connecting => vec![muted("Readwise · connecting…".to_string())],
+                SyncState::Idle if service.importing_library() => {
+                    vec![muted("Readwise · importing your library…".to_string())]
+                }
+                SyncState::Idle => vec![muted("Readwise · checking…".to_string())],
+                SyncState::Synced { at } => {
+                    let mut text = format!("Readwise · synced {}", format_ago(at.elapsed()));
+                    match service.last_landed() {
+                        0 => {}
+                        1 => text.push_str(" · +1 highlight"),
+                        n => text.push_str(&format!(" · +{n} highlights")),
+                    }
+                    vec![muted(text)]
+                }
+                SyncState::Holding { reason } => vec![muted(format!("Readwise · {reason}"))],
+                SyncState::Failing { error } => vec![
+                    muted("Readwise · sync failed".to_string()),
+                    Button::new("thock-retry-readwise-sync", "Retry")
+                        .label_size(LabelSize::Small)
+                        .tooltip(Tooltip::text(error.clone()))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(SyncReadwiseNow.boxed_clone(), cx);
+                        })
+                        .into_any_element(),
+                ],
+                SyncState::Disconnected => vec![
+                    muted("Readwise · token rejected".to_string()),
+                    connect_button("thock-reconnect-readwise", "Reconnect"),
+                ],
+            }
+        };
+        Some(
+            h_flex()
+                .px_2()
+                .py_1()
+                .gap_2()
+                .justify_between()
+                .border_b_1()
+                .border_color(cx.theme().colors().border_variant)
+                .children(content)
+                .into_any_element(),
+        )
+    }
+
     /// The inbox-capture status row (V13 §10.4), shown only when the vault
     /// has `.thock/inbox.toml`. A healthy row with items waiting is the way
     /// into triage: activating it runs the Triage Inbox ritual, falling back
@@ -2199,6 +2291,7 @@ impl Render for BacklogPanel {
             .size_full()
             .children(self.render_status_row(cx))
             .children(self.render_inbox_status_row(cx))
+            .children(self.render_readwise_status_row(cx))
             .child(self.render_body(cx))
     }
 }

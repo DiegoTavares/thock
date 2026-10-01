@@ -10,14 +10,14 @@ use anyhow::Result;
 use chrono::{DateTime, Local, Utc};
 use gpui::{
     Action, App, AsyncWindowContext, Context, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, KeyContext, Pixels, PromptLevel, SharedString, Subscription, WeakEntity, Window,
-    actions, px,
+    Focusable, KeyContext, Pixels, PromptLevel, SharedString, Subscription, Task, WeakEntity,
+    Window, actions, px,
 };
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use project::Project;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr as _;
 use ui::prelude::*;
@@ -33,6 +33,9 @@ use workspace::{OpenOptions, OpenVisible, Toast, Workspace};
 use crate::agent_panel::RunSkill;
 use crate::getting_started;
 use crate::notes::{EnsureNoteOutcome, TimelineEntry, ensure_note};
+use crate::routine_collections::{
+    CollectionEntry, CollectionItems, CollectionView, load_collection,
+};
 use crate::routines::{
     self, DiscoveredRoutine, LinkKind, RoutineLink, RoutineLoad, RoutineManifest, RoutineSkill,
 };
@@ -232,6 +235,17 @@ fn group_key(routine_id: &str, label: &str) -> String {
     format!("{routine_id}\u{1}{label}")
 }
 
+/// Group keys for collection rows. The prefix is a character no manifest
+/// label can contain, so a collection or one of its field values can never
+/// share a disclosure state with a `[[link]]` group of the same name.
+fn collection_group_key(collection_id: &str) -> String {
+    format!("\u{2}{collection_id}")
+}
+
+fn collection_subgroup_key(collection_id: &str, label: &str) -> String {
+    format!("\u{2}{collection_id}\u{2}{label}")
+}
+
 /// The pseudo section id the Getting started rows use in nav keys; not a
 /// Routine, so it can never collide with one (routine ids are directory
 /// names, and this one contains no files).
@@ -284,7 +298,8 @@ fn row_key(row: &NavRow) -> String {
     match &row.kind {
         NavRowKind::Link(link) => nav_key(&row.routine_id, "link", &link.id),
         NavRowKind::Skill(skill) => nav_key(&row.routine_id, "skill", &skill.id),
-        NavRowKind::Group(label) => nav_key(&row.routine_id, "group", label),
+        NavRowKind::Group(key) => nav_key(&row.routine_id, "group", key),
+        NavRowKind::Entry(entry) => nav_key(&row.routine_id, "entry", &entry.link_id),
         NavRowKind::GettingStarted(step) => nav_key(&row.routine_id, "step", step.key()),
     }
 }
@@ -306,22 +321,40 @@ fn reanchor_selection(rows: &[NavRow], anchor: &str, group_row: &str) -> Option<
 /// reach, then the groups holding the ones it doesn't, then its rituals, then
 /// the collapsed Setup row. Captions appear only when a section holds both
 /// places and verbs — with nothing to separate they would be decoration.
+/// Collections sit with the places, after the link groups; an empty one
+/// (no notes in its folder yet) takes no row.
 fn section_items(
     manifest: &RoutineManifest,
     expanded_groups: &HashSet<String>,
+    collections: &[CollectionView],
 ) -> Vec<SectionItem> {
     fn item(kind: SectionItemKind) -> SectionItem {
-        SectionItem { group: None, kind }
+        SectionItem {
+            group: None,
+            depth: 0,
+            kind,
+        }
     }
-    let is_expanded =
-        |label: &str| expanded_groups.contains(&group_key(manifest.id.as_str(), label));
+    fn group(key: String, label: SharedString, expanded: bool) -> SectionItemKind {
+        SectionItemKind::Group {
+            key: key.into(),
+            label,
+            expanded,
+        }
+    }
+    let is_expanded = |key: &str| expanded_groups.contains(&group_key(manifest.id.as_str(), key));
+    let collections: Vec<&CollectionView> = collections
+        .iter()
+        .filter(|collection| !collection.is_empty())
+        .collect();
 
     let mut items = Vec::new();
     let (rituals, setup_skills): (Vec<&RoutineSkill>, Vec<&RoutineSkill>) = manifest
         .skills
         .iter()
         .partition(|skill| !skill.kind.is_setup());
-    let captioned = !manifest.links.is_empty() && !manifest.skills.is_empty();
+    let captioned =
+        (!manifest.links.is_empty() || !collections.is_empty()) && !manifest.skills.is_empty();
 
     if captioned {
         items.push(item(SectionItemKind::Caption(NOTES_CAPTION.into())));
@@ -345,16 +378,55 @@ fn section_items(
             .iter()
             .filter(|link| link.group.as_deref() == Some(label));
         let expanded = is_expanded(label);
-        let label: SharedString = label.to_string().into();
-        items.push(item(SectionItemKind::Group {
-            label: label.clone(),
-            expanded,
-        }));
+        let key: SharedString = label.to_string().into();
+        items.push(item(group(label.to_string(), key.clone(), expanded)));
         if expanded {
             items.extend(members.map(|link| SectionItem {
-                group: Some(label.clone()),
+                group: Some(key.clone()),
+                depth: 1,
                 kind: SectionItemKind::Link(link.clone()),
             }));
+        }
+    }
+    for collection in collections {
+        let key = collection_group_key(&collection.id);
+        let expanded = is_expanded(&key);
+        items.push(item(group(
+            key.clone(),
+            collection.name.clone().into(),
+            expanded,
+        )));
+        if !expanded {
+            continue;
+        }
+        let key: SharedString = key.into();
+        match &collection.items {
+            CollectionItems::Flat(entries) => {
+                items.extend(entries.iter().map(|entry| SectionItem {
+                    group: Some(key.clone()),
+                    depth: 1,
+                    kind: SectionItemKind::Entry(entry.clone()),
+                }));
+            }
+            CollectionItems::Grouped(groups) => {
+                for subgroup in groups {
+                    let subkey = collection_subgroup_key(&collection.id, &subgroup.label);
+                    let sub_expanded = is_expanded(&subkey);
+                    items.push(SectionItem {
+                        group: Some(key.clone()),
+                        depth: 1,
+                        kind: group(subkey.clone(), subgroup.label.clone().into(), sub_expanded),
+                    });
+                    if sub_expanded {
+                        let subkey: SharedString = subkey.into();
+                        items.extend(subgroup.entries.iter().map(|entry| SectionItem {
+                            group: Some(subkey.clone()),
+                            depth: 2,
+                            kind: SectionItemKind::Entry(entry.clone()),
+                        }));
+                    }
+                }
+            }
         }
     }
 
@@ -366,13 +438,15 @@ fn section_items(
     }
     if !setup_skills.is_empty() {
         let expanded = is_expanded(SETUP_GROUP);
-        items.push(item(SectionItemKind::Group {
-            label: SETUP_GROUP.into(),
+        items.push(item(group(
+            SETUP_GROUP.to_string(),
+            SETUP_GROUP.into(),
             expanded,
-        }));
+        )));
         if expanded {
             items.extend(setup_skills.into_iter().map(|skill| SectionItem {
                 group: Some(SETUP_GROUP.into()),
+                depth: 1,
                 kind: SectionItemKind::Skill(skill.clone()),
             }));
         }
@@ -427,16 +501,35 @@ pub fn show_panel_if_vault(
 enum NavRowKind {
     Link(RoutineLink),
     Skill(RoutineSkill),
+    /// A disclosure row, by its group key.
     Group(SharedString),
+    /// A note listed by a `[[collection]]`.
+    Entry(CollectionEntry),
     GettingStarted(GettingStartedStep),
 }
 
 struct NavRow {
     routine_id: String,
-    /// `Some(label)` when the row lives inside that expanded group, so
-    /// `left` on a member can close the group it came from.
+    /// The key of the expanded group the row lives inside, so `left` on a
+    /// member can close the group it came from.
     group: Option<SharedString>,
     kind: NavRowKind,
+}
+
+/// The keyboard row for a section item; captions have none.
+fn nav_row(routine_id: &str, item: SectionItem) -> Option<NavRow> {
+    let kind = match item.kind {
+        SectionItemKind::Caption(_) => return None,
+        SectionItemKind::Link(link) => NavRowKind::Link(link),
+        SectionItemKind::Skill(skill) => NavRowKind::Skill(skill),
+        SectionItemKind::Entry(entry) => NavRowKind::Entry(entry),
+        SectionItemKind::Group { key, .. } => NavRowKind::Group(key),
+    };
+    Some(NavRow {
+        routine_id: routine_id.to_string(),
+        group: item.group,
+        kind,
+    })
 }
 
 /// One rendered entry of a Routine section, in display order. Captions are
@@ -444,8 +537,10 @@ struct NavRow {
 /// — deriving both from a single walk is what keeps the rendered order and
 /// the cursor indices from drifting apart.
 struct SectionItem {
-    /// `Some(label)` when the item sits inside that collapsible group.
+    /// The key of the collapsible group the item sits inside, if any.
     group: Option<SharedString>,
+    /// Nesting below the section's top level, for indentation.
+    depth: usize,
     kind: SectionItemKind,
 }
 
@@ -453,7 +548,14 @@ enum SectionItemKind {
     Caption(SharedString),
     Link(RoutineLink),
     Skill(RoutineSkill),
-    Group { label: SharedString, expanded: bool },
+    Entry(CollectionEntry),
+    /// `key` identifies the group in `expanded_groups`; `label` is what
+    /// the row shows. They differ only for collections.
+    Group {
+        key: SharedString,
+        label: SharedString,
+        expanded: bool,
+    },
 }
 
 pub struct RoutinesPanel {
@@ -482,9 +584,14 @@ pub struct RoutinesPanel {
     pending_updates: Vec<String>,
     /// Sections start expanded; this tracks the ones the user collapsed.
     collapsed_routines: HashSet<String>,
-    /// Groups (demoted links, setup steps) start collapsed; this tracks the
-    /// ones the user opened, keyed by `group_key`.
+    /// Groups (demoted links, setup steps, collections) start collapsed;
+    /// this tracks the ones the user opened, keyed by `group_key`.
     expanded_groups: HashSet<String>,
+    /// Loaded `[[collection]]` rows per Routine id, in manifest order.
+    collections: HashMap<String, Vec<CollectionView>>,
+    /// The in-flight collection reload. Replacing it cancels the previous
+    /// one, which is right: every reload reads the whole folder set.
+    collections_task: Option<Task<()>>,
     show_add_routines: bool,
     /// Ready markers already offered with a toast this session, so a marker
     /// awaiting activation doesn't re-toast on every refresh.
@@ -550,6 +657,13 @@ impl RoutinesPanel {
                         // updates double as the onboarding file-watch.
                         this.schedule_onboarding_check(window, cx);
                     }
+                    if let project::Event::WorktreeUpdatedEntries(_, changes) = event
+                        && this.touches_collection(
+                            changes.iter().map(|(path, _, _)| path.as_unix_str()),
+                        )
+                    {
+                        this.reload_collections(cx);
+                    }
                 });
             // On active-item changes, drop the keyboard cursor so the
             // highlight goes back to following the open note.
@@ -582,6 +696,8 @@ impl RoutinesPanel {
                 pending_updates: Vec::new(),
                 collapsed_routines: HashSet::new(),
                 expanded_groups: HashSet::new(),
+                collections: HashMap::new(),
+                collections_task: None,
                 show_add_routines: false,
                 ready_toasted: HashSet::new(),
                 getting_started: None,
@@ -621,6 +737,7 @@ impl RoutinesPanel {
             self.vault_status = status;
             self.fingerprint = fingerprint;
             self.refresh_routines();
+            self.reload_collections(cx);
             if status_changed {
                 self.reconcile_routines(cx);
             }
@@ -1068,6 +1185,12 @@ impl RoutinesPanel {
                 .cloned(),
             _ => None,
         });
+        if link.is_none()
+            && let Some(entry) = self.collection_entry(&routine_id, &link_id)
+        {
+            self.open_collection_entry(routine_id, entry, window, cx);
+            return;
+        }
         match link {
             Some(link) => self.open_link(routine_id, link, window, cx),
             None => self.show_error_deferred(
@@ -1730,7 +1853,140 @@ impl RoutinesPanel {
     }
 
     fn section_items(&self, manifest: &RoutineManifest) -> Vec<SectionItem> {
-        section_items(manifest, &self.expanded_groups)
+        let collections = self
+            .collections
+            .get(&manifest.id)
+            .map_or(&[][..], Vec::as_slice);
+        section_items(manifest, &self.expanded_groups, collections)
+    }
+
+    fn touches_collection<'a>(&self, mut changed: impl Iterator<Item = &'a str>) -> bool {
+        let folders: Vec<&str> = self
+            .routines
+            .iter()
+            .filter_map(|load| match load {
+                RoutineLoad::Loaded(manifest) => Some(manifest),
+                _ => None,
+            })
+            .flat_map(|manifest| manifest.collections.iter())
+            .map(|collection| collection.path.as_str())
+            .collect();
+        !folders.is_empty()
+            && changed.any(|path| {
+                folders.iter().any(|folder| {
+                    path.strip_prefix(folder)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+                })
+            })
+    }
+
+    /// Re-reads every enabled Routine's collections off the UI thread.
+    fn reload_collections(&mut self, cx: &mut Context<Self>) {
+        let VaultStatus::Valid(vault) = &self.vault_status else {
+            self.collections.clear();
+            self.collections_task = None;
+            return;
+        };
+        let wanted: Vec<(String, Vec<routines::RoutineCollection>)> = self
+            .routines
+            .iter()
+            .filter_map(|load| match load {
+                RoutineLoad::Loaded(manifest) if !manifest.collections.is_empty() => {
+                    Some((manifest.id.clone(), manifest.collections.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        if wanted.is_empty() {
+            if !self.collections.is_empty() {
+                self.collections.clear();
+                cx.notify();
+            }
+            self.collections_task = None;
+            return;
+        }
+        let fs = self.project.read(cx).fs().clone();
+        let root = vault.root.clone();
+        self.collections_task = Some(cx.spawn(async move |this, cx| {
+            let mut loaded = HashMap::new();
+            for (routine_id, collections) in wanted {
+                let mut views = Vec::new();
+                for collection in &collections {
+                    views.push(load_collection(&fs, &root, collection).await);
+                }
+                loaded.insert(routine_id, views);
+            }
+            this.update(cx, |this, cx| {
+                if this.collections == loaded {
+                    return;
+                }
+                // Rows move when a collection gains or loses notes, so keep a
+                // keyboard cursor on the row it was on.
+                let anchor = this
+                    .selected_index
+                    .and_then(|index| this.nav_rows().into_iter().nth(index))
+                    .map(|row| row_key(&row));
+                this.collections = loaded;
+                if let Some(anchor) = anchor {
+                    this.selected_index = this
+                        .nav_rows()
+                        .iter()
+                        .position(|row| row_key(row) == anchor);
+                }
+                cx.notify();
+            })
+            .log_err();
+        }));
+    }
+
+    fn collection_entry(&self, routine_id: &str, link_id: &str) -> Option<CollectionEntry> {
+        self.collections
+            .get(routine_id)?
+            .iter()
+            .flat_map(|collection| collection.entries())
+            .find(|entry| entry.link_id == link_id)
+            .cloned()
+    }
+
+    fn open_collection_entry(
+        &mut self,
+        routine_id: String,
+        entry: CollectionEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let VaultStatus::Valid(vault) = &self.vault_status else {
+            return;
+        };
+        let path = match routines::vault_file_path(&vault.root, &entry.rel_path) {
+            Ok(path) => path,
+            Err(error) => {
+                self.show_error_deferred(format!("Couldn't open {}: {error}", entry.title), cx);
+                return;
+            }
+        };
+        if !path.is_file() {
+            self.show_missing_file_toast(entry.rel_path, routine_id, cx);
+            return;
+        }
+        let workspace = self.workspace.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.open_abs_path(
+                        path,
+                        OpenOptions {
+                            visible: Some(OpenVisible::All),
+                            ..Default::default()
+                        },
+                        window,
+                        cx,
+                    )
+                })?
+                .await?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     /// The flat, visible row list keyboard selection walks: the Getting
@@ -1754,19 +2010,11 @@ impl RoutinesPanel {
             if self.collapsed_routines.contains(&manifest.id) {
                 continue;
             }
-            for item in self.section_items(manifest) {
-                let kind = match item.kind {
-                    SectionItemKind::Caption(_) => continue,
-                    SectionItemKind::Link(link) => NavRowKind::Link(link),
-                    SectionItemKind::Skill(skill) => NavRowKind::Skill(skill),
-                    SectionItemKind::Group { label, .. } => NavRowKind::Group(label),
-                };
-                rows.push(NavRow {
-                    routine_id: manifest.id.clone(),
-                    group: item.group,
-                    kind,
-                });
-            }
+            rows.extend(
+                self.section_items(manifest)
+                    .into_iter()
+                    .filter_map(|item| nav_row(&manifest.id, item)),
+            );
         }
         rows
     }
@@ -1855,6 +2103,8 @@ impl RoutinesPanel {
                     routines::vault_file_path(&vault.root, &resolved.relative_path).ok()
                 })
                 .is_some_and(|path| path == active_path),
+            NavRowKind::Entry(entry) => routines::vault_file_path(&vault.root, &entry.rel_path)
+                .is_ok_and(|path| path == active_path),
             NavRowKind::Skill(_) | NavRowKind::Group(_) | NavRowKind::GettingStarted(_) => false,
         })
     }
@@ -1931,7 +2181,10 @@ impl RoutinesPanel {
                 let title = self.skill_run_title(&row.routine_id, &skill);
                 self.run_skill(title, skill.file, skill.model, window, cx);
             }
-            NavRowKind::Group(label) => self.toggle_group(&row.routine_id, &label, cx),
+            NavRowKind::Entry(entry) => {
+                self.open_collection_entry(row.routine_id, entry, window, cx)
+            }
+            NavRowKind::Group(key) => self.toggle_group(&row.routine_id, &key, cx),
             NavRowKind::GettingStarted(step) => self.run_getting_started_step(step, window, cx),
         }
     }
@@ -1975,11 +2228,22 @@ impl RoutinesPanel {
         let Some(row) = self.selected_row(cx) else {
             return;
         };
-        let label = match (&row.kind, &row.group) {
-            (NavRowKind::Group(label), _) | (_, Some(label)) => label.clone(),
-            _ => return,
+        let open_group = match &row.kind {
+            NavRowKind::Group(key)
+                if self
+                    .expanded_groups
+                    .contains(&group_key(&row.routine_id, key)) =>
+            {
+                Some(key.clone())
+            }
+            _ => None,
         };
-        self.set_group_expanded(&row.routine_id, &label, false, cx);
+        // A closed nested group (an author under Authors) has nothing left to
+        // close, so `left` walks out to the group holding it.
+        let Some(key) = open_group.or(row.group) else {
+            return;
+        };
+        self.set_group_expanded(&row.routine_id, &key, false, cx);
     }
 
     fn render_routine_section(
@@ -2077,26 +2341,33 @@ impl RoutinesPanel {
             index
         };
         for item in self.section_items(manifest) {
-            let nested = item.group.is_some();
+            let indent = 1 + item.depth;
             rows.push(match item.kind {
                 SectionItemKind::Caption(label) => render_caption(label),
                 SectionItemKind::Link(link) => {
                     let index = next_index();
-                    self.render_link_row(&routine_id, &link, nested, index, selected_index, cx)
+                    self.render_link_row(&routine_id, &link, indent, index, selected_index, cx)
                 }
                 SectionItemKind::Skill(skill) => {
                     let index = next_index();
-                    self.render_skill_row(manifest, &skill, nested, index, selected_index, cx)
+                    self.render_skill_row(manifest, &skill, indent, index, selected_index, cx)
+                }
+                SectionItemKind::Entry(entry) => {
+                    let index = next_index();
+                    self.render_entry_row(&routine_id, &entry, indent, index, selected_index, cx)
                 }
                 SectionItemKind::Group {
+                    key,
                     label,
                     expanded: group_expanded,
                 } => {
                     let index = next_index();
                     self.render_group_row(
                         &routine_id,
+                        key,
                         label,
                         group_expanded,
+                        indent,
                         index,
                         selected_index,
                         cx,
@@ -2112,7 +2383,7 @@ impl RoutinesPanel {
         &self,
         routine_id: &str,
         link: &RoutineLink,
-        nested: bool,
+        indent: usize,
         index: usize,
         selected_index: Option<usize>,
         cx: &Context<Self>,
@@ -2127,7 +2398,7 @@ impl RoutinesPanel {
             "thock-link-{routine_id}-{}",
             link.id
         ))))
-        .indent_level(if nested { 2 } else { 1 })
+        .indent_level(indent)
         .indent_step_size(px(12.))
         .toggle_state(selected_index == Some(index))
         .start_slot(icon.build().size(IconSize::XSmall).color(Color::Muted))
@@ -2149,7 +2420,7 @@ impl RoutinesPanel {
         &self,
         manifest: &RoutineManifest,
         skill: &RoutineSkill,
-        nested: bool,
+        indent: usize,
         index: usize,
         selected_index: Option<usize>,
         cx: &Context<Self>,
@@ -2162,7 +2433,7 @@ impl RoutinesPanel {
             "thock-skill-{}-{}",
             manifest.id, skill.id
         ))))
-        .indent_level(if nested { 2 } else { 1 })
+        .indent_level(indent)
         .indent_step_size(px(12.))
         .toggle_state(selected_index == Some(index))
         .start_slot(skill_icon(skill).build().size(IconSize::XSmall).color(
@@ -2208,19 +2479,63 @@ impl RoutinesPanel {
         .into_any_element()
     }
 
+    fn render_entry_row(
+        &self,
+        routine_id: &str,
+        entry: &CollectionEntry,
+        indent: usize,
+        index: usize,
+        selected_index: Option<usize>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let open = OpenLink {
+            routine: routine_id.to_string(),
+            link: entry.link_id.clone(),
+        };
+        ListItem::new(ElementId::Name(SharedString::from(format!(
+            "thock-entry-{routine_id}-{}",
+            entry.link_id
+        ))))
+        .indent_level(indent)
+        .indent_step_size(px(12.))
+        .toggle_state(selected_index == Some(index))
+        .start_slot(
+            Icon::new(IconName::FileDoc)
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+        )
+        .child(
+            Label::new(entry.title.clone())
+                .size(LabelSize::Small)
+                .truncate(),
+        )
+        .tooltip(Tooltip::text(entry.title.clone()))
+        .end_slot(KeyBinding::for_action_in(&open, &self.focus_handle, cx).size(rems_from_px(10.)))
+        .on_click(cx.listener({
+            let routine_id = routine_id.to_string();
+            let entry = entry.clone();
+            move |this, _, window, cx| {
+                this.open_collection_entry(routine_id.clone(), entry.clone(), window, cx);
+            }
+        }))
+        .into_any_element()
+    }
+
     fn render_group_row(
         &self,
         routine_id: &str,
+        key: SharedString,
         label: SharedString,
         expanded: bool,
+        indent: usize,
         index: usize,
         selected_index: Option<usize>,
         cx: &Context<Self>,
     ) -> AnyElement {
         ListItem::new(ElementId::Name(SharedString::from(format!(
-            "thock-group-{routine_id}-{label}"
+            "thock-group-{routine_id}-{key}"
         ))))
-        .indent_level(1)
+        .indent_level(indent)
         .indent_step_size(px(12.))
         .toggle_state(selected_index == Some(index))
         // The disclosure sits in the start slot, not in `ListItem::toggle`'s
@@ -2235,14 +2550,10 @@ impl RoutinesPanel {
             .size(IconSize::XSmall)
             .color(Color::Muted),
         )
-        .child(
-            Label::new(label.clone())
-                .size(LabelSize::Small)
-                .color(Color::Muted),
-        )
+        .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
         .on_click(cx.listener({
             let routine_id = routine_id.to_string();
-            move |this, _, _window, cx| this.toggle_group(&routine_id, &label, cx)
+            move |this, _, _window, cx| this.toggle_group(&routine_id, &key, cx)
         }))
         .into_any_element()
     }
@@ -2834,6 +3145,7 @@ mod tests {
             doc: "routines/x/X.md".into(),
             agent_doc: None,
             links,
+            collections: Vec::new(),
             scaffold: Vec::new(),
             skills,
             onboarding: None,
@@ -2847,15 +3159,107 @@ mod tests {
         items
             .iter()
             .map(|item| {
-                let indent = if item.group.is_some() { "  " } else { "" };
+                let indent = "  ".repeat(item.depth);
                 match &item.kind {
                     SectionItemKind::Caption(label) => format!("# {label}"),
                     SectionItemKind::Link(link) => format!("{indent}link {}", link.id),
                     SectionItemKind::Skill(skill) => format!("{indent}skill {}", skill.id),
-                    SectionItemKind::Group { label, .. } => format!("> {label}"),
+                    SectionItemKind::Entry(entry) => format!("{indent}entry {}", entry.title),
+                    SectionItemKind::Group { label, .. } => format!("{indent}> {label}"),
                 }
             })
             .collect()
+    }
+
+    fn books() -> Vec<CollectionView> {
+        use crate::routine_collections::{CollectionGroup, CollectionItems};
+        let entry = |stem: &str, title: &str| CollectionEntry {
+            link_id: stem.to_string(),
+            title: title.to_string(),
+            rel_path: format!("books/{stem}.md"),
+        };
+        vec![
+            CollectionView {
+                id: "books".into(),
+                name: "Books".into(),
+                items: CollectionItems::Flat(vec![
+                    entry("books/a", "A Fé"),
+                    entry("books/m", "Mistborn"),
+                ]),
+            },
+            CollectionView {
+                id: "authors".into(),
+                name: "Authors".into(),
+                items: CollectionItems::Grouped(vec![
+                    CollectionGroup {
+                        label: "Brandon Sanderson".into(),
+                        entries: vec![entry("authors/m", "Mistborn")],
+                    },
+                    CollectionGroup {
+                        label: "Timothy Keller".into(),
+                        entries: vec![entry("authors/a", "A Fé")],
+                    },
+                ]),
+            },
+            CollectionView {
+                id: "podcasts".into(),
+                name: "Podcasts".into(),
+                items: CollectionItems::Flat(Vec::new()),
+            },
+        ]
+    }
+
+    #[test]
+    fn collections_list_their_notes_and_nest_by_field() {
+        let manifest = manifest(Vec::new(), vec![named_skill("connect", SkillKind::Setup)]);
+        // Closed by default; the empty Podcasts collection takes no row.
+        assert_eq!(
+            transcript(&section_items(&manifest, &HashSet::new(), &books())),
+            ["# Notes", "> Books", "> Authors", "> Setup"]
+        );
+
+        let expanded = HashSet::from([
+            group_key("x", &collection_group_key("books")),
+            group_key("x", &collection_group_key("authors")),
+            group_key("x", &collection_subgroup_key("authors", "Timothy Keller")),
+        ]);
+        let items = section_items(&manifest, &expanded, &books());
+        assert_eq!(
+            transcript(&items),
+            [
+                "# Notes",
+                "> Books",
+                "  entry A Fé",
+                "  entry Mistborn",
+                "> Authors",
+                "  > Brandon Sanderson",
+                "  > Timothy Keller",
+                "    entry A Fé",
+                "> Setup",
+            ]
+        );
+        // `left` on a book closes the author it sits under, and the author
+        // row knows which collection holds it.
+        let parents: Vec<Option<&str>> = items.iter().map(|item| item.group.as_deref()).collect();
+        assert_eq!(
+            parents[7],
+            Some(collection_subgroup_key("authors", "Timothy Keller").as_str())
+        );
+        assert_eq!(parents[6], Some(collection_group_key("authors").as_str()));
+
+        // The same title in two collections is two distinct rows.
+        let rows = nav_rows_of_with(&manifest, &expanded, &books());
+        let keys: HashSet<String> = rows.iter().map(row_key).collect();
+        assert_eq!(keys.len(), rows.len());
+    }
+
+    #[test]
+    fn collections_count_as_places_for_captions() {
+        let manifest = manifest(Vec::new(), vec![named_skill("wrap", SkillKind::Ritual)]);
+        assert_eq!(
+            transcript(&section_items(&manifest, &HashSet::new(), &books())),
+            ["# Notes", "> Books", "> Authors", "# Rituals", "skill wrap"]
+        );
     }
 
     #[test]
@@ -2877,7 +3281,7 @@ mod tests {
         // Groups start closed: the two demoted links and both setup steps
         // cost one row each, not four.
         assert_eq!(
-            transcript(&section_items(&manifest, &HashSet::new())),
+            transcript(&section_items(&manifest, &HashSet::new(), &[])),
             vec![
                 "# Notes",
                 "link today",
@@ -2902,7 +3306,7 @@ mod tests {
         );
         let expanded = HashSet::from([group_key("x", "Older notes")]);
         assert_eq!(
-            transcript(&section_items(&manifest, &expanded)),
+            transcript(&section_items(&manifest, &expanded, &[])),
             vec![
                 "# Notes",
                 "link today",
@@ -2917,7 +3321,7 @@ mod tests {
     fn a_section_with_nothing_to_separate_gets_no_captions() {
         let links_only = manifest(vec![named_link("today", None)], Vec::new());
         assert_eq!(
-            transcript(&section_items(&links_only, &HashSet::new())),
+            transcript(&section_items(&links_only, &HashSet::new(), &[])),
             vec!["link today"]
         );
         let skills_only = manifest(
@@ -2925,7 +3329,7 @@ mod tests {
             vec![named_skill("wrap-today", SkillKind::Ritual)],
         );
         assert_eq!(
-            transcript(&section_items(&skills_only, &HashSet::new())),
+            transcript(&section_items(&skills_only, &HashSet::new(), &[])),
             vec!["skill wrap-today"]
         );
     }
@@ -2941,7 +3345,7 @@ mod tests {
                 named_skill("setup", SkillKind::Setup),
             ],
         );
-        let items = section_items(&manifest, &HashSet::new());
+        let items = section_items(&manifest, &HashSet::new(), &[]);
         let selectable = items
             .iter()
             .filter(|item| !matches!(item.kind, SectionItemKind::Caption(_)))
@@ -2951,21 +3355,17 @@ mod tests {
     }
 
     fn nav_rows_of(manifest: &RoutineManifest, expanded: &HashSet<String>) -> Vec<NavRow> {
-        section_items(manifest, expanded)
+        nav_rows_of_with(manifest, expanded, &[])
+    }
+
+    fn nav_rows_of_with(
+        manifest: &RoutineManifest,
+        expanded: &HashSet<String>,
+        collections: &[CollectionView],
+    ) -> Vec<NavRow> {
+        section_items(manifest, expanded, collections)
             .into_iter()
-            .filter_map(|item| {
-                let kind = match item.kind {
-                    SectionItemKind::Caption(_) => return None,
-                    SectionItemKind::Link(link) => NavRowKind::Link(link),
-                    SectionItemKind::Skill(skill) => NavRowKind::Skill(skill),
-                    SectionItemKind::Group { label, .. } => NavRowKind::Group(label),
-                };
-                Some(NavRow {
-                    routine_id: manifest.id.clone(),
-                    group: item.group,
-                    kind,
-                })
-            })
+            .filter_map(|item| nav_row(&manifest.id, item))
             .collect()
     }
 

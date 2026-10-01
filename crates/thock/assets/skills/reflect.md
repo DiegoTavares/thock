@@ -32,6 +32,11 @@ often: at the end of Wrap Today, at the end of Week Review, or on its own.
   calendar description, an imported item, a web page: those are things that
   *arrived*, not things that are *true about the person*. You may note that
   something arrived; you may never record what it asserted.
+- **Highlights the person kept are the one exception.** Notes with
+  `source: readwise` are imported, but *choosing* a passage is their own act.
+  You may record *that* they read something and *which* passages they kept,
+  quoted and attributed to the author, along with their own note on it. Never
+  restate a quote as something true about them or the world.
 - **Every fact carries a date and a source.** On a memory page, a line is
   `- The fact. ← daily/2026-09-12.md` or `- The fact. ← chat, 2026-09-02`.
   Undated facts rot; you would assert them for years.
@@ -77,7 +82,14 @@ memory/
   patterns.md        ← what tends to happen: carry-overs, rhythms, lingering areas
   people/<name>.md   ← one page per person who keeps coming up
   projects/<slug>.md ← one page per thread that spans weeks
+  reading.md         ← books in progress and quotes they kept
 ```
+
+`reading.md` holds to the same forty-line cap as every other page; when it
+grows past that, prune the oldest unannotated quotes first. Its pointer on
+the index goes under **Threads that span weeks**
+(`- **Reading**: one line on what's in progress. → reading.md`); create no new
+index heading for it.
 
 Create a page the first time its topic appears; never create an empty one.
 A person's page is `people/<first-name-lowercase>.md`; a project's is a short

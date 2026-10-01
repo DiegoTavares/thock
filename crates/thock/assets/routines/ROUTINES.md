@@ -67,6 +67,16 @@ open   = "daily/{today}.md"
 kind   = "editor"
 create = true                   # create from the note template if missing
 
+# A collection lists every note directly inside a folder, by its `# Title`
+# (the file name when there is none), under one collapsed row. `group_by`
+# nests the notes one level deeper by a field they carry: frontmatter
+# `author: …` or a `- Author: …` line, either works. Notes without the field
+# land under "No author".
+[[collection]]
+name     = "Statements"
+path     = "finance/statements"
+group_by = "account"            # optional
+
 # Declared ownership: dirs and files the Routine considers its own. These
 # feed activation's hash lockfile — removal deletes only declared files left
 # unmodified since activation.
@@ -126,19 +136,23 @@ One section per Routine, and within it:
 
 1. **Notes** — the ungrouped links, in manifest order.
 2. One collapsed row per link `group`, in first-appearance order.
-3. **Rituals** — the skills that aren't setup.
-4. A collapsed **Setup** row, when the Routine has `kind = "setup"` skills.
+3. One collapsed row per `[[collection]]` that has notes, in manifest order.
+4. **Rituals** — the skills that aren't setup.
+5. A collapsed **Setup** row, when the Routine has `kind = "setup"` skills.
 
-The two captions appear only when a section holds both links and skills;
+The two captions appear only when a section holds both places (links or
+collections) and skills;
 there is nothing to separate otherwise. Clicking or pressing `enter` on a
 link opens it, on a ritual **runs** it, and on a group row opens or closes
 it. `alt-enter` (`g space` in vim mode) opens a ritual's instructions instead
-of running them, and `left`/`right` (`h`/`l`) close and open groups.
+of running them, and `left`/`right` (`h`/`l`) close and open groups — `left`
+on a closed group inside a collection closes the collection.
 
 ## Keyboard shortcuts
 
 Routines can't add keybindings themselves — the user binds them. Any link or
-skill is addressable by id through two generic actions; the snippet below
+skill is addressable by id through two generic actions — a collection's note
+too, as link `<collection id>/<file name without .md>`; the snippet below
 goes in the user's keymap (offer to add it, with their approval). Once bound,
 the chord renders on the row itself, so a binding is visible rather than
 remembered:
