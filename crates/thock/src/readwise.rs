@@ -26,7 +26,8 @@ const MARKER_SUFFIX: &str = "-->";
 pub const HIGHLIGHTS_HEADING: &str = "Highlights";
 
 /// Readwise's export categories (spec §4.1).
-pub const KNOWN_CATEGORIES: [&str; 5] = ["books", "articles", "tweets", "podcasts", "supplementals"];
+pub const KNOWN_CATEGORIES: [&str; 5] =
+    ["books", "articles", "tweets", "podcasts", "supplementals"];
 
 /// What the connect action writes when no config exists yet (spec §7).
 pub const DEFAULT_CONFIG_TOML: &str = "schema = 1
@@ -139,8 +140,32 @@ pub fn parse_readwise_config(text: &str) -> Result<ReadwiseConfig> {
 pub struct ExportPage {
     #[serde(default)]
     pub results: Vec<ReadwiseSource>,
-    #[serde(rename = "nextPageCursor", default)]
+    #[serde(
+        rename = "nextPageCursor",
+        default,
+        deserialize_with = "deserialize_page_cursor"
+    )]
     pub next_page_cursor: Option<String>,
+}
+
+/// The export sends `nextPageCursor` as a number, but the cursor is opaque —
+/// accept either shape and echo it back verbatim.
+fn deserialize_page_cursor<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Cursor {
+        Text(String),
+        Number(u64),
+    }
+    Ok(
+        Option::<Cursor>::deserialize(deserializer)?.map(|cursor| match cursor {
+            Cursor::Text(text) => text,
+            Cursor::Number(number) => number.to_string(),
+        }),
+    )
 }
 
 /// A source (book, article, podcast…) with its highlights nested inside.
@@ -223,7 +248,10 @@ impl ReadwiseHighlight {
 /// carries no timestamp at all.
 pub fn highlight_marker(id: u64, day: Option<NaiveDate>) -> String {
     match day {
-        Some(day) => format!("{MARKER_PREFIX}{id}@{}{MARKER_SUFFIX}", day.format("%Y-%m-%d")),
+        Some(day) => format!(
+            "{MARKER_PREFIX}{id}@{}{MARKER_SUFFIX}",
+            day.format("%Y-%m-%d")
+        ),
         None => format!("{MARKER_PREFIX}{id}{MARKER_SUFFIX}"),
     }
 }
@@ -270,7 +298,12 @@ pub fn note_stem(title: &str) -> String {
         .collect();
     let mut stem = collapse_whitespace(&replaced);
     if stem.chars().count() > 120 {
-        stem = stem.chars().take(120).collect::<String>().trim_end().to_string();
+        stem = stem
+            .chars()
+            .take(120)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
     }
     let stem = stem.trim_matches(|character: char| character == '.' || character.is_whitespace());
     if stem.is_empty() {
@@ -533,9 +566,7 @@ pub fn plan_readwise_sync<Tz: TimeZone>(
             .iter()
             .filter(|highlight| !highlight.is_discard && !highlight.is_deleted)
             .filter(|highlight| !landed.highlights.contains(&highlight.id))
-            .filter(|highlight| {
-                existing.is_none_or(|note| !note.markers.contains(&highlight.id))
-            })
+            .filter(|highlight| existing.is_none_or(|note| !note.markers.contains(&highlight.id)))
             .collect();
         let mut seen = HashSet::new();
         fresh.retain(|highlight| seen.insert(highlight.id));
@@ -590,7 +621,10 @@ fn is_highlights_heading(line: &str) -> bool {
 }
 
 fn heading_level(line: &str) -> Option<usize> {
-    let hashes = line.chars().take_while(|character| *character == '#').count();
+    let hashes = line
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
     (hashes > 0 && line[hashes..].starts_with(' ')).then_some(hashes)
 }
 
@@ -756,6 +790,14 @@ mod tests {
         .unwrap();
         assert_eq!(page.next_page_cursor.as_deref(), Some("abc"));
         assert_eq!(page.results.len(), 1);
+
+        let numeric: ExportPage =
+            serde_json::from_str(r#"{"count": 1000, "nextPageCursor": 28310845, "results": []}"#)
+                .unwrap();
+        assert_eq!(numeric.next_page_cursor.as_deref(), Some("28310845"));
+        let last: ExportPage =
+            serde_json::from_str(r#"{"count": 3, "nextPageCursor": null, "results": []}"#).unwrap();
+        assert_eq!(last.next_page_cursor, None);
         assert_eq!(page.results[0].highlights[0].id, 9);
         assert_eq!(
             page.results[0].highlights[0].day(&Utc),
@@ -870,7 +912,10 @@ mod tests {
 
     #[test]
     fn stems_are_file_safe_and_collisions_get_suffixes() {
-        assert_eq!(note_stem("Zero to One: Notes/Startups"), "Zero to One Notes Startups");
+        assert_eq!(
+            note_stem("Zero to One: Notes/Startups"),
+            "Zero to One Notes Startups"
+        );
         assert_eq!(note_stem("  spaced \n out.  "), "spaced out");
         assert_eq!(note_stem("???"), "(untitled)");
         assert_eq!(note_stem("").len(), "(untitled)".len());

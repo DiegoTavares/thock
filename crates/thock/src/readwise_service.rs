@@ -132,10 +132,7 @@ struct GlobalReadwiseServices(HashMap<EntityId, Entity<ReadwiseService>>);
 impl Global for GlobalReadwiseServices {}
 
 /// The sync service for `project`, if one is running.
-pub fn service_for_project(
-    project: &Entity<Project>,
-    cx: &App,
-) -> Option<Entity<ReadwiseService>> {
+pub fn service_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity<ReadwiseService>> {
     cx.try_global::<GlobalReadwiseServices>()?
         .0
         .get(&project.entity_id())
@@ -194,9 +191,9 @@ impl ReadwiseTransport for HttpReadwiseTransport {
         let http = self.http.clone();
         let token = self.token.clone();
         let executor = cx.background_executor().clone();
-        cx.background_spawn(async move {
-            fetch_export(&http, &token, updated_after, &executor).await
-        })
+        cx.background_spawn(
+            async move { fetch_export(&http, &token, updated_after, &executor).await },
+        )
     }
 }
 
@@ -959,11 +956,7 @@ fn repair_rows(scan: &ReadwiseVaultScan, landed: &LandedState) -> Vec<LandedRow>
 }
 
 fn state_path(vault: &Vault, file: &str) -> PathBuf {
-    vault
-        .root
-        .join(VAULT_MARKER_DIR)
-        .join(STATE_DIR)
-        .join(file)
+    vault.root.join(VAULT_MARKER_DIR).join(STATE_DIR).join(file)
 }
 
 async fn append_landed(fs: &Arc<dyn Fs>, vault: &Vault, rows: &[LandedRow]) -> Result<()> {
@@ -1299,7 +1292,10 @@ mod tests {
         // Both pages landed, one note per book, in the plugin template; the
         // unmapped article was dropped.
         let note = fs.load(Path::new(BOOK_PATH)).await.unwrap();
-        assert!(note.starts_with("---\nsource: readwise\nreadwise_id: 28374651\n"), "{note}");
+        assert!(
+            note.starts_with("---\nsource: readwise\nreadwise_id: 28374651\n"),
+            "{note}"
+        );
         assert!(note.contains("- Author: [[Timothy Keller]]"), "{note}");
         assert!(
             note.contains("- First ([Location 426](https://readwise.io/to_kindle?action=open&asin=B06XTSG7LR&location=426)) <!--rw:10@"),
@@ -1311,7 +1307,8 @@ mod tests {
             .unwrap();
         assert!(second.contains("From the second book"), "{second}");
         assert!(
-            !fs.is_dir(Path::new("/vault/reference/readwise/articles")).await,
+            !fs.is_dir(Path::new("/vault/reference/readwise/articles"))
+                .await,
             "unmapped categories must not land"
         );
 
@@ -1412,12 +1409,18 @@ mod tests {
         cx.run_until_parked();
 
         let note = fs.load(Path::new(BOOK_PATH)).await.unwrap();
-        let expected = existing.replace(
-            "    - Note: mine\n\n## My thoughts",
+        let (before_thoughts, _) = existing
+            .split_once("\n## My thoughts")
+            .expect("fixture has a thoughts section");
+        let expected = before_thoughts.replace(
+            "    - Note: mine\n",
             "    - Note: mine\n- Late but early in the book ([Location 90](https://readwise.io/to_kindle?action=open&asin=B06XTSG7LR&location=90)) <!--rw:12@",
         );
         assert!(note.starts_with(&expected), "{note}");
-        assert!(note.ends_with("-->\n\n## My thoughts\n\nKeep this.\n"), "{note}");
+        assert!(
+            note.ends_with("-->\n\n## My thoughts\n\nKeep this.\n"),
+            "{note}"
+        );
         assert!(!note.contains("Deleted by the user"), "{note}");
         assert_eq!(note.matches("First").count(), 1, "{note}");
         service.read_with(cx, |service, _| assert_eq!(service.last_landed(), 1));
@@ -1458,7 +1461,10 @@ mod tests {
         let _service = start_service(&project, cx);
         cx.run_until_parked();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(!fs.is_file(Path::new(BOOK_PATH)).await, "must wait out Retry-After");
+        assert!(
+            !fs.is_file(Path::new(BOOK_PATH)).await,
+            "must wait out Retry-After"
+        );
 
         cx.executor().advance_clock(Duration::from_secs(29));
         cx.run_until_parked();
@@ -1482,7 +1488,10 @@ mod tests {
                 let calls = calls.clone();
                 async move {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(json_response(401, "{\"detail\":\"Invalid token.\"}".to_string()))
+                    Ok(json_response(
+                        401,
+                        "{\"detail\":\"Invalid token.\"}".to_string(),
+                    ))
                 }
             }
         });
@@ -1498,8 +1507,15 @@ mod tests {
         });
         cx.executor().advance_clock(Duration::from_secs(4 * 3600));
         cx.run_until_parked();
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "a rejected token ends the loop");
-        assert!(!fs.is_file(Path::new("/vault/.thock/state/readwise/cursor.json")).await);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a rejected token ends the loop"
+        );
+        assert!(
+            !fs.is_file(Path::new("/vault/.thock/state/readwise/cursor.json"))
+                .await
+        );
 
         // `validate_token` tells the prompt the same thing.
         let http = cx.update(|cx| cx.http_client());
@@ -1556,7 +1572,10 @@ mod tests {
         // Nothing from the good page landed either: the pass aborted before
         // any apply, and there is no watermark to skip data with.
         assert!(!fs.is_file(Path::new(BOOK_PATH)).await);
-        assert!(!fs.is_file(Path::new("/vault/.thock/state/readwise/cursor.json")).await);
+        assert!(
+            !fs.is_file(Path::new("/vault/.thock/state/readwise/cursor.json"))
+                .await
+        );
         service.read_with(cx, |service, _| {
             assert!(
                 matches!(service.state(), SyncState::Failing { .. }),
@@ -1570,7 +1589,10 @@ mod tests {
         *failing.lock().unwrap() = false;
         cx.executor().advance_clock(Duration::from_secs(3601));
         cx.run_until_parked();
-        assert!(!fs.is_file(Path::new(BOOK_PATH)).await, "backoff doubled the delay");
+        assert!(
+            !fs.is_file(Path::new(BOOK_PATH)).await,
+            "backoff doubled the delay"
+        );
         cx.executor().advance_clock(Duration::from_secs(3601));
         cx.run_until_parked();
         assert!(fs.is_file(Path::new(BOOK_PATH)).await);
@@ -1578,7 +1600,10 @@ mod tests {
             fs.is_file(Path::new("/vault/reference/readwise/books/Second Book.md"))
                 .await
         );
-        assert!(fs.is_file(Path::new("/vault/.thock/state/readwise/cursor.json")).await);
+        assert!(
+            fs.is_file(Path::new("/vault/.thock/state/readwise/cursor.json"))
+                .await
+        );
     }
 
     #[gpui::test]

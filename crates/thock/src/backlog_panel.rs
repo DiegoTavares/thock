@@ -37,9 +37,9 @@ use crate::calendar_service::{ConnectGoogleWorkspace, SyncState};
 use crate::day_plan::strip_trailing_comment;
 use crate::gmail_service::{self, GmailService, SyncGmailNow};
 use crate::inbox_service::{self, InboxService, OpenInbox, SyncInboxNow};
-use crate::readwise_service::{self, ConnectReadwise, ReadwiseService, SyncReadwiseNow};
 use crate::markdown_text::render_markdown_row;
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
+use crate::readwise_service::{self, ConnectReadwise, ReadwiseService, SyncReadwiseNow};
 use crate::vault::{Vault, VaultStatus};
 
 const BACKLOG_PANEL_KEY: &str = "ThockBacklogPanel";
