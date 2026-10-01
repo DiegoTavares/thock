@@ -1,0 +1,35 @@
+schema  = 2
+id      = "reading"
+name    = "Reading"
+version = 1
+summary = "Your book highlights from Readwise, kept as notes you own."
+icon    = "book"
+doc     = "routines/reading/Reading.md"
+
+# The shipped default landing folder. `.thock/readwise.toml` is the real map
+# (category → folder); remapping it there leaves this folder empty, harmlessly.
+[[scaffold]]
+kind = "dir"
+path = "reference/readwise/books"
+
+[[skill]]
+id      = "connect-readwise"
+name    = "Connect Readwise"
+kind    = "setup"
+file    = "routines/reading/skills/connect-readwise.md"
+summary = "Paste a Readwise token once; your highlights land as notes from then on."
+reads   = [".thock/readwise.toml"]
+writes  = [".thock/readwise.toml"]
+
+[[skill]]
+id      = "reading-week"
+name    = "Reading Week"
+file    = "routines/reading/skills/reading-week.md"
+# Collecting a week's highlights and picking quotes is filing, not judgment.
+model   = "fast"
+summary = "What you read this week and the passages worth keeping. Week Review runs it for you."
+reads   = ["the folders .thock/readwise.toml maps (reference/readwise/books/** by default)", "profile.md", "memory/index.md", "memory/reading.md"]
+writes  = ["weekly/<week>.md (append)", "memory/inbox.md (append)"]
+
+[onboarding]
+skill = "routines/reading/skills/connect-readwise.md"

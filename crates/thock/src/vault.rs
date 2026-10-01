@@ -39,7 +39,7 @@ file = "backlog.md"          # the Soon / Someday / Completed holding pen
 [[routines.installed]]
 id      = "timeline"
 enabled = true
-version = 12
+version = 13
 
 [[routines.installed]]
 id      = "inbox"
@@ -1582,7 +1582,7 @@ mod tests {
         fs::write(
             &config_path,
             "schema = 1\n\n[memory]\nstale_after_days = 30\n\n[[routines.installed]]\n\
-             id = \"timeline\"\nenabled = true\nversion = 12\n",
+             id = \"timeline\"\nenabled = true\nversion = 13\n",
         )
         .unwrap();
         update_routines_registry(dir.path(), |_| {}).unwrap();

@@ -133,6 +133,8 @@ When step 4 ran and found something, add one more section under it:
 
 **Omit that heading entirely when step 4 was skipped or came back empty.** Tag each PR/MR with the forge it came from (`[GitHub]`, `[GitLab]`, or whatever `sources.md` names). Keep it short and factual, in the tone the profile names. No commentary unless asked.
 
+When `routines/reading/skills/reading-week.md` exists, read it and run it now, from Week Review, for the review's week. Put the `### Reading` block it hands back after the area sections (and after Pull & Merge Requests, when present). Skip this in silence when the file is missing or the block comes back empty.
+
 ## 8. Append to the dashboard (`weekly/site/data.js`)
 
 The dashboard reads `window.WEEKS` (an array, newest last). Append **one new week object** immediately before the closing `];` of the `window.WEEKS` array. Never rewrite existing entries — new weeks carry their MRs inline with `src` tags.

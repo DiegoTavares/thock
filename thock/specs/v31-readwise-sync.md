@@ -1,6 +1,6 @@
 # Thock V31 — Readwise sync: your highlights, landed as notes
 
-**Status:** Draft (2026-10-01)
+**Status:** Implemented (2026-10-01)
 **Owner:** Diego · **Date:** 2026-10-01
 **Companion docs:** `../VISION.md` (§4.1 Your files forever, §4.2 Augmentation, §4.6 Modular life),
 `v15-unified-gmail-sync.md` (the "map routes, folders mean" config shape and crash-safe apply order

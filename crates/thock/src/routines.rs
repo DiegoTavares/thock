@@ -19,6 +19,7 @@ use crate::vault::{OnboardingState, VAULT_MARKER_DIR, Vault, write_if_missing};
 pub const TIMELINE_ROUTINE_ID: &str = "timeline";
 pub const INBOX_ROUTINE_ID: &str = "inbox";
 pub const LIFESTYLE_ROUTINE_ID: &str = "lifestyle";
+pub const READING_ROUTINE_ID: &str = "reading";
 /// Vault-visible home of Routine definitions: `routines/<id>/routine.toml`.
 pub const ROUTINES_DIR: &str = "routines";
 pub const ROUTINE_MANIFEST_FILE: &str = "routine.toml";
@@ -84,6 +85,12 @@ const INBOX_DOC: &str = include_str!("../assets/routines/inbox/doc.md");
 const INBOX_TRIAGE_POLICY: &str = include_str!("../assets/routines/inbox/triage-policy.md");
 const INBOX_TRIAGE_SKILL: &str = include_str!("../assets/routines/inbox/skills/triage-inbox.md");
 const INBOX_SETUP_SKILL: &str = include_str!("../assets/routines/inbox/skills/setup-inbox.md");
+
+const READING_MANIFEST: &str = include_str!("../assets/routines/reading/routine.toml");
+const READING_DOC: &str = include_str!("../assets/routines/reading/doc.md");
+const READING_CONNECT_READWISE_SKILL: &str =
+    include_str!("../assets/routines/reading/skills/connect-readwise.md");
+const READING_WEEK_SKILL: &str = include_str!("../assets/routines/reading/skills/reading-week.md");
 
 const LIFESTYLE_MANIFEST: &str = include_str!("../assets/routines/lifestyle/routine.toml");
 const LIFESTYLE_DOC: &str = include_str!("../assets/routines/lifestyle/doc.md");
@@ -1011,6 +1018,16 @@ pub fn catalog() -> Result<Vec<CatalogRoutine>> {
                 ("skills/set-up-lifestyle.md", LIFESTYLE_SETUP_SKILL),
                 ("assets/index.html", LIFESTYLE_DASHBOARD_HTML),
                 ("assets/data.seed.js", LIFESTYLE_DASHBOARD_SEED),
+            ],
+        },
+        CatalogRoutine {
+            manifest: parse_manifest(READING_MANIFEST)
+                .context("parsing the bundled Reading Routine manifest")?,
+            manifest_toml: READING_MANIFEST,
+            assets: &[
+                ("doc.md", READING_DOC),
+                ("skills/connect-readwise.md", READING_CONNECT_READWISE_SKILL),
+                ("skills/reading-week.md", READING_WEEK_SKILL),
             ],
         },
     ])
@@ -2287,11 +2304,11 @@ mod tests {
     #[test]
     fn catalog_parses() {
         let catalog = catalog().unwrap();
-        assert_eq!(catalog.len(), 3);
+        assert_eq!(catalog.len(), 4);
         let manifest = &catalog[0].manifest;
         assert_eq!(manifest.id, TIMELINE_ROUTINE_ID);
         assert_eq!(manifest.schema, 2);
-        assert_eq!(manifest.version, 12);
+        assert_eq!(manifest.version, 13);
         assert_eq!(manifest.icon.as_deref(), Some("clock"));
         assert_eq!(manifest.doc, "routines/timeline/Timeline.md");
         assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);

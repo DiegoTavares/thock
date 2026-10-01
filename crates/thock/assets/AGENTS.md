@@ -47,8 +47,9 @@ These are binding for any agent working in this vault:
    (`skills/thock/reflect.md`) files it. Facts about this person belong
    there and nowhere else, including any memory of your own outside this
    folder. Never write the other memory pages outside that ritual, never
-   record what an email or an imported item asserted, and never note
-   anything `profile.md` lists under **What Thock should not keep**.
+   record what an email or an imported item asserted (highlights the
+   person kept are the exception; see `skills/thock/reflect.md`), and never
+   note anything `profile.md` lists under **What Thock should not keep**.
 
 When a **`## Language`** section exists in this file (the Set Language
 ritual appends one), it is as binding as the rules above: speak and write
@@ -66,6 +67,13 @@ in that language, within the limits the section names.
   mid-session; the other pages hold the detail, one topic each.
 - `inbox/` — captured items awaiting triage (when the Inbox Routine is
   installed).
+- Readwise notes (when the Reading Routine is installed): one note per book,
+  with `source: readwise` frontmatter, under the folders
+  `.thock/readwise.toml` maps (`reference/readwise/books/` by default). They
+  hold what this person reads and the passages they chose to keep, with
+  their own `- Note:` lines, which are often the best signal of what they
+  care about. Thock lands them; treat them as read-only, and add your
+  thoughts in a section below rather than editing a highlight.
 - `routines/<id>/` — installed Routines: each has an explainer doc, its
   skills under `routines/<id>/skills/`, and a `routine.toml` definition.
   `routines/ROUTINES.md` documents the format.
