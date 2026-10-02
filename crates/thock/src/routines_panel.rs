@@ -2288,9 +2288,13 @@ impl RoutinesPanel {
                     .color(Color::Muted),
             )
             .child(Label::new(manifest.name.clone()))
+            // The chip rides in the content rather than `end_slot`: with
+            // `end_slot_on_hover` set, the end slot is clipped to the hover
+            // button's width.
             .when(finishing_setup, |item| {
-                item.end_slot(
+                item.child(div().flex_1()).child(
                     h_flex()
+                        .flex_none()
                         .px_1()
                         .rounded_sm()
                         .bg(cx.theme().colors().element_background)
