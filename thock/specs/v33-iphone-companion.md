@@ -467,8 +467,9 @@ page, read-only; history — see a note as it was, restore a line.
 
 ## 19. Deferred and open
 
-- **Data model and sync** — its own spec: where the vault lives on the phone, how the hosted
-  agent reaches it, what happens when both ends append to the same section between syncs.
+- **Data model and sync** — `v34-vault-sync.md` (2026-10-02): where the vault lives on the phone,
+  how the hosted agent reaches it, what happens when both ends append to the same section between
+  syncs.
 - **Platform and language** for the app itself (Swift/SwiftUI is the obvious reading of
   *feels like an iPhone*; nothing here depends on it). Decided with the data-model spec, since
   the vault storage choice constrains it.
