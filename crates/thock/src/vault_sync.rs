@@ -313,8 +313,8 @@ impl SyncApi {
         body: Option<serde_json::Value>,
     ) -> Result<(http::StatusCode, String)> {
         let url = format!("{}{route}", self.base_url);
-        let mut builder = Request::builder()
-            .method(method)
+        let builder = Request::builder()
+            .method(method.clone())
             .uri(&url)
             .header("Accept", "application/json")
             .header("Authorization", format!("Bearer {}", self.credential))
@@ -322,12 +322,20 @@ impl SyncApi {
                 "Thock-Client",
                 format!("desk/{}", env!("CARGO_PKG_VERSION")),
             );
-        let request = match body {
-            Some(body) => {
-                builder = builder.header("Content-Type", "application/json; charset=utf-8");
-                builder.body(AsyncBody::from(body.to_string().into_bytes()))?
-            }
-            None => builder.body(AsyncBody::default())?,
+        // A POST or DELETE without a body goes out as `{}` with an explicit
+        // length: Google's front end answers 411 to a bodiless POST whose
+        // length it cannot see.
+        let request = if method == http::Method::GET {
+            builder.body(AsyncBody::default())?
+        } else {
+            let bytes = body
+                .map(|body| body.to_string())
+                .unwrap_or_else(|| "{}".to_string())
+                .into_bytes();
+            builder
+                .header("Content-Type", "application/json; charset=utf-8")
+                .header("Content-Length", bytes.len().to_string())
+                .body(AsyncBody::from(bytes))?
         };
         let mut response = self
             .http
@@ -2383,6 +2391,50 @@ mod tests {
         service.read_with(cx, |service, _| {
             assert!(!service.state.files.contains_key("notes.txt"));
         });
+    }
+
+    #[gpui::test]
+    async fn bodiless_posts_carry_an_empty_json_body_with_a_length(cx: &mut TestAppContext) {
+        init_test(cx);
+        let seen: Arc<Mutex<Vec<(String, String, String)>>> = Arc::default();
+        let http = FakeHttpClient::create({
+            let seen = seen.clone();
+            move |mut request| {
+                let seen = seen.clone();
+                async move {
+                    let method = request.method().to_string();
+                    let length = request
+                        .headers()
+                        .get("Content-Length")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    let mut body = Vec::new();
+                    request.body_mut().read_to_end(&mut body).await?;
+                    seen.lock().unwrap().push((
+                        method,
+                        length,
+                        String::from_utf8_lossy(&body).into_owned(),
+                    ));
+                    Ok(Response::builder()
+                        .status(200)
+                        .body(AsyncBody::from(
+                            r#"{"code": "K7MP-4QZX", "expires_at": ""}"#.as_bytes().to_vec(),
+                        ))
+                        .unwrap())
+                }
+            }
+        });
+        let api = SyncApi::new(http, "http://stub".to_string(), "tpk_test".to_string());
+        cx.executor()
+            .spawn(async move { api.create_pairing().await })
+            .await
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.as_slice(),
+            &[("POST".to_string(), "2".to_string(), "{}".to_string())]
+        );
     }
 
     #[test]
