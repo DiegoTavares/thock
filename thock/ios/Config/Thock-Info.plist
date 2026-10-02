@@ -6,7 +6,7 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>app.thock.ios</string>
+			<string>com.thethock.ios</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>thock</string>
@@ -17,7 +17,7 @@
 	<array>
 		<dict>
 			<key>UIApplicationShortcutItemType</key>
-			<string>app.thock.ios.idea</string>
+			<string>com.thethock.ios.idea</string>
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>Idea</string>
 			<key>UIApplicationShortcutItemIconSymbolName</key>
@@ -25,7 +25,7 @@
 		</dict>
 		<dict>
 			<key>UIApplicationShortcutItemType</key>
-			<string>app.thock.ios.journal</string>
+			<string>com.thethock.ios.journal</string>
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>Journal</string>
 			<key>UIApplicationShortcutItemIconSymbolName</key>
@@ -33,7 +33,7 @@
 		</dict>
 		<dict>
 			<key>UIApplicationShortcutItemType</key>
-			<string>app.thock.ios.clip</string>
+			<string>com.thethock.ios.clip</string>
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>Clip</string>
 			<key>UIApplicationShortcutItemIconSymbolName</key>
@@ -41,7 +41,7 @@
 		</dict>
 		<dict>
 			<key>UIApplicationShortcutItemType</key>
-			<string>app.thock.ios.ask</string>
+			<string>com.thethock.ios.ask</string>
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>Ask</string>
 			<key>UIApplicationShortcutItemIconSymbolName</key>

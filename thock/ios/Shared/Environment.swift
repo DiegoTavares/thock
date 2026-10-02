@@ -4,7 +4,7 @@ import ThockKit
 /// Where the app, the share sheet and the widgets meet: one container, one
 /// store, one place to leave a note for the app about what to open.
 enum ThockEnvironment {
-    static let appGroup = "group.app.thock.ios"
+    static let appGroup = "group.com.thethock.ios"
 
     static var container: URL {
         if let shared = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup) {

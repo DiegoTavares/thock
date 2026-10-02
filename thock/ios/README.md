@@ -40,7 +40,7 @@ From a terminal:
 cd thock/ios
 xcodebuild -project Thock.xcodeproj -scheme Thock -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -derivedDataPath build build
 xcrun simctl install booted build/Build/Products/Debug-iphonesimulator/Thock.app
-xcrun simctl launch booted app.thock.ios -thock-practice
+xcrun simctl launch booted com.thethock.ios -thock-practice
 ```
 
 `-thock-practice` opens the practice notebook on a fresh install. In the app, the `…` button at the

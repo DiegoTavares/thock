@@ -66,7 +66,7 @@ struct PlanProvider: TimelineProvider {
 
 struct TodayWidget: Widget {
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: "app.thock.ios.today", provider: PlanProvider()) { entry in
+        StaticConfiguration(kind: "com.thethock.ios.today", provider: PlanProvider()) { entry in
             TodayWidgetView(entry: entry)
         }
         .configurationDisplayName("Today")
@@ -144,7 +144,7 @@ struct TodayWidgetView: View {
 /// Lock Screen and Control Center controls (iOS 18): straight into a sheet.
 struct IdeaControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
-        StaticControlConfiguration(kind: "app.thock.ios.control.idea") {
+        StaticControlConfiguration(kind: "com.thethock.ios.control.idea") {
             ControlWidgetButton(action: NewIdeaIntent()) {
                 Label("Idea", systemImage: "plus")
             }
@@ -156,7 +156,7 @@ struct IdeaControl: ControlWidget {
 
 struct JournalControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
-        StaticControlConfiguration(kind: "app.thock.ios.control.journal") {
+        StaticControlConfiguration(kind: "com.thethock.ios.control.journal") {
             ControlWidgetButton(action: JournalIntent()) {
                 Label("Journal", systemImage: "text.alignleft")
             }

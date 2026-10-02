@@ -283,7 +283,7 @@ public final class MemorySecretStore: SecretStore, @unchecked Sendable {
 public final class KeychainSecretStore: SecretStore, @unchecked Sendable {
     private let service: String
 
-    public init(service: String = "app.thock.ios.vault") {
+    public init(service: String = "com.thethock.ios.vault") {
         self.service = service
     }
 
