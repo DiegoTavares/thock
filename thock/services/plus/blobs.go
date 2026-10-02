@@ -20,9 +20,8 @@ import (
 // Where the encrypted snapshots live. The API process only hands out signed
 // URLs and checks that an object exists; the bytes never pass through the
 // main routes. The local store is the default and is complete: with it,
-// `go run .` is a whole sync server on one machine. A bucket-backed store
-// (GCS or Supabase Storage, signed URLs either way) implements the same four
-// methods and plugs in through BLOB_STORE.
+// `go run .` is a whole sync server on one machine. The Cloud Storage store
+// in blobs_gcs.go is what production runs (BLOB_STORE=gcs).
 type blobStore interface {
 	// uploadURL signs a PUT for exactly size bytes.
 	uploadURL(ctx context.Context, vaultID, blobID string, size int64, expires time.Time) (signedURL, error)

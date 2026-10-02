@@ -128,7 +128,8 @@ DATABASE_URL=postgres://... ADMIN_TOKEN=dev PORT=8080 \
 
 | Variable | Meaning |
 |---|---|
-| `BLOB_STORE` | `local` (default). A bucket-backed store implements `blobStore` in `blobs.go` and gets its own value. |
+| `BLOB_STORE` | `local` (default) or `gcs`. With `gcs`, blobs live in the `BLOB_BUCKET` bucket as `<vault id>/<blob id>` and clients get V4 signed URLs straight to the bucket; the process signs with its own account through IAM, so that account needs `roles/storage.objectAdmin` on the bucket and `roles/iam.serviceAccountTokenCreator` on itself (deploy.sh grants both). Locally, `gcloud auth application-default login` is enough. |
+| `BLOB_BUCKET` | The Cloud Storage bucket for `BLOB_STORE=gcs`. |
 | `BLOB_DIR` | Where the local store keeps blobs; defaults to `thock-plus-blobs` under the system temp dir. |
 | `BLOB_SIGNING_KEY` | HMAC key for the local store's URLs. Unset, a random per-process key is used, so URLs die with the process (fine for one machine; set it to survive restarts). |
 | `PUBLIC_URL` | The base URL clients reach this process at, used in signed URLs. Defaults to `http://localhost:PORT`; set it to the LAN address when a phone on the same network should download. |
@@ -154,12 +155,18 @@ Uploads are begin (`POST /v1/vault/files/{path}`), `PUT` the envelope to the ret
 vaults after 30 days, uploads begun but never committed after an hour, tombstones after 30 days,
 acked writes after a week, and spent pairing codes.
 
+The GCS store has a round-trip test against a real bucket that runs only when asked:
+`THOCK_GCS_BUCKET=thock-505921-vault-blobs go test -run RealBucket ./...` with application-default
+credentials that can read, write and sign.
+
 ## Deploy
 
 `deploy.sh` does the whole thing against the `thock-505921` project: it enables the APIs,
 stores `DATABASE_URL` and `ADMIN_TOKEN` (and `OPENROUTER_MANAGEMENT_KEY` when given) in Secret
-Manager, gives the service's own account access to them, and deploys from source with
-`--max-instances 1`. Migrations run when the new revision starts.
+Manager, gives the service's own account access to them, creates the vault blob bucket
+(`<project>-vault-blobs`, uniform access, public access prevented) with the account as object
+admin and token creator on itself, and deploys from source with `--max-instances 1` and
+`BLOB_STORE=gcs`. Migrations run when the new revision starts.
 
 ```sh
 DATABASE_URL='postgresql://...' ./deploy.sh              # first deploy, minting an admin token
