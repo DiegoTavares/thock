@@ -235,10 +235,15 @@ impl Document {
         }
     }
 
-    /// The whole file as a section, for writes whose heading is `null`.
+    /// The whole file as a section, for writes whose heading is `null`. Only
+    /// blank lines are trimmed: "the end of the file" is below a closing rule,
+    /// not above it.
     pub(crate) fn whole(&self) -> Section {
         let end = self.lines.len();
-        let body_end = self.trim_blank_end(0, end);
+        let mut body_end = end;
+        while body_end > 0 && self.lines.get(body_end - 1).is_some_and(Line::is_blank) {
+            body_end -= 1;
+        }
         Section {
             heading: None,
             start: 0,

@@ -552,8 +552,11 @@ heading whose level is less than or equal to the matched heading's level, or the
 **body** is that range with trailing blank lines removed, and without a trailing thematic break
 (`___`, `---` or `***` on its own line) and the blank lines before it, since the shipped templates
 close every section with `___` and an append must land above it. Its **own lines** are the body up
-to, not including, the first deeper heading inside it. A front-matter block that is never closed is
-ordinary content.
+to, not including, the first deeper heading inside it, with its own trailing blank lines (and a
+closing rule) trimmed the same way. A front-matter block that is never closed is ordinary content.
+The whole-file body of a `null` heading trims only blank lines: the end of the file is below a
+closing rule. A heading's `text` has its closing `#`s and surrounding whitespace removed; a heading
+line starts at column 0.
 
 ### 7.3 Kinds
 
@@ -641,7 +644,7 @@ expanded with the same tokens). Outcomes: `created`, `section_added`, `applied`,
 | --- | --- |
 | `create` | the file exists and equals `content` exactly, modulo line endings, or contains `content`'s lines as a contiguous run (the result of rule 3) |
 | `append` | the section's body (or the whole file for `null`) contains `lines` as a contiguous run, compared after trimming trailing whitespace of each line |
-| `replace_line` | a body line **equals** `new_line` (trailing whitespace ignored), or equals `new_line + " <!--thock:also-->"`. Not a hash comparison: a tick or a retime keeps the normalised text, so a hash test would call every such write already present |
+| `replace_line` | when the target (`line_hash`, `ordinal`) is found: that line **equals** `new_line` (trailing whitespace ignored) or `new_line + " <!--thock:also-->"`; when it is not found: some body line equals either, or has `line_hash(new_line)`. Not a plain hash comparison (a tick keeps the hash), and not "any line equals" either: two identical lines must each be tickable by ordinal |
 | `remove_line` | no body line has `line_hash` |
 | `replace_section` | `section_hash` equals `section_hash` of `lines`, or the body contains `lines[0] + " <!--thock:also-->"` |
 
@@ -852,6 +855,8 @@ retries reuse `client_id`; a lapsed vault goes read-only without losing the loca
 
 ## 13. Changelog
 
+- **2026-10-02** — from the phone port: `replace_line` presence is decided by the target line when
+  it is found; the whole-file body keeps a closing rule; heading text drops closing hashes.
 - **2026-10-02** — core implementation notes folded in: section bodies exclude a trailing thematic
   break; `replace_line` presence is equality, not hash equality; `create` presence includes rule 3's
   run; fenced and front-matter lines are never matched; outcome precedence; marker on the first
