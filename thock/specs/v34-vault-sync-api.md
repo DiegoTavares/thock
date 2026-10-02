@@ -604,7 +604,9 @@ expanded with the same tokens). Outcomes: `created`, `section_added`, `applied`,
 
 - Line ending: the file's dominant terminator (`\r\n` if it appears more often than `\n` alone),
   `\n` for a new file. Inserted lines use it. A file that ends without a terminator keeps that property
-  for its last line; an insertion after it adds one before the new lines.
+  for its last line when a `replace_line` edits it in place; an insertion after it adds one before the
+  new lines, and lines written by `append` or `replace_section` always end with a terminator, even when
+  they replace what used to be an unterminated last line.
 - Encoding: UTF-8 in and out. The desk never uploads a file that is not valid UTF-8.
 - Nothing outside the touched lines changes, byte for byte. This is tested by the round-trip fixtures.
 
@@ -855,6 +857,9 @@ retries reuse `client_id`; a lapsed vault goes read-only without losing the loca
 
 ## 13. Changelog
 
+- **2026-10-02** — from the phone port, second round: §8.1 says which lines keep an unterminated
+  ending (an in-place `replace_line`) and which always end with a terminator (`append`,
+  `replace_section`). The Swift port passes all 296 cases and every vector.
 - **2026-10-02** — from the phone port: `replace_line` presence is decided by the target line when
   it is found; the whole-file body keeps a closing rule; heading text drops closing hashes.
 - **2026-10-02** — core implementation notes folded in: section bodies exclude a trailing thematic
