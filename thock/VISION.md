@@ -362,7 +362,10 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   devices, the phone downloads them and queues its appends and single-line edits as small writes the
   desk applies after a checkpoint. The server (`thock/services/plus`) stores what it cannot read, so
   the phone has the latest vault while the desk sleeps; a line edited at both ends keeps both versions
-  in the note with a quiet marker, and nothing is ever lost. Spec `specs/v34-vault-sync.md`. _(planned)_
+  in the note with a quiet marker, and nothing is ever lost. Spec `specs/v34-vault-sync.md`; the wire
+  contract the three implementations share is `specs/v34-vault-sync-api.md`. _(in progress: the backend
+  routes, the shared rules crate `thock_sync_core` and the desk service with pairing, catch-up, drain
+  and the status row are on `main`; the phone app is V33's data layer)_
 
 ---
 

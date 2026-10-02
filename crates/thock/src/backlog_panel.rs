@@ -41,6 +41,7 @@ use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
 use crate::readwise_service::{self, ReadwiseService};
 use crate::sync_status;
 use crate::vault::{Vault, VaultStatus};
+use crate::vault_sync::{self, ConnectPhone, PhoneSyncState, SyncVaultNow, VaultSyncService};
 
 const BACKLOG_PANEL_KEY: &str = "ThockBacklogPanel";
 const REPARSE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -198,6 +199,7 @@ pub struct BacklogPanel {
     /// The Readwise sync service, for its status row (V31 §8.5) — display
     /// only, like the other two.
     readwise_service: Option<Entity<ReadwiseService>>,
+    vault_sync_service: Option<Entity<VaultSyncService>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -261,6 +263,7 @@ impl BacklogPanel {
             let gmail_service = gmail_service::service_for_project(&project, cx);
             let inbox_service = inbox_service::service_for_project(&project, cx);
             let readwise_service = readwise_service::service_for_project(&project, cx);
+            let vault_sync_service = vault_sync::service_for_project(&project, cx);
             let mut subscriptions = vec![project_subscription];
             if let Some(service) = &gmail_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
@@ -269,6 +272,9 @@ impl BacklogPanel {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
             }
             if let Some(service) = &readwise_service {
+                subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
+            }
+            if let Some(service) = &vault_sync_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
             }
             let mut this = Self {
@@ -294,6 +300,7 @@ impl BacklogPanel {
                 gmail_service,
                 inbox_service,
                 readwise_service,
+                vault_sync_service,
                 _subscriptions: subscriptions,
             };
             this.vault_status = this.detect_vault_status(cx);
@@ -1878,6 +1885,107 @@ impl BacklogPanel {
         .collect()
     }
 
+    /// The phone row (`v34-vault-sync.md` §10.1), shown once Thock Plus is
+    /// connected: *Phone · up to date · 2m ago*, the writes still waiting,
+    /// the files held back, or the way to pair a phone.
+    fn render_phone_status_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let service = self.vault_sync_service.as_ref()?.read(cx);
+        let muted = |text: String| {
+            Label::new(text)
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .into_any_element()
+        };
+        let connect_button = |id: &'static str| {
+            Button::new(id, "Connect phone")
+                .label_size(LabelSize::Small)
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(ConnectPhone.boxed_clone(), cx);
+                })
+                .into_any_element()
+        };
+        let content = match service.status() {
+            PhoneSyncState::Hidden => return None,
+            PhoneSyncState::Off => vec![
+                muted("Phone · not connected".to_string()),
+                connect_button("thock-connect-phone"),
+            ],
+            PhoneSyncState::PhoneNotConnected => vec![
+                muted("Phone · not connected".to_string()),
+                connect_button("thock-connect-phone-again"),
+            ],
+            PhoneSyncState::Starting => vec![muted("Phone · connecting…".to_string())],
+            PhoneSyncState::Working => vec![muted("Phone · syncing…".to_string())],
+            PhoneSyncState::Paused => {
+                vec![muted("Phone · paused, renew Thock Plus".to_string())]
+            }
+            PhoneSyncState::UpToDate { at } => {
+                let mut text = format!("Phone · up to date · {}", format_ago(at.elapsed()));
+                if let Some(info) = service.info() {
+                    match info.writes.pending {
+                        0 => {}
+                        1 => text.push_str(" · 1 waiting from your phone"),
+                        n => text.push_str(&format!(" · {n} waiting from your phone")),
+                    }
+                }
+                let not_sent = service.skipped().len() + service.held_back().len();
+                let mut row = vec![muted(text)];
+                if not_sent > 0 {
+                    let details =
+                        service
+                            .skipped()
+                            .iter()
+                            .map(|file| format!("{} — {}", file.path, file.reason))
+                            .chain(service.held_back().iter().map(|path| {
+                                format!("{path} — held back, the vault is at its quota")
+                            }))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                    let label = if not_sent == 1 {
+                        "1 file not sent".to_string()
+                    } else {
+                        format!("{not_sent} files not sent")
+                    };
+                    row.push(
+                        Label::new(label)
+                            .size(LabelSize::Small)
+                            .color(Color::Warning)
+                            .into_any_element(),
+                    );
+                    row.push(
+                        div()
+                            .id("thock-phone-not-sent")
+                            .tooltip(Tooltip::text(details))
+                            .child(Icon::new(IconName::Info).size(IconSize::XSmall))
+                            .into_any_element(),
+                    );
+                }
+                row
+            }
+            PhoneSyncState::Failing { error } => vec![
+                muted("Phone · sync failed".to_string()),
+                Button::new("thock-retry-phone-sync", "Retry")
+                    .label_size(LabelSize::Small)
+                    .tooltip(Tooltip::text(error.clone()))
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(SyncVaultNow.boxed_clone(), cx);
+                    })
+                    .into_any_element(),
+            ],
+        };
+        Some(
+            h_flex()
+                .px_2()
+                .py_1()
+                .gap_2()
+                .justify_between()
+                .border_b_1()
+                .border_color(cx.theme().colors().border_variant)
+                .children(content)
+                .into_any_element(),
+        )
+    }
+
     fn render_body(&self, cx: &Context<Self>) -> AnyElement {
         match &self.vault_status {
             VaultStatus::NotAVault => self
@@ -2022,6 +2130,7 @@ impl Render for BacklogPanel {
             .on_action(cx.listener(Self::expand_category))
             .size_full()
             .children(self.render_status_rows(cx))
+            .children(self.render_phone_status_row(cx))
             .child(self.render_body(cx))
     }
 }
