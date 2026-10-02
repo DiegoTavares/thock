@@ -1,0 +1,18 @@
+{
+  "name": "fenced create different",
+  "before": "# Notes\n\n## Snippets\n\n```md\n## not a heading\n- [ ] not a task either\n```\n\n~~~\n### also fenced\n~~~\n\n- [ ] Review the snippet\n\n## Tasks\n\n- [ ] Ship it\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "fixture-fenced-create",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "create",
+    "content": "---\nsource: thock-ios\ncapture: 4d1f9a02c7b3\n---\n\n# A capture\n\nIts text.\n"
+  },
+  "after": "# Notes\n\n## Snippets\n\n```md\n## not a heading\n- [ ] not a task either\n```\n\n~~~\n### also fenced\n~~~\n\n- [ ] Review the snippet\n\n## Tasks\n\n- [ ] Ship it\n\n---\nsource: thock-ios\ncapture: 4d1f9a02c7b3\n---\n\n# A capture\n\nIts text.\n",
+  "outcome": "applied",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

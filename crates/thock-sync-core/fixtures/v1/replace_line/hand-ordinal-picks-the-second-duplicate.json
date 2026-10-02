@@ -1,0 +1,25 @@
+{
+  "name": "ordinal picks the second duplicate",
+  "before": "## Day planner\n- [ ] Call Ana\n- [ ] Walk\n- [ ] Call Ana\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-dup",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "replace_line",
+    "heading": {
+      "text": "Day planner",
+      "level": 2,
+      "ordinal": 0
+    },
+    "line_hash": "3f27ffc1bb74f5a8",
+    "ordinal": 1,
+    "new_line": "- [x] Call Ana"
+  },
+  "after": "## Day planner\n- [ ] Call Ana\n- [ ] Walk\n- [x] Call Ana\n",
+  "outcome": "applied",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

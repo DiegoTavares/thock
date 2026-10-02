@@ -1,0 +1,18 @@
+{
+  "name": "daily template create different",
+  "before": "# Thursday, October 2, 2026\n\n_A page for today. Write a little or a lot; it's yours._\n\n___\n\n## Journal\n\n_What happened, what you noticed, how it went._\n\n___\n\n## Day planner\n\n_Timed lines land on the planner beside you, like `- [ ] 09:00 - 10:00 Deep work`._\n\n___\n\n## Personal\n\n_The people, the errands, the small good things._\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "fixture-daily-template-create",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "create",
+    "content": "---\nsource: thock-ios\ncapture: 4d1f9a02c7b3\n---\n\n# A capture\n\nIts text.\n"
+  },
+  "after": "# Thursday, October 2, 2026\n\n_A page for today. Write a little or a lot; it's yours._\n\n___\n\n## Journal\n\n_What happened, what you noticed, how it went._\n\n___\n\n## Day planner\n\n_Timed lines land on the planner beside you, like `- [ ] 09:00 - 10:00 Deep work`._\n\n___\n\n## Personal\n\n_The people, the errands, the small good things._\n\n---\nsource: thock-ios\ncapture: 4d1f9a02c7b3\n---\n\n# A capture\n\nIts text.\n",
+  "outcome": "applied",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

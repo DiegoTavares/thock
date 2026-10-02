@@ -1,0 +1,18 @@
+{
+  "name": "no final newline create file missing",
+  "before": null,
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "fixture-no-final-newline-create",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "create",
+    "content": "# Tuesday\n\n## Day planner\n\n- [ ] Call the bank\n- [ ] Water the plants"
+  },
+  "after": "# Tuesday\n\n## Day planner\n\n- [ ] Call the bank\n- [ ] Water the plants",
+  "outcome": "created",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

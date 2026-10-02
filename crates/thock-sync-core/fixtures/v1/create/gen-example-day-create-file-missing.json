@@ -1,0 +1,18 @@
+{
+  "name": "example day create file missing",
+  "before": null,
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "fixture-example-day-create",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "create",
+    "content": "# Thursday, October 2, 2026\n\n> 👋 **This first day is an example.** It shows what a daily note can hold:\n> sections, lists, checkboxes, a few emojis. Change it, delete it, keep the\n> bits you like. It's your page now.\n>\n> Tomorrow's note starts from `templates/daily.md`, and that template is\n> meant to be customized: open it (or ask your agent) and make it yours.\n\n___\n\n## Journal\n\n_What happened, what you noticed, how it went._\n\nSlept badly, but the morning walk fixed it 🌤️. Coffee with **Ana**, who is\nthinking about changing jobs. I said I'd send her that article.\n\nNoticed I keep saying yes to things on Thursdays. Worth watching.\n\n___\n\n## Day planner\n\n_Timed lines land on the planner beside you, like `- [ ] 09:00 - 10:00 Deep work`._\n\n- [x] 08:00 - 08:30 Morning walk 🚶\n- [ ] 09:30 - 11:00 Deep work: the budget spreadsheet 📊\n- [ ] 12:30 Lunch with Ana 🥗\n- [ ] 15:00 - 15:30 Call the dentist ☎️\n- [ ] Buy a birthday card for Dad 🎂\n- [ ] Read 20 pages 📖\n\n___\n\n## Personal\n\n_The people, the errands, the small good things._\n\n- Groceries: eggs, spinach, lemons 🍋\n- Idea 💡: a weekly no-plans Sunday\n- Grateful for: the neighbour who watered the plants\n\n> \"The days are long, but the years are short.\"\n\n___\n\n## How this page works\n\n- `- [ ]` makes a checkbox. Put a time in front and it appears on the planner to the right.\n- `## ` starts a section, `___` draws a line, `**bold**` and `_italic_` do what they say, and `> ` quotes.\n- Double brackets link to another note: [[welcome]].\n- Your agent adds its part *below* yours and never rewrites what you wrote. Try **Wrap Today** in the left rail tonight.\n"
+  },
+  "after": "# Thursday, October 2, 2026\n\n> 👋 **This first day is an example.** It shows what a daily note can hold:\n> sections, lists, checkboxes, a few emojis. Change it, delete it, keep the\n> bits you like. It's your page now.\n>\n> Tomorrow's note starts from `templates/daily.md`, and that template is\n> meant to be customized: open it (or ask your agent) and make it yours.\n\n___\n\n## Journal\n\n_What happened, what you noticed, how it went._\n\nSlept badly, but the morning walk fixed it 🌤️. Coffee with **Ana**, who is\nthinking about changing jobs. I said I'd send her that article.\n\nNoticed I keep saying yes to things on Thursdays. Worth watching.\n\n___\n\n## Day planner\n\n_Timed lines land on the planner beside you, like `- [ ] 09:00 - 10:00 Deep work`._\n\n- [x] 08:00 - 08:30 Morning walk 🚶\n- [ ] 09:30 - 11:00 Deep work: the budget spreadsheet 📊\n- [ ] 12:30 Lunch with Ana 🥗\n- [ ] 15:00 - 15:30 Call the dentist ☎️\n- [ ] Buy a birthday card for Dad 🎂\n- [ ] Read 20 pages 📖\n\n___\n\n## Personal\n\n_The people, the errands, the small good things._\n\n- Groceries: eggs, spinach, lemons 🍋\n- Idea 💡: a weekly no-plans Sunday\n- Grateful for: the neighbour who watered the plants\n\n> \"The days are long, but the years are short.\"\n\n___\n\n## How this page works\n\n- `- [ ]` makes a checkbox. Put a time in front and it appears on the planner to the right.\n- `## ` starts a section, `___` draws a line, `**bold**` and `_italic_` do what they say, and `> ` quotes.\n- Double brackets link to another note: [[welcome]].\n- Your agent adds its part *below* yours and never rewrites what you wrote. Try **Wrap Today** in the left rail tonight.\n",
+  "outcome": "created",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

@@ -1,0 +1,27 @@
+{
+  "name": "stale base keeps both",
+  "before": "## Goals\n- a\n- b\n\n## Notes\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-rs2",
+    "path": "weekly/2026-W40.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "replace_section",
+    "heading": {
+      "text": "Goals",
+      "level": 2,
+      "ordinal": 0
+    },
+    "base_hash": "0000000000000000",
+    "lines": [
+      "- a",
+      "- d"
+    ]
+  },
+  "after": "## Goals\n- a\n- b\n\n- a <!--thock:also-->\n- d\n\n## Notes\n",
+  "outcome": "kept_both",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

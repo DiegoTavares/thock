@@ -1,0 +1,25 @@
+{
+  "name": "weekly template replace_line found",
+  "before": "# Week 40, 2026\n\n_Seven days, one page. Set a direction at the start, look back at the end._\n\n___\n\n## Goals\n\n_Two or three things that would make this a good week._\n\n- [ ] Ship the sync spec\n- [ ] Call Mum\n\n___\n\n## Notes\n\n_Anything worth keeping that doesn't belong to a single day._\n\n___\n\n## Week review\n\n_How did it go? The **Week Review** ritual appends its take below yours._\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "fixture-weekly-template-replace_line",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "replace_line",
+    "heading": {
+      "text": "Goals",
+      "level": 2,
+      "ordinal": 0
+    },
+    "line_hash": "b3b69be4655072a4",
+    "ordinal": 0,
+    "new_line": "- [x] Ship the sync spec"
+  },
+  "after": "# Week 40, 2026\n\n_Seven days, one page. Set a direction at the start, look back at the end._\n\n___\n\n## Goals\n\n_Two or three things that would make this a good week._\n\n- [x] Ship the sync spec\n- [ ] Call Mum\n\n___\n\n## Notes\n\n_Anything worth keeping that doesn't belong to a single day._\n\n___\n\n## Week review\n\n_How did it go? The **Week Review** ritual appends its take below yours._\n",
+  "outcome": "applied",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

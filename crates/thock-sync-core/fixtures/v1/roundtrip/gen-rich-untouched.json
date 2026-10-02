@@ -1,0 +1,10 @@
+{
+  "name": "rich untouched",
+  "before": "# Rich\n\n## Table\n\n| Name | Due |\n| --- | --- |\n| Report | Friday |\n\n<!-- a comment the phone never touches -->\n\n## Lists\n\n- Parent\n  - Child one\n  - Child two\n    - Grandchild\n- [ ] 14:00 Sibling task <!--gcal:aaaaaaaaaaaa-->\n\n## Personal\n\nProse.\n",
+  "seed": null,
+  "write": null,
+  "after": "# Rich\n\n## Table\n\n| Name | Due |\n| --- | --- |\n| Report | Friday |\n\n<!-- a comment the phone never touches -->\n\n## Lists\n\n- Parent\n  - Child one\n  - Child two\n    - Grandchild\n- [ ] 14:00 Sibling task <!--gcal:aaaaaaaaaaaa-->\n\n## Personal\n\nProse.\n",
+  "outcome": "noop",
+  "effect_present_before": true,
+  "effect_present_after": true
+}

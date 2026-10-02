@@ -1,0 +1,24 @@
+{
+  "name": "append to end of file",
+  "before": "# Title\n\ntext\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-eof",
+    "path": "note.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "append",
+    "heading": null,
+    "lines": [
+      "more"
+    ],
+    "placement": "end",
+    "blank_line_before": true,
+    "create_from_template": false
+  },
+  "after": "# Title\n\ntext\n\nmore\n",
+  "outcome": "applied",
+  "effect_present_before": false,
+  "effect_present_after": true
+}
