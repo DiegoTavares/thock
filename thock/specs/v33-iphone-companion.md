@@ -186,20 +186,23 @@ sheet is discarded silently. One haptic and a one-line toast name where it went.
 | Today | Appended at the end of today's `## Day planner` as `- [ ] <first line>` when the capture is one line, otherwise appended to `## Personal` (or the last section before any agent heading) as prose. Today's note is created from the template if missing. |
 | Backlog | Appended under the configured **Soon** heading of `backlog.md` as `- [ ] <first line>`, below the last task of the loose group (V17). Extra lines, if any, become the task's own indented continuation. |
 
-A Today or Backlog capture does not go through triage and therefore gets no triage-log line; the
-receipts row says *added to Today* / *added to Backlog · Soon* from the phone's own record (§14).
+A Today or Backlog capture does not go through triage and therefore gets no triage-log line, and
+it is not listed in the inbox feed (§6.3); the toast names where it went.
 
 ### 6.3 Receipts
 
-The Inbox row on the canvas opens the capture feed: every capture the phone made, newest first,
-with a state read from the vault on each refresh:
+The Inbox row on the canvas opens the inbox feed: every inbox capture the phone made, newest first,
+with a state read from the vault on each refresh, then any other note waiting in `inbox/`. Today
+and Backlog captures never pass through the inbox, so the feed leaves them out; they show where they
+landed. A note still waiting opens in the capture editor and can be edited until triage files it
+(the first line is its title; the heading and body are rewritten, the front matter is left as
+captured, since no write reaches it):
 
 | State | Evidence |
 | --- | --- |
 | waiting for the desk | `inbox/<file>` still exists |
 | filed → `<destination>`, `<day>` | a triage-log line whose `<!--inbox:<digest>-->` matches; destination is the text after `→` |
 | discarded | log line with destination *Discard* |
-| added to Today / Backlog · Soon | the phone's own record of a Today/Backlog capture |
 | gone | note missing and no log line (deleted by hand at the desk) — shown muted, not as an error |
 
 The triage log format (V13 §9.5) becomes a parsed contract on the phone side. It is stated
@@ -376,7 +379,7 @@ The phone writes **only**:
 
 | Where | How |
 | --- | --- |
-| `inbox/*.md` | create-if-missing |
+| `inbox/*.md` | create-if-missing; while it waits for triage, replace its level-1 heading line and that heading's section |
 | `reference/clips/*.md` | create-if-missing |
 | `daily/<today>.md` | create from template if missing; append under `## Journal`, `## Day planner`, `## Personal`, `# Asked on the go`; replace one planner line; replace one journal paragraph; replace one section's line range after confirmation |
 | `daily/<other day>.md` | the same single-line planner edits, from the day strip |

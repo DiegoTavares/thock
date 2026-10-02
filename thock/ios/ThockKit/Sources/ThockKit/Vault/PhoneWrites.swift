@@ -210,14 +210,7 @@ public struct PhoneWrites: Sendable {
 
         switch destination {
         case .inbox:
-            var rest = Array(content.dropFirst())
-            if firstLines.count > 1 {
-                var remainder = first
-                remainder.text = firstLines.dropFirst().joined(separator: "\n")
-                remainder.touched = true
-                rest.insert(remainder, at: 0)
-            }
-            let body = EditorDocument(blocks: rest.map { var block = $0; block.touched = true; return block }).lines().joined(separator: "\n")
+            let body = Self.inboxBody(content).joined(separator: "\n")
             let (write, record) = inboxNote(InboxFields(title: title, body: body), captureKind: .idea, taken: taken)
             return ([write], record)
 
@@ -274,6 +267,80 @@ public struct PhoneWrites: Sendable {
             return last
         }
         return HeadingRef(text: config.personalHeadings.first ?? "Personal", level: 2)
+    }
+
+    /// What follows an inbox note's title: everything the editor produced
+    /// after the first line, which is the title.
+    static func inboxBody(_ content: [Block]) -> [String] {
+        guard let first = content.first else { return [] }
+        let firstLines = first.text.components(separatedBy: "\n")
+        var rest = Array(content.dropFirst())
+        if firstLines.count > 1 {
+            var remainder = first
+            remainder.text = firstLines.dropFirst().joined(separator: "\n")
+            rest.insert(remainder, at: 0)
+        }
+        return EditorDocument(blocks: rest.map { var block = $0; block.touched = true; return block }).lines()
+    }
+
+    // MARK: Inbox edits
+
+    /// A waiting inbox note as the capture editor opens it: the title line,
+    /// then the body. `nil` when the note has no level-1 heading, which is
+    /// what an edit is anchored on.
+    public static func inboxEditorText(_ note: String) -> String? {
+        let file = TextFile(note)
+        guard let heading = file.headings().first(where: { $0.level == 1 }) else { return nil }
+        let body = file.lines[file.section(of: heading).body].map(\.text)
+        let trimmed = body.drop { $0.trimmingCharacters(in: .whitespaces).isEmpty }
+        return ([heading.text] + (trimmed.isEmpty ? [] : [""] + trimmed)).joined(separator: "\n")
+    }
+
+    /// Rewrites a waiting inbox note's title and body, leaving its front
+    /// matter as captured (the contract has no write that reaches it). The
+    /// body is guarded by its hash, so an edit made at the desk meanwhile is
+    /// kept beside this one rather than lost.
+    public func inboxEdit(path: String, note: String, blocks: [Block]) -> (writes: [PlannedWrite], title: String)? {
+        let file = TextFile(note)
+        let headings = file.headings()
+        guard let heading = headings.first(where: { $0.level == 1 }) else { return nil }
+        let content = blocks.filter { $0.kind != .blank }
+        guard let first = content.first,
+              !content.allSatisfy({ $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.kind != .rule })
+        else { return nil }
+        let title = Slug.sanitizedTitle(Inline.plainText(first.text.components(separatedBy: "\n")[0]))
+
+        var writes: [PlannedWrite] = []
+        let section = file.section(of: heading)
+        let oldBody = file.lines[section.body].map(\.text)
+        var newBody = Array(Self.inboxBody(content).drop { $0.trimmingCharacters(in: .whitespaces).isEmpty })
+        while newBody.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
+            newBody.removeLast()
+        }
+        if !newBody.isEmpty {
+            newBody.insert("", at: 0)
+        }
+        if newBody != oldBody {
+            var write = document(.replaceSection, path: path)
+            write.heading = NoteView.reference(heading, in: headings)
+            write.baseHash = SyncCore.sectionHash(lines: oldBody)
+            write.lines = newBody
+            writes.append(PlannedWrite(document: write))
+        }
+        // The heading is renamed last: the section write above names it by
+        // its old text.
+        if title != Slug.sanitizedTitle(Inline.plainText(heading.text)) {
+            let line = file.lines[heading.index].text
+            let hash = SyncCore.lineHash(line)
+            let mask = file.contentMask()
+            let twins = file.wholeFile().body.filter { mask[$0] && SyncCore.lineHash(file.lines[$0].text) == hash }
+            var write = document(.replaceLine, path: path)
+            write.lineHash = hash
+            write.ordinal = twins.firstIndex(of: heading.index) ?? 0
+            write.newLine = "# " + title
+            writes.append(PlannedWrite(document: write))
+        }
+        return (writes, title)
     }
 
     // MARK: Journal

@@ -120,30 +120,34 @@ struct NoticeBar: View {
 struct ComposeDock: View {
     @Environment(AppModel.self) private var model
 
+    /// The field reaches into the home indicator's band (the window's inset,
+    /// which leaves the keyboard out), so it has about as much room below it
+    /// as above instead of floating over an empty strip.
+    private var bottomPadding: CGFloat {
+        let inset = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.bottom }
+            .first ?? 0
+        return inset > 0 ? min(0, 20 - inset) : 12
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Hairline()
             Button {
                 model.sheet = .capture(entry: "dock", preset: nil)
             } label: {
-                HStack(spacing: 12) {
-                    Text("Write something…")
-                        .font(.system(size: 16))
-                        .foregroundStyle(Theme.dim)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                        .frame(height: 44)
-                        .background(Theme.ground, in: Capsule())
-                        .overlay(Capsule().stroke(Theme.rule, lineWidth: 1))
-                    Image(systemName: "plus")
-                        .font(.system(size: 19, weight: .medium))
-                        .foregroundStyle(Theme.amberInk)
-                        .frame(width: 44, height: 44)
-                        .background(Theme.amber, in: Circle())
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 10)
-                .padding(.bottom, 8)
+                Text("Write something…")
+                    .font(.system(size: 16))
+                    .foregroundStyle(Theme.dim)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .frame(height: 44)
+                    .background(Theme.ground, in: Capsule())
+                    .overlay(Capsule().stroke(Theme.rule, lineWidth: 1))
+                    .contentShape(Capsule())
+                    .padding(.horizontal, 18)
+                    .padding(.top, 12)
+                    .padding(.bottom, bottomPadding)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Write something")

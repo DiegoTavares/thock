@@ -20,26 +20,29 @@ struct InAppClipSheet: View {
     }
 }
 
-/// The capture feed behind the Inbox row: everything this phone caught, and
-/// what became of it (V33 §6.3).
+/// The feed behind the Inbox row: what this phone sent to the inbox and what
+/// became of it (V33 §6.3), plus whatever else waits there. Captures sent to
+/// Today or the backlog never pass through the inbox, so they are not listed.
+/// A note still waiting can be opened and edited.
 struct ReceiptsScreen: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @State private var editing: InboxEdit?
 
     var body: some View {
         let _ = model.revision
-        let receipts = model.store?.receipts() ?? []
+        let receipts = (model.store?.receipts() ?? []).filter { $0.record.inboxPath != nil }
         let mine = Set(receipts.compactMap(\.record.inboxPath))
         let others = (model.store?.waitingInboxNotes() ?? []).filter { !mine.contains($0.path) }
         VStack(alignment: .leading, spacing: 0) {
             SheetHeader(leading: "", title: "", trailing: "Done", onLeading: {}, onTrailing: { dismiss() })
                 .padding(.bottom, 4)
             VStack(alignment: .leading, spacing: 4) {
-                Text("CAPTURES")
+                Text("INBOX")
                     .font(Theme.label())
                     .tracking(0.9)
                     .foregroundStyle(Theme.dim)
-                Text("Everything you caught")
+                Text("Waiting for the desk")
                     .font(Theme.serif(28, style: .title1))
                     .foregroundStyle(Theme.ink)
             }
@@ -47,21 +50,38 @@ struct ReceiptsScreen: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if receipts.isEmpty, others.isEmpty {
-                        Text("Nothing caught yet. The dock at the bottom of today is the fastest way in.")
+                        Text("Nothing in the inbox. The field at the bottom of today is the fastest way in.")
                             .font(.system(size: 16))
                             .foregroundStyle(Theme.dim)
                             .padding(.top, 8)
                     }
                     ForEach(receipts, id: \.record.id) { receipt in
-                        ReceiptRow(title: receipt.record.title, detail: detail(for: receipt.record, state: receipt.state), dot: dot(for: receipt.state), muted: receipt.state == .gone)
+                        ReceiptRow(title: receipt.record.title, detail: detail(for: receipt.record, state: receipt.state), dot: dot(for: receipt.state), muted: receipt.state == .gone,
+                                   onEdit: receipt.state == .waiting ? receipt.record.inboxPath.flatMap(edit(_:)) : nil)
                     }
                     ForEach(others, id: \.path) { note in
-                        ReceiptRow(title: note.title, detail: Text(sourceName(note.source) + " · ") + Text("waiting for the desk").foregroundStyle(Theme.muted), dot: Theme.dim, muted: false)
+                        ReceiptRow(title: note.title, detail: Text(sourceName(note.source) + " · ") + Text("waiting for the desk").foregroundStyle(Theme.muted), dot: Theme.dim, muted: false,
+                                   onEdit: edit(note.path))
                     }
                 }
             }
         }
         .padding(.horizontal, 20)
+        .sheet(item: $editing) { edit in
+            InboxEditSheet(edit: edit)
+                .presentationBackground(Theme.surface)
+                .presentationCornerRadius(26)
+                .presentationDragIndicator(.hidden)
+                .preferredColorScheme(model.appearance.scheme)
+                .tint(Theme.amber)
+        }
+    }
+
+    /// Opens the editor on a waiting note, when it has a heading to anchor
+    /// the edit and the phone may still write.
+    private func edit(_ path: String) -> (() -> Void)? {
+        guard !model.isReadOnly, let text = model.session?.inboxEditorText(path) else { return nil }
+        return { editing = InboxEdit(path: path, text: text) }
     }
 
     private func dot(for state: ReceiptState) -> Color {
@@ -120,9 +140,10 @@ struct ReceiptRow: View {
     var detail: Text
     var dot: Color
     var muted: Bool
+    var onEdit: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let row = VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 12) {
                 Circle().fill(dot).frame(width: 9, height: 9).padding(.top, 7)
                 VStack(alignment: .leading, spacing: 3) {
@@ -134,11 +155,82 @@ struct ReceiptRow: View {
                         .font(.system(size: 13))
                         .foregroundStyle(Theme.dim)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if onEdit != nil {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.dim)
+                        .padding(.top, 6)
+                }
             }
             .padding(.vertical, 11)
             Hairline(color: Theme.ruleSoft)
         }
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+
+        if let onEdit {
+            Button(action: onEdit) { row }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens it to edit")
+        } else {
+            row
+        }
+    }
+}
+
+struct InboxEdit: Identifiable {
+    var id: String { path }
+    var path: String
+    var text: String
+}
+
+/// A waiting inbox note in the capture editor. Done saves, and so does
+/// swiping it away, as with a new capture; Cancel leaves the note as it was.
+struct InboxEditSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    var edit: InboxEdit
+
+    @State private var blocks: [Block] = []
+    @State private var handle = EditorHandle()
+    @State private var finished = false
+
+    private var isEmpty: Bool {
+        blocks.allSatisfy { $0.kind == .blank }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SheetHeader(leading: "Cancel", title: "Edit capture", trailing: "Done", trailingEnabled: !isEmpty) {
+                finished = true
+                dismiss()
+            } onTrailing: {
+                save()
+                dismiss()
+            }
+            RichTextEditor(initial: Blocks.parse(edit.text), handle: handle, placeholder: "What's on your mind?", fontSize: 19) { query in
+                model.session?.noteTitles(matching: query) ?? []
+            } onChange: { blocks = $0 }
+            .frame(maxHeight: .infinity)
+            Text("The first line is its title. It stays in your inbox for triage.")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.dim)
+                .padding(.bottom, 10)
+        }
+        .padding(.horizontal, 20)
+        .onAppear { blocks = Blocks.parse(edit.text) }
+        .onDisappear(perform: save)
+    }
+
+    private func save() {
+        guard !finished else { return }
+        finished = true
+        guard !isEmpty else { return }
+        var changed = false
+        if model.perform({ changed = try $0.editInbox(path: edit.path, blocks: blocks) }), changed {
+            model.show("Capture updated")
+        }
     }
 }
 

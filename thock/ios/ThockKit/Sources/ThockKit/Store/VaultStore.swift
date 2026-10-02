@@ -316,6 +316,13 @@ public final class VaultStore: @unchecked Sendable {
         changed()
     }
 
+    public func renameCapture(inboxPath: String, title: String) {
+        locked {
+            try? database.execute("UPDATE captures SET title = ? WHERE inbox_path = ?", [.text(title), .text(inboxPath)])
+        }
+        changed()
+    }
+
     public func captures() -> [CaptureRecord] {
         locked {
             let rows = (try? database.query("SELECT id, digest, title, kind, destination, made_at, inbox_path FROM captures ORDER BY made_at DESC, id DESC")) ?? []

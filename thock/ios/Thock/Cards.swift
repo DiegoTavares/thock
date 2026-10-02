@@ -281,7 +281,7 @@ struct PlannerCard: View {
         }
         .sheet(item: $editing) { item in
             EditLineSheet(item: item, day: day)
-                .presentationDetents([.height(220)])
+                .presentationDetents([.medium])
                 .presentationBackground(Theme.surface)
                 .presentationCornerRadius(26)
                 .preferredColorScheme(model.appearance.scheme)
@@ -332,16 +332,16 @@ struct PlannerRow: View {
         let label = Text(Rich.text(Inline.parse(item.label)))
             .font(.system(size: 17))
             .strikethrough(faded, color: Theme.dim)
-        let words = timeText.isEmpty ? label : Text(timeText).font(Theme.mono(13)).foregroundStyle(faded ? Theme.dim : Theme.muted) + Text("  ") + label
+        // The hour is what the eye scans for, so it never reads as part of
+        // the words; meetings keep the calendar's tone.
+        let timeColor = faded ? Theme.dim : (item.isCalendar ? Theme.cal : Theme.amber)
+        let words = timeText.isEmpty ? label : Text(timeText).font(Theme.mono(13, weight: .medium)).foregroundStyle(timeColor) + Text("  ") + label
         let row = HStack(alignment: .firstTextBaseline, spacing: 10) {
-            if item.isCalendar {
-                RoundedRectangle(cornerRadius: 2).fill(Theme.cal).frame(width: 3, height: 20)
-                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
-            }
             Checkbox(checked: item.done)
                 .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 3 }
             words
                 .foregroundStyle(faded ? Theme.dim : Theme.ink)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 7)

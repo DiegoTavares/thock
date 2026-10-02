@@ -330,7 +330,7 @@ final class AppModel {
             return
         }
         switch entry {
-        case .idea: sheet = .capture(entry: "idea", preset: .inbox)
+        case .idea: sheet = .capture(entry: "idea", preset: nil)
         case .journal: sheet = .journal
         case .clip: sheet = .clip
         case .ask: sheet = .ask

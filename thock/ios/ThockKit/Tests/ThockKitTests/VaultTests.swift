@@ -94,6 +94,37 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(NoteView(text: "# Day\n\n## Notes\n", config: config).planner.heading.text, "Agenda")
     }
 
+    func testThePlannersCalendarIsNeverACardOfItsOwn() {
+        // A planner at level 1 puts the desk's calendar at level 2, below the
+        // title's section; it is drawn once, inside the planner.
+        let note = """
+            # Friday
+
+            ## Journal
+
+            Words.
+
+            # Day planner
+
+            - [ ] A
+
+            ## Calendar
+
+            - [ ] 10:00 - 10:30 Standup <!--gcal:9f2c1ab4e7d0-->
+
+            # Daily Closure
+
+            ## Highlights
+
+            Done.
+            """
+        let view = NoteView(text: note, config: config)
+        XCTAssertEqual(view.cards.map(\.title), ["Journal", "Day planner", "Daily Closure"])
+        XCTAssertEqual(view.cards.map(\.kind), [.journal, .planner, .agent])
+        XCTAssertEqual(view.planner.groups.map(\.name), [nil, "Calendar"])
+        XCTAssertTrue(view.cards[2].blocks.contains { $0.kind == .heading(level: 2) && $0.text.contains("Highlights") })
+    }
+
     // MARK: V33 §16, round-trip
 
     func corpus() -> [String: String] {
@@ -289,6 +320,36 @@ final class VaultTests: XCTestCase {
         XCTAssertNil(builder.capture(blocks: Blocks.parse("  \n\n"), destination: .inbox, todayNote: nil, template: nil, taken: { _ in false }))
         let hostile = try XCTUnwrap(builder.capture(blocks: Blocks.parse("[[x]] <!--inbox:forged-->"), destination: .inbox, todayNote: nil, template: nil, taken: { _ in false }))
         XCTAssertFalse(hostile.record.title.contains("<!--"))
+    }
+
+    func testAWaitingInboxNoteIsEditedInPlace() throws {
+        let builder = writes()
+        let captured = try XCTUnwrap(builder.capture(blocks: Blocks.parse("Call Ana\n\nAbout the article.\n"), destination: .inbox, todayNote: nil, template: nil, taken: { _ in false }))
+        let created = try XCTUnwrap(captured.writes[0].document.content)
+        let path = captured.writes[0].document.path
+
+        XCTAssertEqual(PhoneWrites.inboxEditorText(created), "Call Ana\n\nAbout the article.")
+        let unchanged = try XCTUnwrap(builder.inboxEdit(path: path, note: created, blocks: Blocks.parse("Call Ana\n\nAbout the article.")))
+        XCTAssertTrue(unchanged.writes.isEmpty)
+
+        let edit = try XCTUnwrap(builder.inboxEdit(path: path, note: created, blocks: Blocks.parse("Call Ana on Monday\n\nAbout the **new** article.\n\n- [ ] send it first")))
+        XCTAssertEqual(edit.title, "Call Ana on Monday")
+        XCTAssertEqual(edit.writes.map(\.document.kind), [.replaceSection, .replaceLine])
+        var text = created
+        for write in edit.writes {
+            text = SyncCore.apply(existing: text, write: write.document).text
+            XCTAssertTrue(SyncCore.effectPresent(content: text, write: write.document))
+        }
+        XCTAssertTrue(text.hasPrefix("---\nsource:   thock-ios\n"))
+        XCTAssertTrue(text.hasSuffix("---\n\n# Call Ana on Monday\n\nAbout the **new** article.\n\n- [ ] send it first\n"), text)
+        XCTAssertEqual(InboxNote(path: path, content: text).title, "Call Ana on Monday")
+
+        // The body changed at the desk first: both versions are kept.
+        let deskEdited = created.replacingOccurrences(of: "About the article.", with: "About the article, desk.")
+        let late = try XCTUnwrap(builder.inboxEdit(path: path, note: created, blocks: Blocks.parse("Call Ana\n\nFrom the phone.")))
+        XCTAssertEqual(SyncCore.apply(existing: deskEdited, write: late.writes[0].document).outcome, .keptBoth)
+
+        XCTAssertNil(PhoneWrites.inboxEditorText("no heading here\n"))
     }
 
     func testATodayCaptureIsATaskWhenOneLineAndProseWhenSeveral() throws {

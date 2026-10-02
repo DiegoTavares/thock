@@ -61,6 +61,23 @@ public struct VaultSession: Sendable {
         return captured.record
     }
 
+    /// The waiting inbox note at `path` as the capture editor opens it, or
+    /// `nil` when it is gone or cannot be edited from here.
+    public func inboxEditorText(_ path: String) -> String? {
+        store.content(path).flatMap(PhoneWrites.inboxEditorText)
+    }
+
+    /// Rewrites a waiting inbox note from the capture editor. Returns false
+    /// when there was nothing to write.
+    @discardableResult
+    public func editInbox(path: String, blocks: [Block], now: Date = Date()) throws -> Bool {
+        guard let note = store.content(path), let edit = writes(now: now).inboxEdit(path: path, note: note, blocks: blocks) else { return false }
+        guard !edit.writes.isEmpty else { return false }
+        try record(edit.writes)
+        store.renameCapture(inboxPath: path, title: edit.title)
+        return true
+    }
+
     @discardableResult
     public func clip(_ clip: PhoneWrites.Clip, now: Date = Date()) throws -> CaptureRecord {
         let result = writes(now: now).clip(clip, taken: store.exists)

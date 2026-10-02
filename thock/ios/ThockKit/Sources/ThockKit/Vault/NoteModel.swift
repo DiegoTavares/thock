@@ -110,7 +110,17 @@ public struct NoteView: Equatable, Sendable {
         let inside = afterTitle.filter { $0.index < titleEnd }
         let cardLevel = inside.map(\.level).min() ?? 2
         var cardHeadings = inside.filter { $0.level == cardLevel }
-        cardHeadings += afterTitle.filter { $0.index >= titleEnd }
+        // Past the title's section only another level-1 heading (the agent's
+        // voice) starts a card; its subheadings are part of it.
+        cardHeadings += afterTitle.filter { $0.index >= titleEnd && $0.level == 1 }
+        // The planner and journal draw their own subsections (the desk's
+        // `Calendar` among them), so those never become cards of their own,
+        // whatever level the note puts them at.
+        let owned = [plannerHeading, journalHeading].compactMap { $0 }.map { heading in
+            let section = file.section(of: heading)
+            return section.start..<section.end
+        }
+        cardHeadings.removeAll { heading in owned.contains { $0.contains(heading.index) } }
         cardHeadings.sort { $0.index < $1.index }
 
         var cards: [NoteCard] = []
@@ -323,13 +333,18 @@ public struct InboxNote: Equatable, Sendable {
         digest = fields["capture"]
         captured = fields["captured"]
         url = fields["url"]
-        if let title = fields["title"], !title.isEmpty {
+        let body = lines[min(bodyStart, lines.count)...].first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
+        let heading = TextFile.heading(in: body)
+        // The phone edits a waiting note's heading but cannot reach its front
+        // matter, so a level-1 heading is the newer of the two.
+        if let heading, heading.level == 1, !heading.text.isEmpty {
+            self.title = Inline.plainText(heading.text)
+        } else if let title = fields["title"], !title.isEmpty {
             self.title = title
         } else {
-            let body = lines[min(bodyStart, lines.count)...].first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
-            let heading = TextFile.heading(in: body)?.text ?? body.trimmingCharacters(in: .whitespaces)
+            let first = heading?.text ?? body.trimmingCharacters(in: .whitespaces)
             let stem = path.split(separator: "/").last.map(String.init)?.replacingOccurrences(of: ".md", with: "") ?? path
-            self.title = heading.isEmpty ? stem : Inline.plainText(heading)
+            self.title = first.isEmpty ? stem : Inline.plainText(first)
         }
     }
 }
