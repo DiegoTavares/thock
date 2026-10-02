@@ -178,15 +178,33 @@ pub fn effect_present(content: &str, write: &Write) -> bool {
             contains_run(&document.matchable(&section), lines)
         }
         Operation::ReplaceLine {
-            heading, new_line, ..
+            heading,
+            line_hash: wanted,
+            ordinal,
+            new_line,
         } => {
             let Some(section) = find_section(&document, heading.as_ref()) else {
                 return false;
             };
             let marked = mark(new_line);
-            document.matchable(&section).iter().any(|(_, line)| {
-                line.trim_end() == new_line.trim_end() || line.trim_end() == marked
-            })
+            let equals =
+                |line: &str| line.trim_end() == new_line.trim_end() || line.trim_end() == marked;
+            // The target itself decides when it exists: two identical lines
+            // must each be tickable. Only when it is gone does any line that
+            // reads like `new_line` count.
+            match find_line(&document, &section, wanted, *ordinal) {
+                Some(index) => document
+                    .lines
+                    .get(index)
+                    .is_some_and(|line| equals(&line.text)),
+                None => {
+                    let new_hash = line_hash(new_line);
+                    document
+                        .matchable(&section)
+                        .iter()
+                        .any(|(_, line)| equals(line) || line_hash(line) == new_hash)
+                }
+            }
         }
         Operation::RemoveLine {
             heading,

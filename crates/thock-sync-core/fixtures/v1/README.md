@@ -45,9 +45,12 @@ Decisions the implementation had to take; the contract will be amended to match.
   before it. The shipped templates end every section with `___`; an append lands above it.
 - Lines inside a **fence or front matter** never match `replace_line`, `remove_line`, or the
   contiguous-run check of `append`; a run may not span them.
-- `replace_line` counts as **present when a body line equals `new_line`** (or `new_line` plus the
-  marker), not when a line hashes like `new_line`: tick and retime keep the hash, so the hash test
-  would call every such edit already done.
+- `replace_line` counts as **present when its target line equals `new_line`** (or `new_line` plus
+  the marker); when the target is gone, when any body line equals either or hashes like `new_line`.
+  Tick and retime keep the hash, so a plain hash test would call every such edit already done, and
+  "any line equals" would refuse to tick the second of two identical lines.
+- The **whole-file body** (`heading: null`) trims only blank lines; the end of the file is below a
+  closing rule.
 - `create` on an existing, different file (rule 3) counts as **present once the file contains
   `content`'s lines as a run**, so re-applying it does not append twice.
 - A stale `replace_section` puts the marker on the **first non-blank** appended line.
