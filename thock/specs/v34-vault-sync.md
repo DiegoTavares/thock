@@ -6,7 +6,9 @@ that do not change the architecture are logged in §16 for the first implementat
 **Design reference:** the interactive page with the decision cards, the architecture, three sync
 scenarios stepped through line by line, and the option cards §16 resolves:
 <https://claude.ai/artifact/VhXHNDp4bdqChWoxeFiwDU>
-**Companion docs:** `v33-iphone-companion.md` (the phone app and its write contract, §14 there, which
+**Companion docs:** `v34-vault-sync-api.md` (the frozen wire contract, write document and application
+rules the three implementations build against; it also records the §16 decisions it had to take),
+`v33-iphone-companion.md` (the phone app and its write contract, §14 there, which
 this spec turns into a protocol), `v25-thock-plus-hosted-agent.md` (the Plus backend this extends,
 the trust model this amends in one place), `v2-invisible-git.md` (the checkpoint service the desk
 runs before applying anything from the phone), `v13-inbox-routine.md` (the `<!--inbox:…-->` marker
