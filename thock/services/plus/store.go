@@ -124,12 +124,12 @@ func (s *store) updateSettings(ctx context.Context, unitsPerDollar float64) erro
 	return err
 }
 
-const planColumns = "id, name, allowance_units, cycle_days, default_model, fast_model, warn_at_percent, max_turns_per_session"
+const planColumns = "id, name, allowance_units, cycle_days, default_model, fast_model, warn_at_percent, max_turns_per_session, vault_quota_bytes"
 
 func scanPlan(row pgx.Row) (plan, error) {
 	var p plan
 	err := row.Scan(&p.ID, &p.Name, &p.AllowanceUnits, &p.CycleDays, &p.Models.Default, &p.Models.Fast,
-		&p.Limits.WarnAtPercent, &p.Limits.MaxTurnsPerSession)
+		&p.Limits.WarnAtPercent, &p.Limits.MaxTurnsPerSession, &p.Limits.VaultQuotaBytes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return plan{}, errNotFound
 	}
@@ -169,7 +169,7 @@ func (s *store) listPlans(ctx context.Context) ([]plan, error) {
 
 func (s *store) upsertPlan(ctx context.Context, p plan) error {
 	_, err := s.pool.Exec(ctx, `insert into plans (`+planColumns+`)
-		values ($1, $2, $3, $4, $5, $6, $7, $8)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		on conflict (id) do update set
 			name = excluded.name,
 			allowance_units = excluded.allowance_units,
@@ -178,9 +178,10 @@ func (s *store) upsertPlan(ctx context.Context, p plan) error {
 			fast_model = excluded.fast_model,
 			warn_at_percent = excluded.warn_at_percent,
 			max_turns_per_session = excluded.max_turns_per_session,
+			vault_quota_bytes = excluded.vault_quota_bytes,
 			updated_at = now()`,
 		p.ID, p.Name, p.AllowanceUnits, p.CycleDays, p.Models.Default, p.Models.Fast,
-		p.Limits.WarnAtPercent, p.Limits.MaxTurnsPerSession)
+		p.Limits.WarnAtPercent, p.Limits.MaxTurnsPerSession, p.Limits.VaultQuotaBytes)
 	return err
 }
 
@@ -341,6 +342,11 @@ func (s *store) revokeUser(ctx context.Context, id string, at time.Time, note st
 		}
 		if tag.RowsAffected() == 0 {
 			return errNotFound
+		}
+		// The vault benefit ends with the access (V34 §12); the phone keeps
+		// reading for the grace window and the sweeper deletes afterwards.
+		if _, err := tx.Exec(ctx, "update vaults set lapsed_at = $2 where user_id = $1 and lapsed_at is null", id, at); err != nil {
+			return err
 		}
 		return insertLedger(ctx, tx, ledgerEntry{At: at, UserID: id, Source: "revoke", Note: note})
 	})

@@ -29,6 +29,8 @@ type modelTiers struct {
 type planLimits struct {
 	WarnAtPercent      int `json:"warn_at_percent"`
 	MaxTurnsPerSession int `json:"max_turns_per_session"`
+	// Vault sync storage per user; 0 means the plan has no vault.
+	VaultQuotaBytes int64 `json:"vault_quota_bytes"`
 }
 
 func (p plan) allowanceDollars(unitsPerDollar float64) float64 {
@@ -75,6 +77,9 @@ func (p plan) normalize(id string) (plan, error) {
 	}
 	if p.Limits.MaxTurnsPerSession < 0 {
 		return plan{}, errors.New("max_turns_per_session can't be negative")
+	}
+	if p.Limits.VaultQuotaBytes < 0 {
+		return plan{}, errors.New("vault_quota_bytes can't be negative")
 	}
 	return p, nil
 }

@@ -21,6 +21,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,15 @@ type server struct {
 	adminToken string
 	now        func() time.Time
 	syncEvery  time.Duration
+
+	// Vault sync (thock/specs/v34-vault-sync-api.md).
+	blobs     blobStore
+	feed      *feedHub
+	pusher    pusher
+	coalescer *pushCoalescer
+	// Where clients reach this process; the local blob store signs URLs
+	// under it.
+	publicURL string
 
 	// Serializes the sync-and-enforce path so two concurrent polls can't
 	// both disable (or both re-enable) a key. Per process, which is why the
@@ -93,18 +103,54 @@ func main() {
 		gw = newFakeGateway()
 	}
 	s := newServer(store, gw, adminToken)
+	if publicURL := os.Getenv("PUBLIC_URL"); publicURL != "" {
+		s.publicURL = strings.TrimRight(publicURL, "/")
+	} else {
+		s.publicURL = "http://localhost:" + port
+	}
+	switch kind := os.Getenv("BLOB_STORE"); kind {
+	case "", "local":
+		dir := os.Getenv("BLOB_DIR")
+		if dir == "" {
+			dir = filepath.Join(os.TempDir(), "thock-plus-blobs")
+		}
+		key := []byte(os.Getenv("BLOB_SIGNING_KEY"))
+		if len(key) == 0 {
+			// A per-process key: signed URLs die with the process, which is
+			// fine for a store that lives on the same machine.
+			key = make([]byte, 32)
+			if _, err := rand.Read(key); err != nil {
+				log.Fatalf("blob signing key: %v", err)
+			}
+		}
+		blobs, err := newLocalBlobStore(dir, key, func() string { return s.publicURL })
+		if err != nil {
+			log.Fatalf("blob store: %v", err)
+		}
+		s.blobs = blobs
+		log.Printf("storing blobs under %s", dir)
+	default:
+		log.Fatalf("BLOB_STORE=%q isn't supported; use local (a bucket-backed store implements blobStore in blobs.go)", kind)
+	}
+	go s.runSweeper(context.Background(), time.Hour)
 	log.Printf("thock plus backend listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, s.routes()))
 }
 
 func newServer(store *store, gw gateway, adminToken string) *server {
-	return &server{
+	s := &server{
 		store:      store,
 		gateway:    gw,
 		adminToken: adminToken,
 		now:        time.Now,
 		syncEvery:  usageSyncInterval,
+		feed:       newFeedHub(),
+		pusher:     &loggingPusher{},
+		publicURL:  "http://localhost:8080",
 	}
+	s.coalescer = newPushCoalescer(s.sendPush, func() time.Time { return s.now() })
+	s.feed.onPhoneAbsent = s.coalescer.nudge
+	return s
 }
 
 func (s *server) routes() *http.ServeMux {
@@ -112,6 +158,27 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/connect", s.handleConnect)
 	mux.HandleFunc("GET /v1/entitlement", s.withUser(s.handleEntitlement))
 	mux.HandleFunc("POST /v1/disconnect", s.withUser(s.handleDisconnect))
+
+	mux.HandleFunc("POST /v1/vault", s.withVault(vaultCreateRoute, s.handleVaultCreate))
+	mux.HandleFunc("GET /v1/vault", s.withVault(vaultStatusRoute, s.handleVaultGet))
+	mux.HandleFunc("DELETE /v1/vault", s.withVault(vaultDeleteRoute, s.handleVaultDelete))
+	mux.HandleFunc("POST /v1/vault/reset", s.withVault(deskOnly, s.handleVaultReset))
+	mux.HandleFunc("POST /v1/vault/pairings", s.withVault(deskOnly, s.handlePairingCreate))
+	mux.HandleFunc("POST /v1/vault/pair", s.handlePair)
+	mux.HandleFunc("GET /v1/vault/devices", s.withVault(bothRead, s.handleDevicesList))
+	mux.HandleFunc("PATCH /v1/vault/devices/me", s.withVault(phoneOnly, s.handleDevicePatch))
+	mux.HandleFunc("POST /v1/vault/devices/{device_id}/revoke", s.withVault(deskOnly, s.handleDeviceRevoke))
+	mux.HandleFunc("GET /v1/vault/files", s.withVault(bothRead, s.handleFilesList))
+	mux.HandleFunc("POST /v1/vault/files/{path...}", s.withVault(deskOnly, s.handleFilePost))
+	mux.HandleFunc("DELETE /v1/vault/files/{path...}", s.withVault(deskOnly, s.handleFileDelete))
+	mux.HandleFunc("POST /v1/vault/writes", s.withVault(phoneOnly, s.handleWriteCreate))
+	mux.HandleFunc("GET /v1/vault/writes", s.withVault(deskOnly, s.handleWritesList))
+	mux.HandleFunc("POST /v1/vault/writes/ack", s.withVault(deskOnly, s.handleWritesAck))
+	mux.HandleFunc("GET /v1/vault/feed", s.withVault(bothRead, s.handleFeed))
+	if local, ok := s.blobs.(*localBlobStore); ok {
+		mux.HandleFunc("PUT /v1/vault/blobs/{token}", local.serve)
+		mux.HandleFunc("GET /v1/vault/blobs/{token}", local.serve)
+	}
 
 	mux.HandleFunc("GET /admin/plans", s.withAdmin(s.handleAdminPlans))
 	mux.HandleFunc("PUT /admin/plans/{id}", s.withAdmin(s.handleAdminPutPlan))
@@ -122,6 +189,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /admin/users/{id}/allowance", s.withAdmin(s.handleAdminAllowance))
 	mux.HandleFunc("POST /admin/users/{id}/revoke", s.withAdmin(s.handleAdminRevoke))
 	mux.HandleFunc("GET /admin/users/{id}/ledger", s.withAdmin(s.handleAdminLedger))
+	mux.HandleFunc("POST /admin/users/{id}/vault/lapse", s.withAdmin(s.handleAdminLapse))
 
 	health := func(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.pool.Ping(r.Context()); err != nil {
@@ -154,6 +222,8 @@ type entitlementResponse struct {
 	// environment and never shows them.
 	Gateway *gatewayGrant `json:"gateway,omitempty"`
 	Limits  planLimits    `json:"limits"`
+	// Present when the user has a vault (contract §6.6).
+	Vault *entitlementVault `json:"vault,omitempty"`
 }
 
 type gatewayGrant struct {
@@ -390,6 +460,7 @@ func (s *server) entitlementFor(ctx context.Context, u user) (entitlementRespons
 		status = "exhausted"
 	}
 	return entitlementResponse{
+		Vault:          s.entitlementVault(ctx, u, plan.Limits.VaultQuotaBytes),
 		UserID:         u.ID,
 		Status:         status,
 		PlanID:         plan.ID,
@@ -731,6 +802,35 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	}
 }
 
+// writeError answers with the sentence and the code the status implies;
+// handlers that need a more specific code use writeErrorCode.
 func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	writeErrorCode(w, status, defaultErrorCode(status), message)
+}
+
+func writeErrorCode(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]string{"error": message, "code": code})
+}
+
+func defaultErrorCode(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "bad_request"
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusForbidden:
+		return "revoked"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusGone:
+		return "gone"
+	case http.StatusUnprocessableEntity:
+		return "invalid"
+	case http.StatusServiceUnavailable:
+		return "unavailable"
+	case http.StatusBadGateway:
+		return "upstream"
+	default:
+		return "internal"
+	}
 }
