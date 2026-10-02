@@ -347,7 +347,13 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   triage log, and Ask through the hosted agent (Plus). Editing feels like Apple Notes over a strict
   Markdown subset; the phone only ever appends or changes one line, and never runs a ritual.
   Design reference: https://claude.ai/artifact/UqePrnerog5SmibGeLD9ZD. Spec
-  `specs/v33-iphone-companion.md`. Data model and sync get their own spec. _(planned)_
+  `specs/v33-iphone-companion.md`. Data model and sync are V34. _(planned)_
+- [ ] **The same vault on the desk and the phone** — a Thock Plus benefit: pair by scanning one code at
+  the desk; the desk uploads every text file as a blob encrypted with a key that exists only on the two
+  devices, the phone downloads them and queues its appends and single-line edits as small writes the
+  desk applies after a checkpoint. The server (`thock/services/plus`) stores what it cannot read, so
+  the phone has the latest vault while the desk sleeps; a line edited at both ends keeps both versions
+  in the note with a quiet marker, and nothing is ever lost. Spec `specs/v34-vault-sync.md`. _(planned)_
 
 ---
 
