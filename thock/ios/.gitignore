@@ -1,0 +1,5 @@
+!Thock.xcodeproj
+xcuserdata/
+.build/
+DerivedData/
+*.xcuserstate

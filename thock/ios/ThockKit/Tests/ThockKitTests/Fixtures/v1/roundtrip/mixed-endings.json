@@ -1,0 +1,10 @@
+{
+  "name": "mixed endings",
+  "before": "one\r\ntwo\nthree\r\n\r\nfour",
+  "seed": null,
+  "write": null,
+  "after": "one\r\ntwo\nthree\r\n\r\nfour",
+  "outcome": "noop",
+  "effect_present_before": false,
+  "effect_present_after": false
+}

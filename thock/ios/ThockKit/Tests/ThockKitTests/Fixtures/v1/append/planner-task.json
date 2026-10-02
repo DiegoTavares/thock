@@ -1,0 +1,25 @@
+{
+  "name": "a task lands after the planner's last line",
+  "before": "## Day planner\n- [ ] A\n\n## Personal\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "0f7e0b1a-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
+    "kind": "append",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a9e0d7b2f4a61",
+    "heading": {
+      "text": "Day planner",
+      "level": 2,
+      "ordinal": 0
+    },
+    "lines": [
+      "- [ ] B"
+    ]
+  },
+  "after": "## Day planner\n- [ ] A\n- [ ] B\n\n## Personal\n",
+  "outcome": "applied",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

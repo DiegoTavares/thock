@@ -1,0 +1,550 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		3A6B989ADBA6DF3EB957AA10 /* ThockKit in Frameworks */ = {isa = PBXBuildFile; productRef = AC45C576BEC429A68A51B163 /* ThockKit */; };
+		65674055E1ED6B1057406AA0 /* ThockKit in Frameworks */ = {isa = PBXBuildFile; productRef = 6D5C0E9EA85DFB1B7C4B5E9D /* ThockKit */; };
+		15EAFFDAB872B7F1FF8DD8EF /* ThockKit in Frameworks */ = {isa = PBXBuildFile; productRef = E451DDF61BD80C6C8285DE87 /* ThockKit */; };
+		8EF91B659D9EC9B3714C1DA8 /* ThockShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 4151D505780578DD6324A808 /* ThockShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		C9961232FF006692AAD89A4C /* ThockWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C7EE81D51BBE82857D712BEA /* ThockWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		33CAC228B0C72355405A26F2 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BC6689A62B0D526952520887 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3C4EEB281A1E2CC541CAD32C;
+			remoteInfo = ThockShare;
+		};
+		4FED66823EC7AADA9BD6E8A7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BC6689A62B0D526952520887 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A7524A33E613D440B6906363;
+			remoteInfo = ThockWidgets;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		3E7932A9B3AF7CEEFD1F6F30 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				8EF91B659D9EC9B3714C1DA8 /* ThockShare.appex in Embed Foundation Extensions */,
+				C9961232FF006692AAD89A4C /* ThockWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		527EC6526748E443176EC5AB /* Thock.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Thock.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		4151D505780578DD6324A808 /* ThockShare.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = ThockShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		C7EE81D51BBE82857D712BEA /* ThockWidgets.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = ThockWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		61643446B3B317183CFCB1D7 /* Thock */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Thock;
+			sourceTree = "<group>";
+		};
+		5473239C7D1B113A1FF2B794 /* ThockShare */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ThockShare;
+			sourceTree = "<group>";
+		};
+		0B1A8D33D31F250E4583DFE0 /* ThockWidgets */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ThockWidgets;
+			sourceTree = "<group>";
+		};
+		004FA8806A1DA96425CCE82D /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		528185D65739852B043231EA /* Config */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Config;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		1A401B98E6AE49ACAEFBE177 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3A6B989ADBA6DF3EB957AA10 /* ThockKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D059FF834F5B26995E82C480 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				65674055E1ED6B1057406AA0 /* ThockKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2CDE7899E63DA22D78DF89F6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				15EAFFDAB872B7F1FF8DD8EF /* ThockKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		F8DB426AFE8D69CAE2307C4C = {
+			isa = PBXGroup;
+			children = (
+				61643446B3B317183CFCB1D7 /* Thock */,
+				5473239C7D1B113A1FF2B794 /* ThockShare */,
+				0B1A8D33D31F250E4583DFE0 /* ThockWidgets */,
+				004FA8806A1DA96425CCE82D /* Shared */,
+				528185D65739852B043231EA /* Config */,
+				63EE989CA4210C10164824EF /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		63EE989CA4210C10164824EF /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				527EC6526748E443176EC5AB /* Thock.app */,
+				4151D505780578DD6324A808 /* ThockShare.appex */,
+				C7EE81D51BBE82857D712BEA /* ThockWidgets.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		CB422D5B3495893078013D54 /* Thock */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1BA591F026BD7A374B5DA13A /* Build configuration list for PBXNativeTarget "Thock" */;
+			buildPhases = (
+				6C5E6A45AE35416247D63EA3 /* Sources */,
+				1A401B98E6AE49ACAEFBE177 /* Frameworks */,
+				1E85A1F10878F7D00310D031 /* Resources */,
+				3E7932A9B3AF7CEEFD1F6F30 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				2AA2F42464A9F4A37056A834 /* PBXTargetDependency */,
+				B9EFDD84488FA3869697F348 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				61643446B3B317183CFCB1D7 /* Thock */,
+				004FA8806A1DA96425CCE82D /* Shared */,
+			);
+			name = Thock;
+			packageProductDependencies = (
+				AC45C576BEC429A68A51B163 /* ThockKit */,
+			);
+			productName = Thock;
+			productReference = 527EC6526748E443176EC5AB /* Thock.app */;
+			productType = "com.apple.product-type.application";
+		};
+		3C4EEB281A1E2CC541CAD32C /* ThockShare */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 07AA4AF8780D983985D1A806 /* Build configuration list for PBXNativeTarget "ThockShare" */;
+			buildPhases = (
+				C57638F7ADFCC027AF45D19F /* Sources */,
+				D059FF834F5B26995E82C480 /* Frameworks */,
+				51B7D12B812970EE04B4CCAC /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				5473239C7D1B113A1FF2B794 /* ThockShare */,
+				004FA8806A1DA96425CCE82D /* Shared */,
+			);
+			name = ThockShare;
+			packageProductDependencies = (
+				6D5C0E9EA85DFB1B7C4B5E9D /* ThockKit */,
+			);
+			productName = ThockShare;
+			productReference = 4151D505780578DD6324A808 /* ThockShare.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		A7524A33E613D440B6906363 /* ThockWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4703B22F44C8CE47A0984F43 /* Build configuration list for PBXNativeTarget "ThockWidgets" */;
+			buildPhases = (
+				C5A20EBFBAE43E198E9547FC /* Sources */,
+				2CDE7899E63DA22D78DF89F6 /* Frameworks */,
+				6BCF2D8898769E130AAEABC0 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				0B1A8D33D31F250E4583DFE0 /* ThockWidgets */,
+				004FA8806A1DA96425CCE82D /* Shared */,
+			);
+			name = ThockWidgets;
+			packageProductDependencies = (
+				E451DDF61BD80C6C8285DE87 /* ThockKit */,
+			);
+			productName = ThockWidgets;
+			productReference = C7EE81D51BBE82857D712BEA /* ThockWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		BC6689A62B0D526952520887 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2620;
+				LastUpgradeCheck = 2620;
+				TargetAttributes = {
+					CB422D5B3495893078013D54 = {
+						CreatedOnToolsVersion = 26.2;
+					};
+					3C4EEB281A1E2CC541CAD32C = {
+						CreatedOnToolsVersion = 26.2;
+					};
+					A7524A33E613D440B6906363 = {
+						CreatedOnToolsVersion = 26.2;
+					};
+				};
+			};
+			buildConfigurationList = 33E04C9DB8D3AE97779D8839 /* Build configuration list for PBXProject "Thock" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = F8DB426AFE8D69CAE2307C4C;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				BD96F865AC644269410B6096 /* XCLocalSwiftPackageReference "ThockKit" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 63EE989CA4210C10164824EF /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				CB422D5B3495893078013D54 /* Thock */,
+				3C4EEB281A1E2CC541CAD32C /* ThockShare */,
+				A7524A33E613D440B6906363 /* ThockWidgets */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		1E85A1F10878F7D00310D031 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		51B7D12B812970EE04B4CCAC /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6BCF2D8898769E130AAEABC0 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		6C5E6A45AE35416247D63EA3 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C57638F7ADFCC027AF45D19F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C5A20EBFBAE43E198E9547FC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		2AA2F42464A9F4A37056A834 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3C4EEB281A1E2CC541CAD32C /* ThockShare */;
+			targetProxy = 33CAC228B0C72355405A26F2 /* PBXContainerItemProxy */;
+		};
+		B9EFDD84488FA3869697F348 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A7524A33E613D440B6906363 /* ThockWidgets */;
+			targetProxy = 4FED66823EC7AADA9BD6E8A7 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		9534D4C5D761B63BD0C4CD90 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 0.1;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		B5DEE8DED304EBF6BC1F14D4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 0.1;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		B853901D141AAF649CBDD5FB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/Thock-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Thock;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.thock.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		24CEB62C3F362F12FC78B806 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/Thock-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Thock;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.thock.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+		E173AF4B2E2A8A9D584E6F56 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/ThockShare-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Thock;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.thock.ios.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		D095B01E4C0E66DAA4A8E258 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/ThockShare-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Thock;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.thock.ios.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+		5E1F6B2DCF30F9E0B02253E8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/ThockWidgets-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Thock;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.thock.ios.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		00CADA6B976DEC4FB30F61E4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/ThockWidgets-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Thock;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.thock.ios.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		33E04C9DB8D3AE97779D8839 /* Build configuration list for PBXProject "Thock" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9534D4C5D761B63BD0C4CD90 /* Debug */,
+				B5DEE8DED304EBF6BC1F14D4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1BA591F026BD7A374B5DA13A /* Build configuration list for PBXNativeTarget "Thock" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B853901D141AAF649CBDD5FB /* Debug */,
+				24CEB62C3F362F12FC78B806 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		07AA4AF8780D983985D1A806 /* Build configuration list for PBXNativeTarget "ThockShare" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E173AF4B2E2A8A9D584E6F56 /* Debug */,
+				D095B01E4C0E66DAA4A8E258 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		4703B22F44C8CE47A0984F43 /* Build configuration list for PBXNativeTarget "ThockWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5E1F6B2DCF30F9E0B02253E8 /* Debug */,
+				00CADA6B976DEC4FB30F61E4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		BD96F865AC644269410B6096 /* XCLocalSwiftPackageReference "ThockKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ThockKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AC45C576BEC429A68A51B163 /* ThockKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ThockKit;
+		};
+		6D5C0E9EA85DFB1B7C4B5E9D /* ThockKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ThockKit;
+		};
+		E451DDF61BD80C6C8285DE87 /* ThockKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ThockKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = BC6689A62B0D526952520887 /* Project object */;
+}

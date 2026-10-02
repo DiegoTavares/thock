@@ -1,0 +1,10 @@
+{
+  "name": "code fence",
+  "before": "```rust\n## not a heading\nfn main() {}\n```\n\n~~~\n- [ ] not a task\n~~~\n",
+  "seed": null,
+  "write": null,
+  "after": "```rust\n## not a heading\nfn main() {}\n```\n\n~~~\n- [ ] not a task\n~~~\n",
+  "outcome": "noop",
+  "effect_present_before": false,
+  "effect_present_after": false
+}

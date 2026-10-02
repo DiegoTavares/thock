@@ -1,0 +1,10 @@
+{
+  "name": "frontmatter and table",
+  "before": "---\ntitle: x # not a comment\n---\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n<!-- note -->\n",
+  "seed": null,
+  "write": null,
+  "after": "---\ntitle: x # not a comment\n---\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n<!-- note -->\n",
+  "outcome": "noop",
+  "effect_present_before": false,
+  "effect_present_after": false
+}

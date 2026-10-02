@@ -1,0 +1,90 @@
+[
+  {
+    "line": "- [ ] 09:30 - 11:00 Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "- [x] Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "  * [X] 9:05–10:00   Stand  up  ",
+    "line_hash": "e4401d0aba8c48ec"
+  },
+  {
+    "line": "- [ ] 10:00 - 10:30 Standup <!--gcal:aaaaaaaaaaaa-->",
+    "line_hash": "0c14cad4e75f55f5"
+  },
+  {
+    "line": "- [ ] Lunch <!--gcal:x--> <!--thock:also-->",
+    "line_hash": "74b7de10d8791d7b"
+  },
+  {
+    "line": "3. Third item",
+    "line_hash": "e7ae365ad99c1586"
+  },
+  {
+    "line": "- [ ] 14:00 to 15:00 Review",
+    "line_hash": "aff0766a5290e117"
+  },
+  {
+    "line": "- [ ] 23:00 - 24:00 Late",
+    "line_hash": "0f950da185fc88f4"
+  },
+  {
+    "line": "**21:14** · Walked past the bakery",
+    "line_hash": "b51589873a8d98ab"
+  },
+  {
+    "line": "- [ ] 9:30am call",
+    "line_hash": "ee44f4538a2d2659"
+  },
+  {
+    "line": "- [ ] 25:00 Not a time",
+    "line_hash": "d03831cf3906b762"
+  },
+  {
+    "line": "+ [ ] 08:00 Morning walk 🚶",
+    "line_hash": "dc63fe8f1df41024"
+  },
+  {
+    "line": "Plain paragraph",
+    "line_hash": "ec88d0c7e2069e01"
+  },
+  {
+    "text": "📅 **Day planner**:",
+    "heading_key": "day planner"
+  },
+  {
+    "text": "Day-planner",
+    "heading_key": "day planner"
+  },
+  {
+    "text": "[Day planner](plan.md)",
+    "heading_key": "day planner"
+  },
+  {
+    "text": "[[Day planner]]",
+    "heading_key": "day planner"
+  },
+  {
+    "text": "[[plan|Day planner]]",
+    "heading_key": "day planner"
+  },
+  {
+    "text": "Day planner ##",
+    "heading_key": "day planner"
+  },
+  {
+    "text": "Planejamento do dia",
+    "heading_key": "planejamento do dia"
+  },
+  {
+    "text": "日次計画",
+    "heading_key": "日次計画"
+  },
+  {
+    "text": "Week 40, 2026",
+    "heading_key": "week 40 2026"
+  }
+]
