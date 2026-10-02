@@ -339,6 +339,16 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   remember *which* passages the person kept. Spec `specs/v31-readwise-sync.md`. _(shipped)_
 - [ ] **Money + safety:** Polar products referencing backend plans by id (credits with hard stop, top-up packs, license-key credential), OS sandbox on every hosted session (write = vault, network = gateway allowlist), per-session ceilings, anomaly alerts. _(planned)_
 
+### Milestone 6 — Thock on iPhone
+- [ ] **A pen for the vault, not a second desk** — an iPhone companion for the moments away from the
+  keyboard: capture an idea (inbox by default, Today or Backlog a chip away), journal a timestamped
+  paragraph, clip an article with its readable text under `reference/clips/`, glance at today and
+  the week with single-line nudges (tick, set a time, add, move to Soon), receipts read from the
+  triage log, and Ask through the hosted agent (Plus). Editing feels like Apple Notes over a strict
+  Markdown subset; the phone only ever appends or changes one line, and never runs a ritual.
+  Design reference: https://claude.ai/artifact/UqePrnerog5SmibGeLD9ZD. Spec
+  `specs/v33-iphone-companion.md`. Data model and sync get their own spec. _(planned)_
+
 ---
 
 _This is a starting point, not a spec. It exists to give designers and engineers a shared picture of the destination so we can argue productively about the route._
