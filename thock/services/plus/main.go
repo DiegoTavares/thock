@@ -129,8 +129,16 @@ func main() {
 		}
 		s.blobs = blobs
 		log.Printf("storing blobs under %s", dir)
+	case "gcs":
+		bucket := os.Getenv("BLOB_BUCKET")
+		blobs, err := newGCSBlobStore(context.Background(), bucket)
+		if err != nil {
+			log.Fatalf("blob store: %v", err)
+		}
+		s.blobs = blobs
+		log.Printf("storing blobs in the gs://%s bucket", bucket)
 	default:
-		log.Fatalf("BLOB_STORE=%q isn't supported; use local (a bucket-backed store implements blobStore in blobs.go)", kind)
+		log.Fatalf("BLOB_STORE=%q isn't supported; use local or gcs", kind)
 	}
 	go s.runSweeper(context.Background(), time.Hour)
 	log.Printf("thock plus backend listening on :%s", port)
