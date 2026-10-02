@@ -6,6 +6,7 @@ pub mod calendar;
 pub mod calendar_google;
 pub mod calendar_service;
 pub mod chat_panel;
+pub mod connect_phone;
 pub mod day_plan;
 pub mod day_planner_panel;
 pub mod getting_started;
@@ -30,6 +31,7 @@ pub mod routines;
 pub mod routines_panel;
 pub mod tasks_google;
 pub mod vault;
+pub mod vault_sync;
 pub mod wikilink_completion;
 
 use anyhow::{Context as _, Result};
@@ -58,6 +60,7 @@ pub fn init(cx: &mut App) {
     gmail_service::init(cx);
     inbox_service::init(cx);
     readwise_service::init(cx);
+    vault_sync::init(cx);
     markdown_conceal::init(cx);
     wikilink_completion::init(cx);
     hide_inherited_zed_actions(cx);

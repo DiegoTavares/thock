@@ -715,6 +715,7 @@
       "cmd-alt-t": "thock::ToggleAgentFocus",
       "cmd-alt-p": "thock::ToggleDayPlannerFocus",
       "cmd-alt-n": "thock::ToggleChatFocus",
+      "cmd-alt-shift-p": "thock::ConnectPhone",
       "cmd-3": ["workspace::ActivatePane", 2],
       "cmd-4": ["workspace::ActivatePane", 3],
       "cmd-5": ["workspace::ActivatePane", 4],

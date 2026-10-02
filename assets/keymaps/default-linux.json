@@ -704,6 +704,7 @@
       "ctrl-alt-t": "thock::ToggleAgentFocus",
       "ctrl-alt-p": "thock::ToggleDayPlannerFocus",
       "ctrl-alt-n": "thock::ToggleChatFocus",
+      "ctrl-alt-shift-p": "thock::ConnectPhone",
       "ctrl-?": "agent::ToggleFocus",
       "alt-save": "workspace::SaveAll",
       "ctrl-alt-s": "workspace::SaveAll",
