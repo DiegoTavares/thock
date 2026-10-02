@@ -320,6 +320,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = KY338LSPPB;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Config/ThockWidgets-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Thock;
@@ -361,6 +362,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = KY338LSPPB;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Config/ThockWidgets-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Thock;
@@ -450,6 +452,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = KY338LSPPB;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Config/ThockShare-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Thock;
@@ -470,6 +473,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = KY338LSPPB;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Config/ThockShare-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Thock;

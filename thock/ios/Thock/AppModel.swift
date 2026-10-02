@@ -71,6 +71,7 @@ final class AppModel {
     /// Bumped whenever the store changes, so screens re-read it.
     var revision = 0
     var syncState: SyncState = .notConnected
+    var diagnostics = SyncDiagnostics()
     var sheet: AppSheet?
     var toast: Toast?
     var isUnlocked = false
@@ -178,6 +179,7 @@ final class AppModel {
             return
         }
         syncState = await engine.state
+        diagnostics = await engine.diagnostics
         // Going read-only, or back, changes what every screen offers.
         revision += 1
     }
@@ -509,6 +511,11 @@ final class AppModel {
         guard let removal = pendingRemoval else { return }
         pendingRemoval = nil
         perform { try $0.remove(removal.item, day: removal.day) }
+    }
+
+    func checkAgain() async {
+        await engine?.sync()
+        await refreshSyncState()
     }
 
     // MARK: The practice desk

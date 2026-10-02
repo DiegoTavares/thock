@@ -1,6 +1,10 @@
 import Foundation
 
 /// The Plus backend over HTTPS (V34 API §3.1).
+extension APIError: LocalizedError {
+    public var errorDescription: String? { error }
+}
+
 public final class HTTPTransport: SyncTransport, @unchecked Sendable {
     private let base: URL
     private let session: URLSession
@@ -42,7 +46,7 @@ public final class HTTPTransport: SyncTransport, @unchecked Sendable {
         guard let target = URL(string: url, relativeTo: base) else { throw URLError(.badURL) }
         let (data, response) = try await session.data(from: target)
         guard let status = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(status) else {
-            throw URLError(.badServerResponse)
+            throw APIError(status: (response as? HTTPURLResponse)?.statusCode ?? 0, code: "download", error: "HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0) from the storage address")
         }
         return data
     }

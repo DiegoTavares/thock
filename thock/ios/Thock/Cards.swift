@@ -329,19 +329,19 @@ struct PlannerRow: View {
 
     var body: some View {
         let faded = item.done || item.struck
-        let row = HStack(alignment: .center, spacing: 10) {
-            Text(timeText)
-                .font(Theme.mono(12.5))
-                .foregroundStyle(Theme.muted)
-                .frame(width: 88, alignment: .leading)
+        let label = Text(Rich.text(Inline.parse(item.label)))
+            .font(.system(size: 17))
+            .strikethrough(faded, color: Theme.dim)
+        let words = timeText.isEmpty ? label : Text(timeText).font(Theme.mono(13)).foregroundStyle(faded ? Theme.dim : Theme.muted) + Text("  ") + label
+        let row = HStack(alignment: .firstTextBaseline, spacing: 10) {
             if item.isCalendar {
-                RoundedRectangle(cornerRadius: 2).fill(Theme.cal).frame(width: 3, height: 22)
+                RoundedRectangle(cornerRadius: 2).fill(Theme.cal).frame(width: 3, height: 20)
+                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
             }
             Checkbox(checked: item.done)
-            Text(Rich.text(Inline.parse(item.label)))
-                .font(.system(size: 17))
+                .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 3 }
+            words
                 .foregroundStyle(faded ? Theme.dim : Theme.ink)
-                .strikethrough(faded, color: Theme.dim)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 7)
@@ -381,7 +381,6 @@ struct AddLineRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Color.clear.frame(width: 88, height: 1)
             Text("+")
                 .font(Theme.mono(17))
                 .foregroundStyle(Theme.amber)

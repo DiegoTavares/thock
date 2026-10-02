@@ -197,6 +197,28 @@ struct YouSheet: View {
         }
     }
 
+    /// The facts behind the status sentence, for when notes are not arriving.
+    private var details: String {
+        let d = model.diagnostics
+        var lines: [String] = []
+        lines.append("notes here: \(model.store?.paths().count ?? 0) · at the desk's copy: \(d.serverFileCount.map(String.init) ?? "?")")
+        lines.append("version \(d.cursor) of \(d.serverLatestVersion.map(String.init) ?? "?") · waiting on the server: \(d.serverPendingWrites.map(String.init) ?? "?")")
+        lines.append("address: \(model.store?.meta("backend") ?? "?")")
+        if let last = d.lastRound {
+            lines.append("last check: " + last.formatted(date: .omitted, time: .standard))
+        }
+        if let error = d.lastError {
+            lines.append("problem: " + error)
+        }
+        for failure in d.failures.prefix(6) {
+            lines.append("could not take: " + failure)
+        }
+        if d.failures.count > 6 {
+            lines.append("and \(d.failures.count - 6) more")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     var body: some View {
         @Bindable var model = model
         VStack(alignment: .leading, spacing: 0) {
@@ -212,6 +234,17 @@ struct YouSheet: View {
                         Text(status)
                             .font(.system(size: 15))
                             .foregroundStyle(Theme.muted)
+                    }
+
+                    if !model.isPractice {
+                        VStack(alignment: .leading, spacing: 8) {
+                            CardLabel(title: "Details")
+                            Text(details)
+                                .font(Theme.mono(12))
+                                .foregroundStyle(Theme.muted)
+                                .textSelection(.enabled)
+                            deskButton("Check again") { await model.checkAgain() }
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 10) {

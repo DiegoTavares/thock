@@ -19,6 +19,22 @@ public enum PairingError: Error, Equatable {
     case refused(String)
 }
 
+/// What the last rounds saw, for the settings sheet to show when something
+/// is not arriving. Plain facts; the sentences are the UI's.
+public struct SyncDiagnostics: Equatable, Sendable {
+    public var lastRound: Date?
+    public var lastError: String?
+    public var serverFileCount: Int?
+    public var serverLatestVersion: Int?
+    public var serverPendingWrites: Int?
+    public var cursor = 0
+    /// Path and reason for every snapshot that could not be taken in the
+    /// last pull.
+    public var failures: [String] = []
+
+    public init() {}
+}
+
 /// The phone's whole sync logic (V34 §11): send queued writes, pull
 /// snapshots, rebase, prune. Screens read the local store and never wait on
 /// any of this.
@@ -35,6 +51,7 @@ public actor SyncEngine {
     private var again = false
 
     public private(set) var state: SyncState
+    public private(set) var diagnostics = SyncDiagnostics()
 
     public init(store: VaultStore, transport: SyncTransport, secrets: SecretStore) {
         self.store = store
@@ -190,6 +207,8 @@ public actor SyncEngine {
             return
         }
         set(store.isReadOnly ? .paused : .working)
+        diagnostics.lastRound = Date()
+        diagnostics.failures = []
         do {
             if !store.isReadOnly {
                 try await flush(credential: credential, key: key)
@@ -200,8 +219,14 @@ public actor SyncEngine {
             if let writes = vault.writes {
                 try store.prune(ackedThroughSeq: writes.ackedThroughSeq ?? 0, ackedAtVersion: writes.ackedAtVersion ?? 0)
             }
+            diagnostics.serverFileCount = vault.fileCount
+            diagnostics.serverLatestVersion = vault.latestVersion
+            diagnostics.serverPendingWrites = vault.writes?.pending
+            diagnostics.cursor = store.cursor
+            diagnostics.lastError = nil
             set(vault.status == "lapsed" ? .paused : .upToDate)
         } catch let error as APIError {
+            diagnostics.lastError = "\(error.status) \(error.code): \(error.error)"
             switch error.code {
             case "unauthorized", "vault_missing":
                 set(.disconnected)
@@ -214,8 +239,10 @@ public actor SyncEngine {
                 set(.offline)
             }
         } catch {
+            diagnostics.lastError = error.localizedDescription
             set(.offline)
         }
+        NotificationCenter.default.post(name: Self.stateDidChange, object: nil)
     }
 
     /// Posts unsent writes in the order they were made. A retry reuses the
@@ -265,14 +292,34 @@ public actor SyncEngine {
                 if store.contentHash(row.path) == hash {
                     continue
                 }
-                guard let url = row.downloadURL else { continue }
-                let envelope = try await transport.download(url)
-                // A blob that does not hash or open is a corrupt version, to
-                // fetch again on the next round, never a note to show.
-                guard SyncCore.contentHash(envelope: envelope) == hash,
-                      let plaintext = try? SyncCore.open(key: key, context: .file(path: row.path, blobID: blobID), envelope: envelope),
-                      let text = String(data: plaintext, encoding: .utf8)
-                else {
+                guard let url = row.downloadURL else {
+                    diagnostics.failures.append("\(row.path): no download address")
+                    lowestFailure = min(lowestFailure ?? row.version, row.version)
+                    continue
+                }
+                // A blob that does not arrive, hash or open is a corrupt
+                // version, to fetch again on the next round, never a note
+                // to show.
+                let envelope: Data
+                do {
+                    envelope = try await transport.download(url)
+                } catch {
+                    diagnostics.failures.append("\(row.path): download failed, \(error.localizedDescription)")
+                    lowestFailure = min(lowestFailure ?? row.version, row.version)
+                    continue
+                }
+                guard SyncCore.contentHash(envelope: envelope) == hash else {
+                    diagnostics.failures.append("\(row.path): \(envelope.count) bytes arrived but hash differs")
+                    lowestFailure = min(lowestFailure ?? row.version, row.version)
+                    continue
+                }
+                guard let plaintext = try? SyncCore.open(key: key, context: .file(path: row.path, blobID: blobID), envelope: envelope) else {
+                    diagnostics.failures.append("\(row.path): did not open with this phone's key")
+                    lowestFailure = min(lowestFailure ?? row.version, row.version)
+                    continue
+                }
+                guard let text = String(data: plaintext, encoding: .utf8) else {
+                    diagnostics.failures.append("\(row.path): not text")
                     lowestFailure = min(lowestFailure ?? row.version, row.version)
                     continue
                 }
