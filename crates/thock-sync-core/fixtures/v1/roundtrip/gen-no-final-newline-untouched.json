@@ -1,0 +1,10 @@
+{
+  "name": "no final newline untouched",
+  "before": "# Tuesday\n\n## Day planner\n\n- [ ] Call the bank\n- [ ] Water the plants",
+  "seed": null,
+  "write": null,
+  "after": "# Tuesday\n\n## Day planner\n\n- [ ] Call the bank\n- [ ] Water the plants",
+  "outcome": "noop",
+  "effect_present_before": true,
+  "effect_present_after": true
+}

@@ -1,0 +1,18 @@
+{
+  "name": "create on the same content is a noop",
+  "before": "# Idea\r\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-c3",
+    "path": "inbox/2026-10-02-1358-idea.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "create",
+    "content": "# Idea\n"
+  },
+  "after": "# Idea\r\n",
+  "outcome": "noop",
+  "effect_present_before": true,
+  "effect_present_after": true
+}

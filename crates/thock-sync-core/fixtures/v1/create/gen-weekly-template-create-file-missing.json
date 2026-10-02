@@ -1,0 +1,18 @@
+{
+  "name": "weekly template create file missing",
+  "before": null,
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "fixture-weekly-template-create",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "create",
+    "content": "# Week 40, 2026\n\n_Seven days, one page. Set a direction at the start, look back at the end._\n\n___\n\n## Goals\n\n_Two or three things that would make this a good week._\n\n- [ ] Ship the sync spec\n- [ ] Call Mum\n\n___\n\n## Notes\n\n_Anything worth keeping that doesn't belong to a single day._\n\n___\n\n## Week review\n\n_How did it go? The **Week Review** ritual appends its take below yours._\n"
+  },
+  "after": "# Week 40, 2026\n\n_Seven days, one page. Set a direction at the start, look back at the end._\n\n___\n\n## Goals\n\n_Two or three things that would make this a good week._\n\n- [ ] Ship the sync spec\n- [ ] Call Mum\n\n___\n\n## Notes\n\n_Anything worth keeping that doesn't belong to a single day._\n\n___\n\n## Week review\n\n_How did it go? The **Week Review** ritual appends its take below yours._\n",
+  "outcome": "created",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

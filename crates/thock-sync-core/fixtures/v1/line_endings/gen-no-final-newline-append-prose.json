@@ -1,0 +1,28 @@
+{
+  "name": "no final newline append prose",
+  "before": "# Tuesday\n\n## Day planner\n\n- [ ] Call the bank\n- [ ] Water the plants",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "fixture-no-final-newline-append",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "append",
+    "heading": {
+      "text": "Journal",
+      "level": 2,
+      "ordinal": 0
+    },
+    "lines": [
+      "**21:14** · A thought typed on the phone."
+    ],
+    "placement": "end",
+    "blank_line_before": true,
+    "create_from_template": false
+  },
+  "after": "# Tuesday\n\n## Day planner\n\n- [ ] Call the bank\n- [ ] Water the plants\n\n## Journal\n**21:14** · A thought typed on the phone.",
+  "outcome": "section_added",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

@@ -1,0 +1,10 @@
+{
+  "name": "front matter untouched",
+  "before": "---\ntags: [daily, phone]\n# a YAML comment, not a heading\nmood: 7\n---\n# Friday\n\n## Journal\n\n**08:10** · Up early.\n\n## Day planner\n\n- [ ] 09:00 - 10:00 Standup\n- [ ] Write the report\n",
+  "seed": null,
+  "write": null,
+  "after": "---\ntags: [daily, phone]\n# a YAML comment, not a heading\nmood: 7\n---\n# Friday\n\n## Journal\n\n**08:10** · Up early.\n\n## Day planner\n\n- [ ] 09:00 - 10:00 Standup\n- [ ] Write the report\n",
+  "outcome": "noop",
+  "effect_present_before": true,
+  "effect_present_after": true
+}

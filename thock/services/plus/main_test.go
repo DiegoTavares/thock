@@ -17,7 +17,7 @@ var testPlan = plan{
 	AllowanceUnits: 500,
 	CycleDays:      30,
 	Models:         modelTiers{Default: "google/gemini-2.5-flash", Fast: "google/gemini-2.5-flash-lite"},
-	Limits:         planLimits{WarnAtPercent: 80, MaxTurnsPerSession: 50},
+	Limits:         planLimits{WarnAtPercent: 80, MaxTurnsPerSession: 50, VaultQuotaBytes: 200 << 20},
 }
 
 type harness struct {
@@ -42,8 +42,16 @@ func newHarness(t *testing.T) *harness {
 	s := newServer(store, gw, "admin-secret")
 	h := &harness{t: t, server: s, gateway: gw, clock: time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)}
 	s.now = func() time.Time { return h.clock }
+	blobs, err := newLocalBlobStore(t.TempDir(), []byte("test-signing-key"), func() string { return s.publicURL })
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs.now = s.now
+	s.blobs = blobs
 	h.http = httptest.NewServer(s.routes())
+	s.publicURL = h.http.URL
 	t.Cleanup(h.http.Close)
+	t.Cleanup(s.coalescer.stop)
 	return h
 }
 

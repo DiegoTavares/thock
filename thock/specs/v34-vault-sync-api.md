@@ -106,12 +106,13 @@ on. The full list:
 | 403 | `revoked` | the user's Plus access was turned off (V25) |
 | 403 | `role_forbidden` | the route is for the other device |
 | 403 | `plus_lapsed` | the entitlement ended; see §3.4 |
+| 403 | `plan_excludes_sync` | the user's plan has `vault_quota_bytes = 0` |
 | 404 | `vault_missing` | the user has no vault yet (desk must `POST /v1/vault` first) |
 | 404 | `not_found` | the file, device or write does not exist |
 | 404 | `pairing_invalid` | the pairing code is unknown or already used |
 | 409 | `stale_version` | `expected_version` is not the file's current version; body carries `current` (§6.3) |
 | 409 | `key_mismatch` | `key_check` differs from the vault's and the vault is not empty |
-| 409 | `device_exists` | a desk device already exists for this vault under another user credential |
+| 409 | `device_exists` | reserved; unreachable while a vault is keyed by its user, so not emitted today |
 | 410 | `pairing_expired` | the code's ten minutes are over |
 | 410 | `cursor_expired` | `since` is older than the tombstones the server still keeps (§6.3) |
 | 413 | `too_large` | a blob or write payload above 2 MB |
@@ -123,7 +124,7 @@ on. The full list:
 
 ### 3.4 Lapse
 
-When `vaults.lapsed_at` is set (V34 §12):
+When `vaults.lapsed_at` is set (V34 §12; also set when the Plus user is revoked or disconnects):
 
 - the phone may still `GET /v1/vault`, `GET /v1/vault/files`, download blobs and hold the feed; every
   `POST`/`PATCH`/`DELETE` from the phone is `403 plus_lapsed`;
@@ -375,6 +376,8 @@ working at once. Revoking the desk device is `400 bad_request`; use `DELETE /v1/
 - `size_bytes` is the envelope size (what the quota counts).
 - `410 cursor_expired` when `since` is below the oldest retained tombstone; the client performs a full
   pull.
+- On the last page `next_since` is the vault's `latest_version`, so a cursor never lags behind the head
+  because of pruned tombstones or a full pull.
 
 **`POST /v1/vault/files/{path}`** (desk). Begin an upload.
 
@@ -405,7 +408,9 @@ desk adopts `current.version` as `expected_version` and retries with the content
 size (`422 blob_missing` otherwise), re-checks `expected_version` (`409 stale_version`), assigns the
 version under the vault lock, updates the row and `used_bytes`, schedules the previous blob for
 deletion, emits `file` on the feed and queues a push (§6.5). Committing the same `blob_id` twice is
-`200` with the same version. Begun uploads never committed are swept after an hour.
+`200` with the same version. A *begin* for a blob that was already committed is `409 stale_version`
+(only the commit is idempotent), so a client retrying after a lost commit answer retries the commit, not
+the whole upload. Begun uploads never committed are swept after an hour.
 
 **`DELETE /v1/vault/files/{path}`** (desk).
 
@@ -447,7 +452,9 @@ Ascending by `seq`, unacked rows only. `after` defaults to `acked_through_seq`.
 {"through_seq": 58}
 ```
 
-→ `200 {"through_seq": 58, "at_version": 1845}`. Deletes every write with `seq ≤ through_seq`, records
+→ `200 {"through_seq": 58, "at_version": 1845}`. Retires every write with `seq ≤ through_seq` (the row
+keeps its `client_id` and `seq` for seven days with the payload emptied, so a late retry of the same
+`client_id` still gets its original `seq` instead of a duplicate), records
 `acked_through_seq` and `acked_at_version = latest_version` at that instant, emits `ack`. Acking a seq
 already acked is `200` with the recorded values. The desk acks only after it has committed the
 snapshots that carry the writes' effects (§10.4), which is what makes `at_version` meaningful.
@@ -542,8 +549,14 @@ never matched by any rule here.
 
 The **section** of a heading is the line range after the heading line up to, not including, the next
 heading whose level is less than or equal to the matched heading's level, or the end of the file. Its
-**body** is that range with trailing blank lines removed. Its **own lines** are the body up to, not
-including, the first deeper heading inside it.
+**body** is that range with trailing blank lines removed, and without a trailing thematic break
+(`___`, `---` or `***` on its own line) and the blank lines before it, since the shipped templates
+close every section with `___` and an append must land above it. Its **own lines** are the body up
+to, not including, the first deeper heading inside it, with its own trailing blank lines (and a
+closing rule) trimmed the same way. A front-matter block that is never closed is ordinary content.
+The whole-file body of a `null` heading trims only blank lines: the end of the file is below a
+closing rule. A heading's `text` has its closing `#`s and surrounding whitespace removed; a heading
+line starts at column 0.
 
 ### 7.3 Kinds
 
@@ -565,7 +578,8 @@ Strings never contain `\r` or `\n`; the applier joins with the file's line endin
 2. Strip one list marker: `- `, `* `, `+ `, or `\d{1,9}[.)] `.
 3. Strip one checkbox: `[ ] `, `[x] `, `[X] `.
 4. Strip one time prefix (V4 grammar): `H:MM` or `HH:MM`, optionally a separator (`-`, `–`, `—` or `to`,
-   each with optional surrounding spaces) and a second time; then any following whitespace.
+   each with optional surrounding spaces) and a second time, only when followed by whitespace or the
+   end of the line; then that whitespace.
 5. Repeatedly strip a trailing HTML comment (`<!--…-->`) and trailing whitespace. This is what lets a
    line keep its identity after it gains ` <!--thock:also-->` or a calendar marker.
 6. Collapse every run of whitespace to one space; trim.
@@ -590,7 +604,9 @@ expanded with the same tokens). Outcomes: `created`, `section_added`, `applied`,
 
 - Line ending: the file's dominant terminator (`\r\n` if it appears more often than `\n` alone),
   `\n` for a new file. Inserted lines use it. A file that ends without a terminator keeps that property
-  for its last line; an insertion after it adds one before the new lines.
+  for its last line when a `replace_line` edits it in place; an insertion after it adds one before the
+  new lines, and lines written by `append` or `replace_section` always end with a terminator, even when
+  they replace what used to be an unterminated last line.
 - Encoding: UTF-8 in and out. The desk never uploads a file that is not valid UTF-8.
 - Nothing outside the touched lines changes, byte for byte. This is tested by the round-trip fixtures.
 
@@ -628,15 +644,23 @@ expanded with the same tokens). Outcomes: `created`, `section_added`, `applied`,
 
 | `kind` | Present when |
 | --- | --- |
-| `create` | the file exists and equals `content` exactly, modulo line endings |
+| `create` | the file exists and equals `content` exactly, modulo line endings, or contains `content`'s lines as a contiguous run (the result of rule 3) |
 | `append` | the section's body (or the whole file for `null`) contains `lines` as a contiguous run, compared after trimming trailing whitespace of each line |
-| `replace_line` | a body line's `line_hash` equals `line_hash(new_line)`, or a body line equals `new_line + " <!--thock:also-->"` |
+| `replace_line` | when the target (`line_hash`, `ordinal`) is found: that line **equals** `new_line` (trailing whitespace ignored) or `new_line + " <!--thock:also-->"`; when it is not found: some body line equals either, or has `line_hash(new_line)`. Not a plain hash comparison (a tick keeps the hash), and not "any line equals" either: two identical lines must each be tickable by ordinal |
 | `remove_line` | no body line has `line_hash` |
 | `replace_section` | `section_hash` equals `section_hash` of `lines`, or the body contains `lines[0] + " <!--thock:also-->"` |
 
-Known trade-off, accepted: an `append` whose lines already appear verbatim in the section (the user
-typed the same task at the desk) is treated as present and dropped. One identical line is also the
-right outcome.
+Lines inside fenced code or front matter are never matched and a run never spans them. When a kind
+produces more than one structural fact, the outcome reported is the first of `created`,
+`section_added`, `kept_both`, `applied`. The stale `replace_section` marker goes on the first
+non-blank appended line. `replace_line` and `remove_line` accept `heading: null` for the whole file;
+`replace_section` requires a heading.
+
+Known trade-offs, accepted: an `append` whose lines already appear verbatim in the section (the user
+typed the same task at the desk) is treated as present and dropped, and one identical line is also
+the right outcome; `remove_line` against one of several identical lines removes one per application,
+which the effect-present check cannot distinguish, so the desk's re-application after a crash may
+remove a second copy.
 
 ### 8.4 Rebase and prune on the phone
 
@@ -833,6 +857,19 @@ retries reuse `client_id`; a lapsed vault goes read-only without losing the loca
 
 ## 13. Changelog
 
+- **2026-10-02** — from the phone port, second round: §8.1 says which lines keep an unterminated
+  ending (an in-place `replace_line`) and which always end with a terminator (`append`,
+  `replace_section`). The Swift port passes all 296 cases and every vector.
+- **2026-10-02** — from the phone port: `replace_line` presence is decided by the target line when
+  it is found; the whole-file body keeps a closing rule; heading text drops closing hashes.
+- **2026-10-02** — core implementation notes folded in: section bodies exclude a trailing thematic
+  break; `replace_line` presence is equality, not hash equality; `create` presence includes rule 3's
+  run; fenced and front-matter lines are never matched; outcome precedence; marker on the first
+  non-blank line; `remove_line` of a duplicated line is not idempotent. `uniffi` and the iOS build
+  script are not yet in the crate; the fixtures are the phone's contract until they are.
+- **2026-10-02** — backend implementation notes folded in: `plan_excludes_sync`; `device_exists`
+  reserved; lapse on revoke; `next_since` on the last page; begin-after-commit is `409`; acked writes
+  retained seven days for `client_id` idempotence.
 - **2026-10-02** — v1 frozen. Decides V34 §16 #1 (semantic writes) and #2 (Rust core via UniFFI).
   Deviates from V34 §9 by binding file blobs to `blob_id` instead of `version`. Adds `code` to error
   bodies, the two-step upload with commit, `key_check`, `acked_at_version`, `placement` and
