@@ -1,0 +1,18 @@
+{
+  "name": "create on a different file appends",
+  "before": "Already here.\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-c2",
+    "path": "inbox/2026-10-02-1358-idea.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "create",
+    "content": "# Idea\nIts text.\n"
+  },
+  "after": "Already here.\n\n# Idea\nIts text.\n",
+  "outcome": "applied",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

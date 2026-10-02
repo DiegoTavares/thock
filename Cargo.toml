@@ -212,6 +212,7 @@ members = [
     "crates/theme_importer",
     "crates/theme_selector",
     "crates/thock",
+    "crates/thock-sync-core",
     "crates/time_format",
     "crates/title_bar",
     "crates/toolchain_selector",
@@ -474,6 +475,7 @@ theme_extension = { path = "crates/theme_extension" }
 theme_settings = { path = "crates/theme_settings" }
 theme_selector = { path = "crates/theme_selector" }
 thock = { path = "crates/thock" }
+thock_sync_core = { path = "crates/thock-sync-core" }
 time_format = { path = "crates/time_format" }
 platform_title_bar = { path = "crates/platform_title_bar" }
 title_bar = { path = "crates/title_bar" }
@@ -626,6 +628,7 @@ heck = "0.5"
 hdrhistogram = "7"
 heed = { version = "0.21.0", features = ["read-txn-no-tls"] }
 hex = "0.4.3"
+chacha20poly1305 = { version = "0.10", features = ["getrandom"] }
 human_bytes = "0.4.1"
 html5ever = "0.27.0"
 http = "1.1"
@@ -752,6 +755,7 @@ pollster = "0.4.0"
 pulldown-cmark = { version = "0.13.0", default-features = false }
 quick-xml = "0.38"
 quote = "1.0.9"
+qrcode = { version = "0.14", default-features = false }
 rand = "0.9"
 rayon = "1.8"
 raw-window-handle = "0.6"
@@ -814,6 +818,7 @@ sysinfo = "0.37.0"
 take-until = "0.2.0"
 tempfile = "3.20.0"
 thiserror = "2.0.12"
+unicode-normalization = "0.1"
 time = { version = "0.3", features = [
     "macros",
     "parsing",

@@ -1,0 +1,28 @@
+{
+  "name": "front matter append section missing",
+  "before": "---\ntags: [daily, phone]\n# a YAML comment, not a heading\nmood: 7\n---\n# Friday\n\n## Journal\n\n**08:10** · Up early.\n\n## Day planner\n\n- [ ] 09:00 - 10:00 Standup\n- [ ] Write the report\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "fixture-front-matter-append",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "append",
+    "heading": {
+      "text": "Asked on the go",
+      "level": 1,
+      "ordinal": 0
+    },
+    "lines": [
+      "The agent's answer, kept."
+    ],
+    "placement": "end",
+    "blank_line_before": false,
+    "create_from_template": false
+  },
+  "after": "---\ntags: [daily, phone]\n# a YAML comment, not a heading\nmood: 7\n---\n# Friday\n\n## Journal\n\n**08:10** · Up early.\n\n## Day planner\n\n- [ ] 09:00 - 10:00 Standup\n- [ ] Write the report\n\n# Asked on the go\nThe agent's answer, kept.\n",
+  "outcome": "section_added",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

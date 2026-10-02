@@ -1,0 +1,181 @@
+[
+  {
+    "line": "- [ ] 09:30 - 11:00 Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "- [x] 09:30 - 11:00 Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "- [ ] 09:30–11:00 Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "- [ ] 09:30 — 11:00 Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "- [ ] 09:30 to 11:00 Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "- [ ] 9:30 Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "- [ ] 23:00 - 24:00 Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "  - [ ] Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "* [X] Deep  work  ",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "+ Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "1. Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "12) Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "Deep work",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "- [ ] Deep work <!--gcal:aaaaaaaaaaaa-->",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "- [ ] Deep work <!--gcal:aaaaaaaaaaaa--> <!--thock:also-->",
+    "line_hash": "daef11bdc5c64b72"
+  },
+  {
+    "line": "- [ ] 09:30abc glued time",
+    "line_hash": "48e15893df56d09e"
+  },
+  {
+    "line": "- [ ] 25:00 not a time",
+    "line_hash": "4c4f8cb06c4ca1da"
+  },
+  {
+    "line": "- Groceries: eggs, spinach, lemons 🍋",
+    "line_hash": "11b27eb4451159f0"
+  },
+  {
+    "line": "**21:14** · Slept badly, but the walk fixed it",
+    "line_hash": "5da3fb310d74d631"
+  },
+  {
+    "line": "- [ ] Café com Ana às 12:30",
+    "line_hash": "126b29c0a5a7a6f7"
+  },
+  {
+    "line": "- [ ] 日次計画を見直す",
+    "line_hash": "3baa30dcbe9f094c"
+  },
+  {
+    "line": "- [ ]",
+    "line_hash": "5984eac0c5c6d947"
+  },
+  {
+    "line": "<!-- only a comment -->",
+    "line_hash": "e3b0c44298fc1c14"
+  },
+  {
+    "line": "",
+    "line_hash": "e3b0c44298fc1c14"
+  },
+  {
+    "line": "1234567890. ten digits is not a marker",
+    "line_hash": "60938412eeab987c"
+  },
+  {
+    "line": "| Report | Friday |",
+    "line_hash": "153cb42f4280e2a1"
+  },
+  {
+    "line": "> \"The days are long, but the years are short.\"",
+    "line_hash": "6aa73fdd5fbc32f9"
+  },
+  {
+    "text": "Day planner",
+    "heading_key": "day planner"
+  },
+  {
+    "text": "📅 **Day planner**:",
+    "heading_key": "day planner"
+  },
+  {
+    "text": "Day-planner",
+    "heading_key": "day planner"
+  },
+  {
+    "text": "[Day planner](plan.md)",
+    "heading_key": "day planner"
+  },
+  {
+    "text": "[[Day planner]]",
+    "heading_key": "day planner"
+  },
+  {
+    "text": "[[plan|Day planner]]",
+    "heading_key": "day planner"
+  },
+  {
+    "text": "![img](x.png)",
+    "heading_key": "img x png"
+  },
+  {
+    "text": "`code [x](y)` and [a](b)",
+    "heading_key": "code x y and a"
+  },
+  {
+    "text": "Journal ##",
+    "heading_key": "journal"
+  },
+  {
+    "text": "日次計画",
+    "heading_key": "日次計画"
+  },
+  {
+    "text": "Тайлан",
+    "heading_key": "тайлан"
+  },
+  {
+    "text": "***",
+    "heading_key": ""
+  },
+  {
+    "text": "   Asked on the go   ",
+    "heading_key": "asked on the go"
+  },
+  {
+    "body": [],
+    "section_hash": "e3b0c44298fc1c14"
+  },
+  {
+    "body": [
+      "- a",
+      "- b"
+    ],
+    "section_hash": "4e11985d599fbbf9"
+  },
+  {
+    "body": [
+      "x",
+      "",
+      "y"
+    ],
+    "section_hash": "e2dde8735b3075bb"
+  }
+]

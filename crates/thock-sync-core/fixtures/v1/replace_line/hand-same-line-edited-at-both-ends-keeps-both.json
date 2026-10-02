@@ -1,0 +1,25 @@
+{
+  "name": "same line edited at both ends keeps both",
+  "before": "## Day planner\n- [ ] Call the dentist at 15:00\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-both",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "replace_line",
+    "heading": {
+      "text": "Day planner",
+      "level": 2,
+      "ordinal": 0
+    },
+    "line_hash": "f43d3ddec9da2f9a",
+    "ordinal": 0,
+    "new_line": "- [ ] Call the dentist, ask about Friday"
+  },
+  "after": "## Day planner\n- [ ] Call the dentist at 15:00\n- [ ] Call the dentist, ask about Friday <!--thock:also-->\n",
+  "outcome": "kept_both",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

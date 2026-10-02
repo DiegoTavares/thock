@@ -1,0 +1,25 @@
+{
+  "name": "crlf replace_line file missing",
+  "before": null,
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "fixture-crlf-replace_line",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "replace_line",
+    "heading": {
+      "text": "Day planner",
+      "level": 2,
+      "ordinal": 0
+    },
+    "line_hash": "2742b7b24a49792e",
+    "ordinal": 0,
+    "new_line": "- [x] Groceries"
+  },
+  "after": "## Day planner\n- [x] Groceries <!--thock:also-->\n\n",
+  "outcome": "created",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

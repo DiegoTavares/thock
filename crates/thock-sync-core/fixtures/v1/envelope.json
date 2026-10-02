@@ -1,0 +1,41 @@
+[
+  {
+    "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "nonce": "070000004041424344454647",
+    "context": {
+      "kind": "file",
+      "path": "daily/2026-10-02.md",
+      "blob_id": "5d2c1f0e9a8b7c6d5e4f3a2b1c0d9e8f"
+    },
+    "plaintext": "IyBUaHVyc2RheQoKIyMgSm91cm5hbAoKU2xlcHQgYmFkbHkuCg==",
+    "envelope": "VFZTMQcAAABAQUJDREVGR2rMJUpkMx+k+JBHPVVRbeX6nM+5WZQgwEsEnRAjA86bpsPzTYM9aT3I+DwYljJOoIEzJR35",
+    "content_hash": "25588aae6d716d05787a3d73422c30e9286a96d295e08039408b40c426e78ac2"
+  },
+  {
+    "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "nonce": "070000004041424344454647",
+    "context": {
+      "kind": "file",
+      "path": "reference/clips/café.md",
+      "blob_id": "00000000000000000000000000000001"
+    },
+    "plaintext": "",
+    "envelope": "VFZTMQcAAABAQUJDREVGR0JjY/sQpokSrPLp0X+yMns=",
+    "content_hash": "fefdc9cb9ce5a9f38a96a70d16d283f9b34c75dcf535f1578ef9d06bcb57f2d3"
+  },
+  {
+    "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "nonce": "070000004041424344454647",
+    "context": {
+      "kind": "write",
+      "client_id": "0f7e0b1a-3c4d-4e5f-8a9b-0c1d2e3f4a5b"
+    },
+    "plaintext": "eyJ2IjoxLCJjbGllbnRfaWQiOiIwZjdlMGIxYS0zYzRkLTRlNWYtOGE5Yi0wYzFkMmUzZjRhNWIiLCJwYXRoIjoiZGFpbHkvMjAyNi0xMC0wMi5tZCIsIm1hZGVfYXQiOiIyMDI2LTEwLTAyVDEzOjU4OjAyWiIsImRldmljZV9pZCI6ImM0MWEyZjhlOWI3ZDFjMzUiLCJraW5kIjoiYXBwZW5kIiwiaGVhZGluZyI6eyJ0ZXh0IjoiRGF5IHBsYW5uZXIiLCJsZXZlbCI6Miwib3JkaW5hbCI6MH0sImxpbmVzIjpbIi0gWyBdIEJ1eSBhIGNhcmQiXSwicGxhY2VtZW50IjoiZW5kIiwiYmxhbmtfbGluZV9iZWZvcmUiOmZhbHNlLCJjcmVhdGVfZnJvbV90ZW1wbGF0ZSI6ZmFsc2V9",
+    "envelope": "VFZTMQcAAABAQUJDREVGRzLOBwArcEDi+oUkUhgGEsbxy4f1CJ4drygKyQF6EM/OpoK+BrwTcft7obSFbyeJcGC7TNAHh6vXZ9GWqr6lGWB4D9zBUpBm2s45zXmxLnXj2W+SUCkiF9Ms/cJ6uSm4QSGXk5Tvxq24esG1HrB0PhGzxGoMseSA1O1n/um5or3hp0K5Ef9EvheOdBCRNe32rmz0TA6yR2bOXK0D29JXkk1tszC/RVHS1J60MW4UvzthDfRIhwYrTocyHi5FquS27zXVyQuVUEAOQz4lpX2hLN5eRojRv+cgpPWmRsOhvgSvyOByPywtWHKHGMzx7k192hjisbTgBlys4M6gI9q3enJ8BCSdz0gZ0fd5pJaH2OMx0CrFf0CxNs7jBz8uXBnrREQBc3BRi16q16J7yPCoEHfumhODi0vG0ARUt9Pcmdlr7yvIXpc5rhvh3FSK6CGZV+jxJjM=",
+    "content_hash": "0b3d92018a0f1d2cf010f8688fc12f0409c2ceb1acce6513b0867f6c6923908c"
+  },
+  {
+    "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "key_check": "51eeb41639f71c8e3bfed2e0dd99ef18"
+  }
+]

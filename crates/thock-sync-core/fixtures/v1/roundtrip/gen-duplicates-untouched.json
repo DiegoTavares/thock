@@ -1,0 +1,10 @@
+{
+  "name": "duplicates untouched",
+  "before": "# Wednesday\n\n## Day planner\n\n- [ ] Call Ana\n- [ ] Walk\n- [ ] Call Ana\n- [x] Walk\n- [ ] Email Bea\n",
+  "seed": null,
+  "write": null,
+  "after": "# Wednesday\n\n## Day planner\n\n- [ ] Call Ana\n- [ ] Walk\n- [ ] Call Ana\n- [x] Walk\n- [ ] Email Bea\n",
+  "outcome": "noop",
+  "effect_present_before": true,
+  "effect_present_after": true
+}

@@ -1,0 +1,18 @@
+{
+  "name": "create if missing",
+  "before": null,
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-c1",
+    "path": "inbox/2026-10-02-1358-idea.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "create",
+    "content": "---\nsource: thock-ios\n---\n\n# Idea\n"
+  },
+  "after": "---\nsource: thock-ios\n---\n\n# Idea\n",
+  "outcome": "created",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

@@ -1,0 +1,28 @@
+[package]
+name = "thock_sync_core"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+description = "The vault sync rules, hashes and envelope shared by the Thock desk and phone (spec V34 API)"
+
+[lints]
+workspace = true
+
+[lib]
+path = "thock_sync_core.rs"
+doctest = false
+
+[dependencies]
+chacha20poly1305.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+hex.workspace = true
+sha2.workspace = true

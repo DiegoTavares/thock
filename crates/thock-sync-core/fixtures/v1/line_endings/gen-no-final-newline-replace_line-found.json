@@ -1,0 +1,25 @@
+{
+  "name": "no final newline replace_line found",
+  "before": "# Tuesday\n\n## Day planner\n\n- [ ] Call the bank\n- [ ] Water the plants",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "fixture-no-final-newline-replace_line",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "replace_line",
+    "heading": {
+      "text": "Day planner",
+      "level": 2,
+      "ordinal": 0
+    },
+    "line_hash": "7ddd4ff0de216a09",
+    "ordinal": 0,
+    "new_line": "- [x] Water the plants"
+  },
+  "after": "# Tuesday\n\n## Day planner\n\n- [ ] Call the bank\n- [x] Water the plants",
+  "outcome": "applied",
+  "effect_present_before": false,
+  "effect_present_after": true
+}
