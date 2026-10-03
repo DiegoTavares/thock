@@ -208,6 +208,8 @@ Clicking a block or chip reveals its source line in the active editor. Implement
 
 The highlight is transient: it is cleared and repainted on the next click, and cleared when the active item changes.
 
+**Keyboard.** The same selection is the panel's keyboard cursor (`ThockDayPlannerPanel` + `menu` key context). `up`/`down` (and `j`/`k`, `g g`/`shift-g` under vim) move it through the items in the order they are laid out: the unscheduled strip first, then the grid's blocks top to bottom, left to right within a row (status lane first). Movement clamps at both ends. `enter` reveals the selected item exactly as a click does; `escape` returns focus to the editor. A re-parse of the same day keeps the selection on the task with the same label nearest its old row (falling back to the same index while it exists), and the grid scrolls to keep a selected block in view.
+
 ## 9. Behavior specification
 
 ### 9.1 Activation & data flow
