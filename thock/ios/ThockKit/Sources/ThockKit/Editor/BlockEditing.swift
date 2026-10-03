@@ -102,7 +102,7 @@ public struct EditorParagraph: Equatable, Sendable {
     public var markdown: String {
         let shown = runs.map { run -> InlineRun in
             let style = EditorInline(run).shown(as: kind)
-            return InlineRun(run.text, bold: style.bold, italic: style.italic, code: style.code, strike: style.strike, link: style.link)
+            return InlineRun(run.text, bold: style.bold, italic: style.italic, code: style.code, strike: style.strike, link: style.link, comment: run.comment)
         }
         return Inline.serialize(shown).trimmingCharacters(in: .whitespaces)
     }
@@ -225,12 +225,18 @@ extension NSAttributedString.Key {
     public static let thockKind = NSAttributedString.Key("thock.kind")
     /// The paragraph's `EditorParagraph.origin`.
     public static let thockOrigin = NSAttributedString.Key("thock.origin")
+    /// The verbatim source of an inline HTML comment, carried by one
+    /// invisible `EditorText.commentMark` so it is written back where it was.
+    public static let thockComment = NSAttributedString.Key("thock.comment")
 }
 
 /// Editor paragraphs as attributed text and back. How a style looks (fonts,
 /// colours) is the caller's: `style` gives the attributes for a kind and
 /// inline style, and `inline` reads the inline style back from them.
 public enum EditorText {
+    /// A word joiner: zero width, so a comment takes no room in the text.
+    public static let commentMark: Character = "\u{2060}"
+
     /// The text the editor opens with. Every character carries its
     /// paragraph's kind and origin, so either survives as long as one
     /// character of the paragraph does.
@@ -246,7 +252,13 @@ public enum EditorText {
         }
         for (index, paragraph) in paragraphs.enumerated() {
             for run in paragraph.runs {
-                output.append(NSAttributedString(string: run.text, attributes: paragraphAttributes(paragraph, EditorInline(run).shown(as: paragraph.kind))))
+                var attributes = paragraphAttributes(paragraph, EditorInline(run).shown(as: paragraph.kind))
+                if run.comment {
+                    attributes[.thockComment] = run.text
+                    output.append(NSAttributedString(string: String(EditorText.commentMark), attributes: attributes))
+                } else {
+                    output.append(NSAttributedString(string: run.text, attributes: attributes))
+                }
             }
             if index < paragraphs.count - 1 {
                 output.append(NSAttributedString(string: "\n", attributes: paragraphAttributes(paragraph, EditorInline())))
@@ -295,7 +307,27 @@ public enum EditorText {
             if entry.content.length > 0 {
                 text.enumerateAttributes(in: entry.content) { attributes, runRange, _ in
                     let style = inline(attributes, kind)
-                    runs.append(InlineRun(string.substring(with: runRange), bold: style.bold, italic: style.italic, code: style.code, strike: style.strike, link: style.link))
+                    func styled(_ text: String, comment: Bool = false) -> InlineRun {
+                        InlineRun(text, bold: style.bold, italic: style.italic, code: style.code, strike: style.strike, link: style.link, comment: comment)
+                    }
+                    let substring = string.substring(with: runRange)
+                    guard let comment = attributes[.thockComment] as? String else {
+                        runs.append(styled(substring))
+                        return
+                    }
+                    // Text typed next to the mark can inherit its attribute;
+                    // only the mark itself stands for the comment.
+                    var typed = ""
+                    for character in substring {
+                        if character == EditorText.commentMark {
+                            runs.append(styled(typed))
+                            runs.append(styled(comment, comment: true))
+                            typed = ""
+                        } else {
+                            typed.append(character)
+                        }
+                    }
+                    runs.append(styled(typed))
                 }
             }
             return EditorParagraph(kind: kind, runs: runs, origin: EditorText.origin(in: text, paragraph: entry.enclosing))

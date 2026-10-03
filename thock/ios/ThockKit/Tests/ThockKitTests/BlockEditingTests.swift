@@ -219,6 +219,33 @@ final class BlockEditingTests: XCTestCase {
         XCTAssertEqual(result.markdown, "Zeroth\n\nFirst\n\nSecond\n")
     }
 
+    // MARK: Inline comments
+
+    func testInlineCommentsSurviveTheEditorUnseen() throws {
+        for markdown in ["Standup <!--gcal:9f2c-->\n", "- [ ] Call [[Ana]]<!--gcal:9f2c--> today\n", "See [site](https://a.test) <!-- note --> after\n"] {
+            let editing = BlockEditing(Blocks.parse(markdown))
+            let text = EditorText.attributed(editing.paragraphs, style: Self.style)
+            XCTAssertFalse(text.string.contains("<!--"), markdown)
+            XCTAssertTrue(text.string.contains(EditorText.commentMark), markdown)
+
+            let untouched = try reopened(markdown)
+            XCTAssertEqual(untouched.markdown, markdown)
+            XCTAssertFalse(untouched.blocks.contains { $0.touched }, markdown)
+
+            // Rebuilt from the paragraphs, not copied from the source, the
+            // comment is still written back where it was.
+            let rebuilt = BlockEditing().blocks(from: EditorText.paragraphs(from: text, inline: Self.inline))
+            XCTAssertEqual(EditorDocument(blocks: rebuilt).markdown(), markdown, markdown)
+        }
+    }
+
+    func testEditingNextToAnInlineCommentKeepsIt() throws {
+        let result = try reopened("Standup <!--gcal:9f2c-->\n") { text in
+            try self.replace("Standup", with: "Daily standup", in: text)
+        }
+        XCTAssertEqual(result.markdown, "Daily standup <!--gcal:9f2c-->\n")
+    }
+
     // MARK: The inbox edit
 
     func inboxWrites() -> PhoneWrites {
