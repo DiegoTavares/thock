@@ -371,6 +371,7 @@ func (s *server) handleVaultDelete(w http.ResponseWriter, r *http.Request, p pri
 		writeErrorCode(w, http.StatusInternalServerError, "internal", "Couldn't delete the vault copy. Try again.")
 		return
 	}
+	s.dropPhoneKey(p.user.ID)
 	s.feed.publish(p.vault.ID, feedEvent{Kind: "vault", Data: map[string]any{"status": "deleted"}})
 	s.deleteBlobs(p.vault.ID, blobs)
 	w.WriteHeader(http.StatusNoContent)
@@ -397,6 +398,7 @@ func (s *server) handleVaultReset(w http.ResponseWriter, r *http.Request, p prin
 		writeErrorCode(w, http.StatusInternalServerError, "internal", "Couldn't reset phone sync. Try again.")
 		return
 	}
+	s.dropPhoneKey(p.user.ID)
 	if phoneErr == nil {
 		s.feed.publish(p.vault.ID, feedEvent{Kind: "device", Data: map[string]any{"device_id": phone.ID, "revoked": true}})
 	}
@@ -506,6 +508,9 @@ func (s *server) handlePair(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusInternalServerError, "internal", "Couldn't connect the phone. Try again.")
 		return
 	}
+	// Whatever phone was paired before is gone now, and its key goes with it
+	// before the new phone holds a credential to ask for one.
+	s.dropPhoneKey(v.UserID)
 	u, err := s.store.userByID(r.Context(), v.UserID)
 	if err != nil {
 		logf("error: reading the vault owner: %v", err)
@@ -605,8 +610,92 @@ func (s *server) handleDeviceRevoke(w http.ResponseWriter, r *http.Request, p pr
 		writeErrorCode(w, http.StatusInternalServerError, "internal", "Couldn't disconnect the phone. Try again.")
 		return
 	}
+	s.dropPhoneKey(p.user.ID)
 	s.feed.publish(p.vault.ID, feedEvent{Kind: "device", From: roleDesk, Data: map[string]any{"device_id": id, "revoked": true}})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- the agent grant (thock/specs/v35-phone-ask.md §5.1) ---
+
+// What the phone's Ask loop runs on: the balance, and the phone's own key.
+// Never the desk key.
+type agentGrantResponse struct {
+	Status         string            `json:"status"`
+	AllowanceUnits int64             `json:"allowance_units"`
+	UsedUnits      int64             `json:"used_units"`
+	RemainingUnits int64             `json:"remaining_units"`
+	WarnAtPercent  int               `json:"warn_at_percent"`
+	CycleEndsAt    time.Time         `json:"cycle_ends_at"`
+	Gateway        agentGrantGateway `json:"gateway"`
+}
+
+type agentGrantGateway struct {
+	Provider string     `json:"provider"`
+	BaseURL  string     `json:"base_url"`
+	APIKey   string     `json:"api_key"`
+	Models   modelTiers `json:"models"`
+}
+
+func (s *server) handleAgentGrant(w http.ResponseWriter, r *http.Request, p principal) {
+	credential, _ := bearer(r)
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	// The phone may have been disconnected, or the vault lapsed, between the
+	// check that let this request in and the lock. Those paths revoke the
+	// phone key under the same lock, so asking again here is what stops a
+	// request already in flight from minting a key nobody will revoke.
+	current, err := s.resolvePrincipal(r.Context(), credential)
+	var refusal *refusalError
+	if errors.As(err, &refusal) {
+		writeErrorCode(w, refusal.status, refusal.code, refusal.message)
+		return
+	}
+	if err != nil {
+		logf("error: re-checking a phone credential for its grant: %v", err)
+		writeErrorCode(w, http.StatusInternalServerError, "internal", "Couldn't check your connection right now. Try again.")
+		return
+	}
+	if current.vault == nil || current.vault.LapsedAt != nil || current.user.Status == userRevoked {
+		writeErrorCode(w, http.StatusForbidden, "plus_lapsed", "Your Thock Plus subscription ended, so the phone can only look. Renew to ask from it again.")
+		return
+	}
+	u := current.user
+	if u.PhoneGateway.Hash == "" {
+		u, err = s.mintPhoneKey(r.Context(), u)
+		if errors.Is(err, errPlanMissing) {
+			writeErrorCode(w, http.StatusServiceUnavailable, "unavailable", "Your plan isn't configured right now. Try again later.")
+			return
+		}
+		if err != nil {
+			logf("error: minting a phone key for %s: %v", p.user.ID, err)
+			writeErrorCode(w, http.StatusBadGateway, "upstream", "Couldn't set up your agent's access right now. Try again in a minute.")
+			return
+		}
+	}
+	entitlement, err := s.allowanceLoop(r.Context(), u)
+	if errors.Is(err, errPlanMissing) {
+		writeErrorCode(w, http.StatusServiceUnavailable, "unavailable", "Your plan isn't configured right now. Try again later.")
+		return
+	}
+	if err != nil {
+		logf("error: the phone's grant for %s: %v", u.ID, err)
+		writeErrorCode(w, http.StatusBadGateway, "upstream", "Couldn't read your balance right now. Try again in a minute.")
+		return
+	}
+	writeJSON(w, http.StatusOK, agentGrantResponse{
+		Status:         entitlement.Status,
+		AllowanceUnits: entitlement.AllowanceUnits,
+		UsedUnits:      entitlement.UsedUnits,
+		RemainingUnits: entitlement.RemainingUnits,
+		WarnAtPercent:  entitlement.WarnAtPercent,
+		CycleEndsAt:    entitlement.CycleEndsAt,
+		Gateway: agentGrantGateway{
+			Provider: "openrouter",
+			BaseURL:  gatewayBaseURL,
+			APIKey:   u.PhoneGateway.Secret,
+			Models:   entitlement.Gateway.Models,
+		},
+	})
 }
 
 // --- §6.3 files ---
@@ -1108,6 +1197,11 @@ func (s *server) handleAdminLapse(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.setVaultLapsed(r.Context(), v.ID, at); err != nil {
 		writeErrorCode(w, http.StatusInternalServerError, "internal", "Couldn't update the vault: "+err.Error())
 		return
+	}
+	if request.Lapsed {
+		// The phone keeps its credential through a lapse but may no longer
+		// ask; a renewal's first grant mints a fresh key.
+		s.dropPhoneKey(v.UserID)
 	}
 	if request.Lapsed && v.LapsedAt == nil {
 		s.feed.publish(v.ID, feedEvent{Kind: "vault", Data: map[string]any{"status": "lapsed"}})

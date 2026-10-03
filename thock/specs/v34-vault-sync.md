@@ -371,6 +371,11 @@ keymap entry for `thock::ConnectPhone`. No new upstream touch-points beyond that
 
 ## 13. The agent working set (Ask on the phone)
 
+**Withdrawn 2026-10-03 by `v35-phone-ask.md`.** The agent's loop runs on the phone against the copy of
+the vault it already holds, so nothing is decrypted for a server and no runner exists. V25's rule
+(*notes never leave the machine for the agent's sake*) stands without an exception, and VISION §4 needs
+no new wording. The text below is kept as the record of what was first decided.
+
 V33 §11 wants the hosted agent on the phone; V25 forbids server-side execution; E2E means the
 server cannot read the vault. Decision §15 #6 resolves it with a **bounded exception**: for an Ask
 turn the phone decrypts a working set and sends it with the question to an **ephemeral agent
@@ -419,6 +424,7 @@ From the interview, with Diego's answers:
 5. **Metadata:** paths in the clear, contents encrypted, so files sync one at a time.
 6. **Agent on the phone:** the phone sends the notes it needs to an ephemeral runner. A bounded
    exception to V25's no-server-side-execution rule, to be written up when Ask ships (§13).
+   _Overturned 2026-10-03: the agent runs on the phone (`v35-phone-ask.md`)._
 7. **Keys:** QR pairing only, no recovery phrase, no escrow.
 8. **Phone copy:** every allow-listed text file.
 9. **History:** latest state only on the server.
@@ -454,8 +460,8 @@ the first iteration that touches the area decides it and records the decision he
    extension coordination. Leaning: SQLite.
 6. **A desk background helper** — only if *desk asleep* turns out to mean *desk closed for days*
    for real users; the service of §10.1 should be a separable crate so a helper can wrap it.
-7. **The ephemeral agent runner** (§13) — sandbox shape, per-turn cost cap, VISION wording.
-   Owned by the Ask tier of V33, not by this spec.
+7. ~~**The ephemeral agent runner** (§13) — sandbox shape, per-turn cost cap, VISION wording.~~
+   Withdrawn: `v35-phone-ask.md` runs the agent on the phone.
 8. **Journal timestamp locale and the time-chip grammar across devices** — V33 §19; the rules of
    §8.1 strip the time prefix for hashing so this does not block sync.
 9. **Export from the phone** — a zip of decrypted text files, so *your files, forever* holds on the
@@ -472,6 +478,6 @@ the first iteration that touches the area decides it and records the decision he
    the fixture corpus, status row, conflict hint. Usable alone: a developer can pair a test client.
 3. **Phone:** the store, the queue, the rebase, the pull, pairing. This is the V33 first-release
    data layer; the V33 screens sit on top.
-4. **Ask tier:** §13's working-set call and the V25 amendment, with V33's second tier.
+4. **Ask tier:** `v35-phone-ask.md` (one grant route on the backend; the rest is on the phone).
 
 VISION §12 Milestone 6 gains this spec's row; §4.3's *sync storage next* becomes this.

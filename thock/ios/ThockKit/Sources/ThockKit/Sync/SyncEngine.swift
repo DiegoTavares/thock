@@ -95,6 +95,15 @@ public actor SyncEngine {
         return try JSONDecoder().decode(type, from: result.body)
     }
 
+    /// Asks the service what the agent on this phone may spend. Asking is
+    /// also what keeps the allowance current while the desk is closed.
+    public func agentGrant() async throws -> AgentGrant {
+        guard let credential else {
+            throw APIError(status: 401, code: "unauthorized", error: "This phone isn't connected to your desk.")
+        }
+        return try await call("GET", "/v1/vault/agent", credential: credential, as: AgentGrant.self)
+    }
+
     // MARK: Pairing
 
     /// Redeems the code from the desk's QR, checks the scanned key against

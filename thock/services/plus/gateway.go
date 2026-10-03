@@ -25,6 +25,10 @@ type gateway interface {
 	revoke(ctx context.Context, hash string) error
 }
 
+// Where a device holding a minted key sends its model calls. It travels in
+// the phone's grant so a gateway migration stays a backend change.
+const gatewayBaseURL = "https://openrouter.ai/api/v1"
+
 type openRouterGateway struct {
 	baseURL       string
 	managementKey string

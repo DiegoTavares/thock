@@ -9,6 +9,33 @@ public struct PendingWrite: Equatable, Sendable {
     public var seq: Int?
 }
 
+public struct SearchHit: Equatable, Sendable {
+    public var path: String
+    public var excerpt: String
+}
+
+/// One question and what came of it (V35 §5.2).
+public struct AskTurn: Equatable, Identifiable, Sendable {
+    public var id: Int64
+    public var question: String
+    public var answer: String?
+    /// The notes the agent read to answer, as vault-relative paths.
+    public var sources: [String] = []
+    /// Why there is no answer, in a sentence for the person.
+    public var failure: String?
+    /// Whether the answer was appended to today's note.
+    public var kept = false
+
+    public init(id: Int64, question: String, answer: String? = nil, sources: [String] = [], failure: String? = nil, kept: Bool = false) {
+        self.id = id
+        self.question = question
+        self.answer = answer
+        self.sources = sources
+        self.failure = failure
+        self.kept = kept
+    }
+}
+
 /// The phone's copy of the vault: decrypted notes, the queue of writes the
 /// desk has not applied yet, and the record of captures (V34 §6.3). One
 /// SQLite file in the app group container, shared by the app, the share
@@ -55,6 +82,18 @@ public final class VaultStore: @unchecked Sendable {
             )
             """)
         try database.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        try database.execute("""
+            CREATE TABLE IF NOT EXISTS ask_turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                day TEXT NOT NULL,
+                question TEXT NOT NULL,
+                answer TEXT,
+                sources TEXT NOT NULL DEFAULT '',
+                failure TEXT,
+                kept INTEGER NOT NULL DEFAULT 0
+            )
+            """)
+        try createSearchIndex()
         if let url {
             // Background refresh has to read the store while the phone is
             // locked, so the class is "until first unlock" (V34 §6.3).
@@ -377,10 +416,114 @@ public final class VaultStore: @unchecked Sendable {
             .compactMap { path in content(path).map { InboxNote(path: path, content: $0) } }
     }
 
+    // MARK: Ask
+
+    /// A ranked index over every note, for the agent's `search` (V35 §5.3).
+    /// Triggers keep it current, so no write path can forget it.
+    private func createSearchIndex() throws {
+        let existed = try !database.query("SELECT 1 FROM sqlite_master WHERE name = 'notes_index'").isEmpty
+        try database.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS notes_index USING fts5(
+                path, content, content='files', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2'
+            )
+            """)
+        try database.execute("""
+            CREATE TRIGGER IF NOT EXISTS files_index_insert AFTER INSERT ON files BEGIN
+                INSERT INTO notes_index(rowid, path, content) VALUES (new.rowid, new.path, new.content);
+            END
+            """)
+        try database.execute("""
+            CREATE TRIGGER IF NOT EXISTS files_index_delete AFTER DELETE ON files BEGIN
+                INSERT INTO notes_index(notes_index, rowid, path, content) VALUES ('delete', old.rowid, old.path, old.content);
+            END
+            """)
+        try database.execute("""
+            CREATE TRIGGER IF NOT EXISTS files_index_update AFTER UPDATE OF path, content ON files BEGIN
+                INSERT INTO notes_index(notes_index, rowid, path, content) VALUES ('delete', old.rowid, old.path, old.content);
+                INSERT INTO notes_index(rowid, path, content) VALUES (new.rowid, new.path, new.content);
+            END
+            """)
+        if !existed {
+            // A store from before the index existed already holds notes.
+            try database.execute("INSERT INTO notes_index(notes_index) VALUES ('rebuild')")
+        }
+    }
+
+    /// Notes ranked by how well they match any of the query's words. Words
+    /// match as prefixes with diacritics folded, so "deploy" finds "deployed"
+    /// and "migracao" finds "migração".
+    public func search(_ query: String, folder: String? = nil, limit: Int = 12) -> [SearchHit] {
+        let words = query
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count >= 2 }
+            .prefix(12)
+        guard !words.isEmpty else { return [] }
+        let match = words.map { "\"\($0)\"*" }.joined(separator: " OR ")
+        var sql = """
+            SELECT path, snippet(notes_index, 1, '', '', ' … ', 30) FROM notes_index
+            WHERE notes_index MATCH ? AND (path LIKE '%.md' OR path LIKE '%.txt')
+            """
+        var bindings: [Database.Value] = [.text(match)]
+        let prefix = VaultConfig.normalizedFolder(folder ?? "")
+        if !prefix.isEmpty {
+            sql += " AND substr(path, 1, ?) = ?"
+            bindings += [.int(Int64(prefix.unicodeScalars.count + 1)), .text(prefix + "/")]
+        }
+        // A word in a note's name counts for more than one in its body.
+        sql += " ORDER BY bm25(notes_index, 4.0, 1.0) LIMIT ?"
+        bindings.append(.int(Int64(limit)))
+        return locked {
+            let rows = (try? database.query(sql, bindings)) ?? []
+            return rows.compactMap { row in
+                guard let path = row[0].string else { return nil }
+                let excerpt = (row[1].string ?? "").split(whereSeparator: \.isNewline).joined(separator: " ")
+                return SearchHit(path: path, excerpt: excerpt)
+            }
+        }
+    }
+
+    /// The day's thread. Asking on a new day clears the old one: the thread
+    /// lives on the phone for a day and is never written to the vault.
+    public func askTurns(day: VaultDay) -> [AskTurn] {
+        locked {
+            try? database.execute("DELETE FROM ask_turns WHERE day <> ?", [.text(day.iso)])
+            let rows = (try? database.query("SELECT id, question, answer, sources, failure, kept FROM ask_turns WHERE day = ? ORDER BY id", [.text(day.iso)])) ?? []
+            return rows.compactMap { row in
+                guard let id = row[0].int, let question = row[1].string else { return nil }
+                let sources = (row[3].string ?? "").split(separator: "\n").map(String.init)
+                return AskTurn(id: id, question: question, answer: row[2].string, sources: sources, failure: row[4].string, kept: row[5].int == 1)
+            }
+        }
+    }
+
+    public func addAskTurn(question: String, day: VaultDay) throws -> AskTurn {
+        try locked {
+            try database.execute("INSERT INTO ask_turns (day, question) VALUES (?, ?)", [.text(day.iso), .text(question)])
+            return AskTurn(id: database.lastInsertedRow, question: question)
+        }
+    }
+
+    /// Records how a turn ended: with an answer, or with the sentence that
+    /// says why there is none.
+    public func finishAskTurn(_ turn: AskTurn) throws {
+        try locked {
+            try database.execute(
+                "UPDATE ask_turns SET answer = ?, sources = ?, failure = ?, kept = ? WHERE id = ?",
+                [turn.answer.map { .text($0) } ?? .null, .text(turn.sources.joined(separator: "\n")),
+                 turn.failure.map { .text($0) } ?? .null, .int(turn.kept ? 1 : 0), .int(turn.id)])
+        }
+    }
+
+    public func removeAskTurn(id: Int64) throws {
+        try locked {
+            try database.execute("DELETE FROM ask_turns WHERE id = ?", [.int(id)])
+        }
+    }
+
     /// Forgets the vault: used when the desk disconnects this phone.
     public func wipe() {
         locked {
-            for table in ["files", "pending_writes", "captures", "meta"] {
+            for table in ["files", "pending_writes", "captures", "meta", "ask_turns"] {
                 try? database.execute("DELETE FROM \(table)")
             }
         }

@@ -127,7 +127,8 @@ as a premium hedge harness behind the same gateway.
   hosted-tier-only until a future spec says otherwise.
 - **No server-side agent execution.** Notes never leave the machine for the agent's sake; only model
   traffic (prompts/completions) transits the gateway. No vault sync in this spec; that is a future
-  Thock Plus benefit with its own spec.
+  Thock Plus benefit with its own spec. _(2026-10-03: still true with Ask on the phone; V35 runs that
+  agent on the phone, with its own gateway key drawing on the same allowance.)_
 - **No model picker, key fields, or provider names in the UI.** Tiers only.
 - **No per-change approval prompts.** Dropped by design (decision 16). Rituals may still ask
   questions as part of their own flow (triage confirms filing, the money ritual waits for the human),

@@ -322,7 +322,10 @@ Readwise Reader as a clip destination (D3) is a later tier (§18).
 
 ## 11. Ask
 
-Decided: **F1** — the hosted Thock Agent, Plus only, with no on-phone BYO path.
+Decided: **F1** — the hosted Thock Agent, Plus only, with no on-phone BYO path. Amended 2026-10-03 by
+`v35-phone-ask.md`: the agent's loop runs on the phone against its own copy of the vault, and the first
+release is read-only apart from *Keep this* and one line to `memory/inbox.md` when the person tells it
+something worth remembering. The appends by request below are V35's second pass.
 
 - The Ask screen is the chat panel's grammar on a phone: the user's bubble, the agent's amber
   block, one quiet activity line per turn, the notes it read named as vault-relative paths under
@@ -337,8 +340,7 @@ Decided: **F1** — the hosted Thock Agent, Plus only, with no on-phone BYO path
 - **One thread per day**, cleared at midnight. The desk keeps its own threads.
 - **Without Plus** the tab explains itself in one paragraph and offers nothing else in this tier.
   *Ask later* (the question as an inbox item the desk's agent answers) is a second-tier feature.
-- How the hosted agent reaches the phone's copy of the vault is the data-model spec's problem.
-  This spec fixes only what the agent may do once it can.
+- How the agent reaches the phone's copy of the vault is `v35-phone-ask.md`: it runs on the phone.
 
 ## 12. Entry points outside the app
 
@@ -385,8 +387,9 @@ The phone writes **only**:
 | `daily/<other day>.md` | the same single-line planner edits, from the day strip |
 | `weekly/<week>.md` | tick one `## Goals` line; replace one section after confirmation |
 | `backlog.md` | append one task under **Soon** |
+| `memory/inbox.md` | append one dated line, by the agent during Ask (V35 decision 5); Reflect files it at the desk |
 
-Nothing else, ever. Not `memory/`, not `routines/`, not `.thock/`, not templates, not the triage
+Nothing else, ever. Not the rest of `memory/`, not `routines/`, not `.thock/`, not templates, not the triage
 log (the phone only reads it). The desk owns every other write. Two appends to the same section
 can always both be kept, which is what makes the deferred sync problem solvable rather than
 hopeful.
