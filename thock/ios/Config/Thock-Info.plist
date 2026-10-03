@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.thethock.ios</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>thock</string>
+			</array>
+		</dict>
+	</array>
+	<key>UIApplicationShortcutItems</key>
+	<array>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.thethock.ios.idea</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Idea</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>plus</string>
+		</dict>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.thethock.ios.journal</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Journal</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>text.alignleft</string>
+		</dict>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.thethock.ios.clip</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Clip</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>arrow.up.right</string>
+		</dict>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.thethock.ios.ask</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Ask</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>sparkle</string>
+		</dict>
+	</array>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchGround</string>
+	</dict>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Thock uses the camera to scan the code your desk shows when you connect this phone.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Thock asks for Face ID before showing your notes.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
+</dict>
+</plist>

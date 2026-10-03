@@ -1,6 +1,6 @@
 //! One sync indicator for every connector (spec `v32-sync-status-indicator.md`):
-//! an icon in the status bar whose popover lists Calendar, Gmail, Inbox, and
-//! Readwise with each one's action, plus the status model both that popover
+//! an icon in the status bar whose popover lists Calendar, Gmail, Inbox,
+//! Readwise, and the phone with each one's action, plus the status model both that popover
 //! and the panels' inline rows render from. A panel keeps a status row only
 //! while the user has to act on it; the icon carries a dot for the same
 //! states, so nothing broken hides behind a click.
@@ -30,6 +30,9 @@ use crate::calendar_service::{
 use crate::gmail_service::{self, GmailService, SyncGmailNow};
 use crate::inbox_service::{self, InboxService, SyncInboxNow, TriageInbox};
 use crate::readwise_service::{self, ConnectReadwise, ReadwiseService, SyncReadwiseNow};
+use crate::vault_sync::{
+    self, ConnectPhone, PhoneSyncState, SkippedFile, SyncVaultNow, VaultSyncService,
+};
 
 /// How often an open popover re-renders so "synced 2m ago" keeps up.
 const RELATIVE_TIME_REFRESH: Duration = Duration::from_secs(30);
@@ -38,7 +41,8 @@ actions!(
     thock,
     [
         /// Shows how each connected service — Calendar, Gmail, Inbox,
-        /// Readwise — is doing, with a fix for anything that needs one.
+        /// Readwise, your phone — is doing, with a fix for anything that
+        /// needs one.
         ToggleSyncStatus
     ]
 );
@@ -69,6 +73,7 @@ pub enum Connector {
     Gmail,
     Inbox,
     Readwise,
+    Phone,
 }
 
 impl Connector {
@@ -78,6 +83,7 @@ impl Connector {
             Self::Gmail => "Gmail",
             Self::Inbox => "Inbox",
             Self::Readwise => "Readwise",
+            Self::Phone => "Phone",
         }
     }
 }
@@ -104,8 +110,10 @@ pub enum ActionKind {
     SyncGmailNow,
     SyncInboxNow,
     SyncReadwiseNow,
+    SyncVaultNow,
     ConnectGoogleWorkspace,
     ConnectReadwise,
+    ConnectPhone,
     AddPlannerHeading,
     ChoosePlannerHeading,
     TriageInbox,
@@ -118,8 +126,10 @@ impl ActionKind {
             Self::SyncGmailNow => SyncGmailNow.boxed_clone(),
             Self::SyncInboxNow => SyncInboxNow.boxed_clone(),
             Self::SyncReadwiseNow => SyncReadwiseNow.boxed_clone(),
+            Self::SyncVaultNow => SyncVaultNow.boxed_clone(),
             Self::ConnectGoogleWorkspace => ConnectGoogleWorkspace.boxed_clone(),
             Self::ConnectReadwise => ConnectReadwise.boxed_clone(),
+            Self::ConnectPhone => ConnectPhone.boxed_clone(),
             Self::AddPlannerHeading => AddPlannerHeading.boxed_clone(),
             Self::ChoosePlannerHeading => ChoosePlannerHeading.boxed_clone(),
             Self::TriageInbox => TriageInbox.boxed_clone(),
@@ -132,7 +142,11 @@ impl ActionKind {
     fn keeps_popover_open(self) -> bool {
         matches!(
             self,
-            Self::SyncCalendarNow | Self::SyncGmailNow | Self::SyncInboxNow | Self::SyncReadwiseNow
+            Self::SyncCalendarNow
+                | Self::SyncGmailNow
+                | Self::SyncInboxNow
+                | Self::SyncReadwiseNow
+                | Self::SyncVaultNow
         )
     }
 }
@@ -394,6 +408,75 @@ pub fn status_for_readwise(state: &SyncState, extras: ReadwiseExtras) -> Option<
     })
 }
 
+/// What the phone row needs beyond the sync state.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PhoneExtras<'a> {
+    /// Writes from the phone the desk has not applied yet.
+    pub writes_pending: u64,
+    pub skipped: &'a [SkippedFile],
+    /// Files over the vault's quota, not uploaded.
+    pub held_back: &'a [String],
+}
+
+/// The phone row (V34 §10.1). `None` until Thock Plus is connected. Pairing
+/// is opt-in, so a phone never paired is not a warning; one that was paired
+/// and is gone is.
+pub fn status_for_phone(state: &PhoneSyncState, extras: PhoneExtras) -> Option<ConnectorStatus> {
+    let connector = Connector::Phone;
+    let sync_now = ActionKind::SyncVaultNow;
+    let connect = ActionKind::ConnectPhone;
+    Some(match state {
+        PhoneSyncState::Hidden => return None,
+        PhoneSyncState::Off => {
+            ConnectorStatus::new(connector, "not connected").action(connect, "Connect phone")
+        }
+        PhoneSyncState::PhoneNotConnected => ConnectorStatus::new(connector, "not connected")
+            .attention(Attention::Warning)
+            .action(connect, "Connect phone"),
+        PhoneSyncState::Starting => ConnectorStatus::new(connector, "connecting…").busy(),
+        PhoneSyncState::Working => ConnectorStatus::new(connector, "syncing…").busy(),
+        PhoneSyncState::Paused => ConnectorStatus::new(connector, "paused, renew Thock Plus")
+            .attention(Attention::Warning),
+        PhoneSyncState::UpToDate { at } => {
+            let mut summary = format!("up to date · {}", format_ago(at.elapsed()));
+            match extras.writes_pending {
+                0 => {}
+                1 => summary.push_str(" · 1 waiting from your phone"),
+                pending => summary.push_str(&format!(" · {pending} waiting from your phone")),
+            }
+            let not_sent = extras.skipped.len() + extras.held_back.len();
+            let status = match not_sent {
+                0 => ConnectorStatus::new(connector, summary),
+                not_sent => {
+                    if not_sent == 1 {
+                        summary.push_str(" · 1 file not sent");
+                    } else {
+                        summary.push_str(&format!(" · {not_sent} files not sent"));
+                    }
+                    let detail =
+                        extras
+                            .skipped
+                            .iter()
+                            .map(|file| format!("{}: {}", file.path, file.reason))
+                            .chain(extras.held_back.iter().map(|path| {
+                                format!("{path}: held back, the vault is at its quota")
+                            }))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                    ConnectorStatus::new(connector, summary)
+                        .detail(detail)
+                        .attention(Attention::Warning)
+                }
+            };
+            status.action(sync_now, "Sync now")
+        }
+        PhoneSyncState::Failing { error } => ConnectorStatus::new(connector, "sync failed")
+            .detail(error.clone())
+            .attention(Attention::Error)
+            .action(sync_now, "Retry"),
+    })
+}
+
 pub fn calendar_status(service: &CalendarService) -> Option<ConnectorStatus> {
     status_for_calendar(service.state())
 }
@@ -418,6 +501,17 @@ pub fn readwise_status(service: &ReadwiseService) -> Option<ConnectorStatus> {
             importing_library: service.importing_library(),
             last_landed: service.last_landed(),
             config_error: service.config_error(),
+        },
+    )
+}
+
+pub fn phone_status(service: &VaultSyncService) -> Option<ConnectorStatus> {
+    status_for_phone(
+        service.status(),
+        PhoneExtras {
+            writes_pending: service.info().map_or(0, |info| info.writes.pending),
+            skipped: service.skipped(),
+            held_back: service.held_back(),
         },
     )
 }
@@ -593,6 +687,7 @@ pub struct SyncStatusIndicator {
     gmail: Option<Entity<GmailService>>,
     inbox: Option<Entity<InboxService>>,
     readwise: Option<Entity<ReadwiseService>>,
+    phone: Option<Entity<VaultSyncService>>,
     popover_handle: PopoverMenuHandle<SyncStatusPopover>,
     _subscriptions: Vec<Subscription>,
 }
@@ -620,6 +715,7 @@ impl SyncStatusIndicator {
             gmail: None,
             inbox: None,
             readwise: None,
+            phone: None,
             popover_handle: PopoverMenuHandle::default(),
             _subscriptions: vec![project_subscription],
         };
@@ -629,7 +725,7 @@ impl SyncStatusIndicator {
 
     /// The services are created by their own workspace observers, which run
     /// after the status bar is built, so missing ones are looked up again on
-    /// every later trigger until all four are found.
+    /// every later trigger until all of them are found.
     fn resolve_services(&mut self, cx: &mut Context<Self>) {
         let project = self.project.clone();
         Self::resolve(
@@ -653,6 +749,12 @@ impl SyncStatusIndicator {
         Self::resolve(
             &mut self.readwise,
             readwise_service::service_for_project(&project, cx),
+            &mut self._subscriptions,
+            cx,
+        );
+        Self::resolve(
+            &mut self.phone,
+            vault_sync::service_for_project(&project, cx),
             &mut self._subscriptions,
             cx,
         );
@@ -692,6 +794,11 @@ impl SyncStatusIndicator {
             self.readwise
                 .as_ref()
                 .and_then(|service| readwise_status(service.read(cx))),
+        );
+        statuses.extend(
+            self.phone
+                .as_ref()
+                .and_then(|service| phone_status(service.read(cx))),
         );
         statuses
     }
@@ -1229,6 +1336,86 @@ mod tests {
         assert_eq!(readwise.attention, Attention::Warning);
         assert!(readwise.detail.is_some());
         assert!(readwise.actions.is_empty());
+    }
+
+    #[test]
+    fn a_phone_never_paired_is_offered_quietly() {
+        let extras = PhoneExtras::default();
+        assert_eq!(status_for_phone(&PhoneSyncState::Hidden, extras), None);
+
+        let off = status_for_phone(&PhoneSyncState::Off, extras).unwrap();
+        assert_eq!(off.attention, Attention::None);
+        assert_eq!(labels(&off), ["Connect phone"]);
+
+        let gone = status_for_phone(&PhoneSyncState::PhoneNotConnected, extras).unwrap();
+        assert_eq!(gone.attention, Attention::Warning);
+        assert_eq!(labels(&gone), ["Connect phone"]);
+
+        let paused = status_for_phone(&PhoneSyncState::Paused, extras).unwrap();
+        assert_eq!(paused.attention, Attention::Warning);
+        assert!(paused.actions.is_empty());
+
+        assert!(
+            status_for_phone(&PhoneSyncState::Working, extras)
+                .unwrap()
+                .busy
+        );
+        let failing = status_for_phone(
+            &PhoneSyncState::Failing {
+                error: "boom".into(),
+            },
+            extras,
+        )
+        .unwrap();
+        assert_eq!(failing.attention, Attention::Error);
+        assert_eq!(failing.detail.as_deref(), Some("boom"));
+        assert_eq!(labels(&failing), ["Retry"]);
+    }
+
+    #[test]
+    fn files_not_sent_to_the_phone_are_a_warning_listing_them() {
+        let up_to_date = PhoneSyncState::UpToDate { at: Instant::now() };
+        let healthy = status_for_phone(
+            &up_to_date,
+            PhoneExtras {
+                writes_pending: 2,
+                ..PhoneExtras::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            healthy.summary.as_ref(),
+            "up to date · just now · 2 waiting from your phone"
+        );
+        assert_eq!(healthy.attention, Attention::None);
+        assert_eq!(labels(&healthy), ["Sync now"]);
+
+        let skipped = [SkippedFile {
+            path: "archives/big.md".into(),
+            reason: "over 1 MB".into(),
+        }];
+        let held_back = ["daily/2026-10-02.md".to_string()];
+        let not_sent = status_for_phone(
+            &up_to_date,
+            PhoneExtras {
+                writes_pending: 0,
+                skipped: &skipped,
+                held_back: &held_back,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            not_sent.summary.as_ref(),
+            "up to date · just now · 2 files not sent"
+        );
+        assert_eq!(not_sent.attention, Attention::Warning);
+        assert_eq!(
+            not_sent.detail.as_deref(),
+            Some(
+                "archives/big.md: over 1 MB\n\
+                 daily/2026-10-02.md: held back, the vault is at its quota"
+            )
+        );
     }
 
     #[test]

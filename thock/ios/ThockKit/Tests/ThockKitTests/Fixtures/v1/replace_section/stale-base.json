@@ -1,0 +1,27 @@
+{
+  "name": "a stale section rewrite is appended below the current one",
+  "before": "## Personal\n\nDesk version.\n\n## Next\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "0f7e0b1a-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
+    "kind": "replace_section",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a9e0d7b2f4a61",
+    "heading": {
+      "text": "Personal",
+      "level": 2,
+      "ordinal": 0
+    },
+    "base_hash": "37e92f782511129b",
+    "lines": [
+      "Phone version.",
+      "Second line."
+    ]
+  },
+  "after": "## Personal\n\nDesk version.\n\nPhone version. <!--thock:also-->\nSecond line.\n\n## Next\n",
+  "outcome": "kept_both",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

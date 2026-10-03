@@ -1,0 +1,10 @@
+{
+  "name": "fenced untouched",
+  "before": "# Notes\n\n## Snippets\n\n```md\n## not a heading\n- [ ] not a task either\n```\n\n~~~\n### also fenced\n~~~\n\n- [ ] Review the snippet\n\n## Tasks\n\n- [ ] Ship it\n",
+  "seed": null,
+  "write": null,
+  "after": "# Notes\n\n## Snippets\n\n```md\n## not a heading\n- [ ] not a task either\n```\n\n~~~\n### also fenced\n~~~\n\n- [ ] Review the snippet\n\n## Tasks\n\n- [ ] Ship it\n",
+  "outcome": "noop",
+  "effect_present_before": true,
+  "effect_present_after": true
+}

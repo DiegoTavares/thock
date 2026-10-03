@@ -348,6 +348,25 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   hand-rolled copies of the same row grammar. Spec `specs/v32-sync-status-indicator.md`. _(shipped)_
 - [ ] **Money + safety:** Polar products referencing backend plans by id (credits with hard stop, top-up packs, license-key credential), OS sandbox on every hosted session (write = vault, network = gateway allowlist), per-session ceilings, anomaly alerts. _(planned)_
 
+### Milestone 6 — Thock on iPhone
+- [ ] **A pen for the vault, not a second desk** — an iPhone companion for the moments away from the
+  keyboard: capture an idea (inbox by default, Today or Backlog a chip away), journal a timestamped
+  paragraph, clip an article with its readable text under `reference/clips/`, glance at today and
+  the week with single-line nudges (tick, set a time, add, move to Soon), receipts read from the
+  triage log, and Ask through the hosted agent (Plus). Editing feels like Apple Notes over a strict
+  Markdown subset; the phone only ever appends or changes one line, and never runs a ritual.
+  Design reference: https://claude.ai/artifact/UqePrnerog5SmibGeLD9ZD. Spec
+  `specs/v33-iphone-companion.md`. Data model and sync are V34. _(planned)_
+- [ ] **The same vault on the desk and the phone** — a Thock Plus benefit: pair by scanning one code at
+  the desk; the desk uploads every text file as a blob encrypted with a key that exists only on the two
+  devices, the phone downloads them and queues its appends and single-line edits as small writes the
+  desk applies after a checkpoint. The server (`thock/services/plus`) stores what it cannot read, so
+  the phone has the latest vault while the desk sleeps; a line edited at both ends keeps both versions
+  in the note with a quiet marker, and nothing is ever lost. Spec `specs/v34-vault-sync.md`; the wire
+  contract the three implementations share is `specs/v34-vault-sync-api.md`. _(in progress: the backend
+  routes, the shared rules crate `thock_sync_core` and the desk service with pairing, catch-up, drain
+  and the Phone row in the sync indicator are on `main`; the phone app is V33's data layer)_
+
 ---
 
 _This is a starting point, not a spec. It exists to give designers and engineers a shared picture of the destination so we can argue productively about the route._

@@ -1,0 +1,28 @@
+{
+  "name": "exact match beats key match",
+  "before": "## Day-planner\n- a\n## Day planner\n- b\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-exact",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "append",
+    "heading": {
+      "text": "Day planner",
+      "level": 2,
+      "ordinal": 0
+    },
+    "lines": [
+      "- c"
+    ],
+    "placement": "end",
+    "blank_line_before": false,
+    "create_from_template": false
+  },
+  "after": "## Day-planner\n- a\n## Day planner\n- b\n- c\n",
+  "outcome": "applied",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

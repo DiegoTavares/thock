@@ -1,0 +1,25 @@
+{
+  "name": "an edit keeps the checkbox and time and changes only the words",
+  "before": "## Day planner\n- [ ] 15:00 - 15:30 Call dentist\n- [ ] Lunch\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "0f7e0b1a-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
+    "kind": "replace_line",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a9e0d7b2f4a61",
+    "heading": {
+      "text": "Day planner",
+      "level": 2,
+      "ordinal": 0
+    },
+    "line_hash": "76cbacf65a21837a",
+    "ordinal": 0,
+    "new_line": "- [ ] 15:00 - 15:30 Call the dentist about Friday"
+  },
+  "after": "## Day planner\n- [ ] 15:00 - 15:30 Call the dentist about Friday\n- [ ] Lunch\n",
+  "outcome": "applied",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

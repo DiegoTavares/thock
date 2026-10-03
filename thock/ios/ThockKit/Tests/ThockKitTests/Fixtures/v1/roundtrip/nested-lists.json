@@ -1,0 +1,10 @@
+{
+  "name": "nested lists",
+  "before": "- a\n  - b\n    - [ ] c\n\n1. one\n2) two\n\n> quote\n> more\n\n___\n",
+  "seed": null,
+  "write": null,
+  "after": "- a\n  - b\n    - [ ] c\n\n1. one\n2) two\n\n> quote\n> more\n\n___\n",
+  "outcome": "noop",
+  "effect_present_before": false,
+  "effect_present_after": false
+}

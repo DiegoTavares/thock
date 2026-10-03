@@ -1,0 +1,18 @@
+{
+  "name": "crlf create same",
+  "before": "# Monday\r\n\r\n## Journal\r\n\r\nRainy.\r\n\r\n## Day planner\r\n\r\n- [ ] 09:00 - 09:30 Standup\r\n- [ ] Groceries\r\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "fixture-crlf-create",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "create",
+    "content": "# Monday\r\n\r\n## Journal\r\n\r\nRainy.\r\n\r\n## Day planner\r\n\r\n- [ ] 09:00 - 09:30 Standup\r\n- [ ] Groceries\r\n"
+  },
+  "after": "# Monday\r\n\r\n## Journal\r\n\r\nRainy.\r\n\r\n## Day planner\r\n\r\n- [ ] 09:00 - 09:30 Standup\r\n- [ ] Groceries\r\n",
+  "outcome": "noop",
+  "effect_present_before": true,
+  "effect_present_after": true
+}

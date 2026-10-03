@@ -11,12 +11,16 @@ REGION="${REGION:-us-central1}"
 SERVICE="${SERVICE:-thock-plus-api}"
 ACCOUNT_NAME="${SERVICE}"
 ACCOUNT="${ACCOUNT_NAME}@${PROJECT}.iam.gserviceaccount.com"
+# The bucket for encrypted vault snapshots (spec v34). The service signs V4
+# URLs for it through IAM with its own account.
+BLOB_BUCKET="${BLOB_BUCKET:-${PROJECT}-vault-blobs}"
 SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() { printf '%s\n' "$*" >&2; }
 
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com secretmanager.googleapis.com \
-  artifactregistry.googleapis.com --project "$PROJECT" --quiet
+  artifactregistry.googleapis.com storage.googleapis.com iamcredentials.googleapis.com \
+  --project "$PROJECT" --quiet
 
 if ! gcloud iam service-accounts describe "$ACCOUNT" --project "$PROJECT" >/dev/null 2>&1; then
   log "creating the service account $ACCOUNT"
@@ -54,6 +58,18 @@ elif ! has_secret thock-plus-admin; then
   put_secret thock-plus-admin "$(openssl rand -hex 24)"
 fi
 
+if ! gcloud storage buckets describe "gs://$BLOB_BUCKET" --project "$PROJECT" >/dev/null 2>&1; then
+  log "creating the blob bucket gs://$BLOB_BUCKET"
+  gcloud storage buckets create "gs://$BLOB_BUCKET" --project "$PROJECT" --location "$REGION" \
+    --uniform-bucket-level-access --public-access-prevention --quiet
+fi
+gcloud storage buckets add-iam-policy-binding "gs://$BLOB_BUCKET" --project "$PROJECT" \
+  --member "serviceAccount:$ACCOUNT" --role roles/storage.objectAdmin --quiet >/dev/null
+# Signing URLs on Cloud Run goes through IAM signBlob with the service's own
+# account, which needs this role on itself.
+gcloud iam service-accounts add-iam-policy-binding "$ACCOUNT" --project "$PROJECT" \
+  --member "serviceAccount:$ACCOUNT" --role roles/iam.serviceAccountTokenCreator --quiet >/dev/null
+
 SECRETS="DATABASE_URL=thock-plus-database-url:latest,ADMIN_TOKEN=thock-plus-admin:latest"
 if [[ -n "${OPENROUTER_MANAGEMENT_KEY:-}" ]]; then
   put_secret openrouter-management "$OPENROUTER_MANAGEMENT_KEY"
@@ -73,6 +89,7 @@ gcloud run deploy "$SERVICE" \
   --min-instances 0 --max-instances 1 \
   --cpu 1 --memory 256Mi \
   --set-secrets "$SECRETS" \
+  --set-env-vars "BLOB_STORE=gcs,BLOB_BUCKET=$BLOB_BUCKET" \
   --quiet
 
 gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format 'value(status.url)'

@@ -1,0 +1,26 @@
+{
+  "name": "daily template replace_section file missing",
+  "before": null,
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "fixture-daily-template-replace_section",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "replace_section",
+    "heading": {
+      "text": "Day planner",
+      "level": 2,
+      "ordinal": 0
+    },
+    "base_hash": "e3b0c44298fc1c14",
+    "lines": [
+      "- [ ] Only line"
+    ]
+  },
+  "after": "## Day planner\n- [ ] Only line\n\n",
+  "outcome": "created",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

@@ -41,6 +41,7 @@ use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
 use crate::readwise_service::{self, ReadwiseService};
 use crate::sync_status;
 use crate::vault::{Vault, VaultStatus};
+use crate::vault_sync::{self, VaultSyncService};
 
 const BACKLOG_PANEL_KEY: &str = "ThockBacklogPanel";
 const REPARSE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -198,6 +199,7 @@ pub struct BacklogPanel {
     /// The Readwise sync service, for its status row (V31 §8.5) — display
     /// only, like the other two.
     readwise_service: Option<Entity<ReadwiseService>>,
+    vault_sync_service: Option<Entity<VaultSyncService>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -261,6 +263,7 @@ impl BacklogPanel {
             let gmail_service = gmail_service::service_for_project(&project, cx);
             let inbox_service = inbox_service::service_for_project(&project, cx);
             let readwise_service = readwise_service::service_for_project(&project, cx);
+            let vault_sync_service = vault_sync::service_for_project(&project, cx);
             let mut subscriptions = vec![project_subscription];
             if let Some(service) = &gmail_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
@@ -269,6 +272,9 @@ impl BacklogPanel {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
             }
             if let Some(service) = &readwise_service {
+                subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
+            }
+            if let Some(service) = &vault_sync_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
             }
             let mut this = Self {
@@ -294,6 +300,7 @@ impl BacklogPanel {
                 gmail_service,
                 inbox_service,
                 readwise_service,
+                vault_sync_service,
                 _subscriptions: subscriptions,
             };
             this.vault_status = this.detect_vault_status(cx);
@@ -1860,7 +1867,7 @@ impl BacklogPanel {
     }
 
     /// The connector rows kept at the top of the panel (V32 §4.2): Gmail,
-    /// Inbox, and Readwise, each only while it needs the user. Everything
+    /// Inbox, Readwise, and the phone, each only while it needs the user. Everything
     /// else lives in the sync icon's popover.
     fn render_status_rows(&self, cx: &App) -> Vec<AnyElement> {
         let gmail = self.gmail_service.as_ref().map(|service| service.read(cx));
@@ -1872,6 +1879,9 @@ impl BacklogPanel {
             self.readwise_service
                 .as_ref()
                 .and_then(|service| sync_status::readwise_status(service.read(cx))),
+            self.vault_sync_service
+                .as_ref()
+                .and_then(|service| sync_status::phone_status(service.read(cx))),
         ])
         .iter()
         .map(|status| sync_status::render_inline_row(status, cx))
