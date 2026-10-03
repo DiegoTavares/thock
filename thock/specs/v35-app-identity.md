@@ -121,5 +121,8 @@ All mechanical; each is a string swap or a one-line addition.
   `nix/build.nix`, `docs/src/*`, the flatpak check in `crates/cli/src/main.rs`, and the
   `/dev.zed.Zed*.json` line in `.gitignore`. Thock ships none of these channels; they are inert here
   and changing them is pure rebase cost.
+- **`v20-auto-update.md` and `v20-auto-update-rollout.md`** still say `dev.zed.Zed`: they record the
+  state V20 shipped, and this spec supersedes their identity notes. `thock/RELEASING.md` names no bundle
+  id or scheme, so it needs no change.
 - **Migrating old macOS per-app state** (saved state, defaults) from `dev.zed.Zed` to the new id. It is
   either Zed's or worthless.
