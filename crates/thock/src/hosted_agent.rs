@@ -328,13 +328,17 @@ fn language_label(vault: &Vault) -> Option<String> {
 
 /// `compose_vault_context` with the blocking vault reads around it. Returns
 /// `None` when the workspace is not a vault, which clears any block a previous
-/// session left behind. Blocking I/O — call from a background thread.
-pub fn gather_vault_context(vault: Option<&Vault>, today: NaiveDate) -> Option<String> {
+/// session left behind. Partly blocking I/O — call from a background thread.
+pub async fn gather_vault_context(
+    fs: &Arc<dyn Fs>,
+    vault: Option<&Vault>,
+    today: NaiveDate,
+) -> Option<String> {
     let vault = vault?;
     let routines = crate::routines::enabled_routine_manifests(vault);
     let has_profile = vault.root.join("profile.md").is_file();
     let memory_index =
-        crate::memory::read_index_capped(&vault.root, vault.config.memory.index_lines);
+        crate::memory::read_index_capped(fs, &vault.root, vault.config.memory.index_lines).await;
     Some(compose_vault_context(
         vault,
         &routines,
@@ -456,8 +460,11 @@ pub async fn prepare_launch(
     let harness = ensure_installed(&node, &fs).await?;
     let vault_root = vault.as_ref().map(|vault| vault.root.clone());
     let vault_context = cx
-        .background_spawn(async move {
-            gather_vault_context(vault.as_ref(), chrono::Local::now().date_naive())
+        .background_spawn({
+            let fs = fs.clone();
+            async move {
+                gather_vault_context(&fs, vault.as_ref(), chrono::Local::now().date_naive()).await
+            }
         })
         .await;
     let pi_config_dir = write_pi_config(
@@ -716,25 +723,31 @@ mod tests {
         assert!(context.contains("`memory/inbox.md`"));
     }
 
-    #[test]
-    fn gathered_context_reads_the_index_under_the_configured_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut vault = vault_at(dir.path().to_str().unwrap());
+    #[gpui::test]
+    async fn gathered_context_reads_the_index_under_the_configured_cap(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fake_fs = fs::FakeFs::new(cx.background_executor.clone());
+        fake_fs
+            .insert_tree(
+                "/vault",
+                serde_json::json!({ "memory": { "index.md": "# Learned\n- one\n- two\n" } }),
+            )
+            .await;
+        let fs: Arc<dyn Fs> = fake_fs;
+        let mut vault = vault_at("/vault");
         vault.config.memory.index_lines = 2;
-        std::fs::create_dir_all(dir.path().join("memory")).unwrap();
-        std::fs::write(
-            dir.path().join(crate::memory::INDEX_PATH),
-            "# Learned\n- one\n- two\n",
-        )
-        .unwrap();
-        let context = gather_vault_context(Some(&vault), today()).unwrap();
+        let context = gather_vault_context(&fs, Some(&vault), today())
+            .await
+            .unwrap();
         assert!(context.contains("- one"));
         assert!(!context.contains("- two"));
         assert!(context.contains(crate::memory::INDEX_OVER_CAP_LINE));
     }
 
-    #[test]
-    fn a_workspace_that_is_not_a_vault_gets_no_context() {
-        assert!(gather_vault_context(None, today()).is_none());
+    #[gpui::test]
+    async fn a_workspace_that_is_not_a_vault_gets_no_context(cx: &mut gpui::TestAppContext) {
+        let fs: Arc<dyn Fs> = fs::FakeFs::new(cx.background_executor.clone());
+        assert!(gather_vault_context(&fs, None, today()).await.is_none());
     }
 }

@@ -5,8 +5,9 @@
 //! Nothing here calls a model; the writing is the ritual's job.
 
 use anyhow::{Context as _, Result};
-use std::fs;
+use fs::Fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use util::ResultExt as _;
 
 use crate::vault::{VAULT_MARKER_DIR, write_if_missing};
@@ -41,13 +42,20 @@ pub const INDEX_OVER_CAP_LINE: &str =
 /// `memory/index.md` as the session prompt carries it: the whole file when
 /// it fits in `index_lines`, else the first `index_lines` lines and a note
 /// that it was cut. `None` when there is no index or it says nothing yet, so
-/// the prompt never carries an empty block. Blocking I/O.
-pub fn read_index_capped(vault_root: &Path, index_lines: usize) -> Option<String> {
-    let raw = match fs::read_to_string(vault_root.join(INDEX_PATH)) {
+/// the prompt never carries an empty block.
+pub async fn read_index_capped(
+    fs: &Arc<dyn Fs>,
+    vault_root: &Path,
+    index_lines: usize,
+) -> Option<String> {
+    let path = vault_root.join(INDEX_PATH);
+    if !fs.is_file(&path).await {
+        return None;
+    }
+    let raw = match fs.load(&path).await {
         Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
-            log::warn!("Thock: couldn't read {INDEX_PATH}: {error}");
+            log::warn!("Thock: couldn't read {INDEX_PATH}: {error:#}");
             return None;
         }
     };
@@ -80,9 +88,9 @@ pub fn has_entries(raw: &str) -> bool {
 }
 
 /// Whether `memory/inbox.md` holds facts the Reflect ritual hasn't filed
-/// yet. A missing inbox is an empty one. Blocking I/O.
-pub fn inbox_has_entries(vault_root: &Path) -> bool {
-    match fs::read_to_string(vault_root.join(INBOX_PATH)) {
+/// yet. A missing inbox is an empty one.
+pub async fn inbox_has_entries(fs: &Arc<dyn Fs>, vault_root: &Path) -> bool {
+    match fs.load(&vault_root.join(INBOX_PATH)).await {
         Ok(raw) => has_entries(&raw),
         Err(_) => false,
     }
@@ -96,46 +104,58 @@ fn nudge_counter_path(vault_root: &Path) -> PathBuf {
         .join("sessions-with-inbox")
 }
 
-fn read_nudge_counter(vault_root: &Path) -> usize {
-    fs::read_to_string(nudge_counter_path(vault_root))
+async fn read_nudge_counter(fs: &Arc<dyn Fs>, vault_root: &Path) -> usize {
+    fs.load(&nudge_counter_path(vault_root))
+        .await
         .ok()
         .and_then(|raw| raw.trim().parse().ok())
         .unwrap_or(0)
 }
 
-fn write_nudge_counter(vault_root: &Path, count: usize) -> Result<()> {
+async fn write_nudge_counter(fs: &Arc<dyn Fs>, vault_root: &Path, count: usize) -> Result<()> {
     let path = nudge_counter_path(vault_root);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        fs.create_dir(parent)
+            .await
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
-    fs::write(&path, count.to_string()).with_context(|| format!("writing {}", path.display()))
+    fs.write(&path, count.to_string().as_bytes())
+        .await
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Records that a chat session started and says whether the panel should
 /// suggest Reflect: true once `nudge_after_sessions` sessions have begun
 /// with an unemptied inbox. An empty inbox (Reflect ran, or nothing was
 /// ever noted) resets the count. A `nudge_after_sessions` of zero turns the
-/// nudge off. Blocking I/O — call from a background thread.
-pub fn note_session_started(vault_root: &Path, nudge_after_sessions: usize) -> bool {
-    if nudge_after_sessions == 0 || !inbox_has_entries(vault_root) {
-        if read_nudge_counter(vault_root) != 0 {
-            write_nudge_counter(vault_root, 0).log_err();
+/// nudge off.
+pub async fn note_session_started(
+    fs: &Arc<dyn Fs>,
+    vault_root: &Path,
+    nudge_after_sessions: usize,
+) -> bool {
+    if nudge_after_sessions == 0 || !inbox_has_entries(fs, vault_root).await {
+        if read_nudge_counter(fs, vault_root).await != 0 {
+            write_nudge_counter(fs, vault_root, 0).await.log_err();
         }
         return false;
     }
-    let count = read_nudge_counter(vault_root).saturating_add(1);
-    write_nudge_counter(vault_root, count).log_err();
+    let count = read_nudge_counter(fs, vault_root).await.saturating_add(1);
+    write_nudge_counter(fs, vault_root, count).await.log_err();
     count >= nudge_after_sessions
 }
 
 /// The person said "not now": start counting again from zero.
-pub fn dismiss_nudge(vault_root: &Path) -> Result<()> {
-    write_nudge_counter(vault_root, 0)
+pub async fn dismiss_nudge(fs: &Arc<dyn Fs>, vault_root: &Path) -> Result<()> {
+    write_nudge_counter(fs, vault_root, 0).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs::FakeFs;
+    use gpui::TestAppContext;
+    use serde_json::json;
 
     #[test]
     fn scaffold_creates_the_memory_files_once() {
@@ -145,18 +165,46 @@ mod tests {
             assert!(dir.path().join(path).is_file(), "{path} missing");
         }
         let index = dir.path().join(INDEX_PATH);
-        fs::write(&index, "# Mine\n\n- Kept.\n").unwrap();
+        std::fs::write(&index, "# Mine\n\n- Kept.\n").unwrap();
         materialize(dir.path()).unwrap();
-        assert_eq!(fs::read_to_string(&index).unwrap(), "# Mine\n\n- Kept.\n");
+        assert_eq!(
+            std::fs::read_to_string(&index).unwrap(),
+            "# Mine\n\n- Kept.\n"
+        );
     }
 
-    #[test]
-    fn a_fresh_index_reads_as_nothing_known() {
+    #[gpui::test]
+    async fn a_fresh_index_reads_as_nothing_known(cx: &mut TestAppContext) {
         assert!(!has_entries(INDEX_SEED));
         assert!(!has_entries(INBOX_SEED));
         assert_eq!(cap_index(INDEX_SEED, 120), None);
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(read_index_capped(dir.path(), 120), None);
+        let fake_fs = FakeFs::new(cx.background_executor.clone());
+        fake_fs.create_dir(Path::new("/vault")).await.unwrap();
+        let fs: Arc<dyn Fs> = fake_fs.clone();
+        let root = Path::new("/vault");
+        assert_eq!(read_index_capped(&fs, root, 120).await, None);
+        fake_fs
+            .insert_tree("/vault", json!({ "memory": { "index.md": INDEX_SEED } }))
+            .await;
+        assert_eq!(read_index_capped(&fs, root, 120).await, None);
+    }
+
+    #[gpui::test]
+    async fn the_index_is_read_under_its_cap(cx: &mut TestAppContext) {
+        let fake_fs = FakeFs::new(cx.background_executor.clone());
+        fake_fs
+            .insert_tree(
+                "/vault",
+                json!({ "memory": { "index.md": "# Learned\n- one\n- two\n" } }),
+            )
+            .await;
+        let fs: Arc<dyn Fs> = fake_fs;
+        assert_eq!(
+            read_index_capped(&fs, Path::new("/vault"), 2)
+                .await
+                .as_deref(),
+            Some(format!("# Learned\n- one\n{INDEX_OVER_CAP_LINE}").as_str())
+        );
     }
 
     #[test]
@@ -179,33 +227,44 @@ mod tests {
         assert!(!capped.contains("- three"));
     }
 
-    #[test]
-    fn the_nudge_counts_sessions_with_an_unemptied_inbox() {
-        let dir = tempfile::tempdir().unwrap();
-        materialize(dir.path()).unwrap();
-        assert!(!note_session_started(dir.path(), 2));
-        assert!(!inbox_has_entries(dir.path()));
+    #[gpui::test]
+    async fn the_nudge_counts_sessions_with_an_unemptied_inbox(cx: &mut TestAppContext) {
+        let fake_fs = FakeFs::new(cx.background_executor.clone());
+        fake_fs
+            .insert_tree("/vault", json!({ "memory": { "inbox.md": INBOX_SEED } }))
+            .await;
+        let fs: Arc<dyn Fs> = fake_fs;
+        let root = Path::new("/vault");
+        let inbox = root.join(INBOX_PATH);
+        assert!(!note_session_started(&fs, root, 2).await);
+        assert!(!inbox_has_entries(&fs, root).await);
 
-        fs::write(
-            dir.path().join(INBOX_PATH),
-            "# Noted\n\n- 2026-09-15 · Rui invoices monthly.\n",
+        fs.write(
+            &inbox,
+            "# Noted\n\n- 2026-09-15 · Rui invoices monthly.\n".as_bytes(),
         )
+        .await
         .unwrap();
-        assert!(inbox_has_entries(dir.path()));
-        assert!(!note_session_started(dir.path(), 2));
-        assert!(note_session_started(dir.path(), 2));
-        assert!(note_session_started(dir.path(), 2));
+        assert!(inbox_has_entries(&fs, root).await);
+        assert!(!note_session_started(&fs, root, 2).await);
+        assert!(note_session_started(&fs, root, 2).await);
+        assert!(note_session_started(&fs, root, 2).await);
+        assert_eq!(
+            fs.load(&nudge_counter_path(root)).await.unwrap(),
+            "3",
+            "the count lives in the vault's state folder"
+        );
 
-        dismiss_nudge(dir.path()).unwrap();
-        assert!(!note_session_started(dir.path(), 2));
+        dismiss_nudge(&fs, root).await.unwrap();
+        assert!(!note_session_started(&fs, root, 2).await);
 
         // Reflect emptied the inbox: the count starts over.
-        fs::write(dir.path().join(INBOX_PATH), INBOX_SEED).unwrap();
-        assert!(!note_session_started(dir.path(), 2));
-        assert_eq!(read_nudge_counter(dir.path()), 0);
+        fs.write(&inbox, INBOX_SEED.as_bytes()).await.unwrap();
+        assert!(!note_session_started(&fs, root, 2).await);
+        assert_eq!(read_nudge_counter(&fs, root).await, 0);
 
         // A zero threshold never nudges.
-        fs::write(dir.path().join(INBOX_PATH), "- a fact\n").unwrap();
-        assert!(!note_session_started(dir.path(), 0));
+        fs.write(&inbox, b"- a fact\n").await.unwrap();
+        assert!(!note_session_started(&fs, root, 0).await);
     }
 }
