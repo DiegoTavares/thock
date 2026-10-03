@@ -482,8 +482,8 @@ func TestWritesQueueIdempotentlyAndAckPrunes(t *testing.T) {
 		t.Fatalf("phone reading the queue: %d %v", status, body)
 	}
 	status, body = h.call("GET", "/v1/vault", h.phone, nil)
-	if body["writes"].(map[string]any)["pending"].(float64) != 2 {
-		t.Fatalf("pending count: %v", body)
+	if status != 200 || body["writes"].(map[string]any)["pending"].(float64) != 2 {
+		t.Fatalf("pending count: %d %v", status, body)
 	}
 
 	// Ack after the desk committed the snapshot that carries the effects.
@@ -493,8 +493,8 @@ func TestWritesQueueIdempotentlyAndAckPrunes(t *testing.T) {
 		t.Fatalf("ack: %d %v", status, body)
 	}
 	status, body = h.call("GET", "/v1/vault/writes", h.desk, nil)
-	if len(body["writes"].([]any)) != 1 {
-		t.Fatalf("ack should prune seq 1: %v", body)
+	if status != 200 || len(body["writes"].([]any)) != 1 || body["writes"].([]any)[0].(map[string]any)["seq"].(float64) != 2 {
+		t.Fatalf("ack should prune seq 1: %d %v", status, body)
 	}
 	status, body = h.call("POST", "/v1/vault/writes/ack", h.desk, map[string]any{"through_seq": 1})
 	if status != 200 || body["at_version"].(float64) != 2 {
@@ -510,6 +510,9 @@ func TestWritesQueueIdempotentlyAndAckPrunes(t *testing.T) {
 		t.Fatalf("retry after ack: %d %v", status, body)
 	}
 	status, body = h.call("GET", "/v1/vault", h.phone, nil)
+	if status != 200 {
+		t.Fatalf("vault after ack: %d %v", status, body)
+	}
 	summary := body["writes"].(map[string]any)
 	if summary["pending"].(float64) != 1 || summary["acked_through_seq"].(float64) != 1 || summary["acked_at_version"].(float64) != 2 {
 		t.Fatalf("vault summary after ack: %v", summary)
@@ -591,8 +594,8 @@ func TestQuotaRefusesAboveTheHardCap(t *testing.T) {
 		t.Fatalf("replace within cap: %d", v)
 	}
 	status, body = h.call("GET", "/v1/vault", h.desk, nil)
-	if body["used_bytes"].(float64) != 64 {
-		t.Fatalf("used bytes should track the live blob: %v", body)
+	if status != 200 || body["used_bytes"].(float64) != 64 {
+		t.Fatalf("used bytes should track the live blob: %d %v", status, body)
 	}
 	// Files above 2 MB are refused outright.
 	status, body = h.call("POST", "/v1/vault/files/big.md", h.desk, map[string]any{"expected_version": 0, "blob_id": strings.Repeat("ab", 16), "size_bytes": 3 << 20, "content_hash": strings.Repeat("cd", 32)})
