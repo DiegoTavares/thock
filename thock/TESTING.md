@@ -82,6 +82,12 @@ two parts that each passed their own tests. Prefer the test that crosses the sea
 job that is skipped when its paths didn't change. `CI` is the single required check: skipped suites
 pass, failed or cancelled ones don't. Pushes to `main` run every suite.
 
+macOS minutes cost ten times Linux ones, so the macOS half of the Rust test job (`Test (macos-15)`)
+runs on `main` and on pull requests carrying the `needs-mac` label, not on every pull request. Add
+the label when a change touches platform code (`crates/gpui_macos`, bundling, anything under
+`cfg(target_os = "macos")`); adding it re-runs CI. The `iPhone` and `Sync integration` jobs have no
+Linux equivalent and keep running on the pull requests whose paths need them.
+
 `.github/workflows/security.yml` — dependency review on pull requests, gitleaks over the Thock tree
 (`thock/gitleaks.toml` holds the allowlist), `govulncheck` and CodeQL for the Go services and the
 workflows; also weekly, because advisories arrive without a push.
