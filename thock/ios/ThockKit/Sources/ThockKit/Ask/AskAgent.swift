@@ -222,7 +222,7 @@ public struct AskAgent: Sendable {
             guard !grant.isExhausted else { throw AskFailure.exhausted }
 
             var messages = [ChatMessage.system(AskPrompt.system(session: session, now: now))]
-            for turn in earlier.suffix(Self.earlierTurns) {
+            for turn in earlier.filter({ $0.answer != nil }).suffix(Self.earlierTurns) {
                 guard let answer = turn.answer else { continue }
                 messages.append(.user(turn.question))
                 messages.append(.assistant(answer))
