@@ -42,6 +42,7 @@ the vector reproducible: a real `seal` draws a fresh random nonce every time.
 `{"syncable": [...], "refused": [...]}`, hand-written: `is_syncable_path` (§4.1) must accept every
 `syncable` path and refuse every `refused` one. NFC is compared scalar by scalar, so
 `notes/cafe\u0301.md` (decomposed) is refused while `notes/caf\u00e9.md` syncs.
+Those two are written as JSON escapes on purpose: as raw UTF-8 they render identically.
 
 ## Where this corpus is stricter than the contract text
 

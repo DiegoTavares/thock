@@ -7,7 +7,7 @@
     "reference/clips/A Title.MD",
     "a b/c.TXT",
     "data.csv",
-    "notes/café.md"
+    "notes/caf\u00e9.md"
   ],
   "refused": [
     "",
@@ -28,7 +28,7 @@
     ".git/config.json",
     "a\\b.md",
     "bad\u0007.md",
-    "notes/café.md",
-    "notes/Café.md"
+    "notes/cafe\u0301.md",
+    "notes/Cafe\u0301.md"
   ]
 }
