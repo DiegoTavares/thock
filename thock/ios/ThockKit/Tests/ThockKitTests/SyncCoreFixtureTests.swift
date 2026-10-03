@@ -145,6 +145,27 @@ final class SyncCoreFixtureTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(sealed, 2)
     }
 
+    func testPathVectors() throws {
+        struct Vectors: Decodable {
+            var syncable: [String]
+            var refused: [String]
+        }
+        var checked = 0
+        for root in Self.fixtureRoots() {
+            let url = root.appendingPathComponent("paths.json")
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            let vectors = try JSONDecoder().decode(Vectors.self, from: Data(contentsOf: url))
+            for path in vectors.syncable {
+                XCTAssertTrue(SyncCore.isSyncablePath(path), path.debugDescription)
+            }
+            for path in vectors.refused {
+                XCTAssertFalse(SyncCore.isSyncablePath(path), path.debugDescription)
+            }
+            checked += vectors.syncable.count + vectors.refused.count
+        }
+        XCTAssertGreaterThan(checked, 0)
+    }
+
     func testBlobCannotMoveToAnotherPathOrBlob() throws {
         let key = Data(repeating: 7, count: 32)
         let envelope = try SyncCore.seal(key: key, context: .file(path: "daily/a.md", blobID: "aa"), plaintext: Data("x".utf8))

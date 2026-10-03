@@ -75,7 +75,6 @@ final class SecurityTests: XCTestCase {
     }
 
     func testADecomposedPathIsRefused() {
-        XCTExpectFailure("isSyncablePath compares with String ==, which is canonical equivalence, so an NFD path passes the NFC rule")
         XCTAssertFalse(SyncCore.isSyncablePath("notes/Cafe\u{301}.md"))
     }
 

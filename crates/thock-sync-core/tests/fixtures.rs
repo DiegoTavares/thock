@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use thock_sync_core::{
     Applied, Context, Heading, Operation, Outcome, Placement, Write, apply, content_hash,
-    effect_present, heading_key, key_check, line_hash, open, parse_write, seal_with_nonce,
-    section_hash,
+    effect_present, heading_key, is_syncable_path, key_check, line_hash, open, parse_write,
+    seal_with_nonce, section_hash,
 };
 
 fn fixtures_root() -> PathBuf {
@@ -284,6 +284,25 @@ fn envelope_vectors_match() {
         }
     }
     assert!(sealed >= 3 && checks >= 1);
+}
+
+#[derive(Debug, Deserialize)]
+struct PathVectors {
+    syncable: Vec<String>,
+    refused: Vec<String>,
+}
+
+#[test]
+fn path_vectors_match() {
+    let text = fs::read_to_string(fixtures_root().join("paths.json")).expect("paths.json");
+    let vectors: PathVectors = serde_json::from_str(&text).expect("paths.json parses");
+    assert!(!vectors.syncable.is_empty() && !vectors.refused.is_empty());
+    for path in &vectors.syncable {
+        assert!(is_syncable_path(path), "{path:?} should sync");
+    }
+    for path in &vectors.refused {
+        assert!(!is_syncable_path(path), "{path:?} should be refused");
+    }
 }
 
 // ---------------------------------------------------------------------------
