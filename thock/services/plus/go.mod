@@ -2,6 +2,8 @@ module github.com/DiegoTavares/thock/services/plus
 
 go 1.26.0
 
+toolchain go1.26.8
+
 require (
 	cloud.google.com/go/storage v1.69.0
 	github.com/fergusstrange/embedded-postgres v1.34.0

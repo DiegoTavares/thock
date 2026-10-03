@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Runs the ThockKit unit tests (the data layer) on the Mac. This is what CI calls.
+set -euo pipefail
+
+cd "$(dirname "$0")/../ThockKit"
+swift test "$@"

@@ -1,0 +1,23 @@
+# Thock's own dependency surfaces only. The Cargo workspace follows upstream
+# Zed's lockfile, so it is updated by rebasing, not by Dependabot.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directories:
+      - /thock/services/plus
+      - /thock/services/releases
+      - /thock/site
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ["*"]
+

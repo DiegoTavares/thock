@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# End-to-end sync tests: real clients against a real Plus server.
+#
+#   thock/script/integration              every client suite (swift, rust)
+#   thock/script/integration swift        only the named suites
+#   thock/script/integration --serve     start the server, print its env, wait for ctrl-c
+#
+# Starts the Plus backend on a free port with a throwaway Postgres and the
+# local blob store, mints an invite through the admin API, runs the clients'
+# live-server tests against it, and tears everything down. Postgres comes from
+# THOCK_PLUS_TEST_DATABASE_URL when set (a role that may create databases; a
+# fresh database is made and dropped there), otherwise an embedded server is
+# started (its binary is downloaded once, so the first run needs the network).
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+# The plus module needs a newer Go than some machines pin.
+export GOTOOLCHAIN=auto
+
+serve_only=false
+suites=()
+for argument in "$@"; do
+  case "$argument" in
+    --serve) serve_only=true ;;
+    swift | rust) suites+=("$argument") ;;
+    -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown argument: $argument" >&2; exit 2 ;;
+  esac
+done
+if [ ${#suites[@]} -eq 0 ]; then
+  suites=(swift rust)
+fi
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/thock-integration.XXXXXX")"
+devpg_pid=""
+server_pid=""
+
+cleanup() {
+  local status=$?
+  if [ -n "$server_pid" ]; then
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
+  if [ -n "$devpg_pid" ]; then
+    kill -TERM "$devpg_pid" 2>/dev/null || true
+    wait "$devpg_pid" 2>/dev/null || true
+  fi
+  if [ $status -ne 0 ] && [ -f "$work/server.log" ]; then
+    echo "--- last lines of the server log ---" >&2
+    tail -n 40 "$work/server.log" >&2
+  fi
+  rm -rf "$work"
+  exit $status
+}
+trap cleanup EXIT INT TERM
+
+wait_for() {
+  local what="$1" seconds="$2"
+  shift 2
+  for _ in $(seq $((seconds * 10))); do
+    if "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "timed out after ${seconds}s waiting for $what" >&2
+  return 1
+}
+
+echo "==> building the Plus server" >&2
+(cd thock/services/plus && go build -o "$work/plus" . && go build -o "$work/devpg" ./internal/devpg)
+
+echo "==> starting Postgres" >&2
+"$work/devpg" "$work/database-url" >"$work/devpg.log" 2>&1 &
+devpg_pid=$!
+wait_for "Postgres (see $work/devpg.log)" 180 test -s "$work/database-url"
+
+port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+url="http://127.0.0.1:$port"
+admin_token="$(openssl rand -hex 24)"
+
+echo "==> starting the Plus server on $url" >&2
+DATABASE_URL="$(cat "$work/database-url")" \
+  ADMIN_TOKEN="$admin_token" \
+  PORT="$port" \
+  PUBLIC_URL="$url" \
+  BLOB_STORE=local \
+  BLOB_DIR="$work/blobs" \
+  "$work/plus" >"$work/server.log" 2>&1 &
+server_pid=$!
+wait_for "the Plus server" 60 curl -fsS "$url/health"
+
+invite="$(curl -fsS -H "Authorization: Bearer $admin_token" \
+  -d '{"plan":"dev","max_uses":0,"note":"integration"}' "$url/admin/invites" |
+  python3 -c 'import json, sys; print(json.load(sys.stdin)["code"])')"
+
+export THOCK_INTEGRATION_URL="$url"
+export THOCK_INTEGRATION_ADMIN_TOKEN="$admin_token"
+export THOCK_INTEGRATION_INVITE="$invite"
+
+if $serve_only; then
+  echo "THOCK_INTEGRATION_URL=$url"
+  echo "THOCK_INTEGRATION_ADMIN_TOKEN=$admin_token"
+  echo "THOCK_INTEGRATION_INVITE=$invite"
+  echo "serving until ctrl-c; log at $work/server.log" >&2
+  wait "$server_pid"
+  exit 0
+fi
+
+failed=()
+for suite in "${suites[@]}"; do
+  echo "==> $suite" >&2
+  started=$SECONDS
+  case "$suite" in
+    swift)
+      swift test --package-path thock/ios/ThockKit --filter LiveServerTests || failed+=(swift)
+      ;;
+    rust)
+      cargo test -p thock --lib vault_sync::live_server -- --nocapture || failed+=(rust)
+      ;;
+  esac
+  echo "==> $suite took $((SECONDS - started))s" >&2
+done
+
+if [ ${#failed[@]} -gt 0 ]; then
+  echo "integration suites failed: ${failed[*]}" >&2
+  exit 1
+fi
+echo "integration suites passed: ${suites[*]}" >&2
