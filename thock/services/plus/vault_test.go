@@ -722,6 +722,43 @@ func TestRevokingTheUserLapsesTheVault(t *testing.T) {
 	}
 }
 
+func TestADisconnectedDeskCanDeleteItsVaultCopy(t *testing.T) {
+	h := newSyncHarness(t)
+	h.mustUpload("daily/2026-10-02.md", 0, "# Today\n")
+	if status, _ := h.call("POST", "/v1/disconnect", h.desk, nil); status != 204 {
+		t.Fatalf("disconnect: %d", status)
+	}
+	status, body := h.call("GET", "/v1/vault/files", h.desk, nil)
+	if status != 403 || body["code"] != "revoked" {
+		t.Fatalf("other desk routes stay refused: %d %v", status, body)
+	}
+	status, body = h.call("DELETE", "/v1/vault", h.phone, nil)
+	if status != 403 || body["code"] != "role_forbidden" {
+		t.Fatalf("the phone of a revoked user can't delete: %d %v", status, body)
+	}
+	listing := h.files(h.phone, "")
+	if len(listing["files"].([]any)) != 1 {
+		t.Fatalf("the vault should survive the phone's attempt: %v", listing)
+	}
+
+	status, body = h.call("DELETE", "/v1/vault", h.desk, nil)
+	if status != 204 {
+		t.Fatalf("revoked desk deletes its vault copy: %d %v", status, body)
+	}
+	status, body = h.call("GET", "/v1/vault", h.phone, nil)
+	if status != 401 || body["code"] != "unauthorized" {
+		t.Fatalf("the phone is disconnected with the vault: %d %v", status, body)
+	}
+	status, body = h.call("DELETE", "/v1/vault", h.desk, nil)
+	if status != 404 || body["code"] != "vault_missing" {
+		t.Fatalf("a second delete finds nothing: %d %v", status, body)
+	}
+	status, body = h.call("POST", "/v1/vault", h.desk, map[string]any{"device_name": "Mac", "key_check": testKeyCheck})
+	if status != 403 || body["code"] != "revoked" {
+		t.Fatalf("a revoked desk can't start a new vault: %d %v", status, body)
+	}
+}
+
 func TestTombstonesAgeOutAndExpireCursors(t *testing.T) {
 	h := newSyncHarness(t)
 	h.mustUpload("a.md", 0, "a")

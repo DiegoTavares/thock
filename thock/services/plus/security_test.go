@@ -591,9 +591,14 @@ func TestRevokedAccountsLoseWriteAccessEverywhere(t *testing.T) {
 		t.Fatalf("disconnect: %d", status)
 	}
 	for _, pattern := range protectedRoutes(authUser, authVault) {
+		// Deleting the vault copy is the one thing a disconnected desk may
+		// still do; TestADisconnectedDeskCanDeleteItsVaultCopy covers it.
+		if pattern == "DELETE /v1/vault" {
+			continue
+		}
 		method, path := concretePath(pattern)
 		status, body := h.call(method, path, h.desk, map[string]any{})
-		if status != http.StatusForbidden {
+		if status != http.StatusForbidden || body["code"] != "revoked" {
 			t.Errorf("%s with a revoked desk: %d %v", pattern, status, body)
 		}
 	}

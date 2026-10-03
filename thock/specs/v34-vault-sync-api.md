@@ -103,7 +103,7 @@ on. The full list:
 | --- | --- | --- |
 | 400 | `bad_request` | body unreadable, required field missing, malformed path or hash |
 | 401 | `unauthorized` | no credential, unknown credential, or a phone credential that was revoked |
-| 403 | `revoked` | the user's Plus access was turned off (V25) |
+| 403 | `revoked` | the user's Plus access was turned off (V25); every desk call but `DELETE /v1/vault` |
 | 403 | `role_forbidden` | the route is for the other device |
 | 403 | `plus_lapsed` | the entitlement ended; see §3.4 |
 | 403 | `plan_excludes_sync` | the user's plan has `vault_quota_bytes = 0` |
@@ -289,7 +289,8 @@ check is adopted; otherwise `409 key_mismatch`. A desk device bound to a differe
 the phone's *waiting for the desk* count read from here.
 
 **`DELETE /v1/vault`** (desk) → `204`. Deletes files, blobs, writes, devices and the vault row. The
-phone's next call is `401 unauthorized`. The feed emits `vault {"status":"deleted"}` before closing.
+phone's next call is `401 unauthorized`. A desk whose Plus access was revoked, or that disconnected,
+can still make this call, so its copy is gone now rather than when the sweeper runs. The feed emits `vault {"status":"deleted"}` before closing.
 
 **`POST /v1/vault/reset`** (desk).
 
