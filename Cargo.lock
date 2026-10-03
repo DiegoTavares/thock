@@ -18716,6 +18716,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "settings",
  "sha2",
  "shlex",
