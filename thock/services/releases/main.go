@@ -59,6 +59,14 @@ type cachedManifest struct {
 	fetchedAt time.Time
 }
 
+// A fetch in progress for one channel. Requests that find one wait for it
+// instead of fetching again; result and err are set before done closes.
+type manifestFetch struct {
+	done   chan struct{}
+	result manifest
+	err    error
+}
+
 type server struct {
 	// Base URL the channel manifests are fetched from, e.g.
 	// "https://storage.googleapis.com/thock-releases".
@@ -67,8 +75,11 @@ type server struct {
 	now          func() time.Time
 	ttl          time.Duration
 
-	mu    sync.Mutex
-	cache map[string]cachedManifest
+	// Guards cache and fetches; never held across a fetch, so a slow bucket
+	// for one channel can't stall answers from another channel's cache.
+	mu      sync.Mutex
+	cache   map[string]cachedManifest
+	fetches map[string]*manifestFetch
 }
 
 func newServer(manifestBase string) *server {
@@ -78,6 +89,7 @@ func newServer(manifestBase string) *server {
 		now:          time.Now,
 		ttl:          manifestTTL,
 		cache:        map[string]cachedManifest{},
+		fetches:      map[string]*manifestFetch{},
 	}
 }
 
@@ -105,34 +117,54 @@ func (s *server) routes() *http.ServeMux {
 // per-channel in-process cache. A fetch failure with a previous manifest in
 // hand serves the stale copy — a promoted release should outlive a blip in
 // front of the bucket. A clean 404 from the bucket is authoritative: the
-// channel does not exist, cached or not.
+// channel does not exist, cached or not. Concurrent misses on one channel
+// share a single fetch.
 func (s *server) manifest(ctx context.Context, channel string) (manifest, error) {
 	if !channelNamePattern.MatchString(channel) {
 		return manifest{}, errChannelNotFound
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	cached, haveCached := s.cache[channel]
 	if haveCached && s.now().Sub(cached.fetchedAt) < s.ttl {
+		s.mu.Unlock()
 		return cached.manifest, nil
 	}
+	if fetch, running := s.fetches[channel]; running {
+		s.mu.Unlock()
+		select {
+		case <-fetch.done:
+			return fetch.result, fetch.err
+		case <-ctx.Done():
+			return manifest{}, ctx.Err()
+		}
+	}
+	fetch := &manifestFetch{done: make(chan struct{})}
+	s.fetches[channel] = fetch
+	s.mu.Unlock()
 
-	fetched, err := s.fetchManifest(ctx, channel)
+	// Detached from this request so its caller going away doesn't fail the
+	// others waiting on the same fetch; the client's timeout still bounds it.
+	fetched, err := s.fetchManifest(context.WithoutCancel(ctx), channel)
+
+	s.mu.Lock()
 	switch {
 	case err == nil:
 		s.cache[channel] = cachedManifest{manifest: fetched, fetchedAt: s.now()}
-		return fetched, nil
+		fetch.result = fetched
 	case errors.Is(err, errChannelNotFound):
 		delete(s.cache, channel)
-		return manifest{}, err
+		fetch.err = err
 	case haveCached:
 		log.Printf("warning: serving stale %s manifest: %v", channel, err)
-		return cached.manifest, nil
+		fetch.result = cached.manifest
 	default:
-		return manifest{}, err
+		fetch.err = err
 	}
+	delete(s.fetches, channel)
+	s.mu.Unlock()
+	close(fetch.done)
+	return fetch.result, fetch.err
 }
 
 func (s *server) fetchManifest(ctx context.Context, channel string) (manifest, error) {

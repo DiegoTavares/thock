@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -260,6 +261,95 @@ func TestManifestFetchIsCached(t *testing.T) {
 	}
 	if fetches.Load() != 1 {
 		t.Fatalf("bucket fetched %d times within the TTL, want 1", fetches.Load())
+	}
+}
+
+// stallingBucket serves the stable manifest for every channel, but holds
+// preview.json until release is closed, announcing the first such request
+// on started.
+func stallingBucket(t *testing.T, started chan<- struct{}, release <-chan struct{}) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/channels/preview.json" {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		if _, err := w.Write([]byte(stableManifest)); err != nil {
+			t.Errorf("writing manifest: %v", err)
+		}
+	}
+}
+
+func TestASlowFetchDoesNotBlockAnotherChannelsCache(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	_, mux := newTestServer(t, stallingBucket(t, started, release))
+	const stableURL = "/releases/stable/latest/asset?asset=zed&os=macos&arch=aarch64"
+	const previewURL = "/releases/preview/latest/asset?asset=zed&os=macos&arch=aarch64"
+
+	if response := get(mux, stableURL); response.Code != http.StatusOK {
+		t.Fatalf("priming fetch failed: %d %s", response.Code, response.Body)
+	}
+	preview := make(chan int, 1)
+	go func() { preview <- get(mux, previewURL).Code }()
+	<-started
+
+	stable := make(chan int, 1)
+	go func() { stable <- get(mux, stableURL).Code }()
+	select {
+	case code := <-stable:
+		if code != http.StatusOK {
+			t.Errorf("cached stable read: got %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("a cached read waited on another channel's fetch")
+	}
+
+	close(release)
+	if code := <-preview; code != http.StatusOK {
+		t.Fatalf("slow preview fetch: got %d", code)
+	}
+}
+
+func TestConcurrentMissesShareOneFetch(t *testing.T) {
+	var fetches atomic.Int32
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	stalling := stallingBucket(t, started, release)
+	_, mux := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		stalling(w, r)
+	})
+	const previewURL = "/releases/preview/latest/asset?asset=zed&os=macos&arch=aarch64"
+
+	const requests = 10
+	codes := make(chan int, requests)
+	var waiting sync.WaitGroup
+	for range requests {
+		waiting.Add(1)
+		go func() {
+			defer waiting.Done()
+			codes <- get(mux, previewURL).Code
+		}()
+	}
+	<-started
+	// Give the other requests time to arrive while the first fetch is held;
+	// any that arrive after it completes are answered from the cache anyway.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	waiting.Wait()
+	close(codes)
+
+	for code := range codes {
+		if code != http.StatusOK {
+			t.Errorf("got %d, want 200", code)
+		}
+	}
+	if fetches.Load() != 1 {
+		t.Fatalf("bucket fetched %d times for one burst of misses, want 1", fetches.Load())
 	}
 }
 
