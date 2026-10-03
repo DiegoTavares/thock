@@ -1,49 +1,92 @@
-# Zed
+# Thock
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+[![CI](https://github.com/DiegoTavares/thock/actions/workflows/ci.yml/badge.svg)](https://github.com/DiegoTavares/thock/actions/workflows/ci.yml)
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+Thock is a desktop app that turns a folder of plain Markdown files into a guided, LLM-augmented
+second brain. Your vault stays a normal folder on disk. **Routines** (daily and weekly notes,
+finance, journaling, team) are opt-in bundles that scaffold folders, templates and quick links, and
+ship **Skills**: inspectable Markdown rituals that the LLM you already use runs over your notes.
+Custom panels (the Routines rail, Day Planner, Backlog, Agent) sit around a fast editor.
 
----
+Thock is a fork of the [Zed](https://github.com/zed-industries/zed) editor. It is not Zed, and it is
+not affiliated with or endorsed by Zed Industries. Please don't report Thock issues to the Zed
+project.
 
-### Installation
+## Getting it
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+Thock is in early access, a private beta. Builds for macOS and Linux are on
+[thethock.com/download](https://thethock.com/download), behind an invite code: join the waitlist on
+[thethock.com](https://thethock.com) and an invite arrives when a slot opens. Installed builds
+update themselves.
 
-Other platforms are not yet available:
+There is also an iPhone companion, Thock Vault, for capturing and journaling away from the desk. It
+is distributed through TestFlight during the beta.
 
-- Web ([tracking discussion](https://github.com/zed-industries/zed/discussions/26195))
+## The vault promise
 
-### Developing Zed
+- **Your files, forever, in the open.** Plain Markdown in a normal folder, no proprietary store. If
+  Thock disappeared, the vault still opens in any editor.
+- **Augmentation, not replacement.** The AI appends its synthesis under its own heading; it never
+  silently rewrites what you wrote.
+- **Invisible versioning.** History runs underneath so any change is one restore away, without you
+  ever touching source control.
+- **Everything is editable.** Skills, layouts, prompts and templates are files you (or your agent)
+  can open and change.
 
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
+The full product picture and roadmap are in [`thock/VISION.md`](thock/VISION.md).
 
-### Contributing
+## Building from source
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
+Toolchain setup is the same as upstream Zed. Follow the guide for your platform:
 
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+- [macOS](docs/src/development/macos.md)
+- [Linux](docs/src/development/linux.md)
 
-### Licensing
+Thock ships on macOS and Linux only. The pinned Rust version is in `rust-toolchain.toml`.
 
-Zed source code is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked.
+Then, from the repository root:
 
-License information for third party dependencies must be correctly provided for CI to pass.
+```sh
+cargo run -p zed      # builds and runs the app; the binary is named `thock`
+thock/script/test     # runs the test suites that cover what you changed
+cargo clippy -p thock -p thock_sync_core --all-targets -- --deny warnings
+```
 
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
+The `zed` package keeps its upstream name; its default binary is `thock`.
 
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
+**Never build, test or lint the whole workspace** (`cargo build`, `cargo test` or `cargo clippy`
+without `-p`, or a bare `./script/clippy`). The workspace is all of Zed: hundreds of crates, tens of
+minutes and tens of gigabytes. Scope commands to `-p thock` and `-p thock_sync_core`, and add
+`-p zed` only when `crates/zed` changed. [`thock/TESTING.md`](thock/TESTING.md) has the full test
+loop, and [`thock/RELEASING.md`](thock/RELEASING.md) covers how builds ship.
 
-## Sponsorship
+## Repository layout
 
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
+- `thock/`: the product vision, feature specs (`specs/`), the testing and release runbooks, the Go
+  services (`services/`), the website (`site/`) and the iPhone app (`ios/`).
+- `crates/thock/`: all of Thock's Rust: panels, the vault model, Routines, Skills, the Backlog and
+  history. The shipped Routine catalog and core Skills are in `crates/thock/assets/`.
+- `crates/thock-sync-core/`: the sync rules the desktop and the phone must agree on, with shared
+  fixtures.
+- Everything else is upstream Zed, kept as close to upstream as possible so rebases stay cheap.
 
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
+## Support and privacy
 
+- Help: [thethock.com/support](https://thethock.com/support)
+- Privacy policy: [thethock.com/privacy](https://thethock.com/privacy)
+- Bugs: open a [new issue](https://github.com/DiegoTavares/thock/issues/new/choose) on this
+  repository and use the bug form. Never paste note contents into an issue.
+- Security problems: report them privately to the contact address on the support page, not in a
+  public issue.
+
+Contributing: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Licensing
+
+Thock inherits Zed's licensing. The source is licensed primarily under GPL-3.0-or-later
+([`LICENSE-GPL`](LICENSE-GPL)), with Apache-2.0 components where marked
+([`LICENSE-APACHE`](LICENSE-APACHE)). Each crate states its licence in the `license` field of its
+`Cargo.toml`; the Apache-2.0 crates are mostly the GPUI framework and its supporting libraries
+(`gpui`, `gpui_*`, `util`, `collections`, `sum_tree` and others).
+
+The Thock crates, `crates/thock` and `crates/thock-sync-core`, are GPL-3.0-or-later.
