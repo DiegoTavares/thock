@@ -41,6 +41,13 @@ actions!(
         ToggleAgentFocus,
         /// Starts a new conversation with the connected agent.
         NewConversation,
+        /// Switches to the next conversation in the Agent panel.
+        ActivateNextAgentSession,
+        /// Switches to the previous conversation in the Agent panel.
+        ActivatePreviousAgentSession,
+        /// Closes the conversation shown in the Agent panel, ending the
+        /// agent running in it.
+        CloseAgentSession,
         /// Opens the guided flow for connecting a CLI agent.
         ConnectAgent,
         /// Sets the language your notes and your agent use, translating the
@@ -623,23 +630,105 @@ impl AgentPanel {
 
     /// `enter` anywhere in the connect flow connects with the field's
     /// command; single-line editors don't consume enter, so the action
-    /// bubbles here from the focused command field.
-    fn confirm_connect(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        let PanelView::Connect(flow) = &self.view else {
-            cx.propagate();
-            return;
-        };
-        let command = flow.command_editor.read(cx).text(cx);
-        self.save_connection(command, window, cx);
+    /// bubbles here from the focused command field. With no session open it
+    /// presses the empty state's primary button. A running session's
+    /// terminal keeps its own enter.
+    fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.view {
+            PanelView::Connect(flow) => {
+                let command = flow.command_editor.read(cx).text(cx);
+                self.save_connection(command, window, cx);
+            }
+            PanelView::Sessions if self.sessions.is_empty() => {
+                if self.connected.is_some() {
+                    self.launch(LaunchRequest::conversation(), window, cx);
+                } else {
+                    self.open_connect(window, cx);
+                    if let PanelView::Connect(flow) = &self.view {
+                        window.focus(&flow.command_editor.focus_handle(cx), cx);
+                    }
+                }
+            }
+            PanelView::Sessions => cx.propagate(),
+        }
     }
 
-    /// `escape` backs out of the connect flow; outside it, let the default
-    /// escape behavior run.
-    fn cancel_view(&mut self, _: &menu::Cancel, _window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.view, PanelView::Connect(_)) {
-            self.cancel_connect(cx);
+    /// `escape` backs out of the connect flow, and from the empty state hands
+    /// focus back to the note. A running session's terminal keeps its own
+    /// escape.
+    fn cancel_view(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.view {
+            PanelView::Connect(_) => self.cancel_connect(cx),
+            PanelView::Sessions if self.sessions.is_empty() => {
+                let workspace = self.workspace.clone();
+                cx.defer_in(window, move |_, window, cx| {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            if let Some(item) = workspace.active_item(cx) {
+                                item.item_focus_handle(cx).focus(window, cx);
+                            }
+                        })
+                        .log_err();
+                });
+            }
+            PanelView::Sessions => cx.propagate(),
+        }
+    }
+
+    fn activate_session(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.sessions.get(index) else {
+            return;
+        };
+        self.active_session = index;
+        window.focus(&session.terminal_view.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn activate_next_session(
+        &mut self,
+        _: &ActivateNextAgentSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let next = (self.active_session + 1) % self.sessions.len();
+        self.activate_session(next, window, cx);
+    }
+
+    fn activate_previous_session(
+        &mut self,
+        _: &ActivatePreviousAgentSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let previous = (self.active_session + self.sessions.len() - 1) % self.sessions.len();
+        self.activate_session(previous, window, cx);
+    }
+
+    fn close_active_session(
+        &mut self,
+        _: &CloseAgentSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = self
+            .sessions
+            .get(self.active_session)
+            .map(|session| session.id)
+        else {
+            return;
+        };
+        self.remove_session(session_id, cx);
+        // The focused terminal just went away; keep the keyboard in the panel.
+        if self.sessions.is_empty() {
+            window.focus(&self.focus_handle, cx);
         } else {
-            cx.propagate();
+            self.activate_session(self.active_session, window, cx);
         }
     }
 
@@ -989,10 +1078,7 @@ impl AgentPanel {
                             .iter()
                             .position(|session| session.id == session_id)
                         {
-                            this.active_session = index;
-                            let view = this.sessions[index].terminal_view.clone();
-                            window.focus(&view.focus_handle(cx), cx);
-                            cx.notify();
+                            this.activate_session(index, window, cx);
                         }
                     }))
             }))
@@ -1029,16 +1115,25 @@ impl Render for AgentPanel {
         };
         let mut key_context = KeyContext::new_with_defaults();
         key_context.add("ThockAgentPanel");
-        // The connect flow is menu-shaped: enter connects, escape backs out.
-        if matches!(self.view, PanelView::Connect(_)) {
+        // The connect flow and the empty state are menu-shaped: enter acts,
+        // escape backs out. A running session is not: its terminal needs
+        // every key, so the menu bindings must not shadow it.
+        let menu_shaped = match self.view {
+            PanelView::Connect(_) => true,
+            PanelView::Sessions => self.sessions.is_empty(),
+        };
+        if menu_shaped {
             key_context.add("menu");
         }
         v_flex()
             .id("thock-agent-panel")
             .key_context(key_context)
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::confirm_connect))
+            .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::cancel_view))
+            .on_action(cx.listener(Self::activate_next_session))
+            .on_action(cx.listener(Self::activate_previous_session))
+            .on_action(cx.listener(Self::close_active_session))
             .size_full()
             .child(content)
     }
@@ -1341,5 +1436,215 @@ impl PickerDelegate for RunSkillDelegate {
             item = item.tooltip(Tooltip::text(skill.summary.clone()));
         }
         Some(item)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs::FakeFs;
+    use gpui::{KeyBinding, TestAppContext, VisualTestContext};
+    use serde_json::json;
+    use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
+
+    fn init_test(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            editor::init(cx);
+            // The shipped keymap, so a missing or shadowed binding fails here.
+            let key_bindings: Vec<KeyBinding> = match KeymapFile::load(
+                include_str!("../../../assets/keymaps/default-linux.json"),
+                cx,
+            ) {
+                KeymapFileLoadResult::Success { key_bindings }
+                | KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => key_bindings,
+                KeymapFileLoadResult::JsonParseFailure { error } => {
+                    panic!("bad keymap: {error}")
+                }
+            };
+            cx.bind_keys(key_bindings);
+        });
+    }
+
+    struct Setup {
+        panel: Entity<AgentPanel>,
+        editor: Entity<Editor>,
+        cx: VisualTestContext,
+        _vault_dir: tempfile::TempDir,
+    }
+
+    /// A vault with a note open and the Agent panel docked and focused, with
+    /// no agent connected whatever this machine's global config says.
+    async fn setup(cx: &mut TestAppContext) -> Setup {
+        init_test(cx);
+        let vault_dir = tempfile::tempdir().unwrap();
+        let root = vault_dir.path();
+        std::fs::create_dir_all(root.join(".thock")).unwrap();
+        std::fs::write(root.join(".thock/config.toml"), "schema = 1\n").unwrap();
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            root,
+            json!({
+                ".thock": { "config.toml": "schema = 1\n" },
+                "note.md": "# Note\n",
+            }),
+        )
+        .await;
+        let project = Project::test(fs, [root], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let mut cx = cx.clone();
+        let project_path = project
+            .read_with(&mut cx, |project, cx| {
+                project.find_project_path(root.join("note.md"), cx)
+            })
+            .unwrap();
+        let editor = workspace
+            .update_in(&mut cx, |workspace, window, cx| {
+                workspace.open_path(project_path, None, true, window, cx)
+            })
+            .await
+            .unwrap()
+            .downcast::<Editor>()
+            .unwrap();
+        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let panel = AgentPanel::new(workspace, window, cx);
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        cx.run_until_parked();
+        panel.update(&mut cx, |panel, cx| {
+            panel.connected = None;
+            cx.notify();
+        });
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.toggle_panel_focus::<AgentPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        Setup {
+            panel,
+            editor,
+            cx,
+            _vault_dir: vault_dir,
+        }
+    }
+
+    /// Opens a session on a display-only terminal: no process, same tab.
+    fn add_test_session(setup: &mut Setup, title: &str) {
+        let terminal = setup.cx.update(|window, cx| {
+            let window_id = window.window_handle().window_id().as_u64();
+            cx.new(|cx| {
+                terminal::TerminalBuilder::new_display_only(
+                    terminal::terminal_settings::CursorShape::default(),
+                    terminal::terminal_settings::AlternateScroll::On,
+                    None,
+                    window_id,
+                    cx.background_executor(),
+                    util::paths::PathStyle::local(),
+                )
+                .subscribe(cx)
+            })
+        });
+        let title = title.to_string();
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            let session_id = panel.next_session_id;
+            panel.next_session_id += 1;
+            panel.add_session(session_id, title, terminal, window, cx);
+        });
+        setup.cx.run_until_parked();
+    }
+
+    fn active_title(setup: &Setup) -> Option<String> {
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            panel
+                .sessions
+                .get(panel.active_session)
+                .map(|session| session.title.to_string())
+        })
+    }
+
+    fn active_terminal_focused(setup: &mut Setup) -> bool {
+        let panel = setup.panel.clone();
+        setup.cx.update(|window, cx| {
+            let panel = panel.read(cx);
+            panel
+                .sessions
+                .get(panel.active_session)
+                .is_some_and(|session| {
+                    session
+                        .terminal_view
+                        .focus_handle(cx)
+                        .contains_focused(window, cx)
+                })
+        })
+    }
+
+    #[gpui::test]
+    async fn enter_on_the_empty_state_starts_connecting(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        setup.cx.simulate_keystrokes("enter");
+        setup.cx.run_until_parked();
+        let panel = setup.panel.clone();
+        let command_field_focused = setup.cx.update(|window, cx| {
+            let PanelView::Connect(flow) = &panel.read(cx).view else {
+                return false;
+            };
+            flow.command_editor.focus_handle(cx).is_focused(window)
+        });
+        assert!(
+            command_field_focused,
+            "enter opens the connect flow, ready to type"
+        );
+
+        setup.cx.simulate_keystrokes("escape");
+        setup.cx.run_until_parked();
+        assert!(
+            setup.panel.read_with(&setup.cx, |panel, _| matches!(
+                panel.view,
+                PanelView::Sessions
+            )),
+            "escape backs out of the connect flow"
+        );
+    }
+
+    #[gpui::test]
+    async fn escape_on_the_empty_state_returns_to_the_note(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        setup.cx.simulate_keystrokes("escape");
+        setup.cx.run_until_parked();
+        let editor = setup.editor.clone();
+        assert!(
+            setup
+                .cx
+                .update(|window, cx| editor.focus_handle(cx).contains_focused(window, cx))
+        );
+    }
+
+    #[gpui::test]
+    async fn sessions_switch_and_close_from_the_keyboard(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        add_test_session(&mut setup, "First");
+        add_test_session(&mut setup, "Second");
+        assert_eq!(active_title(&setup).as_deref(), Some("Second"));
+        assert!(active_terminal_focused(&mut setup));
+
+        setup.cx.simulate_keystrokes("ctrl-pageup");
+        assert_eq!(active_title(&setup).as_deref(), Some("First"));
+        assert!(active_terminal_focused(&mut setup));
+        setup.cx.simulate_keystrokes("ctrl-pagedown");
+        assert_eq!(active_title(&setup).as_deref(), Some("Second"));
+        setup.cx.simulate_keystrokes("ctrl-pagedown");
+        assert_eq!(active_title(&setup).as_deref(), Some("First"), "wraps");
+
+        setup.cx.dispatch_action(CloseAgentSession);
+        setup.cx.run_until_parked();
+        assert_eq!(active_title(&setup).as_deref(), Some("Second"));
+        assert!(
+            active_terminal_focused(&mut setup),
+            "the keyboard stays in the panel"
+        );
     }
 }
