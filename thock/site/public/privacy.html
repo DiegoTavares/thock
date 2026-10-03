@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy · Thock</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground: #1a1918;
+    --surface: #232120;
+    --edge: #2f2c29;
+    --text: #ece7de;
+    --muted: #a49d92;
+    --dim: #6d675e;
+    --amber: #e2a554;
+    --amber-ink: #1a1918;
+    --sans: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+    --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--text);
+    font-family: var(--sans); font-size: 17px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--amber); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ::selection { background: var(--amber); color: var(--amber-ink); }
+  code { font-family: var(--mono); font-size: 0.85em; color: var(--amber); }
+  nav { border-bottom: 1px solid var(--edge); }
+  nav .bar { max-width: 46rem; margin: 0 auto; padding: 0.85rem 1.5rem; display: flex; align-items: center; }
+  nav .wordmark { font-weight: 700; font-size: 1.1rem; letter-spacing: -0.01em; color: var(--text); }
+  nav .back { margin-left: auto; font-size: 0.9rem; color: var(--muted); }
+  main { max-width: 46rem; margin: 0 auto; padding: 4rem 1.5rem 6rem; }
+  h1 { font-size: clamp(2rem, 5vw, 2.6rem); font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; margin: 0 0 1rem; }
+  h2 { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.01em; margin: 2.4rem 0 0.6rem; }
+  p, li { color: var(--muted); }
+  p { margin: 0 0 1rem; }
+  ul { padding-left: 1.2rem; margin: 0 0 1rem; }
+  li { margin-bottom: 0.4rem; }
+  strong { color: var(--text); font-weight: 500; }
+  .eyebrow { font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--amber); margin: 0 0 0.9rem; }
+  .updated { font-family: var(--mono); font-size: 0.8rem; color: var(--dim); }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="bar">
+    <a class="wordmark" href="/">Thock</a>
+    <a class="back" href="/">← back to the site</a>
+  </div>
+</nav>
+
+<main>
+  <p class="eyebrow">Privacy</p>
+  <h1>Your notes are yours</h1>
+  <p class="updated">Last updated October 2, 2026</p>
+
+  <p>Thock is a desktop app for macOS and Linux, Thock Vault for iPhone, an optional Thock Plus
+  service, and this website. This page says what each of them keeps, where it goes, and why. The
+  short version: your notes live as plain files on your own computer, nothing is used for
+  advertising or tracking, and nothing is sold.</p>
+
+  <h2>The desktop app</h2>
+  <ul>
+    <li>Your vault is a normal folder of Markdown files on your computer. Thock reads and writes it
+    there and keeps its history in a hidden folder inside it. None of this leaves your computer
+    unless you turn on a feature below.</li>
+    <li>Telemetry and crash reporting are off. The app checks <code>updates.thethock.com</code> for
+    new versions, which sends your operating system, processor type and current version.</li>
+    <li>If you connect Google Calendar, Gmail, Google Tasks or Readwise, the app talks to those
+    services directly from your computer. Their access tokens stay in your system keychain, and
+    what they return is written into your vault.</li>
+    <li>If you use your own AI agent (Claude Code, Gemini CLI and others), it runs under your own
+    account with that provider, under their terms.</li>
+  </ul>
+
+  <h2>Thock Plus</h2>
+  <ul>
+    <li><strong>Account.</strong> Plus is joined with an invite code. The service keeps your plan,
+    the code you used, the name of your computer, a hash of your connection credential, and a
+    ledger of usage for your allowance. It does not ask for your name or email address.</li>
+    <li><strong>The hosted agent.</strong> When you talk to the Thock Agent, your messages and the
+    parts of your vault the agent reads are sent through OpenRouter to the AI model that answers.
+    Thock does not store your conversations. OpenRouter and the model provider handle that text
+    under their own policies.</li>
+    <li><strong>Phone sync.</strong> When you pair a phone, your desktop encrypts each text file
+    with a key that exists only on your two devices, and the service stores the encrypted copy. We
+    cannot read your notes. To keep the two devices in step, the service does see each file's path
+    (folder and file name, which for a captured idea includes a few words of its title), its size,
+    a fingerprint of its encrypted content, and when it changed. Changes made on the phone travel
+    the same way, encrypted, and are deleted once your desktop has applied them.</li>
+    <li>Turning sync off deletes the stored files at once. If Plus ends, they are kept for 30 days
+    in case you come back, then deleted. You can ask us to delete your Plus account at any
+    time.</li>
+  </ul>
+
+  <h2>Thock Vault on iPhone</h2>
+  <ul>
+    <li>The practice notebook runs entirely on the phone and sends nothing anywhere.</li>
+    <li>Once paired with your desktop, the app talks only to the Thock Plus service described
+    above, sending your phone's name at pairing.</li>
+    <li>When you clip a link, the phone fetches that page itself to keep its readable text.</li>
+    <li>The camera is used only to scan the pairing code, and Face ID only to unlock your notes on
+    the phone. Neither image nor biometric data leaves the device.</li>
+    <li>The app has no analytics, advertising or tracking.</li>
+  </ul>
+
+  <h2>This website</h2>
+  <p>If you join the waitlist, we keep your email address to send you an invite, and for nothing
+  else. The pages load fonts from Google Fonts. There are no analytics or cookies.</p>
+
+  <h2>Where it is kept</h2>
+  <p>The Thock Plus service, the encrypted sync files and the waitlist run on Google Cloud in the
+  United States. The Plus account records are kept in a hosted PostgreSQL database.</p>
+
+  <h2>Questions and deletion</h2>
+  <p>Write to <a href="mailto:diego.exodo@gmail.com">diego.exodo@gmail.com</a> to ask what we
+  hold about you or to have it deleted. If this policy changes, the date at the top changes with
+  it.</p>
+</main>
+
+</body>
+</html>

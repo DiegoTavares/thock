@@ -114,6 +114,19 @@ func TestDownloadCleanURL(t *testing.T) {
 	}
 }
 
+func TestPolicyPagesHaveCleanURLs(t *testing.T) {
+	f := newFixture(t)
+	for path, marker := range map[string]string{"/privacy": "Your notes are yours", "/support": "Getting help with Thock"} {
+		response := f.get(canonicalHost, path)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", path, response.Code)
+		}
+		if !strings.Contains(response.Body.String(), marker) {
+			t.Fatalf("%s: page not served", path)
+		}
+	}
+}
+
 func TestGateBlobIsServed(t *testing.T) {
 	response := newFixture(t).get(canonicalHost, "/gate.json")
 	if response.Code != http.StatusOK {
