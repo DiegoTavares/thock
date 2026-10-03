@@ -1660,6 +1660,22 @@
     },
   },
   {
+    "context": "ThockAgentPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-pagedown": "thock::ActivateNextAgentSession",
+      "ctrl-pageup": "thock::ActivatePreviousAgentSession",
+    },
+  },
+  {
+    "context": "ThockAgentPanel && menu",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "menu::Confirm",
+      "escape": "menu::Cancel",
+    },
+  },
+  {
     "context": "ThockChatPanel",
     "use_key_equivalents": true,
     "bindings": {
