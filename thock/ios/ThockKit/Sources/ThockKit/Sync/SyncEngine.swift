@@ -350,7 +350,9 @@ public actor SyncEngine {
             since = page.nextSince ?? page.files.map(\.version).max() ?? since ?? 0
             if page.hasMore != true { break }
         }
-        if fullPull, failed.isEmpty {
+        // A path whose snapshot failed was still listed, so it survives this;
+        // desk deletions keep arriving while it is fetched again.
+        if fullPull {
             try store.removeFiles(notIn: listed)
         }
         store.cursor = since ?? 0

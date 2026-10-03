@@ -1803,7 +1803,11 @@ async fn scan_vault(
     let removed = known
         .keys()
         .filter(|path| !seen.contains(*path))
-        .filter(|path| !unlisted.iter().any(|prefix| path.starts_with(prefix.as_str())))
+        .filter(|path| {
+            !unlisted
+                .iter()
+                .any(|prefix| path.starts_with(prefix.as_str()))
+        })
         .cloned()
         .collect();
     Ok(ScanResult {
@@ -1915,7 +1919,19 @@ async fn apply_write(
     row: &WriteRow,
 ) -> Result<Option<String>, ApplyFailure> {
     let write = open_write(key, row).map_err(ApplyFailure::Refused)?;
-    apply_opened_write(fs, vault, &write)
+    let abs = vault.root.join(&write.path);
+    let existing = if fs.is_file(&abs).await {
+        let bytes = fs.load_bytes(&abs).await.map_err(ApplyFailure::Vault)?;
+        // The desk never sends a file that isn't UTF-8, so a phone write
+        // against one can't be meaningful; waiting would block the queue.
+        let text = String::from_utf8(bytes).map_err(|_| {
+            ApplyFailure::Refused(anyhow!("{} isn't a text file", write.path))
+        })?;
+        Some(text)
+    } else {
+        None
+    };
+    apply_opened_write(fs, vault, &write, existing)
         .await
         .map_err(ApplyFailure::Vault)
 }
@@ -1948,13 +1964,9 @@ async fn apply_opened_write(
     fs: &Arc<dyn Fs>,
     vault: &Vault,
     write: &Write,
+    existing: Option<String>,
 ) -> Result<Option<String>> {
     let abs = vault.root.join(&write.path);
-    let existing = if fs.is_file(&abs).await {
-        Some(fs.load(&abs).await?)
-    } else {
-        None
-    };
     let seed = if existing.is_none() && write.create_from_template() {
         template_seed(fs, vault, &write.path).await
     } else {
