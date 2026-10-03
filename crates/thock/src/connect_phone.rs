@@ -263,3 +263,77 @@ impl Render for ConnectPhoneModal {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs::{FakeFs, Fs as _};
+    use gpui::{KeyBinding, TestAppContext, VisualTestContext};
+    use project::Project;
+    use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
+    use std::path::Path;
+    use workspace::{MultiWorkspace, Workspace};
+
+    /// Opens the modal in a workspace with the shipped keymap bound. The
+    /// service is gone, which only means no code is fetched.
+    async fn open_modal(
+        cx: &mut TestAppContext,
+    ) -> (gpui::Entity<Workspace>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            let key_bindings: Vec<KeyBinding> = match KeymapFile::load(
+                include_str!("../../../assets/keymaps/default-linux.json"),
+                cx,
+            ) {
+                KeymapFileLoadResult::Success { key_bindings }
+                | KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => key_bindings,
+                KeymapFileLoadResult::JsonParseFailure { error } => {
+                    panic!("bad keymap: {error}")
+                }
+            };
+            cx.bind_keys(key_bindings);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(Path::new("/vault")).await.unwrap();
+        let project = Project::test(fs, [Path::new("/vault")], cx).await;
+        // The modal layer is drawn by the multi-workspace root, not by a
+        // bare `Workspace`.
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_modal(window, cx, |window, cx| {
+                ConnectPhoneModal::new(WeakEntity::new_invalid(), window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(modal_open(&workspace, cx));
+        (workspace, cx)
+    }
+
+    fn modal_open(workspace: &gpui::Entity<Workspace>, cx: &mut VisualTestContext) -> bool {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<ConnectPhoneModal>(cx).is_some()
+        })
+    }
+
+    #[gpui::test]
+    async fn escape_closes_the_modal(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_modal(cx).await;
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!modal_open(&workspace, cx));
+    }
+
+    #[gpui::test]
+    async fn enter_closes_the_modal(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_modal(cx).await;
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(!modal_open(&workspace, cx));
+    }
+}
