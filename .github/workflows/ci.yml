@@ -183,6 +183,10 @@ jobs:
           unformatted="$(gofmt -l .)"
           [ -z "${unformatted}" ] || { echo "gofmt needed on:"; echo "${unformatted}"; exit 1; }
 
+      - name: staticcheck
+        working-directory: ${{ steps.module.outputs.dir }}
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+
       # The same command a local run uses; the plus suite starts its own
       # embedded Postgres, so no service container is needed.
       - name: Test

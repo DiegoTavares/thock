@@ -104,11 +104,14 @@ jobs:
             --format='value(status.latestReadyRevisionName)')"
           echo "revision=${revision}" | tee -a "$GITHUB_OUTPUT"
 
+      # --timeout bounds the vault feed's SSE connections (5 minutes by
+      # default); it matches deploy.sh so neither path undoes the other.
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy "${SERVICE}" \
             --project "${PROJECT}" --region "${REGION}" \
             --source thock/services/plus \
+            --timeout 3600 \
             --quiet
 
       # /health answers only when the database does, so it also proves the

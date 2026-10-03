@@ -99,7 +99,9 @@ func (h *feedHub) publish(vaultID string, event feedEvent) {
 }
 
 // serve writes the stream until the client goes away or the server closes
-// it. Cloud Run drops connections after an hour; clients reconnect.
+// it. Cloud Run ends every request at the service's timeout, 3600 s (its
+// maximum), set by --timeout in deploy.sh and deploy-services.yml; clients
+// reconnect.
 // stillAllowed is asked at every ping, so a credential revoked, replaced or
 // reset stops receiving events within one interval instead of an hour.
 func (h *feedHub) serve(w http.ResponseWriter, r *http.Request, vaultID string, role deviceRole, stillAllowed func(context.Context) bool) {

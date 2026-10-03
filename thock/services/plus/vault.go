@@ -84,6 +84,9 @@ type principal struct {
 	vault  *vault
 	role   deviceRole
 	device device
+	// A desk whose Plus access was turned off. Only routes with
+	// routeAccess.revokedDesk let it through.
+	revoked bool
 }
 
 // Which roles a route accepts and what a lapsed vault may still do there.
@@ -92,6 +95,9 @@ type routeAccess struct {
 	needVault   bool
 	lapsedDesk  bool
 	lapsedPhone bool
+	// A disconnected desk may still delete its vault copy instead of waiting
+	// for the sweeper.
+	revokedDesk bool
 }
 
 var (
@@ -99,7 +105,7 @@ var (
 	phoneOnly        = routeAccess{roles: []deviceRole{rolePhone}, needVault: true}
 	bothRead         = routeAccess{roles: []deviceRole{roleDesk, rolePhone}, needVault: true, lapsedPhone: true}
 	vaultStatusRoute = routeAccess{roles: []deviceRole{roleDesk, rolePhone}, needVault: true, lapsedDesk: true, lapsedPhone: true}
-	vaultDeleteRoute = routeAccess{roles: []deviceRole{roleDesk}, needVault: true, lapsedDesk: true}
+	vaultDeleteRoute = routeAccess{roles: []deviceRole{roleDesk}, needVault: true, lapsedDesk: true, revokedDesk: true}
 	vaultCreateRoute = routeAccess{roles: []deviceRole{roleDesk}}
 )
 
@@ -119,6 +125,10 @@ func (s *server) withVault(access routeAccess, next func(http.ResponseWriter, *h
 		if err != nil {
 			logf("error: resolving a credential: %v", err)
 			writeErrorCode(w, http.StatusInternalServerError, "internal", "Couldn't check your connection right now. Try again.")
+			return
+		}
+		if p.revoked && !access.revokedDesk {
+			writeRevoked(w)
 			return
 		}
 		allowed := false
@@ -159,6 +169,13 @@ func refuse(status int, code, message string) error {
 	return &refusalError{status: status, code: code, message: message}
 }
 
+func writeRevoked(w http.ResponseWriter) {
+	writeErrorCode(w, http.StatusForbidden, "revoked", "Your Thock Plus access was turned off. Your own agent still works from the Agent panel.")
+}
+
+// resolvePrincipal maps a credential to who is calling. A revoked desk
+// resolves with principal.revoked set; callers must refuse it unless the
+// route allows it.
 func (s *server) resolvePrincipal(ctx context.Context, credential string) (principal, error) {
 	hash := hashCredential(credential)
 	if strings.HasPrefix(credential, "tpp_") {
@@ -186,10 +203,7 @@ func (s *server) resolvePrincipal(ctx context.Context, credential string) (princ
 	if err != nil {
 		return principal{}, err
 	}
-	if u.Status == userRevoked {
-		return principal{}, refuse(http.StatusForbidden, "revoked", "Your Thock Plus access was turned off. Your own agent still works from the Agent panel.")
-	}
-	p := principal{user: u, role: roleDesk}
+	p := principal{user: u, role: roleDesk, revoked: u.Status == userRevoked}
 	v, err := s.store.vaultByUser(ctx, u.ID)
 	if err == nil {
 		p.vault = &v
@@ -1007,7 +1021,7 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request, p principal)
 			logf("warning: re-checking a feed credential: %v", err)
 			return true
 		}
-		return current.vault != nil && current.vault.ID == vaultID && current.role == p.role
+		return !current.revoked && current.vault != nil && current.vault.ID == vaultID && current.role == p.role
 	})
 }
 
