@@ -1,0 +1,34 @@
+{
+  "syncable": [
+    "daily/2026-10-02.md",
+    "backlog.md",
+    ".thock/config.toml",
+    "routines/inbox/routine.toml",
+    "reference/clips/A Title.MD",
+    "a b/c.TXT",
+    "data.csv",
+    "notes/caf\u00e9.md"
+  ],
+  "refused": [
+    "",
+    "/daily/x.md",
+    "daily/x.md/",
+    "daily//x.md",
+    "./x.md",
+    "../x.md",
+    "daily/../x.md",
+    "image.png",
+    "notes/.md",
+    "noext",
+    ".thock/history/HEAD",
+    ".thock/history/x.md",
+    ".thock/cache/index.json",
+    ".thock/sync/state.json",
+    ".git/config",
+    ".git/config.json",
+    "a\\b.md",
+    "bad\u0007.md",
+    "notes/cafe\u0301.md",
+    "notes/Cafe\u0301.md"
+  ]
+}

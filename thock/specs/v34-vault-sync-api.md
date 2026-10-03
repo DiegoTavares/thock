@@ -727,7 +727,8 @@ applies `write` to `after` and asserts the text is unchanged with outcome `noop`
 Hash vectors: `fixtures/v1/hashes.json`, a list of `{"line": "…", "line_hash": "…"}` and
 `{"text": "…", "heading_key": "…"}`. Envelope vectors: `fixtures/v1/envelope.json`, a list of
 `{"key": hex, "nonce": hex, "context": {…}, "plaintext": base64, "envelope": base64, "content_hash": hex}`
-plus one `{"key": hex, "key_check": hex}`.
+plus one `{"key": hex, "key_check": hex}`. Path vectors: `fixtures/v1/paths.json`,
+`{"syncable": […], "refused": […]}` for `is_syncable_path`.
 
 ### 9.3 Corpus
 

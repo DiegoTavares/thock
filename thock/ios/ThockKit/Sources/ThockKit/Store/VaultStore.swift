@@ -101,9 +101,10 @@ public final class VaultStore: @unchecked Sendable {
             let rows: [[Database.Value]]?
             if let directory {
                 // `substr` rather than LIKE, so a folder named `50%_done`
-                // cannot turn into a wildcard.
+                // cannot turn into a wildcard. SQLite counts code points, so
+                // the length is in scalars, not Characters.
                 let prefix = directory + "/"
-                rows = try? database.query("SELECT path FROM files WHERE substr(path, 1, ?) = ? ORDER BY path", [.int(Int64(prefix.count)), .text(prefix)])
+                rows = try? database.query("SELECT path FROM files WHERE substr(path, 1, ?) = ? ORDER BY path", [.int(Int64(prefix.unicodeScalars.count)), .text(prefix)])
             } else {
                 rows = try? database.query("SELECT path FROM files ORDER BY path")
             }
@@ -370,9 +371,9 @@ public final class VaultStore: @unchecked Sendable {
 
     /// Inbox notes still waiting for triage, whoever captured them.
     public func waitingInboxNotes() -> [InboxNote] {
-        let directory = config.inboxDir
-        return paths(under: directory)
-            .filter { $0.hasSuffix(".md") && !$0.dropFirst(directory.count + 1).contains("/") }
+        let config = config
+        return paths(under: config.inboxDir.isEmpty ? nil : config.inboxDir)
+            .filter(config.isInboxNote)
             .compactMap { path in content(path).map { InboxNote(path: path, content: $0) } }
     }
 
