@@ -370,9 +370,9 @@ public final class VaultStore: @unchecked Sendable {
 
     /// Inbox notes still waiting for triage, whoever captured them.
     public func waitingInboxNotes() -> [InboxNote] {
-        let directory = config.inboxDir
-        return paths(under: directory)
-            .filter { $0.hasSuffix(".md") && !$0.dropFirst(directory.count + 1).contains("/") }
+        let config = config
+        return paths(under: config.inboxDir.isEmpty ? nil : config.inboxDir)
+            .filter(config.isInboxNote)
             .compactMap { path in content(path).map { InboxNote(path: path, content: $0) } }
     }
 

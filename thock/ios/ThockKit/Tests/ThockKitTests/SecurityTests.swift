@@ -116,11 +116,17 @@ final class SecurityTests: XCTestCase {
     }
 
     func testAnInboxFolderSpelledWithADotIsUsable() {
-        XCTExpectFailure("VaultConfig trims only `/` and spaces from inbox.toml's dir, so `./inbox` or `.` gives paths the service refuses")
-        for dir in ["./inbox", "inbox/./sub", "."] {
-            let inboxDir = VaultConfig(config: nil, inboxConfig: "dir = \"\(dir)\"\n").inboxDir
-            XCTAssertTrue(SyncCore.isSyncablePath(inboxDir + "/a.md"), "\(dir) → \(inboxDir)")
+        for (dir, expected) in [("./inbox", "inbox"), ("inbox/./sub", "inbox/sub"), ("inbox//sub", "inbox/sub"), (".", ""), ("./", "")] {
+            let config = VaultConfig(config: nil, inboxConfig: "dir = \"\(dir)\"\n")
+            XCTAssertEqual(config.inboxDir, expected, dir)
+            let path = VaultConfig.join(config.inboxDir, "a.md")
+            XCTAssertTrue(SyncCore.isSyncablePath(path), "\(dir) → \(path)")
+            XCTAssertTrue(config.isInboxNote(path), "\(dir) → \(path)")
         }
+        let root = VaultConfig(config: nil, inboxConfig: "dir = \".\"\n")
+        XCTAssertFalse(root.isInboxNote("daily/2026-10-02.md"))
+        XCTAssertFalse(VaultConfig().isInboxNote("inbox/sub/a.md"))
+        XCTAssertFalse(VaultConfig().isInboxNote("inboxes/a.md"))
     }
 
     // MARK: Envelopes

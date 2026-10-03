@@ -170,7 +170,7 @@ public struct PhoneWrites: Sendable {
         let title = Slug.sanitizedTitle(fields.title)
         let parts = calendar.dateComponents([.hour, .minute], from: now)
         let stamp = today.iso + "-" + String(format: "%02d%02d", parts.hour ?? 0, parts.minute ?? 0)
-        let base = "\(config.inboxDir)/\(stamp)-\(Slug.make(title))"
+        let base = VaultConfig.join(config.inboxDir, "\(stamp)-\(Slug.make(title))")
         let path = [base, "\(base)-\(digest.prefix(4))", "\(base)-\(digest)"].first { !taken($0 + ".md") } ?? "\(base)-\(digest)"
 
         var note = "---\n"

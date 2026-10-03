@@ -214,7 +214,7 @@ public actor SimulatedDesk {
     public func triageInbox() async throws -> Int {
         let config = VaultConfig(config: state.disk[VaultConfig.configPath], inboxConfig: state.disk[VaultConfig.inboxConfigPath])
         let day = today()
-        let waiting = state.disk.keys.filter { $0.hasPrefix(config.inboxDir + "/") && $0.hasSuffix(".md") }.sorted()
+        let waiting = state.disk.keys.filter(config.isInboxNote).sorted()
         guard !waiting.isEmpty else { return 0 }
         var disk = state.disk
         for path in waiting {

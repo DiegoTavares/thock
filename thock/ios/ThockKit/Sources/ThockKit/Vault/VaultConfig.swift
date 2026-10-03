@@ -179,14 +179,8 @@ public struct VaultConfig: Equatable, Sendable {
             guard let value = values[key]?.string?.trimmingCharacters(in: .whitespaces), !value.isEmpty else { return nil }
             return value
         }
-        // Folders are joined with `/`, so `daily/` or `./daily` must not
-        // become `daily//…`, which the service refuses as a path.
         func folder(_ key: String) -> String? {
-            text(key).map { value in
-                var parts = value.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-                parts.removeAll { $0 == "." }
-                return parts.joined(separator: "/")
-            }
+            text(key).map(Self.normalizedFolder)
         }
         daily.dir = folder("daily.dir") ?? daily.dir
         daily.filename = text("daily.filename") ?? daily.filename
@@ -222,8 +216,25 @@ public struct VaultConfig: Equatable, Sendable {
 
         let inbox = MiniTOML.parse(inboxConfig ?? "")
         if let dir = inbox["dir"]?.string?.trimmingCharacters(in: CharacterSet(charactersIn: "/ ")), !dir.isEmpty {
-            inboxDir = dir
+            inboxDir = Self.normalizedFolder(dir)
         }
+    }
+
+    // Folders are joined with `/`, so `daily/` or `./daily` must not become
+    // `daily//…` or `./daily/…`, which the service refuses as paths. `.`
+    // becomes the empty string: the vault's root.
+    static func normalizedFolder(_ value: String) -> String {
+        value.split(separator: "/", omittingEmptySubsequences: true)
+            .filter { $0 != "." }
+            .joined(separator: "/")
+    }
+
+    /// Whether `path` is a note waiting directly in the inbox folder, as the
+    /// desk counts them: top-level `.md` files only.
+    public func isInboxNote(_ path: String) -> Bool {
+        let prefix = inboxDir.isEmpty ? "" : inboxDir + "/"
+        guard path.hasPrefix(prefix), path.hasSuffix(".md") else { return false }
+        return !path.unicodeScalars.dropFirst(prefix.unicodeScalars.count).contains("/")
     }
 
     public func dailyPath(_ day: VaultDay) -> String {
