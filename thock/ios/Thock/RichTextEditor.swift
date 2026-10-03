@@ -59,12 +59,18 @@ extension NSAttributedString.Key {
     /// (font traits, strikethrough, link), because UIKit carries only those
     /// from one typed character to the next.
     static let thockKind = NSAttributedString.Key("thock.kind")
+    /// The verbatim source of an inline HTML comment, carried by one
+    /// invisible `EditorStyle.commentMark` so it is written back where it was.
+    static let thockComment = NSAttributedString.Key("thock.comment")
 }
 
 enum EditorStyle {
     static let markerWidth: CGFloat = 30
 
     static let noteScheme = "thock-note"
+
+    /// A word joiner: zero width, so a comment takes no room in the text.
+    static let commentMark: Character = "\u{2060}"
 
     static func inline(_ attributes: [NSAttributedString.Key: Any], kind: EditorKind) -> EditorInline {
         var style = EditorInline()
@@ -167,7 +173,13 @@ enum EditorStyle {
             let kind = EditorKind(block.kind)
             for run in block.runs {
                 let inline = EditorInline(bold: run.bold, italic: run.italic, code: run.code, strike: run.strike, link: run.link)
-                output.append(NSAttributedString(string: run.text, attributes: attributes(kind: kind, inline: inline, size: size)))
+                var style = attributes(kind: kind, inline: inline, size: size)
+                if run.comment {
+                    style[.thockComment] = run.text
+                    output.append(NSAttributedString(string: String(commentMark), attributes: style))
+                } else {
+                    output.append(NSAttributedString(string: run.text, attributes: style))
+                }
             }
             if index < editable.count - 1 {
                 output.append(NSAttributedString(string: "\n", attributes: attributes(kind: kind, inline: EditorInline(), size: size)))
@@ -187,7 +199,27 @@ enum EditorStyle {
             if range.length > 0 {
                 text.enumerateAttributes(in: range) { attributes, runRange, _ in
                     let inline = inline(attributes, kind: kind)
-                    runs.append(InlineRun(string.substring(with: runRange), bold: inline.bold, italic: inline.italic, code: inline.code, strike: inline.strike, link: inline.link))
+                    func styled(_ text: String, comment: Bool = false) -> InlineRun {
+                        InlineRun(text, bold: inline.bold, italic: inline.italic, code: inline.code, strike: inline.strike, link: inline.link, comment: comment)
+                    }
+                    let substring = string.substring(with: runRange)
+                    guard let comment = attributes[.thockComment] as? String else {
+                        runs.append(styled(substring))
+                        return
+                    }
+                    // Text typed next to the mark can inherit its attribute;
+                    // only the mark itself stands for the comment.
+                    var typed = ""
+                    for character in substring {
+                        if character == commentMark {
+                            runs.append(styled(typed))
+                            runs.append(styled(comment, comment: true))
+                            typed = ""
+                        } else {
+                            typed.append(character)
+                        }
+                    }
+                    runs.append(styled(typed))
                 }
             }
             let markdown = Inline.serialize(runs).trimmingCharacters(in: .whitespaces)
@@ -453,7 +485,9 @@ final class EditorTextView: UITextView {
             let current = EditorStyle.kind(in: textStorage, paragraph: string.paragraphRange(for: NSRange(location: runRange.location, length: 0)))
             var inline = EditorStyle.inline(attributes, kind: current)
             change?(&inline)
-            updates.append((runRange, EditorStyle.attributes(kind: kind ?? current, inline: inline, size: fontSize)))
+            var restyled = EditorStyle.attributes(kind: kind ?? current, inline: inline, size: fontSize)
+            restyled[.thockComment] = attributes[.thockComment]
+            updates.append((runRange, restyled))
         }
         textStorage.beginEditing()
         for (runRange, attributes) in updates {
