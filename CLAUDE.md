@@ -292,8 +292,8 @@ New docked panes implement the `Panel` trait and are registered with the workspa
 
 ## Security
 
-- The repository is public. Never commit credentials, vault contents, or personal data, and report a
-  vulnerability through a private security advisory, not an issue.
+- Never commit credentials, vault contents, or personal data: the repository has been public and may be
+  again. Report a vulnerability through a private security advisory, not an issue.
 - Anything read from outside the vault's author — email, calendar, Readwise, web clips, server responses,
   pairing links — is untrusted input: validate paths before writing, and never let it trigger an action that
   leaves the vault without the user's confirmation.

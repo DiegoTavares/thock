@@ -72,8 +72,11 @@ jobs:
         working-directory: ${{ matrix.dir }}
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
+  # Code scanning is free on a public repository and needs GitHub Advanced
+  # Security on a private one, where the upload would fail.
   codeql:
     name: CodeQL (${{ matrix.language }})
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
