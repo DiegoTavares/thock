@@ -379,11 +379,22 @@ step that silently succeeds without publishing is the one outcome worth engineer
             "gs://${BUCKET}/channels/stable.json" \
             --cache-control="no-store"
           echo "Thock ${GITHUB_REF_NAME} is live on the stable channel." >> "$GITHUB_STEP_SUMMARY"
+
+      # The manifest's notes_url points at this release, and a draft is a 404
+      # for everyone but the owner.
+      - name: Publish the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --draft=false
 ```
 
+(`contents: write` rather than `read` is for that last step.)
+
 The ordering is the safety story: artifacts are immutable and land first, the manifest is archived
-beside them, and the channel object is written last. Every step before that last one is invisible to
-installed apps, so a run that dies halfway leaves nothing half-shipped.
+beside them, and the channel object is written last. Every step before that write is invisible to
+installed apps, so a run that dies halfway leaves nothing half-shipped. Publishing the release comes
+after it, so a public release always has a channel offering it, and a channel's `notes_url` is a 404
+only for the moments between the two steps (or if the last one fails, which fails the run).
 
 ### Promote — `.github/workflows/promote-release.yml`, `workflow_dispatch`
 
@@ -412,10 +423,10 @@ is how half the fleet gets an update and the other half doesn't.
 
 ### What deliberately stays manual
 
-The GitHub Release is still created as a **draft** (`release.yml:122`), and this job doesn't change
-that. The two are now decoupled on purpose: the draft is for humans and the download page, the
-manifest is for installed apps. If they should move together, publishing the release is one flag on
-the step that already exists.
+The GitHub Release is still created as a **draft** by `publish`, and stays one through the
+build-and-upload window; `publish-updates` publishes it as its last step. When `publish-updates` is
+skipped (no bucket variable) the release stays a draft and publishing it is manual:
+`gh release edit vX.Y.Z --draft=false` (`thock/RELEASING.md`, step 5).
 
 The download page (`thock/site/index.html`) links the same `dist/` URLs, so promoting a build and
 updating the page draw on the same facts.

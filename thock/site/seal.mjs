@@ -8,6 +8,9 @@
 //   node seal.mjs THOCK-XXXX-...  # re-seals under an existing code
 //
 // MANIFEST_URL overrides what gets sealed (default: the stable channel).
+// That default is public in this repository, so the gate is a courtesy that
+// keeps the download page out of search and casual sharing, not an access
+// control (spec v21, decision 6).
 // Rotating the code is: run this, redeploy, email the new code.
 
 import { webcrypto as crypto } from "node:crypto";

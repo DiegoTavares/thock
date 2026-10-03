@@ -32,15 +32,19 @@ accepts this repository on `main` or on a tag, nothing else (setup: `specs/v20-a
 3. **Wait.** `release.yml` first verifies the tag: it matches the crate version, the commit is on
    `main`, and the `CI` check passed on it (it waits up to 30 minutes for CI still running). Then it
    builds and notarizes the macOS bundle and builds the Linux one (about 90 minutes), drafts a GitHub
-   Release, uploads to `gs://thock-releases/dist/vX.Y.Z/`, and copies the manifest to
-   `channels/stable.json`. **That last copy is the moment every installed app is offered the update.**
+   Release, uploads to `gs://thock-releases/dist/vX.Y.Z/`, copies the manifest to
+   `channels/stable.json`, and then publishes the draft release. **That copy to the channel is the
+   moment every installed app is offered the update.**
 4. **Verify.**
    ```sh
    curl -s https://storage.googleapis.com/thock-releases/channels/stable.json | jq .version
    ```
-   Then install the DMG from the draft release on a Mac and open a vault.
-5. **Publish the draft release** (`gh release edit vX.Y.Z --draft=false`). The manifest's
-   `notes_url` points at it, and a draft is a 404 for everyone else.
+   Then install the DMG from the release on a Mac and open a vault.
+5. **Check the release is published.** The `publish-updates` job publishes it right after flipping
+   the channel, because the manifest's `notes_url` points at it and a draft is a 404 for everyone
+   else. If that job was skipped (no `GCP_RELEASES_BUCKET` variable) or failed before its last step,
+   the release is still a draft: read the generated notes, then publish it by hand with
+   `gh release edit vX.Y.Z --repo DiegoTavares/thock --draft=false`.
 
 A manual run of `release.yml` (`workflow_dispatch`) builds the bundles as run artifacts and
 publishes nothing. Use it to test a change to the bundling scripts.
