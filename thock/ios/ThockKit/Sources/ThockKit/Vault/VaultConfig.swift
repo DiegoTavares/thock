@@ -169,6 +169,12 @@ public struct VaultConfig: Equatable, Sendable {
     public var journalHeadings = ["Journal"]
     public var personalHeadings = ["Personal"]
     public var inboxDir = "inbox"
+    /// The language the Set Language ritual recorded (V19), in the person's
+    /// own words and as a tag. Either may be missing.
+    public var languageName: String?
+    public var languageTag: String?
+    /// The cap on `memory/index.md` in the agent's context (V28 decision 3).
+    public var memoryIndexLines = 120
 
     public init() {}
 
@@ -212,6 +218,12 @@ public struct VaultConfig: Equatable, Sendable {
             if !cleaned.isEmpty { plannerHeadings = cleaned }
         default:
             break
+        }
+
+        languageName = text("language.name")
+        languageTag = text("language.tag")
+        if case .number(let lines)? = values["memory.index_lines"], lines >= 1 {
+            memoryIndexLines = Int(lines)
         }
 
         let inbox = MiniTOML.parse(inboxConfig ?? "")

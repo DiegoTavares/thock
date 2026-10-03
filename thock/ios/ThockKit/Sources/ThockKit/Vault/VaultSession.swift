@@ -86,6 +86,23 @@ public struct VaultSession: Sendable {
         return result.record
     }
 
+    /// Queues the agent's note for later. Returns false when there was
+    /// nothing to write.
+    @discardableResult
+    public func remember(_ text: String, now: Date = Date()) throws -> Bool {
+        guard let write = writes(now: now).memoryNote(text) else { return false }
+        try record([write])
+        return true
+    }
+
+    @discardableResult
+    public func keep(question: String, answer: String, now: Date = Date()) throws -> Bool {
+        let builder = writes(now: now)
+        guard let write = builder.keptAnswer(question: question, answer: answer, todayNote: noteText(builder.today)) else { return false }
+        try record([write])
+        return true
+    }
+
     static let journalKey = "journal.last"
 
     /// Appends a timestamped entry to today's Journal. Returns false when

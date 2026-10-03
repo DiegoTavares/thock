@@ -44,6 +44,12 @@ type user struct {
 	// The gateway key is disabled while true; flipped back when a top-up or
 	// a new cycle brings the balance above zero.
 	Exhausted bool `json:"exhausted"`
+
+	// The phone's own key (V35 §5.1), minted on its first grant and revoked
+	// with the phone. An empty hash means there is none. Its usage above its
+	// own baseline counts against the same allowance as the desk key's.
+	PhoneGateway          gatewayKey `json:"phone_gateway"`
+	PhoneUsageBaselineUSD float64    `json:"phone_usage_baseline_usd"`
 }
 
 type gatewayKey struct {
@@ -229,13 +235,15 @@ func (s *store) listInvites(ctx context.Context) ([]invite, error) {
 // --- users ---
 
 const userColumns = `id, plan_id, device, coalesce(invite_code, ''), credential_hash, status, created_at, cycle_started_at,
-	gateway_key_hash, gateway_key_secret, gateway_limit_usd, usage_baseline_usd, used_units, adjust_units, last_sync_at, exhausted`
+	gateway_key_hash, gateway_key_secret, gateway_limit_usd, usage_baseline_usd, used_units, adjust_units, last_sync_at, exhausted,
+	phone_gateway_key_hash, phone_gateway_key_secret, phone_gateway_limit_usd, phone_usage_baseline_usd`
 
 func scanUser(row pgx.Row) (user, error) {
 	var u user
 	err := row.Scan(&u.ID, &u.Plan, &u.Device, &u.InviteCode, &u.CredentialHash, &u.Status, &u.CreatedAt, &u.CycleStartedAt,
 		&u.Gateway.Hash, &u.Gateway.Secret, &u.Gateway.LimitUSD, &u.UsageBaselineUSD, &u.UsedUnits, &u.AdjustUnits,
-		&u.LastSyncAt, &u.Exhausted)
+		&u.LastSyncAt, &u.Exhausted,
+		&u.PhoneGateway.Hash, &u.PhoneGateway.Secret, &u.PhoneGateway.LimitUSD, &u.PhoneUsageBaselineUSD)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return user{}, errNotFound
 	}
@@ -265,11 +273,13 @@ func (s *store) createUser(ctx context.Context, u user, entry ledgerEntry) error
 			return err
 		}
 		_, err = tx.Exec(ctx, `insert into users (id, plan_id, device, invite_code, credential_hash, status, created_at, cycle_started_at,
-			gateway_key_hash, gateway_key_secret, gateway_limit_usd, usage_baseline_usd, used_units, adjust_units, last_sync_at, exhausted)
-			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+			gateway_key_hash, gateway_key_secret, gateway_limit_usd, usage_baseline_usd, used_units, adjust_units, last_sync_at, exhausted,
+			phone_gateway_key_hash, phone_gateway_key_secret, phone_gateway_limit_usd, phone_usage_baseline_usd)
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
 			u.ID, u.Plan, u.Device, u.InviteCode, u.CredentialHash, string(u.Status), u.CreatedAt, u.CycleStartedAt,
 			u.Gateway.Hash, u.Gateway.Secret, u.Gateway.LimitUSD, u.UsageBaselineUSD, u.UsedUnits, u.AdjustUnits,
-			u.LastSyncAt, u.Exhausted)
+			u.LastSyncAt, u.Exhausted,
+			u.PhoneGateway.Hash, u.PhoneGateway.Secret, u.PhoneGateway.LimitUSD, u.PhoneUsageBaselineUSD)
 		if err != nil {
 			return err
 		}
@@ -308,10 +318,12 @@ func (s *store) saveAllowance(ctx context.Context, u user, entries []ledgerEntry
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `update users set
 			cycle_started_at = $2, usage_baseline_usd = $3, used_units = $4, adjust_units = $5,
-			last_sync_at = $6, exhausted = $7, gateway_key_hash = $8, gateway_key_secret = $9, gateway_limit_usd = $10
+			last_sync_at = $6, exhausted = $7, gateway_key_hash = $8, gateway_key_secret = $9, gateway_limit_usd = $10,
+			phone_gateway_key_hash = $11, phone_gateway_key_secret = $12, phone_gateway_limit_usd = $13, phone_usage_baseline_usd = $14
 			where id = $1`,
 			u.ID, u.CycleStartedAt, u.UsageBaselineUSD, u.UsedUnits, u.AdjustUnits,
-			u.LastSyncAt, u.Exhausted, u.Gateway.Hash, u.Gateway.Secret, u.Gateway.LimitUSD)
+			u.LastSyncAt, u.Exhausted, u.Gateway.Hash, u.Gateway.Secret, u.Gateway.LimitUSD,
+			u.PhoneGateway.Hash, u.PhoneGateway.Secret, u.PhoneGateway.LimitUSD, u.PhoneUsageBaselineUSD)
 		if err != nil {
 			return err
 		}
@@ -333,9 +345,42 @@ func (s *store) touchSync(ctx context.Context, id string, at time.Time) error {
 	return err
 }
 
+// setPhoneKey records a freshly minted phone key, which has spent nothing
+// yet. errNotFound when the user is gone or already holds a phone key: the
+// caller's key lost and must be revoked.
+func (s *store) setPhoneKey(ctx context.Context, id string, key gatewayKey) error {
+	tag, err := s.pool.Exec(ctx, `update users set
+		phone_gateway_key_hash = $2, phone_gateway_key_secret = $3, phone_gateway_limit_usd = $4, phone_usage_baseline_usd = 0
+		where id = $1 and phone_gateway_key_hash = ''`,
+		id, key.Hash, key.Secret, key.LimitUSD)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errNotFound
+	}
+	return nil
+}
+
+// clearPhoneKey forgets the phone key with this hash; a different key that
+// took its place in the meantime is left alone.
+func (s *store) clearPhoneKey(ctx context.Context, id, hash string, carriedUSD float64) error {
+	// The departing key's spend moves onto the desk key's side of the sum by
+	// lowering that baseline, which a new cycle resets like any other. The
+	// last sync is forgotten so the very next pass recounts: a balance cached
+	// from before would let a fresh phone key start with the old one's
+	// allowance.
+	_, err := s.pool.Exec(ctx, `update users set
+		phone_gateway_key_hash = '', phone_gateway_key_secret = '', phone_gateway_limit_usd = 0, phone_usage_baseline_usd = 0,
+		usage_baseline_usd = usage_baseline_usd - $3, last_sync_at = 'epoch'
+		where id = $1 and phone_gateway_key_hash = $2`,
+		id, hash, carriedUSD)
+	return err
+}
+
 func (s *store) revokeUser(ctx context.Context, id string, at time.Time, note string) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `update users set status = $2, gateway_key_secret = '', exhausted = true where id = $1`,
+		tag, err := tx.Exec(ctx, `update users set status = $2, gateway_key_secret = '', phone_gateway_key_secret = '', exhausted = true where id = $1`,
 			id, string(userRevoked))
 		if err != nil {
 			return err
@@ -354,12 +399,13 @@ func (s *store) revokeUser(ctx context.Context, id string, at time.Time, note st
 
 type allowanceChange struct {
 	Plan string
-	// Start a fresh cycle at `At` from this gateway baseline.
-	Reset       bool
-	BaselineUSD float64
-	AdjustUnits int64
-	Note        string
-	At          time.Time
+	// Start a fresh cycle at `At` from these gateway baselines, one per key.
+	Reset            bool
+	BaselineUSD      float64
+	PhoneBaselineUSD float64
+	AdjustUnits      int64
+	Note             string
+	At               time.Time
 }
 
 // applyAllowance records an admin change and clears the sync clock so the
@@ -372,8 +418,8 @@ func (s *store) applyAllowance(ctx context.Context, id string, change allowanceC
 			}
 		}
 		if change.Reset {
-			_, err := tx.Exec(ctx, `update users set cycle_started_at = $2, usage_baseline_usd = $3, used_units = 0, adjust_units = 0 where id = $1`,
-				id, change.At, change.BaselineUSD)
+			_, err := tx.Exec(ctx, `update users set cycle_started_at = $2, usage_baseline_usd = $3, phone_usage_baseline_usd = $4, used_units = 0, adjust_units = 0 where id = $1`,
+				id, change.At, change.BaselineUSD, change.PhoneBaselineUSD)
 			if err != nil {
 				return err
 			}

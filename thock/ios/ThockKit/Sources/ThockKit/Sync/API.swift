@@ -132,6 +132,54 @@ public struct QueuedWrite: Codable, Equatable, Sendable {
     }
 }
 
+/// What the phone's agent may spend and how it reaches a model (V35 §5.1).
+public struct AgentGrant: Codable, Equatable, Sendable {
+    public struct Models: Codable, Equatable, Sendable {
+        public var `default`: String
+        public var fast: String?
+    }
+
+    public struct Gateway: Codable, Equatable, Sendable {
+        public var provider: String?
+        public var baseURL: String
+        public var apiKey: String
+        public var models: Models
+
+        enum CodingKeys: String, CodingKey {
+            case provider
+            case baseURL = "base_url"
+            case apiKey = "api_key"
+            case models
+        }
+    }
+
+    public var status: String
+    public var allowanceUnits: Int?
+    public var usedUnits: Int?
+    public var remainingUnits: Int?
+    public var warnAtPercent: Int?
+    public var cycleEndsAt: String?
+    public var gateway: Gateway
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case allowanceUnits = "allowance_units"
+        case usedUnits = "used_units"
+        case remainingUnits = "remaining_units"
+        case warnAtPercent = "warn_at_percent"
+        case cycleEndsAt = "cycle_ends_at"
+        case gateway
+    }
+
+    public var isExhausted: Bool { status == "exhausted" }
+
+    /// Whether enough of the cycle's allowance is gone to say so.
+    public var isRunningLow: Bool {
+        guard let allowance = allowanceUnits, let used = usedUnits, let warn = warnAtPercent, allowance > 0 else { return false }
+        return used * 100 >= allowance * warn
+    }
+}
+
 /// Every non-2xx response: a sentence for the person and a code to branch on.
 public struct APIError: Error, Codable, Equatable, Sendable {
     public struct Current: Codable, Equatable, Sendable {

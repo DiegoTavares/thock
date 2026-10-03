@@ -46,6 +46,17 @@ units (`units_per_dollar` in `settings`, 100 by default, so a unit is a cent), a
 The app polls `GET /v1/entitlement` after every agent turn; that is what the panel footer shows.
 The sync-and-enforce step is serialized in the process, so run one instance.
 
+The phone has a key of its own (`thock/specs/v35-phone-ask.md` §5.1), minted on its first
+`GET /v1/vault/agent` and stored beside the desk key in the `phone_gateway_*` columns. The
+allowance stays one pool: used units are the spend on both keys, each above its own cycle
+baseline, so a turn on the phone moves the bar the desk shows. Exhaustion disables both keys, a
+top-up or a new cycle re-enables both, and a rollover or admin reset moves both baselines. Each
+key's cap is its own baseline plus the allowance, so with this service down and both keys abused
+the worst case is twice the allowance. The phone key is revoked whenever the phone goes
+(*Disconnect phone*, a second pairing, vault delete or reset), when the vault lapses, and when the
+user is revoked; the next grant mints a fresh one. A user whose phone never asked has no phone
+key and costs no extra gateway calls.
+
 ## API
 
 Errors are `{"error": "<a sentence the app shows as is>", "code": "<what the app branches on>"}`.
@@ -56,7 +67,8 @@ the status (`unauthorized`, `revoked`, `not_found`, …).
 |---|---|---|---|
 | POST | `/v1/connect` | none | `{"invite_code", "device"}` → `{"credential", "entitlement"}` |
 | GET | `/v1/entitlement` | `Bearer <credential>` | plan, balance, model tiers, gateway key |
-| POST | `/v1/disconnect` | `Bearer <credential>` | revoke the key and the credential |
+| POST | `/v1/disconnect` | `Bearer <credential>` | revoke the keys (desk and phone) and the credential |
+| GET | `/v1/vault/agent` | `Bearer <phone credential>` | the phone's grant: balance, model tiers, gateway base URL and the phone's own key |
 | GET | `/admin/plans` | `Bearer <ADMIN_TOKEN>` | `units_per_dollar` and every plan |
 | PUT | `/admin/plans/{id}` | admin | create or replace a plan (body: the plan JSON) |
 | PUT | `/admin/settings` | admin | `{"units_per_dollar": N}` |
@@ -64,12 +76,18 @@ the status (`unauthorized`, `revoked`, `not_found`, …).
 | GET | `/admin/invites` | admin | list invites |
 | GET | `/admin/users` | admin | list users (no secrets) |
 | POST | `/admin/users/{id}/allowance` | admin | `{"reset": true}`, `{"adjust_units": N}`, `{"plan": "id"}` |
-| POST | `/admin/users/{id}/revoke` | admin | kill the key, lock the credential (also lapses the user's vault) |
+| POST | `/admin/users/{id}/revoke` | admin | kill both keys, lock the credential (also lapses the user's vault) |
 | GET | `/admin/users/{id}/ledger` | admin | the user's ledger entries |
 | POST | `/admin/users/{id}/vault/lapse` | admin | `{"lapsed": true|false}`: what a billing driver does on cancel and renew |
 | GET | `/health` | none | `ok` when the database answers |
 
-The vault sync routes under `/v1/vault` are specified field by field in
+`GET /v1/vault/agent` answers `{"status", "allowance_units", "used_units", "remaining_units",
+"warn_at_percent", "cycle_ends_at", "gateway": {"provider", "base_url", "api_key", "models"}}`
+with `status` `active` or `exhausted`. It runs the allowance loop, so the phone asking before a
+turn keeps the balance and the hard stop current while the desk is closed. A desk credential gets
+`role_forbidden`, a lapsed vault `plus_lapsed`, and the desk key never appears in it.
+
+The other vault sync routes under `/v1/vault` are specified field by field in
 `thock/specs/v34-vault-sync-api.md` §6 and are not repeated here. The desk calls them with its
 Plus credential; the phone with the `tpp_…` credential pairing mints. `GET /v1/entitlement` carries
 a `vault` object once the user has one, and a plan's `limits.vault_quota_bytes` (0 = no vault) is

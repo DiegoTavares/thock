@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +25,12 @@ type gateway interface {
 	configure(ctx context.Context, hash string, limitUSD float64, disabled bool) error
 	revoke(ctx context.Context, hash string) error
 }
+
+// Where a device holding a minted key sends its model calls. It travels in
+// the phone's grant so a gateway migration stays a backend change.
+const gatewayBaseURL = "https://openrouter.ai/api/v1"
+
+var errGatewayKeyGone = errors.New("the gateway has no such key")
 
 type openRouterGateway struct {
 	baseURL       string
@@ -74,6 +81,9 @@ func (g *openRouterGateway) call(ctx context.Context, method, path string, body 
 	if err != nil {
 		return err
 	}
+	if response.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("openrouter %s %s: %w", method, path, errGatewayKeyGone)
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("openrouter %s %s: %s: %s", method, path, response.Status, bytes.TrimSpace(raw))
 	}
@@ -115,8 +125,14 @@ func (g *openRouterGateway) configure(ctx context.Context, hash string, limitUSD
 	return g.call(ctx, http.MethodPatch, "/"+hash, body, nil)
 }
 
+// A key that is already gone is revoked: a retry after a half-finished
+// revocation must be able to get past it.
 func (g *openRouterGateway) revoke(ctx context.Context, hash string) error {
-	return g.call(ctx, http.MethodDelete, "/"+hash, nil, nil)
+	err := g.call(ctx, http.MethodDelete, "/"+hash, nil, nil)
+	if errors.Is(err, errGatewayKeyGone) {
+		return nil
+	}
+	return err
 }
 
 // fakeGateway stands in when no management key is configured: local runs

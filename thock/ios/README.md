@@ -18,6 +18,7 @@ the same client code it uses against the real service.
 | `ThockKit/Sources/ThockKit/Editor/` | The editor's block and inline model: the subset, opaque blocks, round-tripping. |
 | `ThockKit/Sources/ThockKit/Store/` | The SQLite store in the app group: notes, the write queue, rebase, prune, captures. |
 | `ThockKit/Sources/ThockKit/Sync/` | Wire models, the HTTP transport, pairing, the sync engine. |
+| `ThockKit/Sources/ThockKit/Ask/` | Ask (`thock/specs/v35-phone-ask.md`): the agent's loop, its four tools over the local store, and the prompt. `Prompts/SYSTEM.md` is a copy of the desk's `crates/thock/assets/hosted-agent/SYSTEM.md`; a test fails when they differ. |
 | `ThockKit/Sources/ThockKit/Local/` | `LocalBackend` (the contract's routes, in memory), `SimulatedDesk`, the sample vault. |
 | `Thock/` | The SwiftUI app. |
 | `ThockShare/` | Share Sheet extension: the clip sheet. |
@@ -57,7 +58,7 @@ tapping:
 | `-thock-looks <dark\|light\|system>` | set the appearance |
 | `-thock-gate` | ask for Face ID in the practice notebook too |
 | `-thock-type "<keys>"` | type into the first editor (`\n` return, `\b` backspace, `{B}` `{I}` `{List}` `{Task}` `{Pick}`), and write the Markdown it would save to the app's `tmp/editor-dump.md` |
-| `-thock-script "<steps>"` | run steps separated by `;`: `capture:<inbox\|today\|backlog>:<text>`, `journal:<text>`, `tick:<label prefix>`, `soon:<label prefix>`, `asleep`, `awake`, `triage`, `plan`, `lapse`, `renew` |
+| `-thock-script "<steps>"` | run steps separated by `;`: `capture:<inbox\|today\|backlog>:<text>`, `journal:<text>`, `tick:<label prefix>`, `soon:<label prefix>`, `asked:<question>:<answer>` (a finished turn in the Ask thread), `asleep`, `awake`, `triage`, `plan`, `lapse`, `renew` |
 
 ## Testing
 

@@ -40,6 +40,8 @@ type server struct {
 	adminToken string
 	now        func() time.Time
 	syncEvery  time.Duration
+	// How long one gateway call may take while a phone key is being dropped.
+	gatewayPatience time.Duration
 
 	// Vault sync (thock/specs/v34-vault-sync-api.md).
 	blobs     blobStore
@@ -51,8 +53,9 @@ type server struct {
 	publicURL string
 
 	// Serializes the sync-and-enforce path so two concurrent polls can't
-	// both disable (or both re-enable) a key. Per process, which is why the
-	// deployment runs one instance.
+	// both disable (or both re-enable) a key, and so the phone key is minted
+	// and revoked between passes, never during one. Per process, which is why
+	// the deployment runs one instance.
 	syncMu sync.Mutex
 }
 
@@ -147,14 +150,15 @@ func main() {
 
 func newServer(store *store, gw gateway, adminToken string) *server {
 	s := &server{
-		store:      store,
-		gateway:    gw,
-		adminToken: adminToken,
-		now:        time.Now,
-		syncEvery:  usageSyncInterval,
-		feed:       newFeedHub(),
-		pusher:     &loggingPusher{},
-		publicURL:  "http://localhost:8080",
+		store:           store,
+		gateway:         gw,
+		adminToken:      adminToken,
+		now:             time.Now,
+		syncEvery:       usageSyncInterval,
+		gatewayPatience: 8 * time.Second,
+		feed:            newFeedHub(),
+		pusher:          &loggingPusher{},
+		publicURL:       "http://localhost:8080",
 	}
 	s.coalescer = newPushCoalescer(s.sendPush, func() time.Time { return s.now() })
 	s.feed.onPhoneAbsent = s.coalescer.nudge
@@ -183,6 +187,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /v1/vault/writes", s.withVault(deskOnly, s.handleWritesList))
 	mux.HandleFunc("POST /v1/vault/writes/ack", s.withVault(deskOnly, s.handleWritesAck))
 	mux.HandleFunc("GET /v1/vault/feed", s.withVault(bothRead, s.handleFeed))
+	mux.HandleFunc("GET /v1/vault/agent", s.withVault(phoneOnly, s.handleAgentGrant))
 	if local, ok := s.blobs.(*localBlobStore); ok {
 		mux.HandleFunc("PUT /v1/vault/blobs/{token}", local.serve)
 		mux.HandleFunc("GET /v1/vault/blobs/{token}", local.serve)
@@ -331,7 +336,7 @@ func (s *server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entitlement, err := s.entitlementFor(r.Context(), created)
+	entitlement, err := s.entitlementFor(r.Context(), created.ID)
 	if err != nil {
 		logf("error: computing a fresh entitlement: %v", err)
 		writeError(w, http.StatusInternalServerError, "Your account was created, but its balance couldn't be read. Try again.")
@@ -341,7 +346,7 @@ func (s *server) handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleEntitlement(w http.ResponseWriter, r *http.Request, u user) {
-	entitlement, err := s.entitlementFor(r.Context(), u)
+	entitlement, err := s.entitlementFor(r.Context(), u.ID)
 	if err != nil {
 		if errors.Is(err, errPlanMissing) {
 			writeError(w, http.StatusServiceUnavailable, "Your plan isn't configured right now. Try again later.")
@@ -365,15 +370,43 @@ func (s *server) handleDisconnect(w http.ResponseWriter, r *http.Request, u user
 
 var errPlanMissing = errors.New("plan missing")
 
-// entitlementFor is the allowance loop: roll the cycle over when it has
-// ended, pull spend from the gateway when the last sync is stale, compute the
-// balance, and enforce it at the gateway (disable at zero, re-enable once a
-// top-up or a new cycle restores a balance). Everything the panel footer
-// shows comes from here.
-func (s *server) entitlementFor(ctx context.Context, u user) (entitlementResponse, error) {
+// entitlementFor runs the allowance loop for the desk. The user is read under
+// the lock: a row fetched before it could miss a phone key minted since, and
+// the pass would then enforce the balance on one key only.
+func (s *server) entitlementFor(ctx context.Context, userID string) (entitlementResponse, error) {
 	s.syncMu.Lock()
 	defer s.syncMu.Unlock()
+	u, err := s.store.userByID(ctx, userID)
+	if err != nil {
+		return entitlementResponse{}, err
+	}
+	return s.allowanceLoop(ctx, u)
+}
 
+// keyUsage reads cumulative spend for the desk key and, when there is one,
+// the phone key.
+func (s *server) keyUsage(ctx context.Context, u user) (desk, phone float64, err error) {
+	desk, err = s.gateway.usage(ctx, u.Gateway.Hash)
+	if err != nil {
+		return 0, 0, err
+	}
+	if u.PhoneGateway.Hash != "" {
+		phone, err = s.gateway.usage(ctx, u.PhoneGateway.Hash)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	return desk, phone, nil
+}
+
+// allowanceLoop rolls the cycle over when it has ended, pulls spend from the
+// gateway when the last sync is stale, computes the balance, and enforces it
+// at the gateway (disable at zero, re-enable once a top-up or a new cycle
+// restores a balance). The allowance is one pool: spend on the desk key and
+// on the phone key, each above its own cycle baseline, counts against it, and
+// both keys are disabled and re-enabled together. Everything the panel footer
+// and the phone's grant show comes from here. Callers hold syncMu.
+func (s *server) allowanceLoop(ctx context.Context, u user) (entitlementResponse, error) {
 	plan, config, err := s.store.plan(ctx, u.Plan)
 	if errors.Is(err, errNotFound) {
 		return entitlementResponse{}, errPlanMissing
@@ -399,7 +432,7 @@ func (s *server) entitlementFor(ctx context.Context, u user) (entitlementRespons
 	cycleEnds := u.CycleStartedAt.Add(plan.cycleLength())
 	rolledOver := false
 	if !now.Before(cycleEnds) {
-		usage, err := s.gateway.usage(ctx, u.Gateway.Hash)
+		usage, phoneUsage, err := s.keyUsage(ctx, u)
 		if err != nil {
 			return entitlementResponse{}, err
 		}
@@ -408,6 +441,7 @@ func (s *server) entitlementFor(ctx context.Context, u user) (entitlementRespons
 			u.CycleStartedAt = u.CycleStartedAt.Add(plan.cycleLength())
 		}
 		u.UsageBaselineUSD = usage
+		u.PhoneUsageBaselineUSD = phoneUsage
 		u.UsedUnits = 0
 		u.AdjustUnits = 0
 		u.LastSyncAt = now
@@ -415,11 +449,12 @@ func (s *server) entitlementFor(ctx context.Context, u user) (entitlementRespons
 		changed = true
 		cycleEnds = u.CycleStartedAt.Add(plan.cycleLength())
 	} else if now.Sub(u.LastSyncAt) >= s.syncEvery {
-		usage, err := s.gateway.usage(ctx, u.Gateway.Hash)
+		usage, phoneUsage, err := s.keyUsage(ctx, u)
 		if err != nil {
 			return entitlementResponse{}, err
 		}
-		used := int64(math.Round(math.Max(0, usage-u.UsageBaselineUSD) * config.UnitsPerDollar))
+		spent := math.Max(0, usage-u.UsageBaselineUSD) + math.Max(0, phoneUsage-u.PhoneUsageBaselineUSD)
+		used := int64(math.Round(spent * config.UnitsPerDollar))
 		if used != u.UsedUnits {
 			u.UsedUnits = used
 			changed = true
@@ -434,14 +469,32 @@ func (s *server) entitlementFor(ctx context.Context, u user) (entitlementRespons
 	remaining := allowance - u.UsedUnits
 	shouldBeExhausted := remaining <= 0
 	// The gateway's own cap is the hard stop even if this service is down:
-	// keep it equal to the spend that ends this cycle's allowance.
-	wantLimit := u.UsageBaselineUSD + float64(allowance)/config.UnitsPerDollar
-	if shouldBeExhausted != u.Exhausted || rolledOver || math.Abs(wantLimit-u.Gateway.LimitUSD) > 1e-9 {
+	// keep each key's equal to the spend that would end this cycle's
+	// allowance on that key alone. Unreachable and with both keys abused,
+	// that is twice the allowance at worst (V35 §5.1).
+	// A baseline lowered by a departed phone key's spend can put the desk
+	// key's cap below zero, which no gateway should be asked to store.
+	wantLimit := math.Max(0, u.UsageBaselineUSD+float64(allowance)/config.UnitsPerDollar)
+	wantPhoneLimit := u.PhoneUsageBaselineUSD + float64(allowance)/config.UnitsPerDollar
+	flipped := shouldBeExhausted != u.Exhausted || rolledOver
+	configureDesk := flipped || math.Abs(wantLimit-u.Gateway.LimitUSD) > 1e-9
+	configurePhone := u.PhoneGateway.Hash != "" && (flipped || math.Abs(wantPhoneLimit-u.PhoneGateway.LimitUSD) > 1e-9)
+	if configureDesk {
 		if err := s.gateway.configure(ctx, u.Gateway.Hash, wantLimit, shouldBeExhausted); err != nil {
 			return entitlementResponse{}, err
 		}
-		u.Exhausted = shouldBeExhausted
 		u.Gateway.LimitUSD = wantLimit
+	}
+	if configurePhone {
+		// A failure here leaves the desk key already switched and nothing
+		// saved, so the next pass still sees the flip and configures both.
+		if err := s.gateway.configure(ctx, u.PhoneGateway.Hash, wantPhoneLimit, shouldBeExhausted); err != nil {
+			return entitlementResponse{}, err
+		}
+		u.PhoneGateway.LimitUSD = wantPhoneLimit
+	}
+	if configureDesk || configurePhone {
+		u.Exhausted = shouldBeExhausted
 		changed = true
 	}
 
@@ -487,15 +540,134 @@ func (s *server) entitlementFor(ctx context.Context, u user) (entitlementRespons
 	}, nil
 }
 
-// revokeUser kills the gateway key first so a revocation holds even if the
-// database write fails afterwards.
+// mintPhoneKey gives the user a phone key capped where a desk key minted now
+// would be: this cycle's allowance, from zero spend. Callers hold syncMu, so
+// two first grants can't both mint.
+func (s *server) mintPhoneKey(ctx context.Context, u user) (user, error) {
+	plan, config, err := s.store.plan(ctx, u.Plan)
+	if errors.Is(err, errNotFound) {
+		return user{}, errPlanMissing
+	}
+	if err != nil {
+		return user{}, err
+	}
+	allowance := max(plan.AllowanceUnits+u.AdjustUnits, 0)
+	limit := float64(allowance) / config.UnitsPerDollar
+	key, err := s.gateway.mint(ctx, "thock-plus-"+u.ID+"-phone", limit)
+	if err != nil {
+		return user{}, err
+	}
+	revokeOrphan := func() {
+		if err := s.gateway.revoke(context.Background(), key.Hash); err != nil {
+			logf("warning: couldn't revoke phone key %s, minted for %s but never stored: %v", key.Hash, u.ID, err)
+		}
+	}
+	if u.Exhausted {
+		// Keys are minted enabled, and the loop only reconfigures on a
+		// change, so a key born into a spent allowance is switched off here.
+		if err := s.gateway.configure(ctx, key.Hash, limit, true); err != nil {
+			revokeOrphan()
+			return user{}, err
+		}
+	}
+	err = s.store.setPhoneKey(ctx, u.ID, key)
+	if errors.Is(err, errNotFound) {
+		// Another instance stored a key first; hand out that one.
+		revokeOrphan()
+		current, err := s.store.userByID(ctx, u.ID)
+		if err != nil {
+			return user{}, err
+		}
+		if current.PhoneGateway.Hash == "" {
+			return user{}, errors.New("the phone key couldn't be stored")
+		}
+		return current, nil
+	}
+	if err != nil {
+		revokeOrphan()
+		return user{}, err
+	}
+	u.PhoneGateway = key
+	u.PhoneUsageBaselineUSD = 0
+	return u, nil
+}
+
+// revokePhoneKeyLocked deletes the phone key at the gateway and forgets it,
+// so the next grant mints a fresh one. With mustReachGateway the columns are
+// kept when the gateway refuses, for a caller that can report the failure and
+// be retried. Without it they are cleared regardless (see dropPhoneKey), and
+// what the key spent this cycle is carried into the pool: otherwise pairing
+// the phone again would hand back the allowance it used. A user being revoked
+// has no cycle left to carry anything into. Callers hold syncMu.
+func (s *server) revokePhoneKeyLocked(ctx context.Context, u user, mustReachGateway bool) error {
+	if u.PhoneGateway.Hash == "" {
+		return nil
+	}
+	if mustReachGateway {
+		if err := s.gateway.revoke(ctx, u.PhoneGateway.Hash); err != nil {
+			return err
+		}
+		return s.store.clearPhoneKey(ctx, u.ID, u.PhoneGateway.Hash, 0)
+	}
+	// Each step gets its own budget: a gateway that hangs on one call must
+	// not use up the time the next one, or the database write, needs.
+	carriedUSD := 0.0
+	usageCtx, cancelUsage := context.WithTimeout(context.WithoutCancel(ctx), s.gatewayPatience)
+	usage, err := s.gateway.usage(usageCtx, u.PhoneGateway.Hash)
+	cancelUsage()
+	if err != nil {
+		logf("error: the spend on phone key %s of user %s couldn't be read before revoking it and is not counted this cycle: %v", u.PhoneGateway.Hash, u.ID, err)
+	} else {
+		carriedUSD = math.Max(0, usage-u.PhoneUsageBaselineUSD)
+	}
+	revokeCtx, cancelRevoke := context.WithTimeout(context.WithoutCancel(ctx), s.gatewayPatience)
+	err = s.gateway.revoke(revokeCtx, u.PhoneGateway.Hash)
+	cancelRevoke()
+	if err != nil {
+		logf("error: phone key %s of user %s couldn't be revoked at the gateway and is forgotten here; delete it by hand: %v", u.PhoneGateway.Hash, u.ID, err)
+	}
+	clearCtx, cancelClear := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancelClear()
+	return s.store.clearPhoneKey(clearCtx, u.ID, u.PhoneGateway.Hash, carriedUSD)
+}
+
+// dropPhoneKey ends the phone's key after its device row went or its vault
+// lapsed. Those changes are already committed and can't be retried, so a
+// gateway failure doesn't stop the key being forgotten: keeping it would hand
+// a secret the old phone still holds to the next phone that pairs. The price
+// is a key that may outlive its row, bounded by its cap and logged by hash.
+func (s *server) dropPhoneKey(userID string) {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	u, err := s.store.userByID(ctx, userID)
+	if err != nil {
+		logf("error: reading user %s to revoke the phone key: %v", userID, err)
+		return
+	}
+	if err := s.revokePhoneKeyLocked(ctx, u, false); err != nil {
+		logf("error: forgetting the phone key of user %s: %v", userID, err)
+	}
+}
+
+// revokeUser kills the gateway keys first so a revocation holds even if the
+// database write fails afterwards. It holds syncMu so a grant can't mint a
+// phone key for a user who is halfway out.
 func (s *server) revokeUser(ctx context.Context, userID, note string) error {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
 	u, err := s.store.userByID(ctx, userID)
 	if err != nil {
 		return err
 	}
 	if u.Status == userRevoked {
 		return errNotFound
+	}
+	// The phone key goes first and is forgotten at once, so a retry after a
+	// failure further down doesn't ask the gateway to delete it twice.
+	if err := s.revokePhoneKeyLocked(ctx, u, true); err != nil {
+		return err
 	}
 	if err := s.gateway.revoke(ctx, u.Gateway.Hash); err != nil {
 		return err
@@ -635,6 +807,8 @@ type adminUser struct {
 	AdjustUnits    int64      `json:"adjust_units"`
 	Exhausted      bool       `json:"exhausted"`
 	GatewayKeyHash string     `json:"gateway_key_hash"`
+	// Empty until the phone asks for its first grant.
+	PhoneGatewayKeyHash string `json:"phone_gateway_key_hash,omitempty"`
 }
 
 func (s *server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
@@ -649,6 +823,7 @@ func (s *server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 			ID: u.ID, Plan: u.Plan, Device: u.Device, InviteCode: u.InviteCode, Status: u.Status,
 			CreatedAt: u.CreatedAt, CycleStartedAt: u.CycleStartedAt, UsedUnits: u.UsedUnits,
 			AdjustUnits: u.AdjustUnits, Exhausted: u.Exhausted, GatewayKeyHash: u.Gateway.Hash,
+			PhoneGatewayKeyHash: u.PhoneGateway.Hash,
 		})
 	}
 	writeJSON(w, http.StatusOK, users)
@@ -674,40 +849,48 @@ func (s *server) handleAdminAllowance(w http.ResponseWriter, r *http.Request) {
 	if request.Plan != "" && !s.planExists(w, r, request.Plan) {
 		return
 	}
-	u, err := s.store.userByID(r.Context(), userID)
-	if errors.Is(err, errNotFound) {
-		writeError(w, http.StatusNotFound, "No such user.")
+	err := s.changeAllowance(r.Context(), userID, request)
+	var refusal *refusalError
+	if errors.As(err, &refusal) {
+		writeErrorCode(w, refusal.status, refusal.code, refusal.message)
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "Couldn't read the user: "+err.Error())
-		return
-	}
-	change := allowanceChange{Plan: request.Plan, Reset: request.Reset, AdjustUnits: request.AdjustUnits, Note: request.Note, At: s.now()}
-	if request.Reset {
-		usage, err := s.gateway.usage(r.Context(), u.Gateway.Hash)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "Couldn't read the gateway usage to reset from: "+err.Error())
-			return
-		}
-		change.BaselineUSD = usage
-	}
-	if err := s.store.applyAllowance(r.Context(), userID, change); err != nil {
 		writeError(w, http.StatusInternalServerError, "Couldn't update the allowance: "+err.Error())
 		return
 	}
-	updated, err := s.store.userByID(r.Context(), userID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "The allowance was saved but the user couldn't be re-read: "+err.Error())
-		return
-	}
-	entitlement, err := s.entitlementFor(r.Context(), updated)
+	entitlement, err := s.entitlementFor(r.Context(), userID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "The allowance was saved but couldn't be applied at the gateway: "+err.Error())
 		return
 	}
 	entitlement.Gateway = nil
 	writeJSON(w, http.StatusOK, entitlement)
+}
+
+// changeAllowance records an admin change. It holds syncMu so a reset reads
+// the usage of exactly the keys whose baselines it then stores: no phone key
+// is minted or revoked in between.
+func (s *server) changeAllowance(ctx context.Context, userID string, request allowanceRequest) error {
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	u, err := s.store.userByID(ctx, userID)
+	if errors.Is(err, errNotFound) {
+		return refuse(http.StatusNotFound, "not_found", "No such user.")
+	}
+	if err != nil {
+		return refuse(http.StatusInternalServerError, "internal", "Couldn't read the user: "+err.Error())
+	}
+	change := allowanceChange{Plan: request.Plan, Reset: request.Reset, AdjustUnits: request.AdjustUnits, Note: request.Note, At: s.now()}
+	if request.Reset {
+		usage, phoneUsage, err := s.keyUsage(ctx, u)
+		if err != nil {
+			return refuse(http.StatusBadGateway, "upstream", "Couldn't read the gateway usage to reset from: "+err.Error())
+		}
+		change.BaselineUSD = usage
+		change.PhoneBaselineUSD = phoneUsage
+	}
+	return s.store.applyAllowance(ctx, userID, change)
 }
 
 func (s *server) handleAdminRevoke(w http.ResponseWriter, r *http.Request) {

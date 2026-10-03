@@ -354,6 +354,60 @@ public struct PhoneWrites: Sendable {
         return (writes, title)
     }
 
+    // MARK: Ask
+
+    public static let memoryInboxPath = "memory/inbox.md"
+    public static let keptHeading = "Asked on the go"
+
+    /// Facts the agent wants kept, one dated line each, for Reflect to file
+    /// at the desk (V28 §5.3, V35 decision 5).
+    public func memoryNote(_ text: String) -> PlannedWrite? {
+        let lines = text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .prefix(5)
+            .map { line -> String in
+                let fact = line.hasPrefix("- ") ? String(line.dropFirst(2)) : line
+                // The model is asked to date the line; a line it forgot to
+                // date still needs one for Reflect.
+                let dated = fact.range(of: #"^\d{4}-\d{2}-\d{2}"#, options: .regularExpression) != nil
+                return "- " + (dated ? fact : "\(today.iso) · \(fact)")
+            }
+        guard !lines.isEmpty else { return nil }
+        var write = document(.append, path: Self.memoryInboxPath)
+        write.lines = Array(lines)
+        return PlannedWrite(document: write)
+    }
+
+    /// An answer the person chose to keep, under the agent's own heading in
+    /// today's note so it never reads as their words (V33 §11).
+    public func keptAnswer(question: String, answer: String, todayNote: String?) -> PlannedWrite? {
+        let asked = question.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        var body = answer.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n").map { line -> String in
+            // A heading inside the answer would start a new section of the note.
+            let trimmed = line.drop { $0 == " " }
+            guard trimmed.hasPrefix("#") else { return line }
+            let title = trimmed.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces)
+            return title.isEmpty ? "" : "**\(title)**"
+        }
+        while body.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
+            body.removeLast()
+        }
+        guard !asked.isEmpty, !body.isEmpty else { return nil }
+        var write = document(.append, path: config.dailyPath(today))
+        let heading = HeadingRef(text: Self.keptHeading, level: 1)
+        write.heading = heading
+        write.lines = ["**\(clock)** · \(asked)", ""] + body
+        if TextFile(todayNote ?? "").resolve(heading) == nil {
+            // The first kept answer of the day also makes the heading, and a
+            // new heading gets no blank line under it on its own.
+            write.lines.insert("", at: 0)
+        }
+        write.blankLineBefore = true
+        write.createFromTemplate = true
+        return PlannedWrite(document: write, seed: dailySeed(today))
+    }
+
     // MARK: Journal
 
     /// A new timestamped entry at the end of today's Journal (V33 §9).

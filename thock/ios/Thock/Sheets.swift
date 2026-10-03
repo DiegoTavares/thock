@@ -238,38 +238,6 @@ struct InboxEditSheet: View {
 
 /// Ask is not in this release; the tab explains itself and offers nothing
 /// else (V33 §11, §18).
-struct AskScreen: View {
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            SheetHeader(leading: "", title: "", trailing: "Done", onLeading: {}, onTrailing: { dismiss() })
-                .padding(.bottom, 4)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("ASK · READS YOUR VAULT")
-                    .font(Theme.label())
-                    .tracking(0.9)
-                    .foregroundStyle(Theme.dim)
-                Text("Thock Agent")
-                    .font(Theme.serif(28, style: .title1))
-                    .foregroundStyle(Theme.ink)
-            }
-            .padding(.bottom, 16)
-            Text("Asking from the phone isn't here yet. When it arrives, this is where the Thock Agent you talk to at the desk will answer from your own notes, and name the ones it read. For now, a question you write down lands in your inbox and is there when you sit down.")
-                .font(.system(size: 17))
-                .foregroundStyle(Theme.ink)
-                .lineSpacing(4)
-                .padding(.vertical, 12)
-                .padding(.horizontal, 14)
-                .background(Theme.amberSoft)
-                .overlay(alignment: .leading) { Rectangle().fill(Theme.amber).frame(width: 2) }
-                .clipShape(UnevenRoundedRectangle(bottomTrailingRadius: 10, topTrailingRadius: 10))
-            Spacer()
-        }
-        .padding(.horizontal, 20)
-    }
-}
-
 /// The only settings the phone has: which desk it is connected to, how it
 /// looks, and, in the practice notebook, the pretend desk's controls.
 struct YouSheet: View {

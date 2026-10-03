@@ -83,6 +83,16 @@ final class AppModel {
         didSet { ThockEnvironment.defaults.set(appearance.rawValue, forKey: "appearance") }
     }
 
+    /// Today's questions and answers (V35 §5.5).
+    private(set) var askTurns: [AskTurn] = []
+    /// The turn being answered, and the one line that says what the agent
+    /// is doing about it.
+    private(set) var askingTurn: Int64?
+    private(set) var askActivity = ""
+    private(set) var askRunningLow = false
+    @ObservationIgnored private var askTask: Task<Void, Never>?
+    @ObservationIgnored private var askGrace = UIBackgroundTaskIdentifier.invalid
+
     private(set) var store: VaultStore?
     private var engine: SyncEngine?
     private var world: LocalWorld?
@@ -274,6 +284,8 @@ final class AppModel {
     }
 
     func disconnect() async {
+        askTask?.cancel()
+        askTurns = []
         await engine?.disconnect()
         await install(nil)
         world?.reset()
@@ -354,8 +366,8 @@ final class AppModel {
 
     func open(_ entry: EntryPoint) {
         guard phase == .ready else { return }
-        if entry == .journal, !isUnlocked {
-            // The journal shows the day's earlier entries, so it waits.
+        if entry == .journal || entry == .ask, !isUnlocked {
+            // Both show what the vault holds, so they wait.
             entryAfterUnlock = entry
             Task { await unlock() }
             return
@@ -448,6 +460,14 @@ final class AppModel {
                 if let item = session?.view(today)?.planner.items.first(where: { $0.label.hasPrefix(parts[1]) }) {
                     perform { try $0.moveToSoon(item, day: today) }
                 }
+            case "asked" where parts.count == 3:
+                // A finished turn in the day's thread, as if the agent had
+                // read today's note: `asked:<question>:<answer>`.
+                if var turn = try? store?.addAskTurn(question: parts[1], day: today) {
+                    turn.answer = parts[2].replacingOccurrences(of: "\\n", with: "\n")
+                    turn.sources = session.map { [$0.config.dailyPath(today)] } ?? []
+                    try? store?.finishAskTurn(turn)
+                }
             case "asleep": await setDeskAwake(false)
             case "awake": await setDeskAwake(true)
             case "triage": await triageAtTheDesk()
@@ -492,6 +512,105 @@ final class AppModel {
             show("That didn't save. Try again.")
         }
         return false
+    }
+
+    // MARK: Ask
+
+    func loadAskThread() {
+        askTurns = store?.askTurns(day: .today()) ?? []
+    }
+
+    /// Sends a question to the agent. The turn belongs to the app, not the
+    /// sheet, so closing the sheet or leaving the app does not lose it.
+    func ask(_ text: String) {
+        let question = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty, askTask == nil, let store, let session, let engine else { return }
+        loadAskThread()
+        let earlier = askTurns
+        guard var turn = try? store.addAskTurn(question: question, day: .today()) else {
+            show("That didn't send. Try again.")
+            return
+        }
+        askTurns.append(turn)
+        askingTurn = turn.id
+        askActivity = "Thinking"
+        let agent = AskAgent(session: session, grant: { try await engine.agentGrant() })
+        // iOS gives a task a short while after the app leaves the screen;
+        // when that runs out the turn is stopped rather than left hanging.
+        askGrace = UIApplication.shared.beginBackgroundTask { [weak self] in
+            self?.askTask?.cancel()
+            // iOS ends an app whose expiry handler returns with the task
+            // still open, and the turn's own cleanup cannot run before then.
+            self?.endAskGrace()
+        }
+        askTask = Task { [weak self] in
+            do {
+                let answer = try await agent.answer(question: question, earlier: earlier) { line in
+                    Task { @MainActor in
+                        guard self?.askingTurn == turn.id else { return }
+                        self?.askActivity = line
+                    }
+                }
+                turn.answer = answer.text
+                turn.sources = answer.sources
+                self?.askRunningLow = answer.runningLow
+            } catch let failure as AskFailure {
+                turn.failure = failure.sentence
+            } catch {
+                turn.failure = "Stopped before an answer came."
+            }
+            do {
+                try store.finishAskTurn(turn)
+            } catch {
+                self?.show("That answer couldn't be saved on this phone.")
+            }
+            self?.askTask = nil
+            self?.askingTurn = nil
+            self?.loadAskThread()
+            if let index = self?.askTurns.firstIndex(where: { $0.id == turn.id }) {
+                // Shown even if saving failed, for as long as the app is open.
+                self?.askTurns[index] = turn
+            }
+            self?.endAskGrace()
+        }
+    }
+
+    private func endAskGrace() {
+        guard askGrace != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(askGrace)
+        askGrace = .invalid
+    }
+
+    func stopAsking() {
+        askTask?.cancel()
+    }
+
+    func askAgain(_ turn: AskTurn) {
+        guard askTask == nil, let store else { return }
+        do {
+            try store.removeAskTurn(id: turn.id)
+        } catch {
+            show("That didn't send. Try again.")
+            return
+        }
+        ask(turn.question)
+    }
+
+    /// Appends an answer to today's note under the agent's own heading.
+    func keep(_ turn: AskTurn) {
+        guard let answer = turn.answer, !turn.kept, let store else { return }
+        var kept = false
+        guard perform({ kept = try $0.keep(question: turn.question, answer: answer) }), kept else { return }
+        var turn = turn
+        turn.kept = true
+        do {
+            try store.finishAskTurn(turn)
+        } catch {
+            // The note has the answer; only the button's memory of it is lost.
+        }
+        loadAskThread()
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        show("Kept in today's note")
     }
 
     func chip(for entry: String) -> CaptureDestination {

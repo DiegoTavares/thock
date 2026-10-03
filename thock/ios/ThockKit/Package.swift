@@ -10,6 +10,7 @@ let package = Package(
     targets: [
         .target(
             name: "ThockKit",
+            resources: [.copy("Ask/Prompts")],
             swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),

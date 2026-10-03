@@ -381,6 +381,14 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   contract the three implementations share is `specs/v34-vault-sync-api.md`. _(in progress: the backend
   routes, the shared rules crate `thock_sync_core` and the desk service with pairing, catch-up, drain
   and the Phone row in the sync indicator are on `main`; the phone app is V33's data layer)_
+- [ ] **Ask on the phone:** a question about the vault, answered from the vault, with the desk closed.
+  The agent's loop runs on the phone against the copy of the vault it already holds: ranked search,
+  read and list over the local store, the desk agent's own voice and memory sections, `memory/index.md`
+  in context, and one line to `memory/inbox.md` when the person tells it something worth keeping. The
+  phone gets its own budget-capped gateway key drawing on the same allowance, so no Thock server ever
+  sees a note. Short answers by default, the notes it read named underneath, *Keep this* appends to
+  today. Spec `specs/v35-phone-ask.md`. _(in progress: backend grant route, the phone loop and the Ask
+  screen)_
 
 ---
 
