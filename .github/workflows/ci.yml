@@ -3,9 +3,15 @@ name: CI
 # One job per Thock suite, each started only when the change touches what it
 # covers. `thock/script/test` holds the path → suite mapping, so CI and a local
 # run agree on what a change needs. See `thock/TESTING.md`.
+#
+# macOS runners cost ten times a Linux minute, so the macOS Rust test job runs
+# on main and on pull requests labelled `needs-mac`, not on every pull request.
+# The iPhone and sync-integration jobs have no Linux equivalent; they keep
+# running on the pull requests whose paths need them.
 on:
   pull_request:
     branches: ["**"]
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
   workflow_dispatch: {}
@@ -36,6 +42,7 @@ jobs:
     outputs:
       suites: ${{ steps.plan.outputs.suites }}
       go_modules: ${{ steps.plan.outputs.go_modules }}
+      test_os: ${{ steps.plan.outputs.test_os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -48,6 +55,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          NEEDS_MAC: ${{ contains(github.event.pull_request.labels.*.name, 'needs-mac') }}
         run: |
           # Called through a variable: shellcheck reads a command named
           # `test` as the builtin and misparses its arguments.
@@ -61,6 +69,11 @@ jobs:
           echo "${suites}"
           echo "suites=$(jq -cnR '[inputs | select(length > 0)]' <<< "${suites}")" >> "$GITHUB_OUTPUT"
           echo "go_modules=$(jq -cnR '[inputs | select(startswith("go-")) | ltrimstr("go-")]' <<< "${suites}")" >> "$GITHUB_OUTPUT"
+          if [ -z "${PR_NUMBER}" ] || [ "${NEEDS_MAC}" = "true" ]; then
+            echo 'test_os=["ubuntu-latest", "macos-15"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'test_os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          fi
 
   style:
     name: Style
@@ -119,7 +132,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15]
+        os: ${{ fromJSON(needs.plan.outputs.test_os) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
