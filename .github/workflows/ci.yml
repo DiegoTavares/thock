@@ -44,7 +44,7 @@ jobs:
       go_modules: ${{ steps.plan.outputs.go_modules }}
       test_os: ${{ steps.plan.outputs.test_os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -81,7 +81,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'rust') || contains(fromJSON(needs.plan.outputs.suites), 'sync-core')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -100,7 +100,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'rust') || contains(fromJSON(needs.plan.outputs.suites), 'sync-core')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -134,7 +134,7 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.plan.outputs.test_os) }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -171,7 +171,7 @@ jobs:
       matrix:
         module: ${{ fromJSON(needs.plan.outputs.go_modules) }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -185,7 +185,7 @@ jobs:
             *) echo "dir=thock/services/${MODULE}" >> "$GITHUB_OUTPUT" ;;
           esac
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: ${{ steps.module.outputs.dir }}/go.mod
           cache-dependency-path: ${{ steps.module.outputs.dir }}/go.sum
@@ -222,7 +222,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'ios')
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -241,11 +241,11 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'integration')
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: thock/services/plus/go.mod
           cache-dependency-path: thock/services/plus/go.sum
@@ -268,7 +268,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'workflows')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
