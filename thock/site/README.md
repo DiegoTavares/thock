@@ -61,7 +61,9 @@ gcloud run deploy …       # as above
 What the gate is and isn't: it keeps the links off the open web and out of search, which is all a
 private beta needs. The artifacts themselves are public objects (the auto-updater fetches them
 with no credentials), so anyone who already has a URL can download; the gate guards discovery,
-not the bytes. The releases bucket has a read-only `*` CORS rule so the page can fetch the
+not the bytes. It doesn't guard the link either: the manifest URL it seals is printed in plaintext
+in this repository (`seal.mjs`, specs v20 and v21), so it is a courtesy against search and casual
+sharing, not an access control (spec v21, decision 6). The releases bucket has a read-only `*` CORS rule so the page can fetch the
 manifest; that rule was added for this page and nothing else depends on it.
 
 ## Waitlist

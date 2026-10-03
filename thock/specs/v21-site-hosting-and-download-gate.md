@@ -30,7 +30,7 @@ a new release changes the download page without anyone deploying it. The one ser
 | 3 | What "approval" is | **A human sends an email.** Signups POST to the site's own `/waitlist`, which writes one Firestore document per address and logs a structured line; a Cloud Logging alert emails Diego the address. Approving is replying with the code, or a `/download#THOCK-…` link that pre-fills it. No accounts, no tokens per user, no third-party form service. *(Revised 2026-09-04: the first cut named Formspree; Diego chose to drop the no-backend constraint rather than pay for a form service. The ~120 lines of Go this added are the only server-side logic on the site.)* |
 | 4 | One code, shared | A single live code for the beta cohort, rotated by re-sealing and redeploying. Per-tester codes would need a list somewhere, which is a backend. Revisit when the cohort is large enough that one leaked code matters. |
 | 5 | Where the build info comes from | **The page fetches `channels/stable.json` from the releases bucket** after unlocking. Version, per-platform URLs, and checksums are the manifest's fields; the page renders them. A release is therefore a tag, exactly as V20 says — the site never has to know a version. Requires a read-only CORS rule on the bucket (`origin: *`, `GET`); the bucket is public anyway. |
-| 6 | What the gate does *not* protect | The artifacts. They are public objects because the auto-updater downloads them with no credentials (V20 §6). The gate keeps the links off the open web and out of search indexes (`noindex` on the page); anyone with a URL can fetch. That is the right amount of protection for a private beta and is stated in the README rather than pretended otherwise. |
+| 6 | What the gate does *not* protect | The artifacts, **and the link it seals.** The artifacts are public objects because the auto-updater downloads them with no credentials (V20 §6). The manifest URL that `gate.json` encrypts is also printed in plaintext in this repository — `seal.mjs`'s default, §3 below, V20 §7 — so anyone who reads the repo can skip the code entirely. The gate is a courtesy, not an access control: it keeps the download page out of search indexes (`noindex`) and makes a forwarded link useless without the code, which is the right amount of friction for a private beta, and it is stated here and in the README rather than pretended otherwise. Making it real would take a private bucket, a server that checks the code and issues short-lived signed URLs, and an updater that authenticates its downloads — a change to V20 §6's credential-less contract, so not worth it until the beta needs it. |
 | 7 | Invite code shape | `THOCK-XXXX-XXXX-XXXX-XXXX`, base32 without look-alike glyphs, 80 bits. `gate.json` is public, so the code must survive an offline guess; 80 bits at 600k PBKDF2 rounds does. Dashes, spaces, and case are ignored on entry. |
 | 8 | www | Mapped to the same service; the server 301s to the apex. |
 
@@ -73,8 +73,10 @@ thethock.com, www.thethock.com  ──►  Cloud Run  thock-site  (us-central1)
 
 - Per-tester codes, revocation, download counts — the natural next step now that Firestore is there
   (per-tester invite documents checked by an `/unlock` route), deferred until one shared code stings.
-- Protecting the artifact bytes. See decision 6; changing that means signed URLs and a change to
-  the updater's contract.
+- Protecting the artifact bytes, or keeping the manifest URL secret. Both are public: the bytes so
+  the updater can fetch them without credentials, the URL because this repository prints it (see
+  decision 6). Changing either means a private bucket, signed URLs issued after a code check, and a
+  change to the updater's contract (V20 §6).
 - A CDN in front of the site. Cloud Run serves a 40 KB page fine at beta scale.
 
 ## 6. Tests
