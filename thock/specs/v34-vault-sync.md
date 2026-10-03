@@ -322,8 +322,11 @@ when they see it, or not.
 credential and a vault key exist, holds the feed, watches the vault through the project `Fs`,
 debounces and uploads, drains and applies writes, and exposes a status row the existing sync
 popover renders beside Gmail, Calendar and Readwise: *Phone · up to date · 2 min ago*, *Phone ·
-3 waiting from your phone*, *Phone · not connected*, *Phone · 1 file too large to send*.
-Failures surface in that row and in a toast with the server's sentence; nothing fails silently.
+3 waiting from your phone*, *Phone · not connected*, *Phone · 1 file not sent*. Phone is a fifth
+`Connector` in `sync_status.rs` (V32), so it follows the same placement rule: a healthy or
+never-paired phone lives only in the popover, and the Backlog shows the row only while it needs the
+user (a phone that went away, a lapse, files not sent, a failure). Failures surface in that row and
+in a toast with the server's sentence; nothing fails silently.
 
 Before applying a batch of writes it asks the V2 checkpoint service for a checkpoint, exactly as
 the hosted agent does before a session, so *undo what the phone did* is a restore away.
