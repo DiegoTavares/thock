@@ -170,10 +170,11 @@ The home screen *is* today's note, drawn as cards from the note's own sections:
 ### 6.1 The sheet
 
 Rises over whatever is open, keyboard up, cursor blinking. First line becomes the inbox note's
-title. Destination chips below the text (decided, **B2**): **Inbox** selected by default,
-**Today** and **Backlog** beside it. The chip last used is remembered per entry point, so the
-dock can learn "Backlog" while the Lock Screen control stays on Inbox. A one-line hint under the
+title. Destination chips below the text (decided, **B2**, amended): **Today** selected by default,
+**Inbox** and **Backlog** beside it. The chip last used is remembered per entry point, so the
+dock can learn "Backlog" while the Lock Screen control stays on Today. A short hint under the
 chips names the destination in plain words: *Lands in your inbox. Triage sorts it at the desk.*
+The hint always reserves two lines so the chips never move when the selection changes.
 
 Done saves. Swiping the sheet away also saves — a capture is never lost to a gesture. An empty
 sheet is discarded silently. One haptic and a one-line toast name where it went.
@@ -434,7 +435,7 @@ From the design document's option cards, with Diego's answers:
 
 1. **Navigation: A1, Today canvas.** Home is today's note drawn as cards; the capture feed with
    receipts sits behind the Inbox row (A2's best part, kept).
-2. **Capture destination: B2.** Inbox by default; Today and Backlog chips; last chip remembered
+2. **Capture destination: B2, amended.** Today by default; Inbox and Backlog chips; last chip remembered
    per entry point.
 3. **Journal: C1, amended.** New entries append with a timestamp; earlier entries are editable in
    place (paragraph-scoped rewrite). Agent sections are never editable.
