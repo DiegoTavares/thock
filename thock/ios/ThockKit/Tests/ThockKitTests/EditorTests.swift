@@ -161,34 +161,69 @@ final class EditorTests: XCTestCase {
         XCTAssertEqual(Inline.parse(Inline.serialize(runs)), Inline.merged(runs))
     }
 
-    // MARK: Known bugs. XCTExpectFailure is strict, so a fix turns these red
-    // until the expectation is removed.
-
     /// The editor saves what it shows as runs, so runs must carry the user's
     /// exact characters back to Markdown.
     func testLiteralMarkupCharactersSurviveTheRuns() {
-        XCTExpectFailure("Inline.serialize does not escape literal markup characters, so `\\*x\\*` is saved as italic")
-        for text in ["\\*not italic\\*", "\\_not\\_ italic", "a \\`tick\\`", "\\[[not a link]]"] {
+        for text in ["\\*not italic\\*", "\\_not\\_ italic", "a \\`tick\\`", "\\[[not a link]]", "\\\\", "\\<!-- shown -->", "\\~~not struck~~"] {
             let back = Inline.serialize(Inline.parse(text))
             XCTAssertEqual(Inline.parse(back), Inline.parse(text), text)
         }
+        let typed: [[InlineRun]] = [
+            [InlineRun("*not italic* and [[not a link]] and <!-- not hidden -->")],
+            [InlineRun("\\")],
+            [InlineRun("a\\*b*")],
+            [InlineRun("*a\\*")],
+            [InlineRun("path\\"), InlineRun("x", bold: true)],
+            [InlineRun("a*", bold: true)],
+            [InlineRun("*"), InlineRun("x", italic: true), InlineRun("*")],
+            [InlineRun("`tick`"), InlineRun("code", code: true)],
+            [InlineRun("~~"), InlineRun("x", strike: true)],
+        ]
+        for runs in typed {
+            XCTAssertEqual(Inline.parse(Inline.serialize(runs)), Inline.merged(runs), "\(runs)")
+        }
+    }
+
+    /// Escaping only where markup would be read keeps lone markup characters
+    /// as the person typed them.
+    func testTextThatNeedsNoEscapingIsNotEscaped() {
+        for text in ["snake_case_word", "2 * 3 * 4", "a_b", "[not a link]", "a ~ b", "it`s", "a < b <!-- unclosed", "\\ alone", "C:\\path"] {
+            XCTAssertEqual(Inline.serialize(Inline.parse(text)), text, text)
+        }
+        XCTAssertEqual(Inline.serialize([InlineRun("*not italic*")]), "\\*not italic*")
+        XCTAssertEqual(Inline.serialize([InlineRun("\\")]), "\\")
     }
 
     func testAnInlineCommentSurvivesTheRuns() {
-        XCTExpectFailure("Inline.parse drops `<!-- … -->`, so a line saved from runs loses a `<!--gcal:…-->` id")
-        let text = "Standup <!--gcal:9f2c-->"
-        XCTAssertEqual(Inline.serialize(Inline.parse(text)), text)
+        for text in ["Standup <!--gcal:9f2c-->", "Call <!--inbox:ab12--> Ana", "<!--x--> first", "[[Ana]] <!--inbox:ab12-->",
+                     "[site](https://a.test)<!--id--> after", "**bold** <!--id-->", "two  <!--a--><!--b-->"] {
+            XCTAssertEqual(Inline.serialize(Inline.parse(text)), text, text)
+        }
+        XCTAssertEqual(Inline.parse("Standup <!--gcal:9f2c-->"), [InlineRun("Standup"), InlineRun(" <!--gcal:9f2c-->", comment: true)])
+        XCTAssertEqual(Inline.plainText("Call <!--inbox:ab12--> Ana"), "Call Ana")
+        XCTAssertFalse(NoteView.isItalicOnly("<!--x-->"))
+        XCTAssertTrue(NoteView.isItalicOnly("_a hint_ <!--x-->"))
     }
 
     func testACodeSpanHoldingABacktickSurvivesTheRuns() {
-        XCTExpectFailure("Inline.serialize always uses one backtick, so ``a ` b`` comes back as broken code")
         let text = "``a ` b``"
         XCTAssertEqual(Inline.parse(Inline.serialize(Inline.parse(text))), Inline.parse(text))
+        XCTAssertEqual(Inline.serialize(Inline.parse(text)), text)
+        for code in ["`", "`x", "x`", "a``b", "a\\", "a\\`b"] {
+            let runs = [InlineRun("see "), InlineRun(code, code: true)]
+            XCTAssertEqual(Inline.parse(Inline.serialize(runs)), runs, code)
+        }
+        XCTAssertEqual(Inline.serialize([InlineRun("`x", code: true)]), "`` `x ``")
     }
 
     func testALinkWithStyledLabelStaysOneLink() {
-        XCTExpectFailure("Inline.serialize writes a link per run, so [**bold** label](url) becomes two links")
-        let text = "[**bold** label](https://a.test)"
-        XCTAssertEqual(Inline.serialize(Inline.parse(text)), text)
+        for text in ["[**bold** label](https://a.test)", "[[notes/plan|the **big** plan]]", "**[[bold link]]**", "_[a **b**](https://a.test)_",
+                     "[[note]] and [[other]]"] {
+            XCTAssertEqual(Inline.serialize(Inline.parse(text)), text, text)
+        }
+        let runs = [InlineRun("the "), InlineRun("big", bold: true, link: .note("plan")), InlineRun(" plan", link: .note("plan"))]
+        XCTAssertEqual(Inline.serialize(runs), "the [[plan|**big** plan]]")
+        XCTAssertEqual(Inline.parse(Inline.serialize(runs)), runs)
+        XCTAssertEqual(Inline.serialize([InlineRun("plan", italic: true, link: .note("plan"))]), "_[[plan]]_")
     }
 }

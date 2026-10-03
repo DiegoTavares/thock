@@ -257,7 +257,7 @@ public struct NoteView: Equatable, Sendable {
     }
 
     static func isItalicOnly(_ text: String) -> Bool {
-        let runs = Inline.parse(text.replacingOccurrences(of: "\n", with: " "))
+        let runs = Inline.parse(text.replacingOccurrences(of: "\n", with: " ")).filter { !$0.comment }
         return !runs.isEmpty && runs.allSatisfy { $0.italic || $0.text.allSatisfy(\.isWhitespace) || $0.code }
     }
 }

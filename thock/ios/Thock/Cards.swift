@@ -100,7 +100,7 @@ struct BlockView: View {
 
     /// A template's italic hint (`_What happened…_`) reads as a hint.
     private var isPrompt: Bool {
-        let runs = block.runs
+        let runs = block.runs.filter { !$0.comment }
         return !runs.isEmpty && runs.allSatisfy { $0.italic || $0.code || $0.text.allSatisfy(\.isWhitespace) }
     }
 
@@ -165,7 +165,7 @@ enum Rich {
     /// desk's conceal mode shows them.
     static func text(_ runs: [InlineRun]) -> AttributedString {
         var output = AttributedString()
-        for run in runs {
+        for run in runs where !run.comment {
             var piece = AttributedString(run.text)
             var intent: InlinePresentationIntent = []
             if run.bold { intent.insert(.stronglyEmphasized) }
