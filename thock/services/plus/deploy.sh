@@ -80,6 +80,8 @@ else
   log "no openrouter-management secret: the service will mint fake gateway keys"
 fi
 
+# The vault feed is a long-lived SSE request, and Cloud Run cuts every request
+# at --timeout (5 minutes by default). Keep it in step with deploy-services.yml.
 gcloud run deploy "$SERVICE" \
   --project "$PROJECT" \
   --region "$REGION" \
@@ -88,6 +90,7 @@ gcloud run deploy "$SERVICE" \
   --allow-unauthenticated \
   --min-instances 0 --max-instances 1 \
   --cpu 1 --memory 256Mi \
+  --timeout 3600 \
   --set-secrets "$SECRETS" \
   --set-env-vars "BLOB_STORE=gcs,BLOB_BUCKET=$BLOB_BUCKET" \
   --quiet
