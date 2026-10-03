@@ -156,6 +156,11 @@ impl OpenRequest {
         }
 
         for url in request.urls {
+            // Thock registers `thock://` with the OS; every handler below speaks `zed://`.
+            let url = match url.strip_prefix("thock://") {
+                Some(rest) => format!("zed://{rest}"),
+                None => url,
+            };
             if let Some(server_name) = url.strip_prefix("zed-cli://") {
                 this.kind = Some(OpenRequestKind::CliConnection(connect_to_cli(server_name)?));
             } else if let Some(action_index) = url.strip_prefix("zed-dock-action://") {
@@ -1603,6 +1608,47 @@ mod tests {
                 request.is_focus_app_only(),
                 "expected is_focus_app_only for {url}"
             );
+        }
+    }
+
+    #[gpui::test]
+    fn test_parse_thock_scheme_urls(cx: &mut TestAppContext) {
+        let _app_state = init_test(cx);
+
+        let skill_link = agent_skills::encode_skill_share_link(
+            "---\nname: my-skill\ndescription: Does a thing.\n---\n\nDo the thing.\n",
+        );
+        let zed_urls = [
+            "zed://".to_string(),
+            "zed://agent?prompt=hello".to_string(),
+            "zed://settings/theme".to_string(),
+            "zed://file/tmp/note.md".to_string(),
+            skill_link,
+        ];
+
+        for zed_url in zed_urls {
+            let thock_url = zed_url.replacen("zed://", "thock://", 1);
+            let parse = |url: String, cx: &mut TestAppContext| {
+                cx.update(|cx| {
+                    OpenRequest::parse(
+                        RawOpenRequest {
+                            urls: vec![url],
+                            ..Default::default()
+                        },
+                        cx,
+                    )
+                    .unwrap()
+                })
+            };
+            let expected = parse(zed_url.clone(), cx);
+            let actual = parse(thock_url.clone(), cx);
+            assert!(expected.kind.is_some() || !expected.open_paths.is_empty());
+            assert_eq!(
+                format!("{:?}", actual.kind),
+                format!("{:?}", expected.kind),
+                "{thock_url} should parse like {zed_url}"
+            );
+            assert_eq!(actual.open_paths, expected.open_paths, "{thock_url}");
         }
     }
 

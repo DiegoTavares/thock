@@ -11,3 +11,6 @@ workspace = true
 [dependencies]
 gpui.workspace = true
 semver.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

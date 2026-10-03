@@ -15136,6 +15136,7 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "semver",
+ "toml 0.8.23",
 ]
 
 [[package]]

@@ -198,13 +198,13 @@ export APP_ICON="thock"
 export APP_ARGS="%U"
 export APP_NAME="Thock"
 if [[ "$channel" == "preview" ]]; then
-  APP_ID="dev.zed.Zed-Preview"
+  APP_ID="com.thethock.Thock-Preview"
 elif [[ "$channel" == "nightly" ]]; then
-  APP_ID="dev.zed.Zed-Nightly"
+  APP_ID="com.thethock.Thock-Nightly"
 elif [[ "$channel" == "dev" ]]; then
-  APP_ID="dev.zed.Zed-Dev"
+  APP_ID="com.thethock.Thock-Dev"
 else
-  APP_ID="dev.zed.Zed"
+  APP_ID="com.thethock.Thock"
 fi
 
 mkdir -p "${app_dir}/share/applications"
