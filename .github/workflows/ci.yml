@@ -49,11 +49,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          # Called through a variable: shellcheck reads a command named
+          # `test` as the builtin and misparses its arguments.
+          plan=thock/script/test
           if [ -n "${PR_NUMBER}" ]; then
-            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename' > changed-paths
-            suites="$(thock/script/test --paths-from - --plan < changed-paths)"
+            suites="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename' \
+              | "${plan}" --paths-from - --plan)"
           else
-            suites="$(thock/script/test --all --plan)"
+            suites="$("${plan}" --all --plan)"
           fi
           echo "${suites}"
           echo "suites=$(jq -cnR '[inputs | select(length > 0)]' <<< "${suites}")" >> "$GITHUB_OUTPUT"

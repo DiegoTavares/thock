@@ -170,6 +170,7 @@ jobs:
       - name: Ensure llvm-objcopy is on PATH
         run: |
           if ! command -v llvm-objcopy >/dev/null; then
+            # shellcheck disable=SC2012
             objcopy_path="$(ls -1 /usr/lib/llvm-*/bin/llvm-objcopy | sort -V | tail -1)"
             sudo ln -sf "$objcopy_path" /usr/local/bin/llvm-objcopy
           fi
