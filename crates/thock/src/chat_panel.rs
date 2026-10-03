@@ -843,19 +843,19 @@ impl ChatPanel {
 
     /// Counts this launch toward the "Reflect now?" suggestion and refreshes
     /// whether it is due. The count lives in the vault's `.thock/state/` so
-    /// it survives restarts; the read is blocking, so it runs off the UI
-    /// thread.
+    /// it survives restarts.
     fn note_session_for_memory_nudge(&mut self, cx: &mut Context<Self>) {
         let Some(vault) = self.vault() else {
             return;
         };
         let root = vault.root.clone();
         let nudge_after = vault.config.memory.nudge_after_sessions;
+        let fs = self.project.read(cx).fs().clone();
         cx.spawn(async move |this, cx| {
             let due = cx
-                .background_spawn(
-                    async move { crate::memory::note_session_started(&root, nudge_after) },
-                )
+                .background_spawn(async move {
+                    crate::memory::note_session_started(&fs, &root, nudge_after).await
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if this.memory_nudge_due != due {
@@ -879,7 +879,8 @@ impl ChatPanel {
             return;
         };
         let root = vault.root.clone();
-        cx.background_spawn(async move { crate::memory::dismiss_nudge(&root) })
+        let fs = self.project.read(cx).fs().clone();
+        cx.background_spawn(async move { crate::memory::dismiss_nudge(&fs, &root).await })
             .detach_and_log_err(cx);
     }
 

@@ -4,6 +4,7 @@
 //! one is the other. Discovery, validation, activation, provenance (the hash
 //! lockfile), and removal all treat both origins identically.
 
+use ::fs::Fs;
 use anyhow::{Context as _, Result, bail};
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use crate::agent::ModelTier;
 use crate::notes::{NoteKind, TimelineEntry};
@@ -2073,22 +2075,23 @@ pub fn resolve_link(vault: &Vault, open: &str, today: NaiveDate) -> Result<Resol
 
 /// Ensures a `create = true` link's target exists: date-template links are
 /// created from their note kind's template (like the core Today action);
-/// plain links get an empty file. Returns the absolute path. Blocking I/O.
-pub fn ensure_link_target(
+/// plain links get an empty file. Returns the absolute path.
+pub async fn ensure_link_target(
+    fs: &Arc<dyn Fs>,
     vault: &Vault,
     create: bool,
     resolved: &ResolvedLink,
     time: NaiveTime,
 ) -> Result<PathBuf> {
     let path = vault_file_path(&vault.root, &resolved.relative_path)?;
-    if !create || path.exists() {
+    if !create {
         return Ok(path);
     }
     match resolved.note {
         Some((kind, date)) => {
-            crate::notes::ensure_note_at(vault, kind, date, time, &path)?;
+            crate::notes::ensure_note_at(fs, vault, kind, date, time, &path).await?;
         }
-        None => write_if_missing(&path, "")?,
+        None => crate::notes::create_file_if_missing(fs, &path, "").await?,
     }
     Ok(path)
 }
@@ -3506,37 +3509,57 @@ summary = "Weekly sweep."
         assert!(resolve_link(&vault, "daily/{today.md", today).is_err());
     }
 
-    #[test]
-    fn ensure_link_target_creates_notes_from_template() {
-        let dir = tempfile::tempdir().unwrap();
-        scaffold_vault(dir.path()).unwrap();
-        let vault = detect(dir.path());
+    #[gpui::test]
+    async fn ensure_link_target_creates_notes_from_template(cx: &mut gpui::TestAppContext) {
+        let fake_fs = ::fs::FakeFs::new(cx.background_executor.clone());
+        fake_fs
+            .insert_tree(
+                "/vault",
+                serde_json::json!({
+                    "templates": { "daily.md": crate::vault::DEFAULT_DAILY_TEMPLATE },
+                }),
+            )
+            .await;
+        let fs: Arc<dyn Fs> = fake_fs;
+        let vault = Vault {
+            root: PathBuf::from("/vault"),
+            config: crate::vault::VaultConfig::default(),
+        };
         let today = chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
         let time = chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap();
 
         // A date-template link creates from the note template, like Today.
         let resolved = resolve_link(&vault, "daily/{today}.md", today).unwrap();
-        let path = ensure_link_target(&vault, true, &resolved, time).unwrap();
-        assert_eq!(path, dir.path().join("daily/2026-07-20.md"));
+        let path = ensure_link_target(&fs, &vault, true, &resolved, time)
+            .await
+            .unwrap();
+        assert_eq!(path, Path::new("/vault/daily/2026-07-20.md"));
         assert!(
-            fs::read_to_string(&path)
+            fs.load(&path)
+                .await
                 .unwrap()
                 .starts_with("# Monday, July 20, 2026")
         );
 
         // Existing files are never touched.
-        fs::write(&path, "user edits").unwrap();
-        ensure_link_target(&vault, true, &resolved, time).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "user edits");
+        fs.write(&path, b"user edits").await.unwrap();
+        ensure_link_target(&fs, &vault, true, &resolved, time)
+            .await
+            .unwrap();
+        assert_eq!(fs.load(&path).await.unwrap(), "user edits");
 
         // create = false leaves missing targets missing.
         let resolved = resolve_link(&vault, "finance/plan.md", today).unwrap();
-        let path = ensure_link_target(&vault, false, &resolved, time).unwrap();
-        assert!(!path.exists());
+        let path = ensure_link_target(&fs, &vault, false, &resolved, time)
+            .await
+            .unwrap();
+        assert!(!fs.is_file(&path).await);
 
         // A plain create link becomes an empty file.
-        let path = ensure_link_target(&vault, true, &resolved, time).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        let path = ensure_link_target(&fs, &vault, true, &resolved, time)
+            .await
+            .unwrap();
+        assert_eq!(fs.load(&path).await.unwrap(), "");
     }
 
     /// The §2 migration: a pre-V7 vault (old registry key, `.thock/

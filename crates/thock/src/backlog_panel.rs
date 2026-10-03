@@ -1180,8 +1180,10 @@ impl BacklogPanel {
         let now = Local::now();
         let today = now.date_naive();
         let time = now.time();
-        let ensure =
-            cx.background_spawn(async move { ensure_note(&vault, NoteKind::Daily, today, time) });
+        let fs = project.read(cx).fs().clone();
+        let ensure = cx.background_spawn(async move {
+            ensure_note(&fs, &vault, NoteKind::Daily, today, time).await
+        });
         cx.spawn_in(window, async move |this, cx| {
             let note_result = async {
                 let (note_path, outcome) = ensure.await?;
