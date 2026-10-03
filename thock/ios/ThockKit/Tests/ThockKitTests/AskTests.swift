@@ -72,6 +72,8 @@ final class AskTests: XCTestCase {
         XCTAssertEqual(hits.first?.path, "daily/2026-09-12.md")
         XCTAssertTrue(hits.contains { $0.path == "projects/maestro.md" })
         XCTAssertFalse(hits.contains { $0.path.hasSuffix(".csv") })
+        try store.applySnapshot(path: ".thock/notes.md", version: 90, content: "Maestro settings", contentHash: "h", blobID: "b")
+        XCTAssertFalse(store.search("maestro").contains { $0.path.hasPrefix(".thock/") })
         XCTAssertTrue(hits[0].excerpt.contains("Deployed the Maestro fix"))
         XCTAssertEqual(store.search("migracao").map(\.path), ["daily/2026-03-14.md"])
         XCTAssertEqual(store.search("maestro", folder: "projects/").map(\.path), ["projects/maestro.md"])
@@ -108,6 +110,35 @@ final class AskTests: XCTestCase {
         XCTAssertEqual(store.search("maestro").map(\.path), ["daily/2026-09-12.md"])
     }
 
+    func testAnIndexLeftHalfBuiltIsFinishedOnTheNextOpen() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("ask-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+        do {
+            // What a launch cut short before the build would have left, had
+            // the steps not been one transaction.
+            let old = try Database(path: url.path)
+            try old.execute("CREATE TABLE files (path TEXT PRIMARY KEY, version INTEGER NOT NULL DEFAULT 0, snapshot TEXT, content TEXT NOT NULL, content_hash TEXT, blob_id TEXT)")
+            try old.execute("INSERT INTO files (path, content) VALUES ('daily/2026-09-12.md', 'Deployed the Maestro fix.')")
+            try old.execute("CREATE VIRTUAL TABLE notes_index USING fts5(path, content, content='files', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2')")
+            try old.execute("CREATE TRIGGER files_index_delete AFTER DELETE ON files BEGIN INSERT INTO notes_index(notes_index, rowid, path, content) VALUES ('delete', old.rowid, old.path, old.content); END")
+        }
+        let store = try VaultStore(url: url)
+        XCTAssertEqual(store.search("maestro").map(\.path), ["daily/2026-09-12.md"])
+        try store.applySnapshot(path: "daily/2026-09-12.md", version: 2, content: "Rolled it back.", contentHash: "h", blobID: "b")
+        XCTAssertEqual(store.search("rolled").map(\.path), ["daily/2026-09-12.md"])
+        try store.applyTombstone(path: "daily/2026-09-12.md", version: 3)
+        XCTAssertEqual(store.paths(), [])
+
+        // Disconnecting empties the vault and leaves the index usable.
+        try store.applySnapshot(path: "a.md", version: 4, content: "alpha", contentHash: "h", blobID: "b")
+        store.wipe()
+        XCTAssertEqual(store.paths(), [])
+        let again = try VaultStore(url: url)
+        try again.applySnapshot(path: "b.md", version: 1, content: "beta", contentHash: "h", blobID: "b")
+        XCTAssertEqual(again.search("beta").map(\.path), ["b.md"])
+        XCTAssertEqual(again.search("alpha").count, 0)
+    }
+
     // MARK: Tools
 
     func testReadCutsLongNotesAndContinues() throws {
@@ -124,6 +155,15 @@ final class AskTests: XCTestCase {
         XCTAssertNil(missing.source)
         XCTAssertTrue(missing.result.hasPrefix("There is no note at nope.md."))
         XCTAssertTrue(tools.run(name: "read", arguments: "not json").result.contains("could not be read"))
+        // Numbers the model makes up must not be able to stop the app.
+        XCTAssertTrue(tools.run(name: "read", arguments: #"{"path": "long.md", "from_line": 1e30}"#).result.hasPrefix("line 1\n"))
+        XCTAssertEqual(tools.run(name: "read", arguments: #"{"path": "long.md", "from_line": 450.0}"#).result, "line 450")
+        XCTAssertEqual(tools.run(name: "read", arguments: #"{"path": "long.md", "from_line": -5}"#).result.prefix(7), "line 1\n")
+
+        let wide = AskTools(session: try vault(["wide.md": String(repeating: "x", count: 40_000) + "\nsecond"]), now: now)
+        let cut = wide.run(name: "read", arguments: #"{"path": "wide.md"}"#).result
+        XCTAssertTrue(cut.hasPrefix(String(repeating: "x", count: 30_000) + " [line cut here]"))
+        XCTAssertTrue(cut.hasSuffix("[1 more lines. Read again with from_line 2 to continue.]"))
         XCTAssertTrue(tools.run(name: "bash", arguments: "{}").result.contains("no tool called bash"))
     }
 
@@ -303,6 +343,27 @@ final class AskTests: XCTestCase {
         } catch {
             XCTAssertEqual((error as? AskFailure)?.sentence, "Your Thock Plus subscription ended.")
         }
+    }
+
+    func testAStoppedTurnIsACancellationNotAFailure() async throws {
+        let session = try vault(notes)
+        let looping = ChatReply(text: "", toolCalls: [call("x", "list", [:])])
+        let model = ScriptedModel(Array(repeating: .success(looping), count: 12))
+        let agent = agent(session, model)
+        let now = now
+        let turn = Task {
+            try await agent.answer(question: "?", now: now) { _ in
+                // Stop from inside the first step, as the stop button would.
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+        }
+        do {
+            _ = try await turn.value
+            XCTFail("a cancelled turn must not answer")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        XCTAssertEqual(model.requests.count, 1)
     }
 
     func testACompletionWithStructuredArgumentsStillParses() throws {

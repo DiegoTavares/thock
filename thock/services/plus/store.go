@@ -366,10 +366,13 @@ func (s *store) setPhoneKey(ctx context.Context, id string, key gatewayKey) erro
 // took its place in the meantime is left alone.
 func (s *store) clearPhoneKey(ctx context.Context, id, hash string, carriedUSD float64) error {
 	// The departing key's spend moves onto the desk key's side of the sum by
-	// lowering that baseline, which a new cycle resets like any other.
+	// lowering that baseline, which a new cycle resets like any other. The
+	// last sync is forgotten so the very next pass recounts: a balance cached
+	// from before would let a fresh phone key start with the old one's
+	// allowance.
 	_, err := s.pool.Exec(ctx, `update users set
 		phone_gateway_key_hash = '', phone_gateway_key_secret = '', phone_gateway_limit_usd = 0, phone_usage_baseline_usd = 0,
-		usage_baseline_usd = usage_baseline_usd - $3
+		usage_baseline_usd = usage_baseline_usd - $3, last_sync_at = 'epoch'
 		where id = $1 and phone_gateway_key_hash = $2`,
 		id, hash, carriedUSD)
 	return err

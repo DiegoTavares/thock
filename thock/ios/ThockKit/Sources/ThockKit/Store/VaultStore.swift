@@ -421,33 +421,47 @@ public final class VaultStore: @unchecked Sendable {
     /// A ranked index over every note, for the agent's `search` (V35 §5.3).
     /// Triggers keep it current, so no write path can forget it.
     private func createSearchIndex() throws {
-        let existed = try !database.query("SELECT 1 FROM sqlite_master WHERE name = 'notes_index'").isEmpty
-        try database.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS notes_index USING fts5(
-                path, content, content='files', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2'
-            )
-            """)
-        try database.execute("""
-            CREATE TRIGGER IF NOT EXISTS files_index_insert AFTER INSERT ON files BEGIN
-                INSERT INTO notes_index(rowid, path, content) VALUES (new.rowid, new.path, new.content);
-            END
-            """)
-        try database.execute("""
-            CREATE TRIGGER IF NOT EXISTS files_index_delete AFTER DELETE ON files BEGIN
-                INSERT INTO notes_index(notes_index, rowid, path, content) VALUES ('delete', old.rowid, old.path, old.content);
-            END
-            """)
-        try database.execute("""
-            CREATE TRIGGER IF NOT EXISTS files_index_update AFTER UPDATE OF path, content ON files BEGIN
-                INSERT INTO notes_index(notes_index, rowid, path, content) VALUES ('delete', old.rowid, old.path, old.content);
-                INSERT INTO notes_index(rowid, path, content) VALUES (new.rowid, new.path, new.content);
-            END
-            """)
-        if !existed {
+        // One transaction, and a flag written inside it: a launch cut short
+        // between the triggers and the build would otherwise leave triggers
+        // deleting rows the index never held, which SQLite reports as a
+        // corrupt database on every later write.
+        guard meta("search_index") != Self.searchIndexVersion else { return }
+        try database.execute("BEGIN IMMEDIATE")
+        do {
+            try database.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS notes_index USING fts5(
+                    path, content, content='files', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2'
+                )
+                """)
+            try database.execute("""
+                CREATE TRIGGER IF NOT EXISTS files_index_insert AFTER INSERT ON files BEGIN
+                    INSERT INTO notes_index(rowid, path, content) VALUES (new.rowid, new.path, new.content);
+                END
+                """)
+            try database.execute("""
+                CREATE TRIGGER IF NOT EXISTS files_index_delete AFTER DELETE ON files BEGIN
+                    INSERT INTO notes_index(notes_index, rowid, path, content) VALUES ('delete', old.rowid, old.path, old.content);
+                END
+                """)
+            try database.execute("""
+                CREATE TRIGGER IF NOT EXISTS files_index_update AFTER UPDATE OF path, content ON files BEGIN
+                    INSERT INTO notes_index(notes_index, rowid, path, content) VALUES ('delete', old.rowid, old.path, old.content);
+                    INSERT INTO notes_index(rowid, path, content) VALUES (new.rowid, new.path, new.content);
+                END
+                """)
             // A store from before the index existed already holds notes.
             try database.execute("INSERT INTO notes_index(notes_index) VALUES ('rebuild')")
+            try database.execute(
+                "INSERT INTO meta (key, value) VALUES ('search_index', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [.text(Self.searchIndexVersion)])
+            try database.execute("COMMIT")
+        } catch {
+            try? database.execute("ROLLBACK")
+            throw error
         }
     }
+
+    static let searchIndexVersion = "1"
 
     /// Notes ranked by how well they match any of the query's words. Words
     /// match as prefixes with diacritics folded, so "deploy" finds "deployed"
@@ -461,7 +475,7 @@ public final class VaultStore: @unchecked Sendable {
         let match = words.map { "\"\($0)\"*" }.joined(separator: " OR ")
         var sql = """
             SELECT path, snippet(notes_index, 1, '', '', ' … ', 30) FROM notes_index
-            WHERE notes_index MATCH ? AND (path LIKE '%.md' OR path LIKE '%.txt')
+            WHERE notes_index MATCH ? AND (path LIKE '%.md' OR path LIKE '%.txt') AND substr(path, 1, 7) <> '.thock/'
             """
         var bindings: [Database.Value] = [.text(match)]
         let prefix = VaultConfig.normalizedFolder(folder ?? "")
@@ -523,9 +537,11 @@ public final class VaultStore: @unchecked Sendable {
     /// Forgets the vault: used when the desk disconnects this phone.
     public func wipe() {
         locked {
-            for table in ["files", "pending_writes", "captures", "meta", "ask_turns"] {
+            for table in ["files", "pending_writes", "captures", "ask_turns"] {
                 try? database.execute("DELETE FROM \(table)")
             }
+            // The search index outlives the vault it was built for.
+            try? database.execute("DELETE FROM meta WHERE key <> 'search_index'")
         }
         changed()
     }

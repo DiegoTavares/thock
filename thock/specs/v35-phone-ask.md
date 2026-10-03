@@ -61,7 +61,8 @@ after the next Reflect.
 the same line the desk draws (V25 §4). The backend sees one more route and no content.
 
 **G6. One allowance.** A turn on the phone moves the same usage bar the desk shows. At zero the phone
-says so in one sentence and offers nothing that spends.
+says so in one sentence and makes no model call; asking again asks the service for the balance again,
+which is how a top-up or a new cycle is noticed.
 
 **G7. Honest about failure.** No connection, an interrupted turn, an exhausted allowance and a lapsed
 Plus each have one plain sentence. A turn that fails leaves the question in the thread with *Try again*.
@@ -128,9 +129,11 @@ phone write route.
   allowance*, so the worst case with the backend unreachable and both keys extracted is twice the
   allowance; accepted under V25 decision 12 (budgets, not DRM) and noted in §9.
 - **A key that goes takes nothing back.** When the phone key is revoked mid-cycle (a re-pair, a
-  disconnect), what it spent is read first and moved onto the desk key's side of the sum, so pairing
-  again never refills the allowance. If the gateway cannot be read at that moment the spend is logged
-  and lost for the cycle.
+  disconnect), what it spent is read first and moved onto the desk key's side of the sum, and the
+  cached balance is dropped so the next grant recounts before it hands out a key. Pairing again
+  never refills the allowance. If the gateway cannot be read at that moment the spend is logged and
+  lost for the cycle; each gateway call there has its own short budget, so a gateway that hangs
+  cannot stop the key being forgotten.
 - The grant runs the allowance loop, so the phone asking before each turn is what keeps the balance and
   the hard stop current when the desk is closed.
 - `GET /v1/entitlement` (desk) is unchanged in shape; its numbers now include phone usage.
@@ -141,7 +144,7 @@ phone write route.
 
 1. Fetch the grant. Exhausted, lapsed, offline: one sentence, no model call.
 2. Build the messages: system prompt (§5.4), today's earlier turns (questions and answers only, the
-   last twelve), the new question.
+   last six that were answered), the new question.
 3. Call `POST {base_url}/chat/completions` with the Default-tier model and the tool definitions. Tool
    calls are run locally and their results appended; repeat until the model answers without calling a
    tool. Replies are not streamed in the first release: answers are short, the activity line carries
@@ -171,7 +174,9 @@ then judge at the desk.
 
 Search index: an FTS5 table over the store's `files` rows (path and content), kept current by triggers
 so every store write path is covered, built once for stores that predate it. `.thock/**` and
-non-Markdown files are indexed too but `search` only returns `.md` and `.txt`.
+non-Markdown files are indexed too but `search` only returns `.md` and `.txt` outside `.thock/`. The
+table, its triggers and the first build are one transaction, marked done by a flag in the store, so a
+launch cut short leaves either no index or a whole one.
 
 ### 5.4 The prompt
 

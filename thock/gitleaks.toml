@@ -13,6 +13,7 @@ paths = [
   '''Fixtures/v1/envelope\.json$''',
   '''fixtures/v1/envelope\.json$''',
   '''thock/services/plus/vault_test\.go$''',
+  '''thock/services/plus/phone_key_test\.go$''',
   '''thock/services/plus/README\.md$''',
 ]
 

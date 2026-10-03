@@ -77,7 +77,9 @@ public struct AskTools: Sendable {
         case "search":
             return search(query: text("query"), folder: text("folder"))
         case "read":
-            let line = parsed["from_line"] as? Int ?? (parsed["from_line"] as? Double).map(Int.init) ?? 1
+            // The model writes this number; one too large for an Int must
+            // not be converted.
+            let line = (parsed["from_line"] as? NSNumber).flatMap { Int(exactly: $0.doubleValue.rounded(.down)) } ?? 1
             return read(path: text("path"), fromLine: line)
         case "list":
             return list(folder: text("folder"))
@@ -112,7 +114,14 @@ public struct AskTools: Sendable {
         var taken: [String] = []
         var characters = 0
         for line in lines[start...] {
-            guard taken.count < Self.readLines, characters + line.count <= Self.readCharacters || taken.isEmpty else { break }
+            guard taken.count < Self.readLines else { break }
+            if characters + line.count > Self.readCharacters {
+                guard taken.isEmpty else { break }
+                // One line longer than a whole reading: its start is better
+                // than nothing, and the rest of the note is still reachable.
+                taken.append(String(line.prefix(Self.readCharacters)) + " [line cut here]")
+                break
+            }
             taken.append(line)
             characters += line.count + 1
         }

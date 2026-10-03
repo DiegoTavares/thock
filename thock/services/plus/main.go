@@ -40,6 +40,8 @@ type server struct {
 	adminToken string
 	now        func() time.Time
 	syncEvery  time.Duration
+	// How long one gateway call may take while a phone key is being dropped.
+	gatewayPatience time.Duration
 
 	// Vault sync (thock/specs/v34-vault-sync-api.md).
 	blobs     blobStore
@@ -148,14 +150,15 @@ func main() {
 
 func newServer(store *store, gw gateway, adminToken string) *server {
 	s := &server{
-		store:      store,
-		gateway:    gw,
-		adminToken: adminToken,
-		now:        time.Now,
-		syncEvery:  usageSyncInterval,
-		feed:       newFeedHub(),
-		pusher:     &loggingPusher{},
-		publicURL:  "http://localhost:8080",
+		store:           store,
+		gateway:         gw,
+		adminToken:      adminToken,
+		now:             time.Now,
+		syncEvery:       usageSyncInterval,
+		gatewayPatience: 8 * time.Second,
+		feed:            newFeedHub(),
+		pusher:          &loggingPusher{},
+		publicURL:       "http://localhost:8080",
 	}
 	s.coalescer = newPushCoalescer(s.sendPush, func() time.Time { return s.now() })
 	s.feed.onPhoneAbsent = s.coalescer.nudge
@@ -469,7 +472,9 @@ func (s *server) allowanceLoop(ctx context.Context, u user) (entitlementResponse
 	// keep each key's equal to the spend that would end this cycle's
 	// allowance on that key alone. Unreachable and with both keys abused,
 	// that is twice the allowance at worst (V35 §5.1).
-	wantLimit := u.UsageBaselineUSD + float64(allowance)/config.UnitsPerDollar
+	// A baseline lowered by a departed phone key's spend can put the desk
+	// key's cap below zero, which no gateway should be asked to store.
+	wantLimit := math.Max(0, u.UsageBaselineUSD+float64(allowance)/config.UnitsPerDollar)
 	wantPhoneLimit := u.PhoneUsageBaselineUSD + float64(allowance)/config.UnitsPerDollar
 	flipped := shouldBeExhausted != u.Exhausted || rolledOver
 	configureDesk := flipped || math.Abs(wantLimit-u.Gateway.LimitUSD) > 1e-9
@@ -590,31 +595,40 @@ func (s *server) mintPhoneKey(ctx context.Context, u user) (user, error) {
 // revokePhoneKeyLocked deletes the phone key at the gateway and forgets it,
 // so the next grant mints a fresh one. With mustReachGateway the columns are
 // kept when the gateway refuses, for a caller that can report the failure and
-// be retried. Without it they are cleared regardless: see dropPhoneKey.
-// Callers hold syncMu.
+// be retried. Without it they are cleared regardless (see dropPhoneKey), and
+// what the key spent this cycle is carried into the pool: otherwise pairing
+// the phone again would hand back the allowance it used. A user being revoked
+// has no cycle left to carry anything into. Callers hold syncMu.
 func (s *server) revokePhoneKeyLocked(ctx context.Context, u user, mustReachGateway bool) error {
 	if u.PhoneGateway.Hash == "" {
 		return nil
 	}
-	// What the key spent this cycle stays spent once it is gone. Without
-	// this, pairing the phone again would hand back the allowance it used.
-	// A user being revoked has no cycle left to carry anything into.
-	carriedUSD := 0.0
-	if !mustReachGateway {
-		usage, err := s.gateway.usage(ctx, u.PhoneGateway.Hash)
-		if err != nil {
-			logf("error: the spend on phone key %s of user %s couldn't be read before revoking it and is not counted this cycle: %v", u.PhoneGateway.Hash, u.ID, err)
-		} else {
-			carriedUSD = math.Max(0, usage-u.PhoneUsageBaselineUSD)
-		}
-	}
-	if err := s.gateway.revoke(ctx, u.PhoneGateway.Hash); err != nil {
-		if mustReachGateway {
+	if mustReachGateway {
+		if err := s.gateway.revoke(ctx, u.PhoneGateway.Hash); err != nil {
 			return err
 		}
+		return s.store.clearPhoneKey(ctx, u.ID, u.PhoneGateway.Hash, 0)
+	}
+	// Each step gets its own budget: a gateway that hangs on one call must
+	// not use up the time the next one, or the database write, needs.
+	carriedUSD := 0.0
+	usageCtx, cancelUsage := context.WithTimeout(context.WithoutCancel(ctx), s.gatewayPatience)
+	usage, err := s.gateway.usage(usageCtx, u.PhoneGateway.Hash)
+	cancelUsage()
+	if err != nil {
+		logf("error: the spend on phone key %s of user %s couldn't be read before revoking it and is not counted this cycle: %v", u.PhoneGateway.Hash, u.ID, err)
+	} else {
+		carriedUSD = math.Max(0, usage-u.PhoneUsageBaselineUSD)
+	}
+	revokeCtx, cancelRevoke := context.WithTimeout(context.WithoutCancel(ctx), s.gatewayPatience)
+	err = s.gateway.revoke(revokeCtx, u.PhoneGateway.Hash)
+	cancelRevoke()
+	if err != nil {
 		logf("error: phone key %s of user %s couldn't be revoked at the gateway and is forgotten here; delete it by hand: %v", u.PhoneGateway.Hash, u.ID, err)
 	}
-	return s.store.clearPhoneKey(ctx, u.ID, u.PhoneGateway.Hash, carriedUSD)
+	clearCtx, cancelClear := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancelClear()
+	return s.store.clearPhoneKey(clearCtx, u.ID, u.PhoneGateway.Hash, carriedUSD)
 }
 
 // dropPhoneKey ends the phone's key after its device row went or its vault
@@ -625,7 +639,7 @@ func (s *server) revokePhoneKeyLocked(ctx context.Context, u user, mustReachGate
 func (s *server) dropPhoneKey(userID string) {
 	s.syncMu.Lock()
 	defer s.syncMu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	u, err := s.store.userByID(ctx, userID)
 	if err != nil {

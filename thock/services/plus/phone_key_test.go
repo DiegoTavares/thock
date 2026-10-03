@@ -39,6 +39,18 @@ type countingGateway struct {
 	mu         sync.Mutex
 	calls      map[string]int
 	failRevoke bool
+	// Makes usage and revoke wait for their context to give up.
+	hang bool
+}
+
+func (g *countingGateway) hanging(ctx context.Context) bool {
+	g.mu.Lock()
+	hang := g.hang
+	g.mu.Unlock()
+	if hang {
+		<-ctx.Done()
+	}
+	return hang
 }
 
 func (h *harness) countGatewayCalls() *countingGateway {
@@ -66,6 +78,9 @@ func (g *countingGateway) mint(ctx context.Context, name string, limitUSD float6
 
 func (g *countingGateway) usage(ctx context.Context, hash string) (float64, error) {
 	g.count("usage")
+	if g.hanging(ctx) {
+		return 0, ctx.Err()
+	}
 	return g.gateway.usage(ctx, hash)
 }
 
@@ -81,6 +96,9 @@ func (g *countingGateway) revoke(ctx context.Context, hash string) error {
 	g.mu.Unlock()
 	if fail {
 		return errors.New("the gateway is unreachable")
+	}
+	if g.hanging(ctx) {
+		return ctx.Err()
 	}
 	return g.gateway.revoke(ctx, hash)
 }
@@ -348,6 +366,57 @@ func TestPairingAgainDoesNotHandBackWhatThePhoneSpent(t *testing.T) {
 	// The desk key's own cap tightens by what the old phone spent.
 	if key, _ := h.gateway.lookup(u.Gateway.Hash); key.LimitUSD != 2.50 {
 		t.Fatalf("the desk key's cap after the old phone's $2.50: %+v", key)
+	}
+}
+
+func TestPairingAgainAtOnceCannotRefillASpentAllowance(t *testing.T) {
+	h := newSyncHarness(t)
+	h.mustGrant(h.phone)
+	u := h.user(h.desk)
+	phone := h.phone
+	// No clock advance anywhere: every grant lands inside the sync interval
+	// of the one before it, where a cached balance would still say "unspent".
+	for round := 1; round <= 3; round++ {
+		hash := h.user(h.desk).PhoneGateway.Hash
+		if key, _ := h.gateway.lookup(hash); key.Disabled != (round > 1) {
+			t.Fatalf("round %d: the phone key's disabled flag is %v", round, key.Disabled)
+		}
+		if round == 1 {
+			if err := h.gateway.spend(hash, 5.00); err != nil {
+				t.Fatal(err)
+			}
+		}
+		phone = h.pairPhone("Replacement iPhone", "")
+		grant := h.mustGrant(phone)
+		if grant["status"] != "exhausted" || grant["used_units"].(float64) != 500 || grant["remaining_units"].(float64) != 0 {
+			t.Fatalf("round %d: a spent allowance came back after pairing again: %v", round, grant)
+		}
+	}
+	// The whole allowance went through the phone, so the desk key has no
+	// room left and its cap stops at zero rather than going below it.
+	if key, _ := h.gateway.lookup(u.Gateway.Hash); !key.Disabled || key.LimitUSD != 0 {
+		t.Fatalf("the desk key after the phone spent everything: %+v", key)
+	}
+}
+
+func TestAHangingGatewayStillForgetsThePhoneKey(t *testing.T) {
+	h := newSyncHarness(t)
+	h.server.gatewayPatience = 50 * time.Millisecond
+	counting := h.countGatewayCalls()
+	first := grantedKey(h.mustGrant(h.phone))
+
+	counting.mu.Lock()
+	counting.hang = true
+	counting.mu.Unlock()
+	next := h.pairPhone("Replacement iPhone", "")
+	if u := h.user(h.desk); u.PhoneGateway != (gatewayKey{}) {
+		t.Fatalf("the old phone's key must be forgotten even when the gateway never answers: %+v", u.PhoneGateway)
+	}
+	counting.mu.Lock()
+	counting.hang = false
+	counting.mu.Unlock()
+	if grantedKey(h.mustGrant(next)) == first {
+		t.Fatal("the next phone must not inherit the old phone's key")
 	}
 }
 

@@ -91,6 +91,7 @@ final class AppModel {
     private(set) var askActivity = ""
     private(set) var askRunningLow = false
     @ObservationIgnored private var askTask: Task<Void, Never>?
+    @ObservationIgnored private var askGrace = UIBackgroundTaskIdentifier.invalid
 
     private(set) var store: VaultStore?
     private var engine: SyncEngine?
@@ -536,9 +537,11 @@ final class AppModel {
         let agent = AskAgent(session: session, grant: { try await engine.agentGrant() })
         // iOS gives a task a short while after the app leaves the screen;
         // when that runs out the turn is stopped rather than left hanging.
-        var grace = UIBackgroundTaskIdentifier.invalid
-        grace = UIApplication.shared.beginBackgroundTask { [weak self] in
+        askGrace = UIApplication.shared.beginBackgroundTask { [weak self] in
             self?.askTask?.cancel()
+            // iOS ends an app whose expiry handler returns with the task
+            // still open, and the turn's own cleanup cannot run before then.
+            self?.endAskGrace()
         }
         askTask = Task { [weak self] in
             do {
@@ -568,8 +571,14 @@ final class AppModel {
                 // Shown even if saving failed, for as long as the app is open.
                 self?.askTurns[index] = turn
             }
-            UIApplication.shared.endBackgroundTask(grace)
+            self?.endAskGrace()
         }
+    }
+
+    private func endAskGrace() {
+        guard askGrace != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(askGrace)
+        askGrace = .invalid
     }
 
     func stopAsking() {
