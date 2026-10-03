@@ -30,10 +30,10 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
     match *RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed-Editor-Dev",
-        ReleaseChannel::Nightly => "Zed-Editor-Nightly",
-        ReleaseChannel::Preview => "Zed-Editor-Preview",
-        ReleaseChannel::Stable => "Zed-Editor-Stable",
+        ReleaseChannel::Dev => "Thock-Dev",
+        ReleaseChannel::Nightly => "Thock-Nightly",
+        ReleaseChannel::Preview => "Thock-Preview",
+        ReleaseChannel::Stable => "Thock-Stable",
     }
 }
 
@@ -210,13 +210,13 @@ impl ReleaseChannel {
 
     /// Returns the application ID that's used by Wayland as application ID
     /// and WM_CLASS on X11.
-    /// This also has to match the bundle identifier for Zed on macOS.
+    /// This also has to match the macOS bundle identifier in `crates/zed/Cargo.toml`.
     pub fn app_id(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "dev.zed.Zed-Dev",
-            ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
-            ReleaseChannel::Preview => "dev.zed.Zed-Preview",
-            ReleaseChannel::Stable => "dev.zed.Zed",
+            ReleaseChannel::Dev => "com.thethock.Thock-Dev",
+            ReleaseChannel::Nightly => "com.thethock.Thock-Nightly",
+            ReleaseChannel::Preview => "com.thethock.Thock-Preview",
+            ReleaseChannel::Stable => "com.thethock.Thock",
         }
     }
 
@@ -269,6 +269,33 @@ impl FromStr for ReleaseChannel {
 #[cfg(test)]
 mod tests {
     use super::ReleaseChannel;
+
+    #[test]
+    fn app_id_matches_bundle_identifier() {
+        let manifest_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../zed/Cargo.toml");
+        let manifest: toml::Table = std::fs::read_to_string(manifest_path)
+            .expect("read crates/zed/Cargo.toml")
+            .parse()
+            .expect("parse crates/zed/Cargo.toml");
+        let metadata = &manifest["package"]["metadata"];
+
+        for channel in ReleaseChannel::ALL {
+            let section_name = format!("bundle-{}", channel.dev_name());
+            let bundle = metadata
+                .get(&section_name)
+                .unwrap_or_else(|| panic!("missing [package.metadata.{section_name}]"));
+            assert_eq!(
+                bundle["identifier"].as_str(),
+                Some(channel.app_id()),
+                "{section_name} identifier"
+            );
+            assert_eq!(
+                bundle["osx_url_schemes"],
+                toml::Value::Array(vec!["thock".into()]),
+                "{section_name} url schemes"
+            );
+        }
+    }
 
     #[test]
     fn test_docs_url_for_release_channel() {

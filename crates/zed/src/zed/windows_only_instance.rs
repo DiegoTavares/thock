@@ -127,6 +127,7 @@ fn send_args_to_instance(args: &Args) -> anyhow::Result<()> {
                 Ok(path) => paths.push(path.to_string_lossy().into_owned()),
                 Err(error) => {
                     if path.starts_with("zed://")
+                        || path.starts_with("thock://")
                         || path.starts_with("http://")
                         || path.starts_with("https://")
                         || path.starts_with("file://")

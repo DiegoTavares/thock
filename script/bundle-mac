@@ -208,13 +208,9 @@ function sign_app_binaries() {
     echo "Downloading git binary"
     download_git "${target_triple}" "${app_path}/Contents/MacOS/git"
 
-    # Note: The app identifier for our development builds is the same as the app identifier for nightly.
-    # The committed profiles are issued to Zed's team, so embedding one under a
-    # different signing identity ships a team mismatch. Thock's entitlements
-    # request no profile-backed capability, so it can simply go unembedded.
-    if [[ -z "${MACOS_SIGNING_IDENTITY:-}" ]]; then
-        cp crates/zed/contents/$channel/embedded.provisionprofile "${app_path}/Contents/"
-    fi
+    # No provisioning profile is embedded: the committed ones are issued to Zed's
+    # team for Zed's bundle identifiers, and Thock's entitlements request no
+    # profile-backed capability.
 
     if [[ $can_code_sign = true ]]; then
         echo "Code signing binaries"

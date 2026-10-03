@@ -317,6 +317,15 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   defaults that differ from stock Zed, and the hidden `dev` namespace that makes Zed's usual
   "open the key context view" advice a dead end. `AGENTS.md` points every agent at it the moment a
   user asks for a bigger font or a new shortcut. _(shipped)_
+- [ ] **An identity of its own** — Thock stops telling the operating system it is Zed. The bundle id,
+  Wayland/X11 app id and Linux `.desktop` name become `com.thethock.Thock` (with `-Dev`, `-Preview`,
+  `-Nightly`), and the OS-registered URL scheme becomes `thock://`, so Thock and Zed installed side by side
+  no longer fight over Launch Services, "Open With", notification and privacy settings, keychain access,
+  dock pairing, or `zed://` links. Incoming `thock://` links are rewritten to `zed://` where they enter the
+  app, so every existing handler answers to both and upstream's internal `zed://` strings stay put; a test
+  keeps `ReleaseChannel::app_id` and the bundle metadata from drifting apart again. Existing installs keep
+  their vault and settings but see one keychain prompt and reset macOS per-app permissions, so it ships as
+  a deliberate release. Spec `specs/v35-app-identity.md`. _(in progress)_
 - [ ] **BYO-LLM cost visibility** — key/model choice, local vs cloud, graceful failure. _(planned)_
 
 ### Milestone 5: Thock Plus & the hosted agent
