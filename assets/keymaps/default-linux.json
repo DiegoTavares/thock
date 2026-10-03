@@ -704,6 +704,7 @@
       "ctrl-alt-t": "thock::ToggleAgentFocus",
       "ctrl-alt-p": "thock::ToggleDayPlannerFocus",
       "ctrl-alt-n": "thock::ToggleChatFocus",
+      "ctrl-alt-o": "thock::ToggleSyncStatus",
       "ctrl-?": "agent::ToggleFocus",
       "alt-save": "workspace::SaveAll",
       "ctrl-alt-s": "workspace::SaveAll",
@@ -1674,6 +1675,16 @@
       "tab": "thock::FocusChatInput",
       "right": "thock::ExpandChatActivity",
       "left": "thock::CollapseChatActivity",
+    },
+  },
+  {
+    "context": "ThockSyncStatus",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "menu::Confirm",
+      "escape": "menu::Cancel",
+      "left": "menu::SelectParent",
+      "right": "menu::SelectChild",
     },
   },
   {

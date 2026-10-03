@@ -33,13 +33,13 @@ use workspace::{OpenOptions, OpenVisible, Workspace};
 use crate::backlog::{
     self, Backlog, BacklogHeadings, BacklogTask, SectionKind, parse_backlog, split_completion,
 };
-use crate::calendar_service::{ConnectGoogleWorkspace, SyncState};
 use crate::day_plan::strip_trailing_comment;
-use crate::gmail_service::{self, GmailService, SyncGmailNow};
-use crate::inbox_service::{self, InboxService, OpenInbox, SyncInboxNow};
+use crate::gmail_service::{self, GmailService};
+use crate::inbox_service::{self, InboxService};
 use crate::markdown_text::render_markdown_row;
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
-use crate::readwise_service::{self, ConnectReadwise, ReadwiseService, SyncReadwiseNow};
+use crate::readwise_service::{self, ReadwiseService};
+use crate::sync_status;
 use crate::vault::{Vault, VaultStatus};
 
 const BACKLOG_PANEL_KEY: &str = "ThockBacklogPanel";
@@ -1859,252 +1859,23 @@ impl BacklogPanel {
             .into_any_element()
     }
 
-    /// The email-capture status row (spec v9 §10.3), shown only when the
-    /// vault has a Gmail config, so a vault without one looks exactly as it
-    /// does today (G5). The actions it triggers are also in the command
-    /// palette (`thock: connect google workspace`, `thock: sync gmail now`).
-    fn render_status_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let service = self.gmail_service.as_ref()?.read(cx);
-        if !service.has_config() {
-            return None;
-        }
-        let muted = |text: String| {
-            Label::new(text)
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .into_any_element()
-        };
-        let connect_button = |id: &'static str, label: &'static str| {
-            Button::new(id, label)
-                .label_size(LabelSize::Small)
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(ConnectGoogleWorkspace.boxed_clone(), cx);
-                })
-                .into_any_element()
-        };
-        let content = match service.state() {
-            SyncState::NoConfig => return None,
-            SyncState::NeverConnected => vec![connect_button(
-                "thock-connect-google-workspace-backlog",
-                "Connect Google Workspace",
-            )],
-            SyncState::Connecting => vec![muted("Gmail · connecting…".to_string())],
-            SyncState::Idle => vec![muted("Gmail · waiting for first check".to_string())],
-            SyncState::Synced { at } => {
-                vec![muted(format!(
-                    "Gmail · checked {}",
-                    format_ago(at.elapsed())
-                ))]
-            }
-            SyncState::Holding { reason } => vec![muted(format!("Gmail · {reason}"))],
-            SyncState::Failing { error } => vec![
-                muted("Gmail · sync failed".to_string()),
-                Button::new("thock-retry-gmail-sync", "Retry")
-                    .label_size(LabelSize::Small)
-                    .tooltip(Tooltip::text(error.clone()))
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(SyncGmailNow.boxed_clone(), cx);
-                    })
-                    .into_any_element(),
-            ],
-            SyncState::Disconnected => vec![
-                muted("Gmail · sign-in needed".to_string()),
-                connect_button("thock-reconnect-google-workspace", "Reconnect"),
-            ],
-        };
-        Some(
-            h_flex()
-                .px_2()
-                .py_1()
-                .gap_2()
-                .justify_between()
-                .border_b_1()
-                .border_color(cx.theme().colors().border_variant)
-                .children(content)
-                .into_any_element(),
-        )
-    }
-
-    /// The Readwise status row (V31 §8.5), shown only when the vault has
-    /// `.thock/readwise.toml`. Every button here is also a palette action
-    /// (`thock: connect readwise`, `thock: sync readwise now`).
-    fn render_readwise_status_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let service = self.readwise_service.as_ref()?.read(cx);
-        if !service.has_config() {
-            return None;
-        }
-        let muted = |text: String| {
-            Label::new(text)
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .into_any_element()
-        };
-        let connect_button = |id: &'static str, label: &'static str| {
-            Button::new(id, label)
-                .label_size(LabelSize::Small)
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(ConnectReadwise.boxed_clone(), cx);
-                })
-                .into_any_element()
-        };
-        let content = if let Some(error) = service.config_error() {
-            vec![
-                Label::new(format!("Readwise · {error}"))
-                    .size(LabelSize::Small)
-                    .color(Color::Muted)
-                    .into_any_element(),
-                Label::new("in .thock/readwise.toml")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted)
-                    .into_any_element(),
-            ]
-        } else {
-            match service.state() {
-                SyncState::NoConfig => return None,
-                SyncState::NeverConnected => {
-                    vec![connect_button("thock-connect-readwise", "Connect Readwise")]
-                }
-                SyncState::Connecting => vec![muted("Readwise · connecting…".to_string())],
-                SyncState::Idle if service.importing_library() => {
-                    vec![muted("Readwise · importing your library…".to_string())]
-                }
-                SyncState::Idle => vec![muted("Readwise · checking…".to_string())],
-                SyncState::Synced { at } => {
-                    let mut text = format!("Readwise · synced {}", format_ago(at.elapsed()));
-                    match service.last_landed() {
-                        0 => {}
-                        1 => text.push_str(" · +1 highlight"),
-                        n => text.push_str(&format!(" · +{n} highlights")),
-                    }
-                    vec![muted(text)]
-                }
-                SyncState::Holding { reason } => vec![muted(format!("Readwise · {reason}"))],
-                SyncState::Failing { error } => vec![
-                    muted("Readwise · sync failed".to_string()),
-                    Button::new("thock-retry-readwise-sync", "Retry")
-                        .label_size(LabelSize::Small)
-                        .tooltip(Tooltip::text(error.clone()))
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(SyncReadwiseNow.boxed_clone(), cx);
-                        })
-                        .into_any_element(),
-                ],
-                SyncState::Disconnected => vec![
-                    muted("Readwise · token rejected".to_string()),
-                    connect_button("thock-reconnect-readwise", "Reconnect"),
-                ],
-            }
-        };
-        Some(
-            h_flex()
-                .px_2()
-                .py_1()
-                .gap_2()
-                .justify_between()
-                .border_b_1()
-                .border_color(cx.theme().colors().border_variant)
-                .children(content)
-                .into_any_element(),
-        )
-    }
-
-    /// The inbox-capture status row (V13 §10.4), shown only when the vault
-    /// has `.thock/inbox.toml`. A healthy row with items waiting is the way
-    /// into triage: activating it runs the Triage Inbox ritual, falling back
-    /// to revealing the folder when the Inbox Routine was removed.
-    fn render_inbox_status_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let service = self.inbox_service.as_ref()?.read(cx);
-        if !service.has_config() {
-            return None;
-        }
-        let muted = |text: String| {
-            Label::new(text)
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .into_any_element()
-        };
-        let vault_root = self.vault().map(|vault| vault.root.clone());
-        let content = match service.state() {
-            SyncState::NoConfig => return None,
-            SyncState::NeverConnected => {
-                // The Gmail row already offers the connect button when both
-                // configs exist; avoid two identical buttons.
-                if self
-                    .gmail_service
-                    .as_ref()
-                    .is_some_and(|gmail| gmail.read(cx).has_config())
-                {
-                    return None;
-                }
-                vec![
-                    Button::new(
-                        "thock-connect-google-workspace-inbox",
-                        "Connect Google Workspace",
-                    )
-                    .label_size(LabelSize::Small)
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(
-                            crate::calendar_service::ConnectGoogleWorkspace.boxed_clone(),
-                            cx,
-                        );
-                    })
-                    .into_any_element(),
-                ]
-            }
-            SyncState::Connecting => vec![muted("Inbox · connecting…".to_string())],
-            SyncState::Idle => vec![muted("Inbox · waiting for first check".to_string())],
-            SyncState::Synced { .. } if service.queue_depth() == 0 => {
-                vec![muted("Inbox · empty".to_string())]
-            }
-            SyncState::Synced { .. } => {
-                let depth = service.queue_depth();
-                vec![
-                    Button::new(
-                        "thock-triage-inbox",
-                        format!("Inbox · {depth} waiting — triage"),
-                    )
-                    .label_size(LabelSize::Small)
-                    .on_click(move |_, window, cx| {
-                        dispatch_triage(vault_root.clone(), window, cx);
-                    })
-                    .into_any_element(),
-                ]
-            }
-            SyncState::Holding { reason } => vec![muted(format!("Inbox · {reason}"))],
-            SyncState::Failing { error } => vec![
-                muted("Inbox · sync failed".to_string()),
-                Button::new("thock-retry-inbox-sync", "Retry")
-                    .label_size(LabelSize::Small)
-                    .tooltip(Tooltip::text(error.clone()))
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(SyncInboxNow.boxed_clone(), cx);
-                    })
-                    .into_any_element(),
-            ],
-            SyncState::Disconnected => vec![
-                muted("Inbox · sign-in expired".to_string()),
-                Button::new("thock-reconnect-google-workspace-inbox", "Reconnect")
-                    .label_size(LabelSize::Small)
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(
-                            crate::calendar_service::ConnectGoogleWorkspace.boxed_clone(),
-                            cx,
-                        );
-                    })
-                    .into_any_element(),
-            ],
-        };
-        Some(
-            h_flex()
-                .px_2()
-                .py_1()
-                .gap_2()
-                .justify_between()
-                .border_b_1()
-                .border_color(cx.theme().colors().border_variant)
-                .children(content)
-                .into_any_element(),
-        )
+    /// The connector rows kept at the top of the panel (V32 §4.2): Gmail,
+    /// Inbox, and Readwise, each only while it needs the user. Everything
+    /// else lives in the sync icon's popover.
+    fn render_status_rows(&self, cx: &App) -> Vec<AnyElement> {
+        let gmail = self.gmail_service.as_ref().map(|service| service.read(cx));
+        sync_status::inline_statuses([
+            gmail.and_then(sync_status::gmail_status),
+            self.inbox_service
+                .as_ref()
+                .and_then(|service| sync_status::inbox_status(service.read(cx), gmail)),
+            self.readwise_service
+                .as_ref()
+                .and_then(|service| sync_status::readwise_status(service.read(cx))),
+        ])
+        .iter()
+        .map(|status| sync_status::render_inline_row(status, cx))
+        .collect()
     }
 
     fn render_body(&self, cx: &Context<Self>) -> AnyElement {
@@ -2204,36 +1975,6 @@ fn column_rows<'a>(
     rows
 }
 
-/// Activating the Inbox row runs the Triage Inbox ritual (the generic
-/// `thock::RunSkill`, per the repo's rule about dynamic content). A vault
-/// whose Inbox Routine was removed must not get a dead row (V13 §10.4), so
-/// with no `triage-inbox` skill registered this falls back to
-/// `thock::OpenInbox`, which reveals the landing zone in the project panel.
-fn dispatch_triage(vault_root: Option<PathBuf>, window: &mut Window, cx: &mut App) {
-    let has_triage_skill = vault_root
-        .and_then(|root| match crate::vault::Vault::detect(&root) {
-            crate::vault::VaultStatus::Valid(vault) => Some(vault),
-            _ => None,
-        })
-        .is_some_and(|vault| {
-            crate::routines::enabled_routine_manifests(&vault)
-                .iter()
-                .flat_map(|manifest| &manifest.skills)
-                .any(|skill| skill.id == "triage-inbox")
-        });
-    if has_triage_skill {
-        window.dispatch_action(
-            crate::agent_panel::RunSkill {
-                skill: Some("triage-inbox".to_string()),
-            }
-            .boxed_clone(),
-            cx,
-        );
-    } else {
-        window.dispatch_action(OpenInbox.boxed_clone(), cx);
-    }
-}
-
 /// Re-attaches the trailing HTML comment `strip_trailing_comment` hid from
 /// the inline editor, so renaming a captured task keeps its identity marker.
 fn restore_hidden_suffix(original: &str, edited: &str) -> String {
@@ -2243,15 +1984,6 @@ fn restore_hidden_suffix(original: &str, edited: &str) -> String {
         edited.to_string()
     } else {
         format!("{edited} {hidden}")
-    }
-}
-
-fn format_ago(elapsed: Duration) -> String {
-    let minutes = elapsed.as_secs() / 60;
-    match minutes {
-        0 => "just now".to_string(),
-        1..=59 => format!("{minutes}m ago"),
-        _ => format!("{}h ago", minutes / 60),
     }
 }
 
@@ -2289,9 +2021,7 @@ impl Render for BacklogPanel {
             .on_action(cx.listener(Self::collapse_category))
             .on_action(cx.listener(Self::expand_category))
             .size_full()
-            .children(self.render_status_row(cx))
-            .children(self.render_inbox_status_row(cx))
-            .children(self.render_readwise_status_row(cx))
+            .children(self.render_status_rows(cx))
             .child(self.render_body(cx))
     }
 }

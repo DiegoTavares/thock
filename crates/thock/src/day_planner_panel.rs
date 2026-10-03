@@ -24,13 +24,11 @@ use util::ResultExt as _;
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
-use crate::calendar_service::{
-    self, AddPlannerHeading, CalendarService, ChoosePlannerHeading, ConnectGoogleWorkspace,
-    HoldReason, SyncCalendarNow, SyncState,
-};
+use crate::calendar_service::{self, CalendarService};
 use crate::day_plan::{self, DayPlan, PlacedBlock, PlanItem, parse_day_plan};
 use crate::markdown_text::render_markdown_row;
 use crate::notes::{NoteKind, format_date};
+use crate::sync_status;
 use crate::vault::VaultStatus;
 
 const DAY_PLANNER_PANEL_KEY: &str = "ThockDayPlannerPanel";
@@ -530,105 +528,13 @@ impl DayPlannerPanel {
         });
     }
 
-    /// The calendar-sync status row (spec v8 §10.3), shown only when the
-    /// vault has a Calendar config, so an unconnected vault looks exactly as
-    /// it does today (G6). The actions it triggers are also in the command
-    /// palette (`thock: connect google workspace`, `thock: sync calendar
-    /// now`).
-    fn render_status_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let service = self.calendar_service.as_ref()?.read(cx);
-        if !service.has_config() {
-            return None;
-        }
-        let muted = |text: String| {
-            Label::new(text)
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .into_any_element()
-        };
-        let connect_button = |id: &'static str, label: &'static str| {
-            Button::new(id, label)
-                .label_size(LabelSize::Small)
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(ConnectGoogleWorkspace.boxed_clone(), cx);
-                })
-                .into_any_element()
-        };
-        let content = match service.state() {
-            SyncState::NoConfig => return None,
-            SyncState::NeverConnected => vec![connect_button(
-                "thock-connect-google-workspace",
-                "Connect Google Workspace",
-            )],
-            SyncState::Connecting => vec![muted("Calendar · connecting…".to_string())],
-            SyncState::Idle => vec![muted("Calendar · waiting for first sync".to_string())],
-            SyncState::Synced { at } => {
-                vec![muted(format!(
-                    "Calendar · synced {}",
-                    format_ago(at.elapsed())
-                ))]
-            }
-            // A structural hold is a question with an answer, so it comes
-            // with the buttons that answer it (spec v26 §7.3).
-            SyncState::Holding { reason } => {
-                let mut row = vec![match reason.detail() {
-                    None => muted(format!("Calendar · {}", reason.summary())),
-                    Some(detail) => div()
-                        .id("thock-calendar-hold")
-                        .child(
-                            Label::new(format!("Calendar · {}", reason.summary()))
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .tooltip(ui::Tooltip::text(detail))
-                        .into_any_element(),
-                }];
-                if matches!(reason, HoldReason::NoPlannerHeading { .. }) {
-                    row.push(
-                        Button::new("thock-add-planner-heading", "Add heading")
-                            .label_size(LabelSize::Small)
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(AddPlannerHeading.boxed_clone(), cx);
-                            })
-                            .into_any_element(),
-                    );
-                    row.push(
-                        Button::new("thock-choose-planner-heading", "Use another…")
-                            .label_size(LabelSize::Small)
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(ChoosePlannerHeading.boxed_clone(), cx);
-                            })
-                            .into_any_element(),
-                    );
-                }
-                row
-            }
-            SyncState::Failing { error } => vec![
-                muted("Calendar · sync failed".to_string()),
-                Button::new("thock-retry-calendar-sync", "Retry")
-                    .label_size(LabelSize::Small)
-                    .tooltip(ui::Tooltip::text(error.clone()))
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(SyncCalendarNow.boxed_clone(), cx);
-                    })
-                    .into_any_element(),
-            ],
-            SyncState::Disconnected => vec![
-                muted("Calendar · sign-in expired".to_string()),
-                connect_button("thock-reconnect-calendar", "Reconnect"),
-            ],
-        };
-        Some(
-            h_flex()
-                .px_2()
-                .py_1()
-                .gap_2()
-                .justify_between()
-                .border_b_1()
-                .border_color(cx.theme().colors().border_variant)
-                .children(content)
-                .into_any_element(),
-        )
+    /// The Calendar row at the top of the panel (V32 §4.2), kept only while
+    /// it needs the user; healthy status lives in the sync icon's popover.
+    fn render_status_row(&self, cx: &App) -> Option<AnyElement> {
+        let status = sync_status::calendar_status(self.calendar_service.as_ref()?.read(cx))?;
+        status
+            .needs_user()
+            .then(|| sync_status::render_inline_row(&status, cx))
     }
 
     /// The theme colour for an item's subsection, from the `players()`
@@ -1007,15 +913,6 @@ impl DayPlannerPanel {
 
 fn format_minutes(minutes: u32) -> String {
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
-}
-
-fn format_ago(elapsed: Duration) -> String {
-    let minutes = elapsed.as_secs() / 60;
-    match minutes {
-        0 => "just now".to_string(),
-        1..=59 => format!("{minutes}m ago"),
-        _ => format!("{}h ago", minutes / 60),
-    }
 }
 
 impl Render for DayPlannerPanel {
