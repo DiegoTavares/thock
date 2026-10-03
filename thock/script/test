@@ -16,7 +16,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-ALL_SUITES=(rust sync-core go-plus go-releases go-site ios integration workflows)
+ALL_SUITES=(rust sync-core go-plus go-releases go-budget-guard go-site ios integration workflows)
 
 usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -31,6 +31,7 @@ suites_for() {
     thock/services/plus/*) echo go-plus; echo integration ;;
     thock/ios/ThockKit/Sources/ThockKit/Sync*) echo ios; echo integration ;;
     thock/services/releases/*) echo go-releases ;;
+    thock/services/budget-guard/*) echo go-budget-guard ;;
     thock/site/*) echo go-site ;;
     thock/ios/*) echo ios ;;
     .github/*) echo workflows ;;
@@ -69,6 +70,7 @@ run_suite() {
     sync-core) cargo test -p thock_sync_core ;;
     go-plus) (cd thock/services/plus && go vet ./... && go test ./...) ;;
     go-releases) (cd thock/services/releases && go vet ./... && go test ./... && python3 write_manifest_test.py) ;;
+    go-budget-guard) (cd thock/services/budget-guard && go vet ./... && go test ./...) ;;
     go-site) (cd thock/site && go vet ./... && go test ./...) ;;
     ios) thock/ios/script/test ;;
     integration) thock/script/integration ;;

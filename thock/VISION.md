@@ -326,6 +326,12 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   keeps `ReleaseChannel::app_id` and the bundle metadata from drifting apart again. Existing installs keep
   their vault and settings but see one keychain prompt and reset macOS per-app permissions, so it ships as
   a deliberate release. Spec `specs/v35-app-identity.md`. _(in progress)_
+- [ ] **A circuit breaker on the cloud bill** — every Thock service is public, and GCP budgets only send
+  email, so a script looping over an installer could run up four figures a day. A small guard service
+  listens to budget notifications and, once a project's actual spend reaches twice its budget, switches its
+  Cloud Run services to internal-only and takes public access off its buckets. What it changed is recorded
+  as labels on the resources, `budget-guard restore <project>` puts it back, and a restore holds for the
+  rest of the billing month. Spec `specs/v36-budget-guard.md`. _(in progress: built, not yet deployed)_
 - [ ] **BYO-LLM cost visibility** — key/model choice, local vs cloud, graceful failure. _(planned)_
 
 ### Milestone 5: Thock Plus & the hosted agent
