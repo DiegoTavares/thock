@@ -67,10 +67,11 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
-/// The designed-for pre-AI-write trigger (spec §6.2): first-party code that is
-/// about to write into a vault calls this immediately beforehand so a clean
-/// pre-mutation restore point exists. No first-party AI write path exists yet
-/// in V2, so nothing calls it in production.
+/// Takes a restore point of every vault in the project right before an AI
+/// writes to it (spec §6.2), so whatever the AI does is one restore away. Both
+/// agent panels (`agent_panel`, `chat_panel`) call it before each session, and
+/// vault sync before applying a batch of writes from the phone. A no-op when
+/// the project has no history service.
 pub fn checkpoint_before_ai_write(project: &Entity<Project>, cx: &mut App) {
     let service = cx
         .default_global::<GlobalHistoryServices>()

@@ -5,8 +5,10 @@
 //! in place; paths are vault-relative; per-call failures never surface as
 //! errors (the agent's prose carries them); and the allowance balance lives
 //! in the footer. There are no per-change approval prompts (V25 decision
-//! 16): every permission the harness asks for is granted, and safety is the
-//! vault-scoped process plus the checkpoint taken before each session.
+//! 16): every permission the harness asks for is granted. The process is not
+//! OS-confined yet (the V25 decision 11 sandbox is Stage 2); safety is the
+//! prompt and the vault-guard extension keeping writes inside the vault and
+//! append-only, plus the checkpoint taken before each session.
 
 use acp_thread::{
     AcpThread, AcpThreadEvent, AgentConnection, AgentThreadEntry, AssistantMessageChunk,

@@ -769,7 +769,21 @@ struct AgentBridge {
 }
 
 fn yaml_quote(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut escaped = String::new();
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            '\r' => escaped.push_str("\\r"),
+            // YAML forbids raw C0, DEL and C1 characters in a scalar.
+            control if control.is_control() => {
+                escaped.push_str(&format!("\\u{:04X}", control as u32));
+            }
+            other => escaped.push(other),
+        }
+    }
     format!("\"{escaped}\"")
 }
 
@@ -2899,6 +2913,54 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap(),
             "my own instructions"
+        );
+    }
+
+    #[test]
+    fn yaml_quote_escapes_control_and_quote_characters() {
+        let name = "Wrap \"today\"\nand\ttab\r\\ \u{7}\u{85}";
+        let quoted = yaml_quote(name);
+        assert_eq!(
+            quoted,
+            "\"Wrap \\\"today\\\"\\nand\\ttab\\r\\\\ \\u0007\\u0085\""
+        );
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&quoted).unwrap();
+        assert_eq!(parsed.as_str().unwrap(), name);
+    }
+
+    #[test]
+    fn claude_bridge_frontmatter_survives_a_multiline_skill_name() {
+        let skill = parse_manifest(
+            r#"
+schema = 2
+id = "demo"
+name = "Demo"
+version = 1
+doc = "routines/demo/README.md"
+
+[[skill]]
+id = "wrap"
+name = "Wrap\nthe \"day\"\tnow"
+file = "routines/demo/skills/wrap.md"
+summary = "Line one\nline two"
+"#,
+        )
+        .unwrap()
+        .skills
+        .remove(0);
+        assert_eq!(skill.name, "Wrap\nthe \"day\"\tnow");
+
+        let content = claude_bridge_content(&skill);
+        let frontmatter = content
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n"))
+            .map(|(frontmatter, _)| frontmatter)
+            .unwrap();
+        let parsed: serde_yaml_ng::Mapping = serde_yaml_ng::from_str(frontmatter).unwrap();
+        assert_eq!(parsed["name"].as_str().unwrap(), skill.name);
+        assert_eq!(
+            parsed["description"].as_str().unwrap(),
+            "Line one\nline two"
         );
     }
 
