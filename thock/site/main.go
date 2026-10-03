@@ -216,10 +216,11 @@ func handler(files fs.FS, signups *waitlist) http.Handler {
 		}
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Clean URLs: /download serves download.html. Anything else is exactly a
+		// Clean URLs: /download serves download.html, and so on. Anything else is exactly a
 		// file under public/ or a 404.
-		if r.URL.Path == "/download" {
-			r.URL.Path = "/download.html"
+		switch r.URL.Path {
+		case "/download", "/privacy", "/support":
+			r.URL.Path += ".html"
 		}
 		w.Header().Set("Cache-Control", "public, max-age=300")
 		w.Header().Set("X-Content-Type-Options", "nosniff")

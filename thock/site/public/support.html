@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support · Thock</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground: #1a1918;
+    --surface: #232120;
+    --edge: #2f2c29;
+    --text: #ece7de;
+    --muted: #a49d92;
+    --dim: #6d675e;
+    --amber: #e2a554;
+    --amber-ink: #1a1918;
+    --sans: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+    --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--text);
+    font-family: var(--sans); font-size: 17px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--amber); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ::selection { background: var(--amber); color: var(--amber-ink); }
+  code { font-family: var(--mono); font-size: 0.85em; color: var(--amber); }
+  nav { border-bottom: 1px solid var(--edge); }
+  nav .bar { max-width: 46rem; margin: 0 auto; padding: 0.85rem 1.5rem; display: flex; align-items: center; }
+  nav .wordmark { font-weight: 700; font-size: 1.1rem; letter-spacing: -0.01em; color: var(--text); }
+  nav .back { margin-left: auto; font-size: 0.9rem; color: var(--muted); }
+  main { max-width: 46rem; margin: 0 auto; padding: 4rem 1.5rem 6rem; }
+  h1 { font-size: clamp(2rem, 5vw, 2.6rem); font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; margin: 0 0 1rem; }
+  h2 { font-size: 1.2rem; font-weight: 700; letter-spacing: -0.01em; margin: 2.4rem 0 0.6rem; }
+  p, li { color: var(--muted); }
+  p { margin: 0 0 1rem; }
+  ul { padding-left: 1.2rem; margin: 0 0 1rem; }
+  li { margin-bottom: 0.4rem; }
+  strong { color: var(--text); font-weight: 500; }
+  .eyebrow { font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--amber); margin: 0 0 0.9rem; }
+  .updated { font-family: var(--mono); font-size: 0.8rem; color: var(--dim); }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="bar">
+    <a class="wordmark" href="/">Thock</a>
+    <a class="back" href="/">← back to the site</a>
+  </div>
+</nav>
+
+<main>
+  <p class="eyebrow">Support</p>
+  <h1>Getting help with Thock</h1>
+
+  <h2>Start at the desk</h2>
+  <p>Thock is a desktop app for macOS and Linux that turns a folder of Markdown files into a
+  guided second brain. Everything begins there: your vault, your routines, and the AI rituals
+  that read your week and append what they find. Thock is in early access; <a href="/#waitlist">join
+  the waitlist</a> and we send an invite with the download.</p>
+
+  <h2>Thock Vault on iPhone</h2>
+  <p>Thock Vault is the companion for the moments away from the keyboard: capture an idea, write
+  a line in today's journal, tick off the plan, clip an article for later.</p>
+  <ul>
+    <li><strong>Try it without a desk.</strong> On the first screen, open the practice notebook. It
+    runs a sample vault on the phone so you can see how everything works.</li>
+    <li><strong>Use it with your vault.</strong> Pairing the phone with your own notes needs the
+    desktop app and Thock Plus. In the desktop app, run <code>thock: connect phone</code> from the command
+    palette (or the <strong>Connect phone</strong> button in the Backlog panel) and scan the code
+    it shows.</li>
+    <li><strong>Nothing arriving?</strong> The <code>…</code> menu at the top right shows whether
+    the phone has reached your desk's copy and how many changes are waiting. Changes made on the
+    phone are kept on it until your desktop is awake to apply them.</li>
+  </ul>
+
+  <h2>Contact</h2>
+  <p>Write to <a href="mailto:diego.exodo@gmail.com">diego.exodo@gmail.com</a> with what you
+  tried and what you saw. A screenshot helps. See also the <a href="/privacy">privacy policy</a>.</p>
+</main>
+
+</body>
+</html>
