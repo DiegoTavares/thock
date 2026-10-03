@@ -373,7 +373,6 @@ func TestPairingAgainAtOnceCannotRefillASpentAllowance(t *testing.T) {
 	h := newSyncHarness(t)
 	h.mustGrant(h.phone)
 	u := h.user(h.desk)
-	phone := h.phone
 	// No clock advance anywhere: every grant lands inside the sync interval
 	// of the one before it, where a cached balance would still say "unspent".
 	for round := 1; round <= 3; round++ {
@@ -386,8 +385,7 @@ func TestPairingAgainAtOnceCannotRefillASpentAllowance(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		phone = h.pairPhone("Replacement iPhone", "")
-		grant := h.mustGrant(phone)
+		grant := h.mustGrant(h.pairPhone("Replacement iPhone", ""))
 		if grant["status"] != "exhausted" || grant["used_units"].(float64) != 500 || grant["remaining_units"].(float64) != 0 {
 			t.Fatalf("round %d: a spent allowance came back after pairing again: %v", round, grant)
 		}
