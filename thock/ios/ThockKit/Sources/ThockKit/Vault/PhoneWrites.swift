@@ -299,21 +299,32 @@ public struct PhoneWrites: Sendable {
     /// Rewrites a waiting inbox note's title and body, leaving its front
     /// matter as captured (the contract has no write that reaches it). The
     /// body is guarded by its hash, so an edit made at the desk meanwhile is
-    /// kept beside this one rather than lost.
+    /// kept beside this one rather than lost. `blocks` are the editor's, so
+    /// a block the person left alone is copied through as it was.
     public func inboxEdit(path: String, note: String, blocks: [Block]) -> (writes: [PlannedWrite], title: String)? {
         let file = TextFile(note)
         let headings = file.headings()
         guard let heading = headings.first(where: { $0.level == 1 }) else { return nil }
         let content = blocks.filter { $0.kind != .blank }
-        guard let first = content.first,
+        guard let titleIndex = blocks.firstIndex(where: { EditorKind(displaying: $0.kind) != nil }),
               !content.allSatisfy({ $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.kind != .rule })
         else { return nil }
+        let first = blocks[titleIndex]
         let title = Slug.sanitizedTitle(Inline.plainText(first.text.components(separatedBy: "\n")[0]))
 
         var writes: [PlannedWrite] = []
         let section = file.section(of: heading)
         let oldBody = file.lines[section.body].map(\.text)
-        var newBody = Array(Self.inboxBody(content).drop { $0.trimmingCharacters(in: .whitespaces).isEmpty })
+        var rest = blocks
+        rest.remove(at: titleIndex)
+        let firstLines = first.text.components(separatedBy: "\n")
+        if firstLines.count > 1 {
+            rest.insert(Block(id: 0, kind: first.kind, text: firstLines.dropFirst().joined(separator: "\n"), touched: true), at: titleIndex)
+        }
+        // Blank lines are kept only as they were read; the document puts
+        // its own between new blocks.
+        rest.removeAll { $0.kind == .blank && $0.source.isEmpty }
+        var newBody = Array(EditorDocument(blocks: rest).lines().drop { $0.trimmingCharacters(in: .whitespaces).isEmpty })
         while newBody.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
             newBody.removeLast()
         }

@@ -266,6 +266,11 @@ public struct EditorDocument: Equatable, Sendable {
                 }
                 output += block.markdownLines()
             } else {
+                // A block kept as it was still needs the blank line that
+                // separates it from a new one written just before it.
+                if index > 0, blocks[index - 1].source.isEmpty, block.kind != .blank, needsBlankLine(before: index, output: output) {
+                    output.append("")
+                }
                 output += block.source
             }
         }
