@@ -10,7 +10,7 @@ struct CaptureSheet: View {
     var entry: String
     var preset: CaptureDestination?
 
-    @State private var destination: CaptureDestination = .inbox
+    @State private var destination: CaptureDestination = .today
     @State private var blocks: [Block] = []
     @State private var handle = EditorHandle()
     @State private var finished = false
@@ -62,6 +62,8 @@ struct CaptureSheet: View {
             Text(hint)
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.dim)
+                // Every hint gets two lines so switching chips never shifts them.
+                .lineLimit(2, reservesSpace: true)
                 .padding(.bottom, 10)
         }
         .padding(.horizontal, 20)

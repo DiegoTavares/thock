@@ -20,8 +20,8 @@ public struct PlannedWrite: Equatable, Sendable {
 }
 
 public enum CaptureDestination: String, Codable, CaseIterable, Sendable {
-    case inbox
     case today
+    case inbox
     case backlog
 }
 

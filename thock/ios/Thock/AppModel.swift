@@ -495,7 +495,7 @@ final class AppModel {
     }
 
     func chip(for entry: String) -> CaptureDestination {
-        ThockEnvironment.defaults.string(forKey: "chip.\(entry)").flatMap(CaptureDestination.init(rawValue:)) ?? .inbox
+        ThockEnvironment.defaults.string(forKey: "chip.\(entry)").flatMap(CaptureDestination.init(rawValue:)) ?? .today
     }
 
     func remember(chip: CaptureDestination, for entry: String) {
