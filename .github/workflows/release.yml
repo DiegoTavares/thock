@@ -37,25 +37,84 @@ env:
   ZED_RELEASE_CHANNEL: stable
 
 jobs:
+  # A tag ships to every installed app, so it has to be a commit that is on
+  # main, passed CI, and carries the version the tag names. Checked before the
+  # forty-minute builds rather than after them. A manual run builds whatever
+  # it is pointed at and publishes nothing, so it skips the checks.
+  verify:
+    name: Verify the tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          filter: tree:0
+
+      - name: Tag matches the crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -1)"
+          [ "v${crate}" = "${GITHUB_REF_NAME}" ] || {
+            echo "tag ${GITHUB_REF_NAME} does not match crates/zed/Cargo.toml ${crate}" >&2
+            exit 1
+          }
+
+      - name: Tagged commit is on main
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main || {
+            echo "${GITHUB_REF_NAME} (${GITHUB_SHA}) is not on main" >&2
+            exit 1
+          }
+
+      - name: CI passed on the tagged commit
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The merge that bumped the version may still be in CI when the tag
+          # is pushed; wait for it rather than making the tag a two-step dance.
+          for _ in $(seq 60); do
+            conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?check_name=CI" \
+              --jq '[.check_runs[] | select(.app.slug == "github-actions")] | sort_by(.started_at) | last | .conclusion // "pending"')"
+            [ "${conclusion}" = "pending" ] || break
+            sleep 30
+          done
+          [ "${conclusion}" = "success" ] || {
+            echo "the CI check on ${GITHUB_SHA} is '${conclusion}', not success" >&2
+            exit 1
+          }
+
   macos:
     name: macOS (aarch64)
+    needs: verify
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustup target add aarch64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
+      # Only a run on main or on a tag can write a cache a tag build restores,
+      # and pushing either already means being able to ship; the cache saves
+      # most of an hour.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2 # zizmor: ignore[cache-poisoning]
         with:
           key: release-macos
           cache-all-crates: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
+          package-manager-cache: false
 
       # `script/bundle-mac` signs and notarizes only when all five Apple secrets
       # are present, and falls back to an ad-hoc signature otherwise — so a
@@ -75,7 +134,7 @@ jobs:
           THOCK_GOOGLE_CLIENT_SECRET: ${{ secrets.THOCK_GOOGLE_CLIENT_SECRET }}
         run: script/bundle-mac aarch64-apple-darwin
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: thock-macos-aarch64
           path: target/aarch64-apple-darwin/release/Thock-aarch64.dmg
@@ -83,9 +142,12 @@ jobs:
 
   linux:
     name: Linux (x86_64)
+    needs: verify
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Free disk space
         run: .github/scripts/free-disk-space.sh
@@ -98,7 +160,7 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustup target add x86_64-unknown-linux-musl
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2 # zizmor: ignore[cache-poisoning]
         with:
           key: release-linux
           cache-all-crates: true
@@ -108,6 +170,7 @@ jobs:
       - name: Ensure llvm-objcopy is on PATH
         run: |
           if ! command -v llvm-objcopy >/dev/null; then
+            # shellcheck disable=SC2012
             objcopy_path="$(ls -1 /usr/lib/llvm-*/bin/llvm-objcopy | sort -V | tail -1)"
             sudo ln -sf "$objcopy_path" /usr/local/bin/llvm-objcopy
           fi
@@ -126,7 +189,7 @@ jobs:
 
       # `script/bundle-linux` also emits a remote_server archive; Thock does not
       # ship remote development, so it stays out of the release.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: thock-linux-x86_64
           path: target/release/thock-linux-x86_64.tar.gz
@@ -140,9 +203,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
           merge-multiple: true
@@ -173,27 +238,18 @@ jobs:
     env:
       BUCKET: ${{ vars.GCP_RELEASES_BUCKET }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      # A tag that disagrees with the crate version either updates nobody or
-      # updates everybody forever, depending on which way it disagrees.
-      - name: Verify the tag matches the crate version
-        run: |
-          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -1)"
-          [ "v${crate}" = "${GITHUB_REF_NAME}" ] || {
-            echo "tag ${GITHUB_REF_NAME} does not match crates/zed/Cargo.toml ${crate}" >&2
-            exit 1
-          }
-
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { path: artifacts, merge-multiple: true }
 
-      - uses: google-github-actions/auth@v2
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
-      - uses: google-github-actions/setup-gcloud@v2
-
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
       - name: Build the manifest
         run: |
           thock/services/releases/write-manifest "${GITHUB_REF_NAME}" artifacts > manifest.json

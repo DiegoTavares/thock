@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# Builds the app for an iOS simulator, installs it fresh, launches it into the
+# practice notebook and checks that scripted flows land where they should:
+#
+#   1. a capture to today, an inbox capture and a journal entry reach the
+#      phone's store and, through the in-process server, the practice desk;
+#   2. text typed into the capture editor is saved as the expected Markdown.
+#
+# Exits non-zero on the first failure.
+#
+#   script/smoke                        # any available iPhone simulator
+#   THOCK_SIMULATOR=<udid|name> script/smoke
+#   THOCK_SMOKE_SKIP_BUILD=1 script/smoke   # reuse the last build
+set -euo pipefail
+
+ios="$(cd "$(dirname "$0")/.." && pwd)"
+bundle=com.thethock.ios
+group=group.com.thethock.ios
+derived="${THOCK_DERIVED_DATA:-$ios/build/smoke}"
+timeout="${THOCK_SMOKE_TIMEOUT:-90}"
+
+step() { echo "smoke: $*"; }
+fail() {
+    echo "smoke: FAIL: $*" >&2
+    exit 1
+}
+
+# Prefers a booted iPhone, then the newest iOS runtime. CI images ship
+# different devices, so nothing is hard-coded.
+pick_simulator() {
+    xcrun simctl list devices available --json | python3 -c '
+import json, re, sys
+wanted = sys.argv[1]
+runtimes = json.load(sys.stdin)["devices"]
+def version(runtime):
+    return [int(part) for part in re.findall(r"\d+", runtime.rsplit("iOS", 1)[-1])]
+candidates = []
+for runtime, devices in runtimes.items():
+    if ".iOS-" not in runtime:
+        continue
+    for device in devices:
+        if wanted and wanted not in (device["udid"], device["name"]):
+            continue
+        if not wanted and not device["name"].startswith("iPhone"):
+            continue
+        candidates.append((device["state"] == "Booted", version(runtime), device["udid"], device["name"]))
+if not candidates:
+    sys.exit("no available iPhone simulator" + (f" matching {wanted!r}" if wanted else ""))
+best = max(candidates)
+print(best[2], best[3], sep="\t")
+' "${THOCK_SIMULATOR:-}"
+}
+
+# Polls until the command succeeds; the app runs its flows asynchronously.
+wait_for() {
+    local description="$1"
+    shift
+    local deadline=$((SECONDS + timeout))
+    until "$@" >/dev/null 2>&1; do
+        ((SECONDS < deadline)) || fail "timed out after ${timeout}s waiting for $description"
+        sleep 1
+    done
+}
+
+# Without the app group entitlement (an unsigned build) the app keeps its
+# store in its own container.
+shared_container() {
+    xcrun simctl get_app_container "$udid" "$bundle" "$group" 2>/dev/null ||
+        echo "$(xcrun simctl get_app_container "$udid" "$bundle" data)/Library/Application Support"
+}
+
+store_has() {
+    local database
+    database="$(shared_container)/vault.sqlite"
+    [[ -f "$database" ]] && sqlite3 -readonly "$database" "SELECT content FROM files" | grep -qF -- "$1"
+}
+
+desk_has() {
+    local desk
+    desk="$(shared_container)/practice-desk.json"
+    [[ -f "$desk" ]] && grep -qF -- "$1" "$desk"
+}
+
+dump_exists() {
+    [[ -s "$(xcrun simctl get_app_container "$udid" "$bundle" data)/tmp/editor-dump.md" ]]
+}
+
+IFS=$'\t' read -r udid name < <(pick_simulator) || fail "could not pick a simulator"
+step "simulator $name ($udid)"
+xcrun simctl boot "$udid" 2>/dev/null || true
+xcrun simctl bootstatus "$udid" -b >/dev/null
+
+if [[ -z "${THOCK_SMOKE_SKIP_BUILD:-}" ]]; then
+    step "building (log: $derived/build.log)"
+    mkdir -p "$derived"
+    xcodebuild -project "$ios/Thock.xcodeproj" -scheme Thock -configuration Debug \
+        -destination "id=$udid" -derivedDataPath "$derived" build >"$derived/build.log" 2>&1 ||
+        { tail -40 "$derived/build.log" >&2; fail "build failed"; }
+fi
+app="$derived/Build/Products/Debug-iphonesimulator/Thock.app"
+[[ -d "$app" ]] || fail "no app at $app"
+
+step "installing fresh"
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+xcrun simctl uninstall "$udid" "$bundle" 2>/dev/null || true
+xcrun simctl install "$udid" "$app"
+
+token="Smoke$(date +%s)"
+
+step "practice notebook: capture, inbox, journal"
+xcrun simctl launch --terminate-running-process "$udid" "$bundle" -thock-practice \
+    -thock-script "capture:today:$token task;capture:inbox:$token idea;journal:$token journal" >/dev/null
+wait_for "the today capture in the phone's store" store_has "- [ ] $token task"
+wait_for "the journal entry in the phone's store" store_has "$token journal"
+wait_for "the inbox capture in the phone's store" store_has "# $token idea"
+wait_for "the today capture at the practice desk" desk_has "- [ ] $token task"
+wait_for "the journal entry at the practice desk" desk_has "$token journal"
+wait_for "the inbox capture at the practice desk" desk_has "# $token idea"
+
+step "capture editor: typing"
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+xcrun simctl launch "$udid" "$bundle" -thock-open idea -thock-type 'Plain {B}bold{B} end\n{Task}a task' >/dev/null
+wait_for "the editor's Markdown in tmp/editor-dump.md" dump_exists
+dump="$(cat "$(xcrun simctl get_app_container "$udid" "$bundle" data)/tmp/editor-dump.md")"
+expected=$'Plain **bold** end\n\n- [ ] a task'
+[[ "$dump" == "$expected" ]] || fail "the editor wrote:"$'\n'"$dump"$'\n'"expected:"$'\n'"$expected"
+
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+step "passed"

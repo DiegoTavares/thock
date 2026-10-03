@@ -30,7 +30,7 @@ the same client code it uses against the real service.
 ## Running it
 
 ```sh
-cd thock/ios/ThockKit && swift test          # the data layer, on the Mac
+thock/ios/script/test                        # the data layer, on the Mac
 open thock/ios/Thock.xcodeproj               # then run the Thock scheme on a simulator
 ```
 
@@ -58,6 +58,23 @@ tapping:
 | `-thock-gate` | ask for Face ID in the practice notebook too |
 | `-thock-type "<keys>"` | type into the first editor (`\n` return, `\b` backspace, `{B}` `{I}` `{List}` `{Task}` `{Pick}`), and write the Markdown it would save to the app's `tmp/editor-dump.md` |
 | `-thock-script "<steps>"` | run steps separated by `;`: `capture:<inbox\|today\|backlog>:<text>`, `journal:<text>`, `tick:<label prefix>`, `soon:<label prefix>`, `asleep`, `awake`, `triage`, `plan`, `lapse`, `renew` |
+
+## Testing
+
+```sh
+thock/ios/script/test     # ThockKit unit tests, on the Mac (~1 s of tests, ~25 s with a cold build)
+thock/ios/script/smoke    # the app on a simulator (~45 s cold, ~11 s with THOCK_SMOKE_SKIP_BUILD=1)
+```
+
+| Layer | Covers |
+| --- | --- |
+| `script/test` (`swift test` in `ThockKit/`) | The contract fixtures, hashes and envelope vectors; pairing links, path rules, envelope tampering; the store's queue, rebase, prune and captures; the editor's block and inline round-trips; the phone's writes; sync against the in-process server and over loopback HTTP. |
+| `script/smoke` | Builds the `Thock` scheme for an available iPhone simulator, installs it fresh and launches it with `-thock-practice -thock-script …`: a today capture, an inbox capture and a journal entry must reach the phone's store and the practice desk. Then `-thock-open idea -thock-type …` must save the expected Markdown. |
+
+`script/smoke` picks a booted iPhone, else the one on the newest iOS runtime; `THOCK_SIMULATOR=<udid or
+name>` chooses. It needs Xcode and a simulator runtime but no signing identity: simulator builds sign to
+run locally. Tests that pin a known bug use `XCTExpectFailure`, which is strict: fixing the bug turns the
+test red until the expectation is removed.
 
 ## Against a real backend
 
