@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Lints the GitHub Actions workflows and the Thock shell scripts. Each linter
+# is skipped with a note when it isn't installed, unless CI is running.
+#
+#   brew install actionlint shellcheck zizmor
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+status=0
+
+run() {
+  local tool="$1"
+  shift
+  if command -v "$tool" >/dev/null 2>&1; then
+    echo "==> $tool" >&2
+    "$tool" "$@" || status=1
+  elif [[ -n "${CI:-}" ]]; then
+    echo "$tool is required in CI but not installed" >&2
+    status=1
+  else
+    echo "skipping $tool (not installed)" >&2
+  fi
+}
+
+run actionlint
+run zizmor --offline --min-severity medium .github/workflows
+run shellcheck thock/script/* thock/ios/script/* thock/services/plus/deploy.sh .github/scripts/*.sh
+
+exit "$status"

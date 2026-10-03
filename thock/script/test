@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Runs the tests that cover what changed, and nothing else.
+#
+#   thock/script/test                 suites for files changed against main (plus uncommitted work)
+#   thock/script/test --all           every Thock suite
+#   thock/script/test rust go-plus    the named suites
+#   thock/script/test --plan          print the suites that would run, one per line, and exit
+#   thock/script/test --base <ref>    diff against <ref> instead of origin/main
+#   thock/script/test --paths-from -  read the changed paths from stdin instead of git
+#   thock/script/test -- <args>       extra arguments for the Rust test run (e.g. a test filter)
+#
+# CI calls `--plan` to decide which jobs to start, so the mapping below is the
+# single place that says which paths need which suite. `thock/TESTING.md` is the
+# prose version.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+ALL_SUITES=(rust sync-core go-plus go-releases go-site ios integration workflows)
+
+usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# Prints the suites a changed path needs. A path nothing claims (upstream Zed
+# code, top-level manifests) falls through to `rust`, the suite that compiles it.
+suites_for() {
+  case "$1" in
+    .github/workflows/ci.yml | thock/script/*) printf '%s\n' "${ALL_SUITES[@]}" ;;
+    crates/thock-sync-core/fixtures/*) echo sync-core; echo ios ;;
+    crates/thock-sync-core/*) echo sync-core; echo rust; echo integration ;;
+    crates/thock/src/vault_sync*) echo rust; echo integration ;;
+    thock/services/plus/*) echo go-plus; echo integration ;;
+    thock/ios/ThockKit/Sources/ThockKit/Sync*) echo ios; echo integration ;;
+    thock/services/releases/*) echo go-releases ;;
+    thock/site/*) echo go-site ;;
+    thock/ios/*) echo ios ;;
+    .github/*) echo workflows ;;
+    crates/thock/*) echo rust ;;
+    *.md | thock/specs/* | docs/* | legal/*) ;;
+    Cargo.lock | Cargo.toml | rust-toolchain.toml) echo rust; echo sync-core ;;
+    *) echo rust ;;
+  esac
+}
+
+changed_paths() {
+  local base="$1" merge_base
+  if merge_base="$(git merge-base "$base" HEAD 2>/dev/null)"; then
+    git diff --name-only "$merge_base"
+  else
+    echo "thock/script/test: no merge base with $base; running everything" >&2
+    echo thock/script/test
+  fi
+  git ls-files --others --exclude-standard
+}
+
+run_rust() {
+  if cargo nextest --version >/dev/null 2>&1; then
+    cargo nextest run -p thock --no-fail-fast "$@"
+  else
+    cargo test -p thock "$@"
+  fi
+}
+
+run_suite() {
+  echo "==> $1" >&2
+  # The modules pin a patched toolchain; let `go` fetch it when the local one is older.
+  local -x GOTOOLCHAIN=auto
+  case "$1" in
+    rust) run_rust ${RUST_ARGS[@]+"${RUST_ARGS[@]}"} ;;
+    sync-core) cargo test -p thock_sync_core ;;
+    go-plus) (cd thock/services/plus && go vet ./... && go test ./...) ;;
+    go-releases) (cd thock/services/releases && go vet ./... && go test ./... && python3 write_manifest_test.py) ;;
+    go-site) (cd thock/site && go vet ./... && go test ./...) ;;
+    ios) thock/ios/script/test ;;
+    integration) thock/script/integration ;;
+    workflows) thock/script/lint-workflows ;;
+    *) echo "unknown suite: $1 (one of: ${ALL_SUITES[*]})" >&2; exit 2 ;;
+  esac
+}
+
+base="${THOCK_TEST_BASE:-origin/main}"
+plan_only=false
+paths_from_stdin=false
+selected=()
+RUST_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all) selected=("${ALL_SUITES[@]}") ;;
+    --plan) plan_only=true ;;
+    --base) base="$2"; shift ;;
+    --paths-from) [[ "$2" == - ]] || { usage; exit 2; }; paths_from_stdin=true; shift ;;
+    -h | --help) usage; exit 0 ;;
+    --) shift; RUST_ARGS=("$@"); break ;;
+    *) selected+=("$1") ;;
+  esac
+  shift
+done
+
+if [[ ${#selected[@]} -eq 0 ]]; then
+  while IFS= read -r suite; do
+    selected+=("$suite")
+  done < <({ if $paths_from_stdin; then cat; else changed_paths "$base"; fi; } | while IFS= read -r path; do suites_for "$path"; done | sort -u)
+fi
+
+if $plan_only; then
+  [[ ${#selected[@]} -eq 0 ]] || printf '%s\n' "${selected[@]}" | sort -u
+  exit 0
+fi
+
+if [[ ${#selected[@]} -eq 0 ]]; then
+  echo "Nothing that has tests changed." >&2
+  exit 0
+fi
+
+for suite in "${selected[@]}"; do
+  run_suite "$suite"
+done

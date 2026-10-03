@@ -2026,6 +2026,9 @@ impl WriteExt for Write {
 }
 
 #[cfg(test)]
+mod live_server;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use fs::FakeFs;

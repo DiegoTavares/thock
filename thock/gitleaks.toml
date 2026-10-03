@@ -1,0 +1,21 @@
+# gitleaks configuration for the Thock tree (run by .github/workflows/security.yml).
+[extend]
+useDefault = true
+
+# `key_check` is a public verifier in the sync contract (spec V34 API §4), and
+# the values below are test vectors, not credentials.
+[[allowlists]]
+description = "Sync contract test vectors"
+condition = "AND"
+regexTarget = "line"
+regexes = ['''key_?check''']
+paths = [
+  '''Fixtures/v1/envelope\.json$''',
+  '''fixtures/v1/envelope\.json$''',
+  '''thock/services/plus/vault_test\.go$''',
+  '''thock/services/plus/README\.md$''',
+]
+
+[[allowlists]]
+description = "Build output"
+paths = ['''(^|/)\.build/''', '''(^|/)build/''']

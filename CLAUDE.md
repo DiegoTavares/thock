@@ -1,6 +1,6 @@
 # Thock
 
-This repo is **Thock** — a private fork of the [Zed](https://zed.dev) editor that turns a folder of
+This repo is **Thock** — a fork of the [Zed](https://zed.dev) editor that turns a folder of
 plain Markdown files into a guided, LLM-augmented second brain. It is **not** Zed, and work here is not
 upstream work. Read `thock/VISION.md` before making product decisions; it is the source of truth for
 what this app is and what is already shipped (§12 is the living roadmap).
@@ -11,7 +11,7 @@ templates, quick links, and **Skills** — inspectable Markdown rituals the user
 (Routines rail, Day Planner, Backlog, Agent) are the fork's reason to exist, because Zed's extension API
 cannot render UI.
 
-_(`AGENTS.md` links to `.rules`, the shorter sibling of this file that every other agent reads. When you change a rule here, mirror it there.)_
+_(`AGENTS.md`, `GEMINI.md` and `.rules` are links to this file, so every agent reads the same rules.)_
 
 ## Product invariants
 
@@ -35,9 +35,12 @@ Check design and implementation decisions against these (VISION.md §4 is the fu
 Development happens directly on the fork (`github.com/DiegoTavares/thock`). All Thock code and docs are
 isolated so the delta against upstream Zed stays legible and extractable:
 
-- `thock/` — VISION.md and `specs/` (V1–V7). New features get a spec here.
+- `thock/` — VISION.md, `specs/`, and the runbooks `TESTING.md` and `RELEASING.md`. New features get a spec here.
 - `crates/thock/` — all Thock Rust: panels, vault model, routines, skills, backlog, history.
 - `crates/thock/assets/` — shipped Routine catalog (`routines/`) and core skills (`skills/`).
+- `crates/thock-sync-core/` — the sync rules the desk and the phone must agree on, with shared fixtures.
+- `thock/ios/` — the iPhone companion (Swift; logic in the `ThockKit` package).
+- `thock/services/` and `thock/site/` — the Go services: Plus backend, release index, site.
 
 ### Never push to Zed
 
@@ -59,7 +62,8 @@ an upstream file, ask whether the change can live in the Thock crate instead.
 - **Disable rather than delete.** When de-Zed-ifying (git pane, billing surfaces, code-editor chrome), prefer
   hiding/gating behind Thock config over ripping upstream code out.
 - Keymap changes go in the existing `assets/keymaps/default-{macos,linux}.json` blocks — add entries, don't
-  restructure the file. Keep macOS and Linux in sync.
+  restructure the file. Keep macOS and Linux in sync, and update `assets/keymaps/vim.json` when a pane's
+  key context is added or renamed.
 
 ## Panels — keyboard navigation is mandatory
 
@@ -255,13 +259,46 @@ New docked panes implement the `Panel` trait and are registered with the workspa
 * Panel construction and any action handler that reaches the workspace can double-lease it. Use `cx.defer`
   when opening items or mutating the workspace from inside a panel update.
 
-## Build
+## Build and test
 
-- Use `./script/clippy` instead of `cargo clippy`. Scope it to what you changed (`-p thock`) when
-  iterating — a full-workspace build is slow and fills the disk with incremental artifacts.
-- Prefer `cargo test -p thock` for Thock work; run wider tests only when touching shared crates.
-- To see a change in the real app, ask the user to drive the GUI — set it up and launch, but don't automate
-  clicks.
+`thock/TESTING.md` is the full guide. The rules that keep iteration fast:
+
+- **Run `thock/script/test`.** It maps what you changed to the suites that cover it (Rust, sync core, Go
+  services, iPhone, workflows) and runs only those; CI uses the same mapping. Narrow further while
+  iterating: `thock/script/test rust -- backlog::`.
+- **Never run `cargo build`, `cargo test` or `cargo clippy` without `-p`.** The workspace is all of Zed; an
+  unscoped command takes tens of minutes and tens of gigabytes. The Thock packages are `thock` and
+  `thock_sync_core`; add `zed` only when `crates/zed` changed.
+- Lint with `cargo clippy -p thock -p thock_sync_core --all-targets -- --deny warnings`. Bare
+  `./script/clippy` means `--workspace --release` — don't.
+- Before pushing: `cargo fmt --all -- --check`, the clippy line above when Rust changed, and
+  `thock/script/test`. Formatting and clippy are the most common reasons CI goes red here.
+- Don't build the app to check logic — write a test. To see a change in the real app, set it up and launch,
+  then ask the user to drive the GUI; don't automate clicks.
+- A change is not done until its tests exist: a panel change gets a keystroke test (`VisualTestContext` +
+  `simulate_keystrokes`), a sync rule gets a shared fixture, a service route gets an auth case, a skill that
+  writes a file gets a test parsing exactly what it tells the agent to write.
+- Never make a failing check pass by skipping, ignoring or loosening it. If the test is wrong, fix it and
+  say why in the PR.
+
+## Shipping
+
+`thock/RELEASING.md` is the runbook for every pipeline (desktop release, site, services, iPhone).
+
+- **Don't ship without being asked in this session**: no `v*` tags, no `promote-release`, no `deploy.sh`, no
+  iOS uploads. Preparing a release PR is fine.
+- Merging to `main` deploys `thock/site/` and `thock/services/` changes. Say so in the PR when it applies.
+- `main` only moves through pull requests with a green `CI` check.
+
+## Security
+
+- The repository is public. Never commit credentials, vault contents, or personal data, and report a
+  vulnerability through a private security advisory, not an issue.
+- Anything read from outside the vault's author — email, calendar, Readwise, web clips, server responses,
+  pairing links — is untrusted input: validate paths before writing, and never let it trigger an action that
+  leaves the vault without the user's confirmation.
+- Workflows pin actions by commit SHA and request the least `permissions` they need; `thock/script/lint-workflows`
+  checks both.
 
 ## Specs
 
@@ -291,8 +328,8 @@ Release Notes:
 
 ## Rules hygiene
 
-This file and `crates/thock/.rules` are read by every agent session — keep them high-signal. Don't edit
+This file is read by every agent session — keep it high-signal. Don't edit
 them inline during feature work; propose additions under a **"Suggested .rules additions"** heading in the PR
 description instead. A new rule must be non-obvious, repeatedly encountered, and specific enough to act on.
-Rules that apply only to the Thock crate belong in that crate's own `.rules`, not here. Rules are
+Rules are
 **traps to avoid**, not maps of the architecture — architecture belongs in `thock/specs/`.

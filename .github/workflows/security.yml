@@ -1,0 +1,108 @@
+name: Security
+
+# The checks that depend on the outside world rather than on the change:
+# advisories published against dependencies, secrets that slipped in, and
+# static analysis of the Go services. Dependabot alerts cover vulnerable
+# dependencies in every lockfile. Weekly, so a new advisory surfaces even
+# when nobody is pushing; on pull requests for the parts a diff can break.
+on:
+  pull_request:
+    branches: ["**"]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch: {}
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # GitHub's own secret scanning covers provider-issued tokens; this adds the
+  # generic patterns (private keys, passwords in URLs, high-entropy strings).
+  # Scoped to the Thock tree: upstream fixtures are full of look-alikes.
+  secrets:
+    name: Secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: gitleaks
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          gitleaks="$(go env GOPATH)/bin/gitleaks"
+          status=0
+          for path in thock crates/thock crates/thock-sync-core .github; do
+            "${gitleaks}" dir "${path}" --config thock/gitleaks.toml --redact --no-banner || status=1
+          done
+          exit "${status}"
+
+  # Reachable vulnerabilities in the Go services, on the schedule as well as on
+  # the pull requests CI already checks, since advisories arrive on their own.
+  govulncheck:
+    name: govulncheck (${{ matrix.dir }})
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [thock/services/plus, thock/services/releases, thock/site]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: ${{ matrix.dir }}/go.mod
+          cache-dependency-path: ${{ matrix.dir }}/go.sum
+
+      - name: govulncheck
+        working-directory: ${{ matrix.dir }}
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+  # Code scanning is free on a public repository and needs GitHub Advanced
+  # Security on a private one, where the upload would fail.
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: autobuild
+          - language: actions
+            build-mode: none
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config: |
+            paths:
+              - thock
+              - .github
+
+      - uses: github/codeql-action/analyze@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+        with:
+          category: /language:${{ matrix.language }}
