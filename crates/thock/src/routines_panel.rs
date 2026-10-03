@@ -980,7 +980,9 @@ impl RoutinesPanel {
         let time = now.time();
         let workspace = self.workspace.clone();
 
-        let ensure_note = cx.background_spawn(async move { ensure_note(&vault, kind, date, time) });
+        let fs = self.project.read(cx).fs().clone();
+        let ensure_note =
+            cx.background_spawn(async move { ensure_note(&fs, &vault, kind, date, time).await });
         cx.spawn_in(window, async move |_, cx| match ensure_note.await {
             Ok((path, outcome)) => {
                 if outcome == EnsureNoteOutcome::CreatedWithoutTemplate {
@@ -1117,7 +1119,8 @@ impl RoutinesPanel {
         let ensure = cx.background_spawn({
             let resolved = resolved.clone();
             let create = link.create;
-            async move { routines::ensure_link_target(&vault, create, &resolved, time) }
+            let fs = self.project.read(cx).fs().clone();
+            async move { routines::ensure_link_target(&fs, &vault, create, &resolved, time).await }
         });
         cx.spawn_in(window, async move |this, cx| {
             let path = match ensure.await {

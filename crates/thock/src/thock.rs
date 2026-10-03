@@ -157,6 +157,7 @@ pub fn open_startup_vault(app_state: Arc<AppState>, cx: &mut App) -> Task<Result
     let vault_root = vault::default_vault_path();
     let scaffold = cx.background_spawn({
         let vault_root = vault_root.clone();
+        let fs = app_state.fs.clone();
         async move {
             let already_vault = vault_root
                 .join(vault::VAULT_MARKER_DIR)
@@ -169,7 +170,7 @@ pub fn open_startup_vault(app_state: Arc<AppState>, cx: &mut App) -> Task<Result
             let example_day = match vault::Vault::detect(&vault_root) {
                 vault::VaultStatus::Valid(vault) => {
                     let now = chrono::Local::now();
-                    notes::ensure_example_day(&vault, now.date_naive(), now.time())?
+                    notes::ensure_example_day(&fs, &vault, now.date_naive(), now.time()).await?
                 }
                 other => {
                     anyhow::bail!("the vault just scaffolded at {vault_root:?} is {other:?}")
