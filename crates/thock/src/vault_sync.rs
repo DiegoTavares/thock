@@ -1924,9 +1924,8 @@ async fn apply_write(
         let bytes = fs.load_bytes(&abs).await.map_err(ApplyFailure::Vault)?;
         // The desk never sends a file that isn't UTF-8, so a phone write
         // against one can't be meaningful; waiting would block the queue.
-        let text = String::from_utf8(bytes).map_err(|_| {
-            ApplyFailure::Refused(anyhow!("{} isn't a text file", write.path))
-        })?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| ApplyFailure::Refused(anyhow!("{} isn't a text file", write.path)))?;
         Some(text)
     } else {
         None
