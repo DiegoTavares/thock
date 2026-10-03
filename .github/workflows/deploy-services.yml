@@ -1,0 +1,183 @@
+# Deploys the Go services to Cloud Run whenever a change to one lands on main:
+# the Thock Plus backend (thock/services/plus) and the release index
+# (thock/services/releases). The site has its own workflow, deploy-site.yml.
+#
+# A deploy here ships code only. Secrets, IAM, buckets and environment
+# variables are provisioned by hand (thock/services/plus/deploy.sh and the
+# specs) and a revision inherits them from the one before it, which is why the
+# deployer accounts can roll out a revision and nothing else.
+#
+# Runbook: thock/RELEASING.md.
+
+name: Deploy services
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "thock/services/**"
+      - ".github/workflows/deploy-services.yml"
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service to deploy"
+        type: choice
+        options: [plus, releases]
+        required: true
+
+concurrency:
+  group: deploy-services
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Changed services
+    runs-on: ubuntu-latest
+    outputs:
+      plus: ${{ steps.changes.outputs.plus }}
+      releases: ${{ steps.changes.outputs.releases }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Compare with the previous commit
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          REQUESTED: ${{ inputs.service }}
+        run: |
+          for service in plus releases; do
+            if [ "${EVENT}" = "workflow_dispatch" ]; then
+              [ "${REQUESTED}" = "${service}" ] && changed=true || changed=false
+            elif git diff --quiet HEAD^ HEAD -- "thock/services/${service}" .github/workflows/deploy-services.yml; then
+              changed=false
+            else
+              changed=true
+            fi
+            echo "${service}=${changed}" | tee -a "$GITHUB_OUTPUT"
+          done
+
+  plus:
+    name: Deploy Thock Plus
+    needs: changes
+    # Skipped, not green, until the deployer account exists (thock/RELEASING.md).
+    if: needs.changes.outputs.plus == 'true' && vars.GCP_PLUS_DEPLOY_SERVICE_ACCOUNT != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation; no key in secrets
+    env:
+      SERVICE: thock-plus-api
+      REGION: us-central1
+      PROJECT: thock-505921
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: thock/services/plus/go.mod
+          cache-dependency-path: thock/services/plus/go.sum
+
+      # Migrations are part of the suite: every test applies them to a fresh
+      # database, and the new revision applies them to the real one at startup.
+      - name: Test
+        run: thock/script/test go-plus
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_PLUS_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Remember the serving revision
+        id: previous
+        run: |
+          revision="$(gcloud run services describe "${SERVICE}" --project "${PROJECT}" --region "${REGION}" \
+            --format='value(status.latestReadyRevisionName)')"
+          echo "revision=${revision}" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${SERVICE}" \
+            --project "${PROJECT}" --region "${REGION}" \
+            --source thock/services/plus \
+            --quiet
+
+      # /health answers only when the database does, so it also proves the
+      # migrations applied and the secrets still resolve.
+      - name: Smoke test
+        env:
+          PREVIOUS: ${{ steps.previous.outputs.revision }}
+        run: |
+          url="$(gcloud run services describe "${SERVICE}" --project "${PROJECT}" --region "${REGION}" --format='value(status.url)')"
+          check() {
+            code="$(curl -s -o /dev/null -w '%{http_code}' "$@")"
+            echo "$* → ${code}"
+            echo "${code}"
+          }
+          ok=true
+          [ "$(check "${url}/health" | tail -1)" = "200" ] || ok=false
+          [ "$(check "${url}/v1/entitlement" | tail -1)" = "401" ] || ok=false
+          [ "$(check "${url}/admin/users" | tail -1)" = "401" ] || ok=false
+          if ! ${ok}; then
+            echo "Smoke test failed. To put the previous revision back:" >&2
+            echo "  gcloud run services update-traffic ${SERVICE} --project ${PROJECT} --region ${REGION} --to-revisions ${PREVIOUS}=100" >&2
+            exit 1
+          fi
+          echo "Deployed thock/services/plus @ ${GITHUB_SHA::10} → ${url}" >> "$GITHUB_STEP_SUMMARY"
+
+  releases:
+    name: Deploy the release index
+    needs: changes
+    if: needs.changes.outputs.releases == 'true' && vars.GCP_RELEASES_API_DEPLOY_SERVICE_ACCOUNT != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation; no key in secrets
+    env:
+      SERVICE: thock-releases-api
+      REGION: us-central1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: thock/services/releases/go.mod
+
+      - name: Test
+        run: thock/script/test go-releases
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASES_API_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${SERVICE}" \
+            --region "${REGION}" \
+            --source thock/services/releases \
+            --quiet
+
+      # The answer every installed app depends on: the stable channel resolves.
+      - name: Smoke test
+        run: |
+          url="$(gcloud run services describe "${SERVICE}" --region "${REGION}" --format='value(status.url)')"
+          for path in /health '/releases/stable/latest/asset?asset=zed&os=macos&arch=aarch64'; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' "${url}${path}")"
+            echo "${path} → ${code}"
+            [ "${code}" = "200" ] || [ "${code}" = "302" ] || exit 1
+          done
+          echo "Deployed thock/services/releases @ ${GITHUB_SHA::10} → ${url}" >> "$GITHUB_STEP_SUMMARY"
