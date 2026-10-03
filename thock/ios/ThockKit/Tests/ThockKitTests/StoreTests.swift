@@ -156,7 +156,6 @@ final class StoreTests: XCTestCase {
         try snapshot(store, "x\n", version: 1, path: "café/a.md")
         XCTAssertEqual(store.paths(under: "café"), ["café/a.md"])
         try snapshot(store, "x\n", version: 1, path: "🇵🇹 trips/lisbon.md")
-        XCTExpectFailure("paths(under:) gives SQLite's substr a Character count; a folder with a multi-scalar emoji matches nothing")
         XCTAssertEqual(store.paths(under: "🇵🇹 trips"), ["🇵🇹 trips/lisbon.md"])
     }
 

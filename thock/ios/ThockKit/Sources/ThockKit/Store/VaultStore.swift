@@ -101,9 +101,10 @@ public final class VaultStore: @unchecked Sendable {
             let rows: [[Database.Value]]?
             if let directory {
                 // `substr` rather than LIKE, so a folder named `50%_done`
-                // cannot turn into a wildcard.
+                // cannot turn into a wildcard. SQLite counts code points, so
+                // the length is in scalars, not Characters.
                 let prefix = directory + "/"
-                rows = try? database.query("SELECT path FROM files WHERE substr(path, 1, ?) = ? ORDER BY path", [.int(Int64(prefix.count)), .text(prefix)])
+                rows = try? database.query("SELECT path FROM files WHERE substr(path, 1, ?) = ? ORDER BY path", [.int(Int64(prefix.unicodeScalars.count)), .text(prefix)])
             } else {
                 rows = try? database.query("SELECT path FROM files ORDER BY path")
             }
