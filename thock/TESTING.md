@@ -20,6 +20,7 @@ the same thing. The path → suite mapping lives in `suites_for` in that script 
 | `sync-core` | `crates/thock-sync-core/`: the rules the desk and the phone must agree on | `cargo test -p thock_sync_core` | ~10 s |
 | `go-plus` | `thock/services/plus/`: the Plus backend and vault sync API | `go vet` + `go test`, against an embedded Postgres it starts itself | ~30 s |
 | `go-releases` | `thock/services/releases/`: the update index and manifest writer | `go vet` + `go test` + `write_manifest_test.py` | seconds |
+| `go-budget-guard` | `thock/services/budget-guard/`: the budget circuit breaker | `go vet` + `go test` | seconds |
 | `go-site` | `thock/site/`: the site server and download gate | `go vet` + `go test` | seconds |
 | `ios` | `thock/ios/`: ThockKit, the phone's whole data layer | `thock/ios/script/test` (`swift test`, on the Mac, no simulator) | ~5 s |
 | `integration` | the sync contract end to end: the real desk and phone clients against a real Plus server | `thock/script/integration` (starts the server and a throwaway Postgres) | ~30 s |
