@@ -500,7 +500,17 @@ func (s *server) revokeUser(ctx context.Context, userID, note string) error {
 	if err := s.gateway.revoke(ctx, u.Gateway.Hash); err != nil {
 		return err
 	}
-	return s.store.revokeUser(ctx, userID, s.now(), note)
+	if err := s.store.revokeUser(ctx, userID, s.now(), note); err != nil {
+		return err
+	}
+	// The vault lapses with the access; connected devices hear it at once,
+	// as they do when the lapse comes from the admin route.
+	if v, err := s.store.vaultByUser(ctx, userID); err == nil {
+		s.feed.publish(v.ID, feedEvent{Kind: "vault", Data: map[string]any{"status": "lapsed"}})
+	} else if !errors.Is(err, errNotFound) {
+		logf("warning: announcing the lapse of user %s's vault: %v", userID, err)
+	}
+	return nil
 }
 
 // --- admin ---

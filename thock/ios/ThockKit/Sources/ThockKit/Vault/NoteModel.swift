@@ -173,6 +173,15 @@ public struct NoteView: Equatable, Sendable {
         var seen: [String: Int] = [:]
         for index in section.start..<section.end where mask[index] {
             let text = file.lines[index].text
+            // Ordinals count every line the applier would consider, not only
+            // tasks: `- Call Ana` above `- [ ] Call Ana` shares its hash, and
+            // a tick must not land on the plain bullet.
+            let hash = SyncCore.lineHash(text)
+            var ordinal = 0
+            if section.body.contains(index), !SyncCore.lineIdentity(text).isEmpty {
+                ordinal = seen[hash, default: 0]
+                seen[hash] = ordinal + 1
+            }
             if let child = TextFile.heading(in: text) {
                 // Only headings one level down start a group; deeper ones
                 // belong to the group they sit in, as on the desk.
@@ -183,9 +192,6 @@ public struct NoteView: Equatable, Sendable {
                 continue
             }
             guard let item = Blocks.listItem(text), case .task(let done) = item.kind else { continue }
-            let hash = SyncCore.lineHash(text)
-            let ordinal = seen[hash, default: 0]
-            seen[hash] = ordinal + 1
             let withoutComment = Self.strippingTrailingComments(item.text)
             var time = TimePrefix.parse(withoutComment)
             var label = time.map { String($0.rest) } ?? withoutComment

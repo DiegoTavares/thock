@@ -24,7 +24,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thock_sync_core::{Context as SealContext, Operation, Outcome, Write, apply, is_syncable_path};
@@ -734,6 +734,21 @@ struct JobOutcome {
     uploaded: usize,
     skipped: Vec<SkippedFile>,
     held_back: Vec<String>,
+    /// Phone writes that could not be read and were skipped, for a toast.
+    refused: Vec<String>,
+    /// The vault could not be read or written while applying a phone write;
+    /// the batch stopped before it and is retried.
+    blocked: Option<anyhow::Error>,
+}
+
+/// Why a phone write was not applied.
+enum ApplyFailure {
+    /// The write itself is unreadable or not one the desk accepts. Retrying
+    /// cannot help, so it is skipped and acked, and the user is told.
+    Refused(anyhow::Error),
+    /// The vault file could not be read or written. The write is not acked,
+    /// so it is applied on a later pass instead of being lost.
+    Vault(anyhow::Error),
 }
 
 /// A file the desk is not sending, and why, for the status row.
@@ -1050,21 +1065,52 @@ impl VaultSyncService {
                 }
                 self.skipped = outcome.skipped;
                 self.held_back = outcome.held_back;
-                self.retry_delay = RETRY_FLOOR;
+                if outcome.blocked.is_none() {
+                    self.retry_delay = RETRY_FLOOR;
+                }
                 self.status = match &self.info {
                     Some(info) if info.is_lapsed() => PhoneSyncState::Paused,
                     Some(info) if info.phone().is_none() => PhoneSyncState::PhoneNotConnected,
                     _ => PhoneSyncState::UpToDate { at: Instant::now() },
                 };
+                if !outcome.refused.is_empty() {
+                    // Shown even on a background pass: the phone has already
+                    // let go of these, so this is the only trace of them.
+                    let paths = outcome.refused.join(", ");
+                    cx.emit(ManualSyncFinished {
+                        message: format!(
+                            "A change from your phone couldn't be read and was skipped: {paths}"
+                        )
+                        .into(),
+                        icon: IconName::Warning,
+                    });
+                }
+                if let Some(error) = outcome.blocked {
+                    log::warn!("Thock: vault sync stopped at a phone write: {error:#}");
+                    self.pending.drain = true;
+                    self.status = PhoneSyncState::Failing {
+                        error: format!("{error:#}").into(),
+                    };
+                    if announce {
+                        cx.emit(ManualSyncFinished {
+                            message: format!("Phone sync stopped: {error:#}").into(),
+                            icon: IconName::Warning,
+                        });
+                    }
+                    let delay = self.retry_delay;
+                    self.retry_delay = (self.retry_delay * 2).min(RETRY_CEILING);
+                    cx.notify();
+                    return Some(delay);
+                }
                 if announce {
                     let message = match (outcome.applied, outcome.uploaded) {
-                        (0, 0) => "Phone synced — nothing new".to_string(),
+                        (0, 0) => "Phone synced, nothing new".to_string(),
                         (applied, 0) => {
-                            format!("Phone synced — {applied} change(s) from your phone")
+                            format!("Phone synced: {applied} change(s) from your phone")
                         }
-                        (0, uploaded) => format!("Phone synced — {uploaded} note(s) sent"),
+                        (0, uploaded) => format!("Phone synced: {uploaded} note(s) sent"),
                         (applied, uploaded) => format!(
-                            "Phone synced — {applied} change(s) from your phone, {uploaded} note(s) sent"
+                            "Phone synced: {applied} change(s) from your phone, {uploaded} note(s) sent"
                         ),
                     };
                     cx.emit(ManualSyncFinished {
@@ -1108,7 +1154,7 @@ impl VaultSyncService {
                         };
                         if announce {
                             cx.emit(ManualSyncFinished {
-                                message: format!("Phone sync failed — {error:#}").into(),
+                                message: format!("Phone sync failed: {error:#}").into(),
                                 icon: IconName::Warning,
                             });
                         }
@@ -1342,7 +1388,7 @@ impl VaultSyncService {
                         });
                     }
                     Err(error) => cx.emit(ManualSyncFinished {
-                        message: format!("Couldn't disconnect the phone — {error:#}").into(),
+                        message: format!("Couldn't disconnect the phone: {error:#}").into(),
                         icon: IconName::Warning,
                     }),
                 }
@@ -1385,7 +1431,7 @@ impl VaultSyncService {
                         icon: IconName::Check,
                     },
                     Err(error) => ManualSyncFinished {
-                        message: format!("Couldn't turn phone sync off — {error:#}").into(),
+                        message: format!("Couldn't turn phone sync off: {error:#}").into(),
                         icon: IconName::Warning,
                     },
                 };
@@ -1496,6 +1542,8 @@ async fn run_job(
     // Drain the phone's queue (`v34` §7.5 / contract §10.4).
     let mut applied = 0;
     let mut last_seq = None;
+    let mut refused_writes = Vec::new();
+    let mut blocked_write = None;
     if job.drain {
         let fetch = {
             let api = session.api.clone();
@@ -1520,6 +1568,11 @@ async fn run_job(
                 cx.background_spawn(async move {
                     let mut changed = BTreeSet::new();
                     let mut applied = 0;
+                    let mut refused = Vec::new();
+                    let mut blocked = None;
+                    let mut last = None;
+                    // Rows arrive in seq order; the ack covers only the rows
+                    // handled, so a blocked write and those after it stay queued.
                     for row in &writes {
                         match apply_write(&fs, &vault, &key, row).await {
                             Ok(Some(path)) => {
@@ -1527,25 +1580,38 @@ async fn run_job(
                                 applied += 1;
                             }
                             Ok(None) => {}
-                            Err(error) => {
-                                // A write that cannot be read is skipped,
-                                // never retried forever: the ack moves past it.
+                            Err(ApplyFailure::Refused(error)) => {
                                 log::warn!(
                                     "Thock: skipping write {} for {}: {error:#}",
                                     row.seq,
                                     row.path
                                 );
+                                refused.push(row.path.clone());
+                            }
+                            Err(ApplyFailure::Vault(error)) => {
+                                log::warn!(
+                                    "Thock: couldn't apply write {} to {}: {error:#}",
+                                    row.seq,
+                                    row.path
+                                );
+                                blocked = Some(error.context(format!(
+                                    "a change from your phone to {} couldn't be saved",
+                                    row.path
+                                )));
+                                break;
                             }
                         }
+                        last = Some(last.map_or(row.seq, |seq: u64| seq.max(row.seq)));
                     }
-                    let last = writes.iter().map(|row| row.seq).max();
-                    (changed, applied, last)
+                    (changed, applied, last, refused, blocked)
                 })
             };
-            let (changed, count, last) = apply_all.await;
+            let (changed, count, last, refused, blocked) = apply_all.await;
             dirty.extend(changed);
             applied = count;
             last_seq = last;
+            refused_writes = refused;
+            blocked_write = blocked;
         }
     }
 
@@ -1651,6 +1717,8 @@ async fn run_job(
         uploaded,
         skipped,
         held_back,
+        refused: refused_writes,
+        blocked: blocked_write,
     })
 }
 
@@ -1670,12 +1738,20 @@ async fn scan_vault(
     let mut changed = BTreeSet::new();
     let mut skipped = Vec::new();
     let mut seen = BTreeSet::new();
+    // A folder that can't be listed says nothing about its files, so they
+    // are not tombstoned on the strength of it.
+    let mut unlisted = Vec::new();
     let mut directories = vec![root.to_path_buf()];
     while let Some(dir) = directories.pop() {
         let mut entries = match fs.read_dir(&dir).await {
             Ok(entries) => entries,
             Err(error) => {
-                log::debug!("Thock: couldn't list {}: {error:#}", dir.display());
+                log::warn!("Thock: couldn't list {}: {error:#}", dir.display());
+                // The root, or a folder we can't name, covers everything.
+                unlisted.push(match relative_path(root, &dir) {
+                    Some(rel) if !rel.is_empty() => format!("{rel}/"),
+                    _ => String::new(),
+                });
                 continue;
             }
         };
@@ -1698,6 +1774,9 @@ async fn scan_vault(
             if metadata.is_symlink || !is_syncable_path(&rel) {
                 continue;
             }
+            // Still present, so never tombstoned: a file that grew too large
+            // stays on the phone as it was, as "not synced" (`v34` §6.1).
+            seen.insert(rel.clone());
             if metadata.len > MAX_FILE_BYTES {
                 skipped.push(SkippedFile {
                     path: rel,
@@ -1705,7 +1784,6 @@ async fn scan_vault(
                 });
                 continue;
             }
-            seen.insert(rel.clone());
             let Ok(bytes) = fs.load_bytes(&abs).await else {
                 continue;
             };
@@ -1725,6 +1803,7 @@ async fn scan_vault(
     let removed = known
         .keys()
         .filter(|path| !seen.contains(*path))
+        .filter(|path| !unlisted.iter().any(|prefix| path.starts_with(prefix.as_str())))
         .cloned()
         .collect();
     Ok(ScanResult {
@@ -1834,7 +1913,14 @@ async fn apply_write(
     vault: &Vault,
     key: &[u8; 32],
     row: &WriteRow,
-) -> Result<Option<String>> {
+) -> Result<Option<String>, ApplyFailure> {
+    let write = open_write(key, row).map_err(ApplyFailure::Refused)?;
+    apply_opened_write(fs, vault, &write)
+        .await
+        .map_err(ApplyFailure::Vault)
+}
+
+fn open_write(key: &[u8; 32], row: &WriteRow) -> Result<Write> {
     let envelope = base64::engine::general_purpose::STANDARD
         .decode(row.payload.trim())
         .context("the write's payload isn't valid base64")?;
@@ -1855,6 +1941,14 @@ async fn apply_write(
     if !is_syncable_path(&write.path) {
         bail!("the write targets a path that doesn't sync");
     }
+    Ok(write)
+}
+
+async fn apply_opened_write(
+    fs: &Arc<dyn Fs>,
+    vault: &Vault,
+    write: &Write,
+) -> Result<Option<String>> {
     let abs = vault.root.join(&write.path);
     let existing = if fs.is_file(&abs).await {
         Some(fs.load(&abs).await?)
@@ -1866,7 +1960,7 @@ async fn apply_write(
     } else {
         None
     };
-    let applied = apply(existing.as_deref(), &write, seed.as_deref());
+    let applied = apply(existing.as_deref(), write, seed.as_deref());
     if applied.outcome == Outcome::Noop || existing.as_deref() == Some(applied.text.as_str()) {
         return Ok(None);
     }
@@ -1927,6 +2021,7 @@ mod tests {
     use gpui::TestAppContext;
     use http_client::FakeHttpClient;
     use settings::SettingsStore;
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use thock_sync_core::{Heading, Placement};
 

@@ -187,6 +187,18 @@ public final class VaultStore: @unchecked Sendable {
         }
     }
 
+    /// Drops a write the service will never accept and rebuilds its note
+    /// from the desk's copy and the writes still waiting.
+    public func discard(clientID: String) throws {
+        try locked {
+            guard let path = try database.query("SELECT path FROM pending_writes WHERE client_id = ?", [.text(clientID)]).first?.first?.string else { return }
+            try database.execute("DELETE FROM pending_writes WHERE client_id = ?", [.text(clientID)])
+            let row = try database.query("SELECT version, snapshot, content_hash, blob_id FROM files WHERE path = ?", [.text(path)]).first
+            try store(path: path, version: Int(row?[0].int ?? 0), snapshot: row?[1].string, contentHash: row?[2].string, blobID: row?[3].string)
+        }
+        changed()
+    }
+
     // MARK: From the desk
 
     private func rebased(snapshot: String?, path: String) -> String? {
@@ -251,11 +263,16 @@ public final class VaultStore: @unchecked Sendable {
     /// final word, so the local copy is rebuilt from its snapshot.
     public func prune(ackedThroughSeq: Int, ackedAtVersion: Int) throws {
         guard cursor >= ackedAtVersion else { return }
+        let missing = refetchPaths
         let touched: [String] = try locked {
             let rows = try database.query("SELECT DISTINCT path FROM pending_writes WHERE seq IS NOT NULL AND seq <= ?", [.int(Int64(ackedThroughSeq))])
-            let paths = rows.compactMap { $0.first?.string }
+            // A note whose snapshot did not arrive keeps its writes: dropping
+            // them would show it without the phone's own change until then.
+            let paths = rows.compactMap { $0.first?.string }.filter { !missing.contains($0) }
             guard !paths.isEmpty else { return [] }
-            try database.execute("DELETE FROM pending_writes WHERE seq IS NOT NULL AND seq <= ?", [.int(Int64(ackedThroughSeq))])
+            for path in paths {
+                try database.execute("DELETE FROM pending_writes WHERE seq IS NOT NULL AND seq <= ? AND path = ?", [.int(Int64(ackedThroughSeq)), .text(path)])
+            }
             for path in paths {
                 let row = try database.query("SELECT version, snapshot, content_hash, blob_id FROM files WHERE path = ?", [.text(path)]).first
                 try store(path: path, version: Int(row?[0].int ?? 0), snapshot: row?[1].string, contentHash: row?[2].string, blobID: row?[3].string)
@@ -289,6 +306,14 @@ public final class VaultStore: @unchecked Sendable {
     public var cursor: Int {
         get { Int(meta("cursor") ?? "") ?? 0 }
         set { setMeta("cursor", String(newValue)) }
+    }
+
+    /// Notes whose latest snapshot could not be taken. The cursor moves past
+    /// them so one bad version cannot hold every other note back; they are
+    /// fetched again by a full pull, and their writes are kept until then.
+    public var refetchPaths: Set<String> {
+        get { Set((meta("refetch") ?? "").split(separator: "\n").map(String.init)) }
+        set { setMeta("refetch", newValue.isEmpty ? nil : newValue.sorted().joined(separator: "\n")) }
     }
 
     public var deviceID: String {

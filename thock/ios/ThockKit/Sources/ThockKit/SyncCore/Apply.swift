@@ -54,9 +54,9 @@ extension SyncCore {
             if let found = file.resolve(reference) {
                 section = file.section(of: found)
             } else {
-                let index = addHeading(reference, to: &file)
+                addHeading(reference, to: &file)
                 sectionAdded = true
-                section = file.section(of: HeadingLine(index: index, level: reference.level, text: reference.text))
+                section = file.resolve(reference).map(file.section(of:)) ?? file.wholeFile()
             }
         } else {
             section = file.wholeFile()
@@ -88,12 +88,15 @@ extension SyncCore {
             let current = sectionHash(lines: file.lines[section.body].map(\.text))
             if current == write.baseHash {
                 file.replace(section.body, with: write.lines)
-            } else if !write.lines.isEmpty {
+            } else if !write.lines.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
                 var lines = write.lines
                 let marked = lines.firstIndex { !$0.allSatisfy(\.isWhitespace) } ?? 0
                 lines[marked] += conflictMarker
                 insert(lines, at: section.bodyEnd, blankLineBefore: true, in: &file, section: section)
                 keptBoth = true
+            } else if !created, !sectionAdded {
+                // A stale replacement with nothing in it has nothing to keep.
+                return Applied(text: file.text, outcome: .noop)
             }
         }
 
@@ -160,7 +163,7 @@ extension SyncCore {
     }
 
     static func headingLine(_ heading: HeadingRef) -> String {
-        String(repeating: "#", count: min(max(heading.level, 1), 6)) + " " + heading.text
+        String(repeating: "#", count: min(max(heading.level, 1), 6)) + " " + heading.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func resolveSection(_ heading: HeadingRef?, in file: TextFile) -> SectionRange? {
@@ -206,6 +209,7 @@ extension SyncCore {
 
     /// A missing heading goes before the first level-1 heading that is not
     /// the note's title, so `# Daily Closure` and friends stay last.
+    @discardableResult
     private static func addHeading(_ heading: HeadingRef, to file: inout TextFile) -> Int {
         let headings = file.headings()
         let before = headings.dropFirst().first { $0.level == 1 }?.index

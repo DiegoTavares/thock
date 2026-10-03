@@ -107,22 +107,19 @@ public struct TextFile: Equatable, Sendable {
     public func contentMask() -> [Bool] {
         var mask = [Bool](repeating: true, count: lines.count)
         var inFrontmatter = false
-        // A front-matter block that never closes is ordinary content.
-        let closesFrontmatter = lines.dropFirst().contains {
-            let trimmed = $0.text.trimmingTrailingWhitespace()
-            return trimmed == "---" || trimmed == "..."
-        }
+        // A front-matter block that never closes is ordinary content. Its
+        // delimiters match exactly, trailing spaces included, as on the desk.
+        let closesFrontmatter = lines.dropFirst().contains { $0.text == "---" || $0.text == "..." }
         var fence: (marker: Character, length: Int)?
         for (index, line) in lines.enumerated() {
-            let trimmedEnd = line.text.trimmingTrailingWhitespace()
-            if index == 0, trimmedEnd == "---", closesFrontmatter {
+            if index == 0, line.text == "---", closesFrontmatter {
                 inFrontmatter = true
                 mask[index] = false
                 continue
             }
             if inFrontmatter {
                 mask[index] = false
-                if trimmedEnd == "---" || trimmedEnd == "..." {
+                if line.text == "---" || line.text == "..." {
                     inFrontmatter = false
                 }
                 continue
@@ -162,11 +159,14 @@ public struct TextFile: Equatable, Sendable {
         return rest.dropFirst(run).allSatisfy(\.isWhitespace)
     }
 
-    /// `___`, `---` or `***`: three or more of one character, spaces allowed.
+    /// `___`, `---` or `***`: three or more of one character, spaces (not
+    /// tabs) allowed between, indented at most three spaces.
     public static func isThematicBreak(_ line: String) -> Bool {
-        let compact = line.filter { !$0.isWhitespace }
-        guard compact.count >= 3, let first = compact.first, "_-*".contains(first) else { return false }
-        return compact.allSatisfy { $0 == first }
+        let indent = line.prefix { $0 == " " }.count
+        guard indent <= 3 else { return false }
+        let rest = line.dropFirst(indent)
+        guard let marker = rest.first, "_-*".contains(marker) else { return false }
+        return rest.filter { $0 == marker }.count >= 3 && rest.allSatisfy { $0 == marker || $0 == " " }
     }
 
     /// `^#{1,6}[ \t]+\S`, the heading text trimmed and without closing hashes.
@@ -175,17 +175,17 @@ public struct TextFile: Equatable, Sendable {
         guard (1...6).contains(level) else { return nil }
         let rest = line.dropFirst(level)
         guard let first = rest.first, first == " " || first == "\t" else { return nil }
-        var text = rest.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return nil }
-        // Closing hashes (`## Day planner ##`) are decoration, not text.
-        let closing = text.reversed().prefix { $0 == "#" }.count
-        if closing > 0, closing < text.count {
-            let before = text.dropLast(closing)
-            if before.last == " " || before.last == "\t" {
-                text = before.trimmingCharacters(in: .whitespaces)
-            }
-        }
-        return (level, text)
+        let content = rest.trimmingCharacters(in: .whitespaces)
+        guard !content.isEmpty else { return nil }
+        // Closing hashes (`## Day planner ##`) are decoration, not text,
+        // when a space sets them off; `## C#` keeps its hash and `## ###`
+        // is no heading at all, as on the desk.
+        let closing = content.reversed().prefix { $0 == "#" }.count
+        guard closing > 0 else { return (level, content) }
+        let before = content.dropLast(closing)
+        let trimmed = before.trimmingCharacters(in: CharacterSet(charactersIn: " \t"))
+        let text = trimmed.count == before.count && !before.isEmpty ? content : trimmed
+        return text.isEmpty ? nil : (level, text)
     }
 
     public func headings() -> [HeadingLine] {

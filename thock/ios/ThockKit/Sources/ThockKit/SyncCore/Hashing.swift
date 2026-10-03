@@ -69,7 +69,7 @@ public enum SyncCore {
                 index += 1
                 continue
             }
-            if let link = parseLink(characters, at: index), !excluded.contains(where: { $0.overlaps(link.range) }) {
+            if let link = parseLink(characters, at: index, asTheDeskKeysIt: true), !excluded.contains(where: { $0.overlaps(link.range) }) {
                 output.append(contentsOf: characters[link.label])
                 index = link.range.upperBound
             } else {
@@ -87,7 +87,10 @@ public enum SyncCore {
         var destination: Range<Int>?
     }
 
-    static func parseLink(_ characters: [Character], at open: Int) -> ParsedLink? {
+    /// `asTheDeskKeysIt` reads an inline link's destination the way the
+    /// desk's `heading_key` does (spaces and balanced parentheses allowed, may
+    /// be empty), so a heading resolves to the same key on both sides.
+    static func parseLink(_ characters: [Character], at open: Int, asTheDeskKeysIt: Bool = false) -> ParsedLink? {
         if open + 1 < characters.count, characters[open + 1] == "[" {
             let innerStart = open + 2
             var close = innerStart
@@ -108,6 +111,22 @@ public enum SyncCore {
             close += 1
         }
         guard close + 1 < characters.count, characters[close + 1] == "(", close > open + 1 else { return nil }
+        if asTheDeskKeysIt {
+            var depth = 1
+            var end = close + 2
+            while end < characters.count {
+                if characters[end] == "(" {
+                    depth += 1
+                } else if characters[end] == ")" {
+                    depth -= 1
+                    if depth == 0 {
+                        return ParsedLink(range: open..<(end + 1), label: (open + 1)..<close, destination: (close + 2)..<end)
+                    }
+                }
+                end += 1
+            }
+            return nil
+        }
         var end = close + 2
         while end < characters.count, characters[end] != ")" {
             if characters[end].isWhitespace { return nil }

@@ -179,10 +179,19 @@ public struct VaultConfig: Equatable, Sendable {
             guard let value = values[key]?.string?.trimmingCharacters(in: .whitespaces), !value.isEmpty else { return nil }
             return value
         }
-        daily.dir = text("daily.dir") ?? daily.dir
+        // Folders are joined with `/`, so `daily/` or `./daily` must not
+        // become `daily//…`, which the service refuses as a path.
+        func folder(_ key: String) -> String? {
+            text(key).map { value in
+                var parts = value.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+                parts.removeAll { $0 == "." }
+                return parts.joined(separator: "/")
+            }
+        }
+        daily.dir = folder("daily.dir") ?? daily.dir
         daily.filename = text("daily.filename") ?? daily.filename
         daily.template = text("daily.template") ?? daily.template
-        weekly.dir = text("weekly.dir") ?? weekly.dir
+        weekly.dir = folder("weekly.dir") ?? weekly.dir
         weekly.filename = text("weekly.filename") ?? weekly.filename
         weekly.template = text("weekly.template") ?? weekly.template
         backlogFile = text("backlog.file") ?? backlogFile
@@ -218,11 +227,16 @@ public struct VaultConfig: Equatable, Sendable {
     }
 
     public func dailyPath(_ day: VaultDay) -> String {
-        "\(daily.dir)/\(day.formatted(daily.filename)).md"
+        Self.join(daily.dir, "\(day.formatted(daily.filename)).md")
     }
 
     public func weeklyPath(_ day: VaultDay) -> String {
-        "\(weekly.dir)/\(day.formatted(weekly.filename)).md"
+        Self.join(weekly.dir, "\(day.formatted(weekly.filename)).md")
+    }
+
+    /// `.` as a folder is the vault's root.
+    static func join(_ folder: String, _ name: String) -> String {
+        folder.isEmpty ? name : folder + "/" + name
     }
 }
 

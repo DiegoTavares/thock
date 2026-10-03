@@ -553,8 +553,11 @@ func (s *store) commitUpload(ctx context.Context, vaultID, path, blobID string, 
 			result = commitResult{Version: current.Version, UpdatedAt: current.UpdatedAt, AlreadyCommitted: true}
 			return nil
 		}
+		// Locked, so the sweeper's delete of stale uploads waits for this
+		// commit and then skips the row, rather than removing a blob this
+		// commit has just published.
 		var p pendingUpload
-		err = tx.QueryRow(ctx, `select size_bytes, content_hash from pending_uploads where vault_id = $1 and blob_id = $2 and path = $3`,
+		err = tx.QueryRow(ctx, `select size_bytes, content_hash from pending_uploads where vault_id = $1 and blob_id = $2 and path = $3 for update`,
 			vaultID, blobID, path).Scan(&p.SizeBytes, &p.ContentHash)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errBlobMissing

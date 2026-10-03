@@ -40,6 +40,12 @@ public struct SyncDiagnostics: Equatable, Sendable {
 /// any of this.
 public actor SyncEngine {
     public static let stateDidChange = Notification.Name("ThockSyncStateDidChange")
+    /// Posted with the note's path as `object` when a write was refused for
+    /// good and dropped.
+    public static let writeRefused = Notification.Name("ThockSyncWriteRefused")
+    /// Refusals that no retry can change: the write is dropped so the ones
+    /// behind it still go (V34 API §3).
+    static let permanentRefusals: Set<String> = ["too_large", "path_not_allowed", "bad_request"]
     static let keyName = "vault-key"
     static let credentialName = "device-credential"
 
@@ -111,6 +117,13 @@ public actor SyncEngine {
         store.wipe()
         secrets.setSecret(Self.keyName, link.key)
         secrets.setSecret(Self.credentialName, Data(response.credential.utf8))
+        // The Keychain can refuse (no passcode yet, a full disk). Nothing is
+        // recorded as connected unless both secrets read back.
+        guard secrets.secret(Self.keyName) == link.key, secrets.secret(Self.credentialName) == Data(response.credential.utf8) else {
+            secrets.setSecret(Self.keyName, nil)
+            secrets.setSecret(Self.credentialName, nil)
+            throw PairingError.refused("This phone couldn't keep the key in its Keychain. Try connecting again.")
+        }
         store.setMeta("vault_id", response.vault.vaultID)
         store.setMeta("device_id", response.device.deviceID)
         store.setMeta("device_name", response.device.name ?? deviceName)
@@ -251,12 +264,20 @@ public actor SyncEngine {
         for write in store.pending() where write.seq == nil {
             let json = write.document.json()
             let envelope = try SyncCore.seal(key: key, context: .write(clientID: write.document.clientID), plaintext: Data(json.utf8))
-            let accepted = try await call("POST", "/v1/vault/writes", body: [
-                "client_id": write.document.clientID,
-                "path": write.document.path,
-                "base_version": write.baseVersion,
-                "payload": envelope.base64EncodedString(),
-            ], credential: credential, as: WriteAccepted.self)
+            let accepted: WriteAccepted
+            do {
+                accepted = try await call("POST", "/v1/vault/writes", body: [
+                    "client_id": write.document.clientID,
+                    "path": write.document.path,
+                    "base_version": write.baseVersion,
+                    "payload": envelope.base64EncodedString(),
+                ], credential: credential, as: WriteAccepted.self)
+            } catch let error as APIError where Self.permanentRefusals.contains(error.code) {
+                diagnostics.failures.append("\(write.document.path): refused, \(error.code)")
+                try store.discard(clientID: write.document.clientID)
+                NotificationCenter.default.post(name: Self.writeRefused, object: write.document.path)
+                continue
+            }
             store.markSent(clientID: write.document.clientID, seq: accepted.seq)
         }
     }
@@ -264,10 +285,11 @@ public actor SyncEngine {
     private func pull(credential: String, key: Data) async throws {
         // No cursor means a full pull: every live note, after which anything
         // the desk no longer has is removed here too.
-        var since: Int? = store.cursor > 0 ? store.cursor : nil
+        let retrying = store.refetchPaths
+        var since: Int? = store.cursor > 0 && retrying.isEmpty ? store.cursor : nil
         var fullPull = since == nil
         var listed: Set<String> = []
-        var lowestFailure: Int?
+        var failed: Set<String> = []
         while true {
             var query = ["limit": "500"]
             if let since {
@@ -294,7 +316,7 @@ public actor SyncEngine {
                 }
                 guard let url = row.downloadURL else {
                     diagnostics.failures.append("\(row.path): no download address")
-                    lowestFailure = min(lowestFailure ?? row.version, row.version)
+                    failed.insert(row.path)
                     continue
                 }
                 // A blob that does not arrive, hash or open is a corrupt
@@ -305,22 +327,22 @@ public actor SyncEngine {
                     envelope = try await transport.download(url)
                 } catch {
                     diagnostics.failures.append("\(row.path): download failed, \(error.localizedDescription)")
-                    lowestFailure = min(lowestFailure ?? row.version, row.version)
+                    failed.insert(row.path)
                     continue
                 }
                 guard SyncCore.contentHash(envelope: envelope) == hash else {
                     diagnostics.failures.append("\(row.path): \(envelope.count) bytes arrived but hash differs")
-                    lowestFailure = min(lowestFailure ?? row.version, row.version)
+                    failed.insert(row.path)
                     continue
                 }
                 guard let plaintext = try? SyncCore.open(key: key, context: .file(path: row.path, blobID: blobID), envelope: envelope) else {
                     diagnostics.failures.append("\(row.path): did not open with this phone's key")
-                    lowestFailure = min(lowestFailure ?? row.version, row.version)
+                    failed.insert(row.path)
                     continue
                 }
                 guard let text = String(data: plaintext, encoding: .utf8) else {
                     diagnostics.failures.append("\(row.path): not text")
-                    lowestFailure = min(lowestFailure ?? row.version, row.version)
+                    failed.insert(row.path)
                     continue
                 }
                 try store.applySnapshot(path: row.path, version: row.version, content: text, contentHash: hash, blobID: blobID)
@@ -328,9 +350,10 @@ public actor SyncEngine {
             since = page.nextSince ?? page.files.map(\.version).max() ?? since ?? 0
             if page.hasMore != true { break }
         }
-        if fullPull, lowestFailure == nil {
+        if fullPull, failed.isEmpty {
             try store.removeFiles(notIn: listed)
         }
-        store.cursor = lowestFailure.map { max($0 - 1, 0) } ?? since ?? 0
+        store.cursor = since ?? 0
+        store.refetchPaths = failed
     }
 }

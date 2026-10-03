@@ -63,13 +63,33 @@ final class Harness {
 final class LossyTransport: SyncTransport, @unchecked Sendable {
     let inner: LocalBackend
     var dropNextWriteReply = false
+    /// Answers `413 too_large` to a write for this note.
+    var refuseWritesTo: String?
+    /// Hands back bytes that do not match the index for this note.
+    var corruptDownloadsOf: String?
 
     init(_ inner: LocalBackend) {
         self.inner = inner
     }
 
     func send(method: String, path: String, query: [String: String], body: Data?, credential: String?) async throws -> HTTPResult {
-        let result = try await inner.send(method: method, path: path, query: query, body: body, credential: credential)
+        if let refused = refuseWritesTo, method == "POST", path == "/v1/vault/writes",
+           let body, String(decoding: body, as: UTF8.self).contains(refused) {
+            return HTTPResult(status: 413, body: Data(#"{"error":"too large","code":"too_large"}"#.utf8))
+        }
+        var result = try await inner.send(method: method, path: path, query: query, body: body, credential: credential)
+        if let corrupt = corruptDownloadsOf, method == "GET", path == "/v1/vault/files",
+           var page = try JSONSerialization.jsonObject(with: result.body) as? [String: Any],
+           let files = page["files"] as? [[String: Any]] {
+            page["files"] = files.map { row in
+                var row = row
+                if row["path"] as? String == corrupt, row["download_url"] != nil {
+                    row["download_url"] = "thock-test://corrupt"
+                }
+                return row
+            }
+            result.body = try JSONSerialization.data(withJSONObject: page)
+        }
         if dropNextWriteReply, method == "POST", path == "/v1/vault/writes" {
             dropNextWriteReply = false
             throw URLError(.networkConnectionLost)
@@ -77,7 +97,12 @@ final class LossyTransport: SyncTransport, @unchecked Sendable {
         return result
     }
 
-    func download(_ url: String) async throws -> Data { try await inner.download(url) }
+    func download(_ url: String) async throws -> Data {
+        if url == "thock-test://corrupt" {
+            return Data("not the blob".utf8)
+        }
+        return try await inner.download(url)
+    }
     func upload(_ url: String, body: Data, headers: [String: String]) async throws { try await inner.upload(url, body: body, headers: headers) }
     func feed(credential: String) -> AsyncThrowingStream<FeedEvent, Error> { inner.feed(credential: credential) }
 }
@@ -250,6 +275,64 @@ final class SyncTests: XCTestCase {
         await harness.assertConverged()
         let after = await harness.desk.file(harness.todayPath) ?? ""
         XCTAssertEqual(after.components(separatedBy: "Written with no signal.").count, 2)
+    }
+
+    func testARefusedWriteIsDroppedAndTheQueueMovesOn() async throws {
+        var lossy: LossyTransport?
+        let harness = try Harness { backend in
+            let transport = LossyTransport(backend)
+            lossy = transport
+            return transport
+        }
+        try await harness.pair()
+        lossy?.refuseWritesTo = "\"path\":\"inbox"
+        let refused = expectation(forNotification: SyncEngine.writeRefused, object: nil)
+
+        let capture = try XCTUnwrap(harness.writes.capture(blocks: Blocks.parse("Too big to send"), destination: .inbox, todayNote: nil, template: nil, taken: { _ in false }))
+        try harness.store.record(capture.writes)
+        let planner = harness.planner()
+        let item = try XCTUnwrap(planner.items.first { $0.label.hasPrefix("Read 20") })
+        try harness.store.record([try XCTUnwrap(harness.writes.tick(item, planner: planner, day: harness.day))])
+        try await harness.settle()
+        // A feed-driven round may be running, which a second sync() only
+        // flags; wait for the queue rather than for one call.
+        for _ in 0..<100 where harness.store.waitingForDeskCount > 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            await harness.engine.sync()
+        }
+        await fulfillment(of: [refused], timeout: 1)
+
+        let state = await harness.engine.state
+        XCTAssertEqual(state, .upToDate)
+        XCTAssertNil(harness.store.content(capture.writes[0].document.path))
+        XCTAssertEqual(harness.store.waitingForDeskCount, 0)
+        let desk = await harness.desk.file(harness.todayPath) ?? ""
+        XCTAssertTrue(desk.contains("- [x] Read 20 pages"))
+    }
+
+    func testOneBadSnapshotDoesNotHoldTheOthersBack() async throws {
+        var lossy: LossyTransport?
+        let harness = try Harness { backend in
+            let transport = LossyTransport(backend)
+            lossy = transport
+            return transport
+        }
+        try await harness.pair()
+        let backlog = harness.store.config.backlogFile
+        lossy?.corruptDownloadsOf = backlog
+        try await harness.desk.edit { disk in
+            disk[backlog, default: ""] += "\n- [ ] Added at the desk\n"
+            disk["daily/2026-10-02.md", default: ""] += "\nA line from the desk.\n"
+        }
+        await harness.engine.sync()
+        XCTAssertEqual(harness.store.refetchPaths, [backlog])
+        XCTAssertTrue(harness.store.content(harness.todayPath)?.contains("A line from the desk.") ?? false)
+        XCTAssertFalse(harness.store.content(backlog)?.contains("Added at the desk") ?? true)
+
+        lossy?.corruptDownloadsOf = nil
+        await harness.engine.sync()
+        XCTAssertEqual(harness.store.refetchPaths, [])
+        await harness.assertConverged()
     }
 
     func testTheSameLineEditedTwiceKeepsBoth() async throws {

@@ -94,6 +94,53 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(NoteView(text: "# Day\n\n## Notes\n", config: config).planner.heading.text, "Agenda")
     }
 
+    func testATickLandsOnTheTaskNotABulletWithTheSameWords() throws {
+        let note = "# Day\n\n## Day planner\n\n- Call Ana\n- [ ] Call Ana\n"
+        let view = NoteView(text: note, config: config)
+        let task = try XCTUnwrap(view.planner.items.first)
+        XCTAssertEqual(task.ordinal, 1)
+        let tick = try XCTUnwrap(writes().tick(task, planner: view.planner, day: day))
+        XCTAssertEqual(SyncCore.apply(existing: note, write: tick.document).text, "# Day\n\n## Day planner\n\n- Call Ana\n- [x] Call Ana\n")
+    }
+
+    func testTheRulesReadMarkdownAsTheDeskDoes() throws {
+        XCTAssertNil(TextFile.heading(in: "## ###"))
+        XCTAssertEqual(TextFile.heading(in: "## C#")?.text, "C#")
+        XCTAssertEqual(TextFile.heading(in: "## Plan ##")?.text, "Plan")
+        XCTAssertTrue(TextFile.isThematicBreak("_ _ _"))
+        XCTAssertTrue(TextFile.isThematicBreak("   ___"))
+        XCTAssertFalse(TextFile.isThematicBreak("    ___"))
+        XCTAssertFalse(TextFile.isThematicBreak("\t___"))
+        XCTAssertEqual(SyncCore.headingKey("[Plan](my file (v2).md)"), SyncCore.headingKey("Plan"))
+        // A closing delimiter with a trailing space does not close front matter.
+        XCTAssertEqual(TextFile("--- \ntitle: x\n---\n# Day\n").contentMask(), [true, true, true, true])
+
+        var stale = WriteDocument(clientID: "c", kind: .replaceSection, path: "a.md", madeAt: "", deviceID: "d")
+        stale.heading = HeadingRef(text: "A")
+        stale.baseHash = "0"
+        stale.lines = ["", "  "]
+        XCTAssertEqual(SyncCore.apply(existing: "## A\nx\n", write: stale).outcome, .noop)
+
+        var created = WriteDocument(clientID: "c", kind: .append, path: "a.md", madeAt: "", deviceID: "d")
+        created.heading = HeadingRef(text: " Journal ", level: 0)
+        created.lines = ["y"]
+        XCTAssertEqual(SyncCore.apply(existing: "x\n", write: created).text, "x\n\n# Journal\ny\n")
+
+        let base = #""client_id":"c","path":"a.md","kind":"append","heading":null"#
+        XCTAssertNoThrow(try WriteDocument.parse(#"{"v":1,"# + base + #","lines":[]}"#))
+        XCTAssertThrowsError(try WriteDocument.parse("{" + base + #","lines":[]}"#))
+        XCTAssertThrowsError(try WriteDocument.parse(#"{"v":1,"# + base + "}"))
+        XCTAssertThrowsError(try WriteDocument.parse(#"{"v":1,"client_id":"c","path":"a.md","kind":"remove_line","heading":null,"line_hash":"h","ordinal":-1}"#))
+        XCTAssertThrowsError(try WriteDocument.parse(#"{"v":1,"client_id":"c","path":"a.md","kind":"append","heading":{"text":"  "},"lines":[]}"#))
+        XCTAssertFalse(SyncCore.isSyncablePath("daily\\x.md"))
+    }
+
+    func testAFolderWithASlashStillNamesTheNote() {
+        let config = VaultConfig(config: "[daily]\ndir = \"./notes/daily/\"\n[weekly]\ndir = \".\"\n")
+        XCTAssertEqual(config.dailyPath(day), "notes/daily/2026-10-02.md")
+        XCTAssertEqual(config.weeklyPath(day), "2026-W40.md")
+    }
+
     func testThePlannersCalendarIsNeverACardOfItsOwn() {
         // A planner at level 1 puts the desk's calendar at level 2, below the
         // title's section; it is drawn once, inside the planner.

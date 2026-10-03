@@ -89,6 +89,15 @@ public struct WriteDocument: Equatable, Sendable {
 
     func validate() throws {
         guard version == 1 else { throw WriteError.malformed("unknown version \(version)") }
+        guard !clientID.trimmingCharacters(in: .whitespaces).isEmpty else { throw WriteError.malformed("no client id") }
+        guard !path.trimmingCharacters(in: .whitespaces).isEmpty else { throw WriteError.malformed("no path") }
+        // The desk reads these as unsigned numbers and refuses the write
+        // otherwise, so the phone must not apply it either.
+        guard ordinal >= 0 else { throw WriteError.malformed("negative ordinal") }
+        if let heading {
+            guard !heading.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw WriteError.malformed("empty heading") }
+            guard (0...255).contains(heading.level), heading.ordinal >= 0 else { throw WriteError.malformed("heading level or ordinal out of range") }
+        }
         let single = [newLine].compactMap { $0 } + lines
         if single.contains(where: { $0.contains("\n") || $0.contains("\r") }) {
             throw WriteError.malformed("line with a terminator")
@@ -131,7 +140,7 @@ extension WriteDocument: Codable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        version = try container.decode(Int.self, forKey: .version)
         clientID = try container.decode(String.self, forKey: .clientID)
         kind = try container.decode(WriteKind.self, forKey: .kind)
         path = try container.decode(String.self, forKey: .path)
@@ -139,7 +148,12 @@ extension WriteDocument: Codable {
         deviceID = try container.decodeIfPresent(String.self, forKey: .deviceID) ?? ""
         content = try container.decodeIfPresent(String.self, forKey: .content)
         heading = try container.decodeIfPresent(HeadingRef.self, forKey: .heading)
-        lines = try container.decodeIfPresent([String].self, forKey: .lines) ?? []
+        // Required where the kind carries lines, as the desk's parser has it.
+        if kind == .append || kind == .replaceSection {
+            lines = try container.decode([String].self, forKey: .lines)
+        } else {
+            lines = try container.decodeIfPresent([String].self, forKey: .lines) ?? []
+        }
         placement = try container.decodeIfPresent(Placement.self, forKey: .placement) ?? .end
         blankLineBefore = try container.decodeIfPresent(Bool.self, forKey: .blankLineBefore) ?? false
         createFromTemplate = try container.decodeIfPresent(Bool.self, forKey: .createFromTemplate) ?? false

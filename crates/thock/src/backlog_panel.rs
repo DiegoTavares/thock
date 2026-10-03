@@ -1935,9 +1935,9 @@ impl BacklogPanel {
                         service
                             .skipped()
                             .iter()
-                            .map(|file| format!("{} — {}", file.path, file.reason))
+                            .map(|file| format!("{}: {}", file.path, file.reason))
                             .chain(service.held_back().iter().map(|path| {
-                                format!("{path} — held back, the vault is at its quota")
+                                format!("{path}: held back, the vault is at its quota")
                             }))
                             .collect::<Vec<_>>()
                             .join("\n");

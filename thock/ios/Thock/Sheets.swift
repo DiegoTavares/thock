@@ -294,7 +294,7 @@ struct YouSheet: View {
         let d = model.diagnostics
         var lines: [String] = []
         lines.append("notes here: \(model.store?.paths().count ?? 0) · at the desk's copy: \(d.serverFileCount.map(String.init) ?? "?")")
-        lines.append("version \(d.cursor) of \(d.serverLatestVersion.map(String.init) ?? "?") · waiting on the server: \(d.serverPendingWrites.map(String.init) ?? "?")")
+        lines.append("version \(d.cursor) of \(d.serverLatestVersion.map(String.init) ?? "?") · writes not yet at the desk: \(d.serverPendingWrites.map(String.init) ?? "?")")
         lines.append("address: \(model.store?.meta("backend") ?? "?")")
         if let last = d.lastRound {
             lines.append("last check: " + last.formatted(date: .omitted, time: .standard))

@@ -994,7 +994,21 @@ func (s *server) handleWritesAck(w http.ResponseWriter, r *http.Request, p princ
 // --- §6.5 feed and push ---
 
 func (s *server) handleFeed(w http.ResponseWriter, r *http.Request, p principal) {
-	s.feed.serve(w, r, p.vault.ID, p.role)
+	credential, _ := bearer(r)
+	vaultID := p.vault.ID
+	s.feed.serve(w, r, vaultID, p.role, func(ctx context.Context) bool {
+		current, err := s.resolvePrincipal(ctx, credential)
+		var refusal *refusalError
+		if errors.As(err, &refusal) {
+			return false
+		}
+		if err != nil {
+			// A database hiccup is not a revocation; the next ping asks again.
+			logf("warning: re-checking a feed credential: %v", err)
+			return true
+		}
+		return current.vault != nil && current.vault.ID == vaultID && current.role == p.role
+	})
 }
 
 // sendPush is what the coalescer calls once per burst: one silent push with

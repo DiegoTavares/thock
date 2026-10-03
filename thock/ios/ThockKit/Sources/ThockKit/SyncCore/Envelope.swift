@@ -68,6 +68,7 @@ extension SyncCore {
     public static func isSyncablePath(_ path: String) -> Bool {
         guard !path.isEmpty, path.utf8.count <= 1024 else { return false }
         guard path == path.precomposedStringWithCanonicalMapping else { return false }
+        guard !path.contains("\\"), !path.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else { return false }
         let segments = path.split(separator: "/", omittingEmptySubsequences: false)
         guard !segments.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else { return false }
         guard let last = segments.last, let dot = last.lastIndex(of: "."), dot != last.startIndex else { return false }

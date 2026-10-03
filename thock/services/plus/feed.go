@@ -100,7 +100,9 @@ func (h *feedHub) publish(vaultID string, event feedEvent) {
 
 // serve writes the stream until the client goes away or the server closes
 // it. Cloud Run drops connections after an hour; clients reconnect.
-func (h *feedHub) serve(w http.ResponseWriter, r *http.Request, vaultID string, role deviceRole) {
+// stillAllowed is asked at every ping, so a credential revoked, replaced or
+// reset stops receiving events within one interval instead of an hour.
+func (h *feedHub) serve(w http.ResponseWriter, r *http.Request, vaultID string, role deviceRole, stillAllowed func(context.Context) bool) {
 	controller := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
@@ -122,6 +124,9 @@ func (h *feedHub) serve(w http.ResponseWriter, r *http.Request, vaultID string, 
 		case <-r.Context().Done():
 			return
 		case <-ping.C:
+			if stillAllowed != nil && !stillAllowed(r.Context()) {
+				return
+			}
 			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
 				return
 			}

@@ -130,6 +130,10 @@ final class AppModel {
             observers.append(NotificationCenter.default.addObserver(forName: SyncEngine.stateDidChange, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in await self?.refreshSyncState() }
             })
+            observers.append(NotificationCenter.default.addObserver(forName: SyncEngine.writeRefused, object: nil, queue: .main) { [weak self] note in
+                let path = note.object as? String ?? "a note"
+                Task { @MainActor in self?.show("A change to \(path) couldn't be sent and was dropped.") }
+            })
             observers.append(NotificationCenter.default.addObserver(forName: .thockEntryPoint, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.takePendingEntry() }
             })
@@ -168,9 +172,22 @@ final class AppModel {
 
     private func storeChanged() {
         revision += 1
-        WidgetCenter.shared.reloadAllTimelines()
+        scheduleWidgetReload()
         // A write just landed locally; send it on without waiting for the feed.
         Task { await engine?.sync() }
+    }
+
+    @ObservationIgnored private var widgetReload: Task<Void, Never>?
+
+    /// A first pull changes hundreds of notes one by one, and each reload
+    /// spends the widgets' daily budget, so a burst becomes one reload.
+    private func scheduleWidgetReload() {
+        widgetReload?.cancel()
+        widgetReload = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            WidgetCenter.shared.reloadAllTimelines()
+        }
     }
 
     private func refreshSyncState() async {
