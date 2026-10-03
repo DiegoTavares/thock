@@ -4,8 +4,9 @@ name: Release
 #
 #   * `workflow_dispatch` — build only; the bundles land as run artifacts,
 #     which is how you smoke-test a change to the bundling scripts.
-#   * pushing a `v*` tag — build, then publish a draft GitHub Release holding
-#     the same bundles, ready to be attached to the download page.
+#   * pushing a `v*` tag — build, draft a GitHub Release holding the same
+#     bundles, publish them to the update channel, and only then publish the
+#     release, so a channel that names a release always names a reachable one.
 #
 # The bundle steps read THOCK_GOOGLE_CLIENT_ID / THOCK_GOOGLE_CLIENT_SECRET
 # from repository secrets so the shipped app can sign in to Google without the
@@ -212,7 +213,9 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # Drafted rather than published so the download page is updated first.
+      # Drafted rather than published: `publish-updates` publishes it once the
+      # channel names it, so a failed run never leaves a public release that
+      # installed apps are not offered.
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -233,7 +236,7 @@ jobs:
     needs: [publish]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # publishes the draft release once the channel is flipped
       id-token: write # Workload Identity Federation; no key in secrets
     env:
       BUCKET: ${{ vars.GCP_RELEASES_BUCKET }}
@@ -270,3 +273,12 @@ jobs:
             "gs://${BUCKET}/channels/stable.json" \
             --cache-control="no-store"
           echo "Thock ${GITHUB_REF_NAME} is live on the stable channel." >> "$GITHUB_STEP_SUMMARY"
+
+      # The manifest's notes_url points at this release, and a draft is a 404
+      # for everyone but the owner.
+      - name: Publish the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --draft=false
+          echo "Release notes: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" >> "$GITHUB_STEP_SUMMARY"
