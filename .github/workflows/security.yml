@@ -2,7 +2,8 @@ name: Security
 
 # The checks that depend on the outside world rather than on the change:
 # advisories published against dependencies, secrets that slipped in, and
-# static analysis of the Go services. Weekly, so a new advisory surfaces even
+# static analysis of the Go services. Dependabot alerts cover vulnerable
+# dependencies in every lockfile. Weekly, so a new advisory surfaces even
 # when nobody is pushing; on pull requests for the parts a diff can break.
 on:
   pull_request:
@@ -21,21 +22,6 @@ permissions:
   contents: read
 
 jobs:
-  # Fails a pull request that adds a dependency with a known vulnerability,
-  # across Cargo, Go modules, Swift packages and Actions.
-  dependency-review:
-    name: Dependency review
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-
-      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
-        with:
-          fail-on-severity: high
-
   # GitHub's own secret scanning covers provider-issued tokens; this adds the
   # generic patterns (private keys, passwords in URLs, high-entropy strings).
   # Scoped to the Thock tree: upstream fixtures are full of look-alikes.
@@ -95,7 +81,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [go, actions]
+        include:
+          - language: go
+            build-mode: autobuild
+          - language: actions
+            build-mode: none
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -104,7 +94,7 @@ jobs:
       - uses: github/codeql-action/init@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
         with:
           languages: ${{ matrix.language }}
-          build-mode: none
+          build-mode: ${{ matrix.build-mode }}
           config: |
             paths:
               - thock

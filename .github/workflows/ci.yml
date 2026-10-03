@@ -50,8 +50,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           if [ -n "${PR_NUMBER}" ]; then
-            suites="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename' \
-              | thock/script/test --paths-from - --plan)"
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename' > changed-paths
+            suites="$(thock/script/test --paths-from - --plan < changed-paths)"
           else
             suites="$(thock/script/test --all --plan)"
           fi
