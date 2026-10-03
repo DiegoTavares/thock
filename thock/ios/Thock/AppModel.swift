@@ -164,10 +164,17 @@ final class AppModel {
         } else {
             throw PairingError.badLink
         }
-        let engine = SyncEngine(store: store, transport: transport, secrets: secrets)
-        self.engine = engine
-        await engine.start()
+        await install(SyncEngine(store: store, transport: transport, secrets: secrets))
         await refreshSyncState()
+    }
+
+    /// The only place `engine` changes. The previous engine's feed loop is
+    /// stopped first: left running, it would keep syncing over its old
+    /// transport while reading the new pairing's Keychain secrets.
+    private func install(_ newEngine: SyncEngine?) async {
+        await engine?.stop()
+        engine = newEngine
+        await newEngine?.start()
     }
 
     private func storeChanged() {
@@ -212,15 +219,20 @@ final class AppModel {
         isPairing = true
         pairingError = nil
         defer { isPairing = false }
+        // Pairing rewrites the store and the Keychain, so the current engine
+        // is set aside (no feed, no nudges from store changes) until it is
+        // replaced or, if pairing fails, put back.
+        let previous = engine
+        await install(nil)
         do {
             guard let base = URL(string: link.backend), base.scheme != nil else { throw PairingError.badLink }
             let transport = HTTPTransport(base: base)
             let engine = SyncEngine(store: store, transport: transport, secrets: secrets)
             try await engine.pair(link: link, deviceName: UIDevice.current.name)
-            self.engine = engine
-            await engine.start()
+            await install(engine)
             await finishConnecting()
         } catch {
+            await install(previous)
             pairingError = Self.sentence(for: error)
         }
     }
@@ -232,6 +244,8 @@ final class AppModel {
         isPairing = true
         pairingError = nil
         defer { isPairing = false }
+        let previous = engine
+        await install(nil)
         do {
             try? FileManager.default.removeItem(at: ThockEnvironment.practiceWorldURL)
             let world = LocalWorld(url: ThockEnvironment.practiceWorldURL)
@@ -242,11 +256,11 @@ final class AppModel {
                 store.addCapture(capture)
             }
             self.world = world
-            self.engine = engine
             deskAwake = true
-            await engine.start()
+            await install(engine)
             await finishConnecting()
         } catch {
+            await install(previous)
             pairingError = Self.sentence(for: error)
         }
     }
@@ -261,7 +275,7 @@ final class AppModel {
 
     func disconnect() async {
         await engine?.disconnect()
-        engine = nil
+        await install(nil)
         world?.reset()
         world = nil
         sheet = nil
