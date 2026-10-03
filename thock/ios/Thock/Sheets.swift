@@ -196,8 +196,10 @@ struct InboxEditSheet: View {
     @State private var handle = EditorHandle()
     @State private var finished = false
 
+    /// Nothing the person can see is left; what the editor carries unseen
+    /// (a table, a code block) is not a capture on its own.
     private var isEmpty: Bool {
-        blocks.allSatisfy { $0.kind == .blank }
+        blocks.allSatisfy { EditorKind(displaying: $0.kind) == nil }
     }
 
     var body: some View {
@@ -226,7 +228,7 @@ struct InboxEditSheet: View {
     private func save() {
         guard !finished else { return }
         finished = true
-        guard !isEmpty else { return }
+        guard !isEmpty, EditorDocument(blocks: blocks).lines().joined(separator: "\n") != edit.text else { return }
         var changed = false
         if model.perform({ changed = try $0.editInbox(path: edit.path, blocks: blocks) }), changed {
             model.show("Capture updated")

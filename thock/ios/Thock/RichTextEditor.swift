@@ -2,75 +2,12 @@ import SwiftUI
 import ThockKit
 import UIKit
 
-/// The phone's editor (V33 §8): rich text with a deliberately small
-/// vocabulary, where every style maps to one Markdown form the desk already
-/// conceals. The person never sees a `#` or a `- [ ]`.
-enum EditorKind: String {
-    case paragraph
-    case bullet
-    case task
-    case taskDone
-    case heading
-    case quote
-
-    var isList: Bool { self == .bullet || self == .task || self == .taskDone }
-
-    /// What a new paragraph is after pressing return in this one.
-    var continued: EditorKind {
-        switch self {
-        case .bullet: return .bullet
-        case .task, .taskDone: return .task
-        default: return .paragraph
-        }
-    }
-
-    var blockKind: BlockKind {
-        switch self {
-        case .paragraph: return .paragraph
-        case .bullet: return .bullet
-        case .task: return .task(checked: false)
-        case .taskDone: return .task(checked: true)
-        case .heading: return .heading(level: 2)
-        case .quote: return .quote
-        }
-    }
-
-    init(_ kind: BlockKind) {
-        switch kind {
-        case .bullet, .numbered: self = .bullet
-        case .task(let checked): self = checked ? .taskDone : .task
-        case .heading: self = .heading
-        case .quote: self = .quote
-        default: self = .paragraph
-        }
-    }
-}
-
-struct EditorInline: Equatable {
-    var bold = false
-    var italic = false
-    var code = false
-    var strike = false
-    var link: LinkTarget?
-}
-
-extension NSAttributedString.Key {
-    /// The one custom attribute. Inline styles live in the standard ones
-    /// (font traits, strikethrough, link), because UIKit carries only those
-    /// from one typed character to the next.
-    static let thockKind = NSAttributedString.Key("thock.kind")
-    /// The verbatim source of an inline HTML comment, carried by one
-    /// invisible `EditorStyle.commentMark` so it is written back where it was.
-    static let thockComment = NSAttributedString.Key("thock.comment")
-}
-
+/// How the phone's editor (V33 §8) looks: the paragraph kinds and inline
+/// styles themselves live in ThockKit, with the round trip to Markdown.
 enum EditorStyle {
     static let markerWidth: CGFloat = 30
 
     static let noteScheme = "thock-note"
-
-    /// A word joiner: zero width, so a comment takes no room in the text.
-    static let commentMark: Character = "\u{2060}"
 
     static func inline(_ attributes: [NSAttributedString.Key: Any], kind: EditorKind) -> EditorInline {
         var style = EditorInline()
@@ -150,86 +87,20 @@ enum EditorStyle {
         return attributes
     }
 
-    /// The kind of the paragraph at `range`: whichever of its characters
-    /// still carries it.
     static func kind(in text: NSAttributedString, paragraph range: NSRange) -> EditorKind {
-        var found: EditorKind?
-        text.enumerateAttribute(.thockKind, in: range) { value, _, stop in
-            if let raw = value as? String, let kind = EditorKind(rawValue: raw) {
-                found = kind
-                stop.pointee = true
-            }
-        }
-        return found ?? .paragraph
+        EditorText.kind(in: text, paragraph: range)
     }
 
-    static func attributed(_ blocks: [Block], size: CGFloat) -> NSAttributedString {
-        let output = NSMutableAttributedString()
-        let editable = blocks.filter { block in
-            if case .numbered = block.kind { return true }
-            return block.kind.isEditable
+    static func attributed(_ paragraphs: [EditorParagraph], size: CGFloat) -> NSAttributedString {
+        EditorText.attributed(paragraphs) { kind, inline in
+            EditorStyle.attributes(kind: kind, inline: inline, size: size)
         }
-        for (index, block) in editable.enumerated() {
-            let kind = EditorKind(block.kind)
-            for run in block.runs {
-                let inline = EditorInline(bold: run.bold, italic: run.italic, code: run.code, strike: run.strike, link: run.link)
-                var style = attributes(kind: kind, inline: inline, size: size)
-                if run.comment {
-                    style[.thockComment] = run.text
-                    output.append(NSAttributedString(string: String(commentMark), attributes: style))
-                } else {
-                    output.append(NSAttributedString(string: run.text, attributes: style))
-                }
-            }
-            if index < editable.count - 1 {
-                output.append(NSAttributedString(string: "\n", attributes: attributes(kind: kind, inline: EditorInline(), size: size)))
-            }
-        }
-        return output
     }
 
-    /// The editor's content as blocks of the subset, ready to be written.
-    static func blocks(from text: NSAttributedString) -> [Block] {
-        var blocks: [Block] = []
-        let string = text.string as NSString
-        string.enumerateSubstrings(in: NSRange(location: 0, length: string.length), options: [.byParagraphs, .substringNotRequired]) { _, range, enclosing, _ in
-            guard enclosing.length > 0 else { return }
-            let kind = kind(in: text, paragraph: enclosing)
-            var runs: [InlineRun] = []
-            if range.length > 0 {
-                text.enumerateAttributes(in: range) { attributes, runRange, _ in
-                    let inline = inline(attributes, kind: kind)
-                    func styled(_ text: String, comment: Bool = false) -> InlineRun {
-                        InlineRun(text, bold: inline.bold, italic: inline.italic, code: inline.code, strike: inline.strike, link: inline.link, comment: comment)
-                    }
-                    let substring = string.substring(with: runRange)
-                    guard let comment = attributes[.thockComment] as? String else {
-                        runs.append(styled(substring))
-                        return
-                    }
-                    // Text typed next to the mark can inherit its attribute;
-                    // only the mark itself stands for the comment.
-                    var typed = ""
-                    for character in substring {
-                        if character == commentMark {
-                            runs.append(styled(typed))
-                            runs.append(styled(comment, comment: true))
-                            typed = ""
-                        } else {
-                            typed.append(character)
-                        }
-                    }
-                    runs.append(styled(typed))
-                }
-            }
-            let markdown = Inline.serialize(runs).trimmingCharacters(in: .whitespaces)
-            if markdown.isEmpty {
-                blocks.append(Block(id: blocks.count, kind: .blank, text: "", touched: true))
-            } else {
-                blocks.append(Block(id: blocks.count, kind: kind.blockKind, text: markdown, touched: true))
-            }
+    static func paragraphs(from text: NSAttributedString) -> [EditorParagraph] {
+        EditorText.paragraphs(from: text) { attributes, kind in
+            EditorStyle.inline(attributes, kind: kind)
         }
-        return blocks
     }
 }
 
@@ -393,7 +264,7 @@ final class EditorTextView: UITextView {
                 insertText(String(character))
             }
         }
-        let lines = EditorDocument(blocks: EditorStyle.blocks(from: textStorage)).lines()
+        let lines = EditorDocument(blocks: blocks).lines()
         try? lines.joined(separator: "\n").write(toFile: NSTemporaryDirectory() + "editor-dump.md", atomically: true, encoding: .utf8)
     }
     #endif
@@ -405,6 +276,14 @@ final class EditorTextView: UITextView {
         let size = placeholder.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
         placeholder.frame = CGRect(x: indent, y: textContainerInset.top, width: width, height: size.height)
         placeholder.isHidden = textStorage.length > 0
+    }
+
+    /// The blocks the editor was opened with, which its content is written
+    /// back over.
+    var opened = BlockEditing()
+
+    var blocks: [Block] {
+        opened.blocks(from: EditorStyle.paragraphs(from: textStorage))
     }
 
     var currentParagraph: NSRange {
@@ -486,6 +365,9 @@ final class EditorTextView: UITextView {
             var inline = EditorStyle.inline(attributes, kind: current)
             change?(&inline)
             var restyled = EditorStyle.attributes(kind: kind ?? current, inline: inline, size: fontSize)
+            // A restyled paragraph still knows which block it was opened
+            // from, so it keeps that block's level, marker and indent.
+            restyled[.thockOrigin] = attributes[.thockOrigin]
             restyled[.thockComment] = attributes[.thockComment]
             updates.append((runRange, restyled))
         }
@@ -518,8 +400,7 @@ final class EditorHandle {
     fileprivate weak var textView: EditorTextView?
 
     var blocks: [Block] {
-        guard let textView else { return [] }
-        return EditorStyle.blocks(from: textView.attributedText)
+        textView?.blocks ?? []
     }
 
     var isEmpty: Bool {
@@ -555,8 +436,9 @@ struct RichTextEditor: UIViewRepresentable {
         view.isScrollEnabled = scrolls
         view.placeholder.text = placeholder
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.opened = BlockEditing(initial)
         if !initial.isEmpty {
-            view.attributedText = EditorStyle.attributed(initial, size: fontSize)
+            view.attributedText = EditorStyle.attributed(view.opened.paragraphs, size: fontSize)
             view.selectedRange = NSRange(location: view.textStorage.length, length: 0)
         }
         let bar = FormatBar(textView: view, coordinator: context.coordinator)
@@ -598,7 +480,7 @@ struct RichTextEditor: UIViewRepresentable {
             view.setNeedsLayout()
             view.invalidateIntrinsicContentSize()
             updateSuggestions(view)
-            parent.onChange(EditorStyle.blocks(from: view.textStorage))
+            parent.onChange(view.blocks)
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
