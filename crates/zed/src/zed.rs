@@ -1622,7 +1622,21 @@ fn open_about_window(cx: &mut App) {
                                     .color(Color::Muted)
                                     .size(LabelSize::XSmall),
                             )
-                            .child(Label::new(self.full_version.clone()).size(LabelSize::Small)),
+                            .child(Label::new(self.full_version.clone()).size(LabelSize::Small))
+                            // Thock: the licence and the fork disclaimer belong where people
+                            // look for them.
+                            .child(
+                                Label::new(
+                                    "Free software under the GPL-3.0-or-later · github.com/DiegoTavares/thock",
+                                )
+                                .color(Color::Muted)
+                                .size(LabelSize::XSmall),
+                            )
+                            .child(
+                                Label::new("A fork of Zed, not affiliated with Zed Industries.")
+                                    .color(Color::Muted)
+                                    .size(LabelSize::XSmall),
+                            ),
                     )
                     .child(
                         h_flex()
@@ -1697,7 +1711,7 @@ fn open_about_window(cx: &mut App) {
 
     let window_size = Size {
         width: px(440.),
-        height: px(300.),
+        height: px(340.),
     };
 
     cx.open_window(

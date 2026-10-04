@@ -108,6 +108,13 @@ All mechanical; each is a string swap or a one-line addition.
 
 ## 6. Non-goals and what stays
 
+_(Added 2026-10-04.)_ The visible identity followed the technical one: `crates/zed/resources/app-icon*`
+and `Document.icns` are now Thock's own mark (derived from the phone's `icon-1024.png`; the stable bundle
+and `bundle-linux` use the stable files instead of borrowing dev's), `Permissions.plist` and
+`DocumentTypes.plist` say Thock, the Linux desktop entry describes a notebook, and the About window and
+`assets/licenses.md` (via `crates/thock/assets/NOTICE.md` and the GPL and Apache texts) carry the licence
+and the fork disclaimer.
+
 - **Renaming `zed://` inside upstream code** (`ZED_URL_SCHEME`, `zed_urls`, settings deep links, skill
   share links, schema and mention URIs). See decision 6. The visible consequence: a settings or skill
   share link copied out of Thock is still `zed://…`; pasting it into a browser opens Zed if installed,
