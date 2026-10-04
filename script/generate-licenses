@@ -18,6 +18,15 @@ fail_on_stderr() {
 echo -n "" >"$OUTPUT_FILE"
 
 {
+    # Thock: the fork notice and the runtime downloads it makes, ahead of Zed's own lists.
+    cat crates/thock/assets/NOTICE.md
+    echo
+    echo -e "# ###### THOCK AND ZED LICENSES ######\n"
+    cat LICENSE-GPL
+    echo
+    cat LICENSE-APACHE
+    echo
+
     echo -e "# ###### THEME LICENSES ######\n"
     cat assets/themes/LICENSES
 

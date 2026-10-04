@@ -56,7 +56,7 @@
 <main>
   <p class="eyebrow">Privacy</p>
   <h1>Your notes are yours</h1>
-  <p class="updated">Last updated October 2, 2026</p>
+  <p class="updated">Last updated October 4, 2026</p>
 
   <p>Thock is a desktop app for macOS and Linux, Thock Vault for iPhone, an optional Thock Plus
   service, and this website. This page says what each of them keeps, where it goes, and why. The
@@ -75,6 +75,9 @@
     what they return is written into your vault.</li>
     <li>If you use your own AI agent (Claude Code, Gemini CLI and others), it runs under your own
     account with that provider, under their terms.</li>
+    <li>Connecting the Thock Agent (a Thock Plus feature, below) downloads the agent program and a
+    Node runtime from their public registries into a folder the app owns. Nothing of yours is sent
+    in that download.</li>
   </ul>
 
   <h2>Thock Plus</h2>
@@ -103,14 +106,17 @@
     <li>Once paired with your desktop, the app talks only to the Thock Plus service described
     above, sending your phone's name at pairing.</li>
     <li>When you clip a link, the phone fetches that page itself to keep its readable text.</li>
+    <li>When you Ask on the phone, your question and the notes the agent reads to answer it are
+    sent from the phone through OpenRouter to the AI model, exactly as the hosted agent on the
+    desktop does. Thock does not store the conversation.</li>
     <li>The camera is used only to scan the pairing code, and Face ID only to unlock your notes on
     the phone. Neither image nor biometric data leaves the device.</li>
     <li>The app has no analytics, advertising or tracking.</li>
   </ul>
 
   <h2>This website</h2>
-  <p>If you join the waitlist, we keep your email address to send you an invite, and for nothing
-  else. The pages load fonts from Google Fonts. There are no analytics or cookies.</p>
+  <p>If you join the waitlist, we keep your email address to send you an invite and, now and then,
+  a note about what changed in Thock. Reply to any of them to be taken off the list. The pages load fonts from Google Fonts. There are no analytics or cookies.</p>
 
   <h2>Where it is kept</h2>
   <p>The Thock Plus service, the encrypted sync files and the waitlist run on Google Cloud in the

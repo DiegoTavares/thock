@@ -325,7 +325,10 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   app, so every existing handler answers to both and upstream's internal `zed://` strings stay put; a test
   keeps `ReleaseChannel::app_id` and the bundle metadata from drifting apart again. Existing installs keep
   their vault and settings but see one keychain prompt and reset macOS per-app permissions, so it ships as
-  a deliberate release. Spec `specs/v35-app-identity.md`. _(in progress)_
+  a deliberate release. The app also got its own icon (the phone's amber mark, in the macOS and Linux
+  shapes) in place of Zed's, the macOS permission prompts, document type and Linux desktop entry stopped
+  saying Zed, and the About window and the in-app licences file now carry the GPL notice and the
+  not-affiliated-with-Zed line. Spec `specs/v35-app-identity.md`. _(in progress)_
 - [ ] **A circuit breaker on the cloud bill** — every Thock service is public, and GCP budgets only send
   email, so a script looping over an installer could run up four figures a day. A small guard service
   listens to budget notifications and, once a project's actual spend reaches twice its budget, switches its

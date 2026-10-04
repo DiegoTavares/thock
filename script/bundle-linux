@@ -178,12 +178,7 @@ rm -rf "${app_dir}/lib/*"
 cp $(find_libs) "${app_dir}/lib"
 
 # Icons
-# Thock has no stable icon asset; stable ships the same icon as dev, matching
-# bundle-stable in crates/zed/Cargo.toml.
 icon_suffix="$suffix"
-if [ "$channel" = "stable" ]; then
-  icon_suffix="-dev"
-fi
 mkdir -p "${app_dir}/share/icons/hicolor/512x512/apps"
 cp "crates/zed/resources/app-icon$icon_suffix.png" "${app_dir}/share/icons/hicolor/512x512/apps/thock.png"
 mkdir -p "${app_dir}/share/icons/hicolor/1024x1024/apps"
