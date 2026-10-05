@@ -12645,6 +12645,7 @@ dependencies = [
  "menu",
  "migrator",
  "mimalloc",
+ "nix 0.29.0",
  "node_runtime",
  "notifications",
  "outline",
