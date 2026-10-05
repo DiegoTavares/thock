@@ -397,7 +397,7 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   planner lines; a paragraph in any prose section, on the week or on a day, can be changed or added in
   place. Headings, rules and the agent's review are drawn, never edited, and looking writes nothing.
   Design reference: https://claude.ai/artifact/JCHoKASWt7gcYe49YGkPHn. Spec `specs/v37-week-plan.md`.
-  _(planned)_
+  _(on `main`; ships with the next phone build)_
 
 ---
 

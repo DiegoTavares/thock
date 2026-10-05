@@ -35,6 +35,10 @@ enum AppSheet: Identifiable, Equatable {
     case ask
     case receipts
     case you
+    case calendar
+    /// A prose section open for a paragraph edit (V37 §6): the card's
+    /// heading line and the paragraph being edited, or `nil` for a new one.
+    case section(note: NoteID, card: Int, editing: Int?)
 
     var id: String {
         switch self {
@@ -44,6 +48,8 @@ enum AppSheet: Identifiable, Equatable {
         case .ask: return "ask"
         case .receipts: return "receipts"
         case .you: return "you"
+        case .calendar: return "calendar"
+        case .section(_, let card, _): return "section-\(card)"
         }
     }
 }
@@ -76,6 +82,9 @@ final class AppModel {
     var toast: Toast?
     var isUnlocked = false
     var selectedDay: VaultDay = .today()
+    var selectedWeek: VaultWeek = .current()
+    /// The week canvas takes the day canvas's slot (V37 §5, N1).
+    var showingWeek = false
     var pairingError: String?
     var isPairing = false
     var deskAwake = true
@@ -99,7 +108,7 @@ final class AppModel {
     private let secrets = KeychainSecretStore()
     private var observers: [NSObjectProtocol] = []
     private var toastTask: Task<Void, Never>?
-    private var pendingRemoval: (item: PlannerItem, day: VaultDay)?
+    private var pendingRemoval: (item: PlannerItem, note: NoteID)?
     private var isAuthenticating = false
     /// Set on launch and on every return from the background.
     private var needsGreeting = true
@@ -276,7 +285,7 @@ final class AppModel {
     }
 
     private func finishConnecting() async {
-        selectedDay = .today()
+        goToToday()
         isUnlocked = true
         needsGreeting = false
         phase = .ready
@@ -338,7 +347,7 @@ final class AppModel {
         guard needsGreeting else { return }
         needsGreeting = false
         // Every launch is today (V33 §5, H1); so is every return.
-        selectedDay = .today()
+        goToToday()
         let entry = EntryPoint.take()
         if let entry, entry != .journal {
             // Writing needs no unlock: the sheet rises over the locked canvas.
@@ -380,6 +389,33 @@ final class AppModel {
         }
     }
 
+    // MARK: The calendar
+
+    /// Opens the calendar over the canvas. The dots say which days were
+    /// written on, so it waits for the unlock like every other read.
+    func openCalendar() {
+        guard phase == .ready, isUnlocked else { return }
+        sheet = .calendar
+    }
+
+    func go(to day: VaultDay) {
+        selectedDay = day
+        showingWeek = false
+        sheet = nil
+    }
+
+    func go(to week: VaultWeek) {
+        selectedWeek = week
+        showingWeek = true
+        sheet = nil
+    }
+
+    func goToToday() {
+        selectedDay = .today()
+        selectedWeek = .current()
+        showingWeek = false
+    }
+
     func takePendingEntry() {
         if let entry = EntryPoint.take() {
             open(entry)
@@ -406,9 +442,9 @@ final class AppModel {
 
     /// Launch arguments for looking at a screen without tapping to it:
     /// `-thock-practice` opens the practice notebook from a fresh install,
-    /// `-thock-open <journal|idea|clip|ask|receipts|you|dock>` opens a sheet,
-    /// `-thock-day <offset>` shows another day, `-thock-looks <dark|light|system>`
-    /// sets the appearance.
+    /// `-thock-open <journal|idea|clip|ask|receipts|you|dock|calendar>` opens a sheet,
+    /// `-thock-day <offset>` shows another day, `-thock-week <offset>` a week,
+    /// `-thock-looks <dark|light|system>` sets the appearance.
     private func applyLaunchArguments() async {
         let arguments = ProcessInfo.processInfo.arguments
         func value(after flag: String) -> String? {
@@ -424,6 +460,9 @@ final class AppModel {
         if let offset = value(after: "-thock-day").flatMap(Int.init) {
             selectedDay = VaultDay.today().adding(days: offset)
         }
+        if let offset = value(after: "-thock-week").flatMap(Int.init) {
+            go(to: VaultWeek.current().adding(weeks: offset))
+        }
         #if DEBUG
         if let script = value(after: "-thock-script") {
             await run(script: script)
@@ -432,6 +471,7 @@ final class AppModel {
         switch value(after: "-thock-open") {
         case "receipts"?: sheet = .receipts
         case "you"?: sheet = .you
+        case "calendar"?: sheet = .calendar
         case "dock"?: sheet = .capture(entry: "dock", preset: nil)
         case let other?:
             if let entry = EntryPoint(rawValue: other) { open(entry) }
@@ -454,11 +494,11 @@ final class AppModel {
                 perform { try $0.journalAppend(blocks: Blocks.parse(parts[1])) }
             case "tick" where parts.count >= 2:
                 if let item = session?.view(today)?.planner.items.first(where: { $0.label.hasPrefix(parts[1]) }) {
-                    tick(item, day: today)
+                    tick(item, note: .day(today))
                 }
             case "soon" where parts.count >= 2:
                 if let item = session?.view(today)?.planner.items.first(where: { $0.label.hasPrefix(parts[1]) }) {
-                    perform { try $0.moveToSoon(item, day: today) }
+                    perform { try $0.moveToSoon(item, note: .day(today)) }
                 }
             case "asked" where parts.count == 3:
                 // A finished turn in the day's thread, as if the agent had
@@ -634,17 +674,17 @@ final class AppModel {
         }
     }
 
-    func tick(_ item: PlannerItem, day: VaultDay) {
-        if perform({ try $0.tick(item, day: day) }) {
+    func tick(_ item: PlannerItem, note: NoteID) {
+        if perform({ try $0.tick(item, note: note) }) {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         }
     }
 
     /// Removal is the one destructive move, so it waits a few seconds for an
     /// undo before it is written.
-    func remove(_ item: PlannerItem, day: VaultDay) {
+    func remove(_ item: PlannerItem, note: NoteID) {
         commitPendingRemoval()
-        pendingRemoval = (item, day)
+        pendingRemoval = (item, note)
         revision += 1
         show("Line removed") { [weak self] in
             self?.pendingRemoval = nil
@@ -653,14 +693,14 @@ final class AppModel {
         }
     }
 
-    func isBeingRemoved(_ item: PlannerItem, day: VaultDay) -> Bool {
-        pendingRemoval?.item == item && pendingRemoval?.day == day
+    func isBeingRemoved(_ item: PlannerItem, note: NoteID) -> Bool {
+        pendingRemoval?.item == item && pendingRemoval?.note == note
     }
 
     func commitPendingRemoval() {
         guard let removal = pendingRemoval else { return }
         pendingRemoval = nil
-        perform { try $0.remove(removal.item, day: removal.day) }
+        perform { try $0.remove(removal.item, note: removal.note) }
     }
 
     func checkAgain() async {

@@ -39,6 +39,11 @@ struct RootView: View {
                     ReceiptsScreen()
                 case .you:
                     YouSheet()
+                case .calendar:
+                    CalendarSheet()
+                        .presentationDetents([.height(430)])
+                case .section(let note, let card, let editing):
+                    SectionScreen(note: note, cardID: card, editingLine: editing)
                 }
             }
             .presentationBackground(Theme.surface)

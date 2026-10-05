@@ -1,6 +1,6 @@
 # Thock V37 — The week, from the date: a calendar and the week canvas on the phone
 
-**Status:** Design accepted (2026-10-05); implementation not started
+**Status:** Implemented (2026-10-05); ships with the next phone build
 **Owner:** Diego · **Date:** 2026-10-05
 **Design reference:** the interactive design document with the mockups and the option cards this
 spec resolves: <https://claude.ai/artifact/JCHoKASWt7gcYe49YGkPHn>. Layout questions go there

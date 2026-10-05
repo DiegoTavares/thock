@@ -31,16 +31,57 @@ public struct VaultSession: Sendable {
         store.content(config.dailyPath(day))
     }
 
+    public func noteText(_ note: NoteID) -> String? {
+        store.content(config.path(note))
+    }
+
     /// The note for a day as the canvas draws it. Today's note that does not
     /// exist yet is drawn from its template, so its sections are there to
     /// write into; the first write creates it.
     public func view(_ day: VaultDay, now: Date = Date()) -> NoteView? {
+        view(.day(day), now: now)
+    }
+
+    /// A day or a week as the canvas draws it. A week with no note yet is
+    /// always drawn from its template, whichever week it is (V37 §11 #6);
+    /// a day only when it is today.
+    public func view(_ note: NoteID, now: Date = Date()) -> NoteView? {
         let config = config
-        if let text = store.content(config.dailyPath(day)) {
-            return NoteView(text: text, config: config)
+        if let text = store.content(config.path(note)) {
+            return NoteView(text: text, config: config, kind: note.kind)
         }
-        guard day == today(now: now), let seed = store.seedText(writes(now: now).dailySeed(day)) else { return nil }
-        return NoteView(text: seed, config: config)
+        if case .day(let day) = note, day != today(now: now) { return nil }
+        guard let seed = store.seedText(writes(now: now).seed(for: note)) else { return nil }
+        return NoteView(text: seed, config: config, kind: note.kind)
+    }
+
+    // MARK: The calendar
+
+    /// The days of a month that have a note, read from the phone's copy.
+    public func daysWithNotes(in month: VaultMonth) -> Set<VaultDay> {
+        let config = config
+        var days = Set<VaultDay>()
+        var day = month.first
+        while month.contains(day) {
+            if store.exists(config.dailyPath(day)) { days.insert(day) }
+            day = day.adding(days: 1)
+        }
+        return days
+    }
+
+    public func hasNote(_ week: VaultWeek) -> Bool {
+        store.exists(config.weeklyPath(week))
+    }
+
+    /// The oldest day the phone's copy holds a note for. A day before it is
+    /// one sync has not brought down, not one that was never written
+    /// (V37 §11 #7). `nil` when nothing is known, or the vault names days
+    /// in a way the phone cannot read back.
+    public func oldestDay() -> VaultDay? {
+        let config = config
+        return store.paths(under: config.daily.dir.isEmpty ? nil : config.daily.dir)
+            .compactMap(config.day(ofDailyPath:))
+            .min()
     }
 
     private func record(_ writes: [PlannedWrite]) throws {
@@ -49,15 +90,15 @@ public struct VaultSession: Sendable {
         try store.record(writes)
     }
 
-    /// Records writes that name lines of a day's note. When the note was
-    /// drawn from its template and is not in the vault yet, it is created
-    /// from the template first: without that both ends would make a bare
-    /// note holding only the heading the write names.
-    private func record(_ writes: [PlannedWrite], onNoteOf day: VaultDay, now: Date = Date()) throws {
+    /// Records writes that name lines of a note. When the note was drawn
+    /// from its template and is not in the vault yet, it is created from the
+    /// template first: without that both ends would make a bare note holding
+    /// only the heading the write names.
+    private func record(_ writes: [PlannedWrite], on note: NoteID, now: Date = Date()) throws {
         guard !writes.isEmpty else { return }
         let builder = self.writes(now: now)
-        if noteText(day) == nil, store.seedText(builder.dailySeed(day)) != nil {
-            try record([builder.noteFromTemplate(day)] + writes)
+        if noteText(note) == nil, store.seedText(builder.seed(for: note)) != nil {
+            try record([builder.noteFromTemplate(note)] + writes)
         } else {
             try record(writes)
         }
@@ -152,43 +193,63 @@ public struct VaultSession: Sendable {
         return view.journal.written.last { $0.time == String(parts[2]) }
     }
 
-    private func planner(_ day: VaultDay) -> Planner? {
-        view(day)?.planner
+    private func planner(_ note: NoteID) -> Planner? {
+        view(note)?.planner
     }
 
-    public func tick(_ item: PlannerItem, day: VaultDay) throws {
-        guard let planner = planner(day), let write = writes().tick(item, planner: planner, day: day) else { return }
-        try record([write], onNoteOf: day)
+    public func tick(_ item: PlannerItem, note: NoteID) throws {
+        guard let planner = planner(note), let write = writes().tick(item, planner: planner, note: note) else { return }
+        try record([write], on: note)
     }
 
-    public func setTime(_ item: PlannerItem, startMinutes: Int?, endMinutes: Int?, day: VaultDay) throws {
-        guard let planner = planner(day), let write = writes().setTime(item, startMinutes: startMinutes, endMinutes: endMinutes, planner: planner, day: day) else { return }
-        try record([write], onNoteOf: day)
+    public func setTime(_ item: PlannerItem, startMinutes: Int?, endMinutes: Int?, note: NoteID) throws {
+        guard let planner = planner(note), let write = writes().setTime(item, startMinutes: startMinutes, endMinutes: endMinutes, planner: planner, note: note) else { return }
+        try record([write], on: note)
     }
 
-    public func editText(_ item: PlannerItem, text: String, day: VaultDay) throws {
-        guard let planner = planner(day), let write = writes().editText(item, text: text, planner: planner, day: day) else { return }
-        try record([write], onNoteOf: day)
+    public func editText(_ item: PlannerItem, text: String, note: NoteID) throws {
+        guard let planner = planner(note), let write = writes().editText(item, text: text, planner: planner, note: note) else { return }
+        try record([write], on: note)
     }
 
-    public func remove(_ item: PlannerItem, day: VaultDay) throws {
-        guard let planner = planner(day) else { return }
-        try record([writes().remove(item, planner: planner, day: day)], onNoteOf: day)
+    public func remove(_ item: PlannerItem, note: NoteID) throws {
+        guard let planner = planner(note) else { return }
+        try record([writes().remove(item, planner: planner, note: note)], on: note)
     }
 
-    public func moveToSoon(_ item: PlannerItem, day: VaultDay) throws {
-        guard let planner = planner(day) else { return }
-        try record(writes().moveToSoon(item, planner: planner, day: day), onNoteOf: day)
+    public func moveToSoon(_ item: PlannerItem, note: NoteID) throws {
+        guard let planner = planner(note) else { return }
+        try record(writes().moveToSoon(item, planner: planner, note: note), on: note)
     }
 
-    public func addLine(_ text: String, group: PlannerGroup?, day: VaultDay) throws {
-        guard let planner = planner(day), let write = writes().addLine(text, group: group, planner: planner, day: day) else { return }
+    public func addLine(_ text: String, group: PlannerGroup?, note: NoteID) throws {
+        guard let planner = planner(note), let write = writes().addLine(text, group: group, planner: planner, note: note) else { return }
         try record([write])
+    }
+
+    /// Replaces one paragraph of a prose section (V37 §6, §8). Returns false
+    /// when there was nothing to change.
+    @discardableResult
+    public func replaceParagraph(_ block: Block, in card: NoteCard, with newText: String, note: NoteID, now: Date = Date()) throws -> Bool {
+        guard let text = noteText(note), let heading = card.heading else { return false }
+        guard let write = writes(now: now).replaceParagraph(block, with: newText, heading: heading, note: note, text: text) else { return false }
+        try record([write])
+        return true
+    }
+
+    /// Adds a paragraph at the end of a prose section, creating the note from
+    /// its template when the section was only drawn from it. Returns false
+    /// when there was nothing to write.
+    @discardableResult
+    public func appendParagraph(blocks: [Block], to card: NoteCard, note: NoteID, now: Date = Date()) throws -> Bool {
+        guard let heading = card.heading, let write = writes(now: now).appendParagraph(blocks: blocks, heading: heading, note: note) else { return false }
+        try record([write])
+        return true
     }
 
     /// The next lines of today's plan that are still open, for the widgets.
     public func nextLines(limit: Int, now: Date = Date()) -> [PlannerItem] {
-        guard let planner = planner(today(now: now)) else { return [] }
+        guard let planner = planner(.day(today(now: now))) else { return [] }
         let open = planner.items.filter { !$0.done && !$0.struck }
         let timed = open.filter { $0.time != nil }.sorted { ($0.time?.startMinutes ?? 0) < ($1.time?.startMinutes ?? 0) }
         let untimed = open.filter { $0.time == nil }
@@ -197,8 +258,8 @@ public struct VaultSession: Sendable {
 
     /// Ticks a line named by its hash, as a widget button does.
     public func tick(hash: String, ordinal: Int, day: VaultDay) throws {
-        guard let item = planner(day)?.items.first(where: { $0.hash == hash && $0.ordinal == ordinal && !$0.isCalendar }) else { return }
-        try tick(item, day: day)
+        guard let item = planner(.day(day))?.items.first(where: { $0.hash == hash && $0.ordinal == ordinal && !$0.isCalendar }) else { return }
+        try tick(item, note: .day(day))
     }
 
     /// Note names for `[[` autocomplete, best matches first.

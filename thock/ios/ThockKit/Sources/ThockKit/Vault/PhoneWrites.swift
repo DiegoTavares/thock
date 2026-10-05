@@ -136,14 +136,23 @@ public struct PhoneWrites: Sendable {
         SeedInfo(kind: .daily, day: day, time: clock)
     }
 
-    /// Creates a day's note from its template and adds nothing to it. Only an
+    /// What a note is created from when a write reaches it before it exists:
+    /// the daily template for a day, the weekly one for a week.
+    public func seed(for note: NoteID) -> SeedInfo {
+        switch note {
+        case .day(let day): return dailySeed(day)
+        case .week(let week): return SeedInfo(kind: .weekly, day: week.monday, time: clock)
+        }
+    }
+
+    /// Creates a note from its template and adds nothing to it. Only an
     /// append can carry the template, so this goes ahead of a tick, an edit
     /// or a removal made on a note the phone drew from the template before
     /// anything had created it. Where the note exists it is a no-op.
-    public func noteFromTemplate(_ day: VaultDay) -> PlannedWrite {
-        var write = document(.append, path: config.dailyPath(day))
+    public func noteFromTemplate(_ note: NoteID) -> PlannedWrite {
+        var write = document(.append, path: config.path(note))
         write.createFromTemplate = true
-        return PlannedWrite(document: write, seed: dailySeed(day))
+        return PlannedWrite(document: write, seed: seed(for: note))
     }
 
     /// The first 12 hex of `sha256(device ‖ 0 ‖ "thock-ios" ‖ 0 ‖ instant)`:
@@ -442,30 +451,62 @@ public struct PhoneWrites: Sendable {
     /// replacement; a wrapped one needs the section's lines rewritten around
     /// it, guarded by the section's hash.
     public func journalReplace(entry: JournalEntry, newText: String, day: VaultDay, note: String, journal: Journal) -> PlannedWrite? {
-        let path = config.dailyPath(day)
         let prefix = entry.time.map { "**\($0)** · " } ?? ""
-        let newLines = (prefix + newText).components(separatedBy: "\n")
-        if entry.source.count == 1, newLines.count == 1 {
-            guard !SyncCore.lineIdentity(entry.source[0]).isEmpty else { return nil }
+        return replaceParagraph(at: entry.line, source: entry.source, with: prefix + newText, heading: journal.heading, path: config.dailyPath(day), note: note)
+    }
+
+    // MARK: Prose
+
+    /// Replaces one paragraph of a user's section in place (V37 §6, §8). A
+    /// one-line paragraph is a single-line replacement; a wrapped one needs
+    /// the section's lines rewritten around it, guarded by the section's
+    /// hash, so a desk edit in between becomes a conflict, never a loss.
+    public func replaceParagraph(at line: Int, source: [String], with newText: String, heading: HeadingRef, path: String, note: String) -> PlannedWrite? {
+        let newLines = newText.components(separatedBy: "\n")
+        if source.count == 1, newLines.count == 1 {
+            guard !SyncCore.lineIdentity(source[0]).isEmpty else { return nil }
             var write = document(.replaceLine, path: path)
-            write.heading = journal.heading
-            write.lineHash = SyncCore.lineHash(entry.source[0])
-            write.ordinal = ordinal(of: entry.line, hash: SyncCore.lineHash(entry.source[0]), in: note, heading: journal.heading)
+            write.heading = heading
+            write.lineHash = SyncCore.lineHash(source[0])
+            write.ordinal = ordinal(of: line, hash: SyncCore.lineHash(source[0]), in: note, heading: heading)
             write.newLine = newLines[0]
             return PlannedWrite(document: write)
         }
         let file = TextFile(note)
-        guard let heading = file.resolve(journal.heading) else { return nil }
-        let section = file.section(of: heading)
+        guard let found = file.resolve(heading) else { return nil }
+        let section = file.section(of: found)
         var body = file.lines[section.body].map(\.text)
-        let start = entry.line - section.start
-        guard start >= 0, start + entry.source.count <= body.count else { return nil }
+        let start = line - section.start
+        guard start >= 0, start + source.count <= body.count else { return nil }
         var write = document(.replaceSection, path: path)
-        write.heading = journal.heading
+        write.heading = heading
         write.baseHash = SyncCore.sectionHash(lines: body)
-        body.replaceSubrange(start..<(start + entry.source.count), with: newLines)
+        body.replaceSubrange(start..<(start + source.count), with: newLines)
         write.lines = body
         return PlannedWrite(document: write)
+    }
+
+    /// Replaces the paragraph drawn as `block` in a note's prose section.
+    public func replaceParagraph(_ block: Block, with newText: String, heading: HeadingRef, note: NoteID, text: String) -> PlannedWrite? {
+        replaceParagraph(at: block.line, source: block.source, with: newText, heading: heading, path: config.path(note), note: text)
+    }
+
+    /// Appends what the editor holds at the end of a prose section, before
+    /// the next heading. The note is created from its template when missing.
+    public func appendParagraph(blocks: [Block], heading: HeadingRef, note: NoteID) -> PlannedWrite? {
+        let content = blocks.filter { $0.kind != .blank }.map { block -> Block in
+            var block = block
+            block.touched = true
+            return block
+        }
+        let lines = EditorDocument(blocks: content).lines()
+        guard !lines.joined().trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        var write = document(.append, path: config.path(note))
+        write.heading = heading
+        write.lines = lines
+        write.blankLineBefore = true
+        write.createFromTemplate = true
+        return PlannedWrite(document: write, seed: seed(for: note))
     }
 
     func ordinal(of line: Int, hash: String, in note: String, heading: HeadingRef) -> Int {
@@ -479,8 +520,8 @@ public struct PhoneWrites: Sendable {
 
     // MARK: Plan
 
-    func replace(_ item: PlannerItem, with line: String, planner: Planner, day: VaultDay) -> PlannedWrite {
-        var write = document(.replaceLine, path: config.dailyPath(day))
+    func replace(_ item: PlannerItem, with line: String, planner: Planner, note: NoteID) -> PlannedWrite {
+        var write = document(.replaceLine, path: config.path(note))
         write.heading = planner.heading
         write.lineHash = item.hash
         write.ordinal = item.ordinal
@@ -488,49 +529,50 @@ public struct PhoneWrites: Sendable {
         return PlannedWrite(document: write)
     }
 
-    public func tick(_ item: PlannerItem, planner: Planner, day: VaultDay) -> PlannedWrite? {
+    public func tick(_ item: PlannerItem, planner: Planner, note: NoteID) -> PlannedWrite? {
         guard let parts = TaskLineParts(item.raw) else { return nil }
-        return replace(item, with: parts.line(done: !item.done), planner: planner, day: day)
+        return replace(item, with: parts.line(done: !item.done), planner: planner, note: note)
     }
 
-    public func setTime(_ item: PlannerItem, startMinutes: Int?, endMinutes: Int?, planner: Planner, day: VaultDay) -> PlannedWrite? {
+    public func setTime(_ item: PlannerItem, startMinutes: Int?, endMinutes: Int?, planner: Planner, note: NoteID) -> PlannedWrite? {
         guard var parts = TaskLineParts(item.raw) else { return nil }
         parts.time = startMinutes.map { TimePrefix.format(startMinutes: $0, endMinutes: endMinutes) }
-        return replace(item, with: parts.line(), planner: planner, day: day)
+        return replace(item, with: parts.line(), planner: planner, note: note)
     }
 
-    public func editText(_ item: PlannerItem, text: String, planner: Planner, day: VaultDay) -> PlannedWrite? {
+    public func editText(_ item: PlannerItem, text: String, planner: Planner, note: NoteID) -> PlannedWrite? {
         guard var parts = TaskLineParts(item.raw) else { return nil }
         let cleaned = text.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
         guard !cleaned.isEmpty else { return nil }
         parts.text = cleaned
-        return replace(item, with: parts.line(), planner: planner, day: day)
+        return replace(item, with: parts.line(), planner: planner, note: note)
     }
 
-    public func remove(_ item: PlannerItem, planner: Planner, day: VaultDay) -> PlannedWrite {
-        var write = document(.removeLine, path: config.dailyPath(day))
+    public func remove(_ item: PlannerItem, planner: Planner, note: NoteID) -> PlannedWrite {
+        var write = document(.removeLine, path: config.path(note))
         write.heading = planner.heading
         write.lineHash = item.hash
         write.ordinal = item.ordinal
         return PlannedWrite(document: write)
     }
 
-    /// The line leaves the planner and lands under Soon, as the desk's wrap
-    /// flow does. It never creates tomorrow's note a day early (V33 §17 #14).
-    public func moveToSoon(_ item: PlannerItem, planner: Planner, day: VaultDay) -> [PlannedWrite] {
+    /// The line leaves the planner, or the week's goals, and lands under
+    /// Soon, as the desk's wrap flow does. It never creates tomorrow's note a
+    /// day early (V33 §17 #14).
+    public func moveToSoon(_ item: PlannerItem, planner: Planner, note: NoteID) -> [PlannedWrite] {
         guard let parts = TaskLineParts(item.raw) else { return [] }
         var append = document(.append, path: config.backlogFile)
         append.heading = HeadingRef(text: config.soonHeading, level: 2)
         append.lines = ["- [ ] " + parts.text]
         append.placement = .beforeChildren
-        return [remove(item, planner: planner, day: day), PlannedWrite(document: append)]
+        return [remove(item, planner: planner, note: note), PlannedWrite(document: append)]
     }
 
     /// A new line at the end of the planner, or of the group it was added from.
-    public func addLine(_ text: String, group: PlannerGroup?, planner: Planner, day: VaultDay) -> PlannedWrite? {
+    public func addLine(_ text: String, group: PlannerGroup?, planner: Planner, note: NoteID) -> PlannedWrite? {
         let cleaned = text.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
         guard !cleaned.isEmpty else { return nil }
-        var write = document(.append, path: config.dailyPath(day))
+        var write = document(.append, path: config.path(note))
         write.lines = ["- [ ] " + cleaned]
         if let group, group.name != nil, let heading = group.heading {
             write.heading = heading
@@ -539,8 +581,8 @@ public struct PhoneWrites: Sendable {
             write.heading = planner.heading
             write.placement = .beforeChildren
         }
-        write.createFromTemplate = day == today
-        return PlannedWrite(document: write, seed: day == today ? dailySeed(day) : nil)
+        write.createFromTemplate = true
+        return PlannedWrite(document: write, seed: seed(for: note))
     }
 
     // MARK: Clip

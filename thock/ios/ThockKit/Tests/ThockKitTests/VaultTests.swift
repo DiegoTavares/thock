@@ -99,7 +99,7 @@ final class VaultTests: XCTestCase {
         let view = NoteView(text: note, config: config)
         let task = try XCTUnwrap(view.planner.items.first)
         XCTAssertEqual(task.ordinal, 1)
-        let tick = try XCTUnwrap(writes().tick(task, planner: view.planner, day: day))
+        let tick = try XCTUnwrap(writes().tick(task, planner: view.planner, note: .day(day)))
         XCTAssertEqual(SyncCore.apply(existing: note, write: tick.document).text, "# Day\n\n## Day planner\n\n- Call Ana\n- [x] Call Ana\n")
     }
 
@@ -282,34 +282,34 @@ final class VaultTests: XCTestCase {
             SyncCore.apply(existing: planner, write: try XCTUnwrap(planned).document).text
         }
 
-        var change = changedLines(planner, try apply(builder.tick(deepWork, planner: view.planner, day: day)))
+        var change = changedLines(planner, try apply(builder.tick(deepWork, planner: view.planner, note: .day(day))))
         XCTAssertEqual(change.removed, ["- [ ] 09:30 - 11:00 Deep work"])
         XCTAssertEqual(change.added, ["- [x] 09:30 - 11:00 Deep work"])
 
-        change = changedLines(planner, try apply(builder.setTime(card, startMinutes: 15 * 60, endMinutes: 15 * 60 + 30, planner: view.planner, day: day)))
+        change = changedLines(planner, try apply(builder.setTime(card, startMinutes: 15 * 60, endMinutes: 15 * 60 + 30, planner: view.planner, note: .day(day))))
         XCTAssertEqual(change.removed, ["- [ ] Buy a card"])
         XCTAssertEqual(change.added, ["- [ ] 15:00 - 15:30 Buy a card"])
 
-        change = changedLines(planner, try apply(builder.setTime(deepWork, startMinutes: nil, endMinutes: nil, planner: view.planner, day: day)))
+        change = changedLines(planner, try apply(builder.setTime(deepWork, startMinutes: nil, endMinutes: nil, planner: view.planner, note: .day(day))))
         XCTAssertEqual(change.added, ["- [ ] Deep work"])
 
-        change = changedLines(planner, try apply(builder.editText(deepWork, text: "Deep work: the budget", planner: view.planner, day: day)))
+        change = changedLines(planner, try apply(builder.editText(deepWork, text: "Deep work: the budget", planner: view.planner, note: .day(day))))
         XCTAssertEqual(change.removed, ["- [ ] 09:30 - 11:00 Deep work"])
         XCTAssertEqual(change.added, ["- [ ] 09:30 - 11:00 Deep work: the budget"])
 
-        change = changedLines(planner, try apply(builder.remove(card, planner: view.planner, day: day)))
+        change = changedLines(planner, try apply(builder.remove(card, planner: view.planner, note: .day(day))))
         XCTAssertEqual(change.removed, ["- [ ] Buy a card"])
         XCTAssertEqual(change.added, [])
 
-        change = changedLines(planner, try apply(builder.addLine("Water the plants", group: nil, planner: view.planner, day: day)))
+        change = changedLines(planner, try apply(builder.addLine("Water the plants", group: nil, planner: view.planner, note: .day(day))))
         XCTAssertEqual(change.removed, [])
         XCTAssertEqual(change.added, ["- [ ] Water the plants"])
-        XCTAssertTrue(try apply(builder.addLine("Water the plants", group: nil, planner: view.planner, day: day)).contains("- [ ] Buy a card\n- [ ] Water the plants\n\n### Calendar"))
+        XCTAssertTrue(try apply(builder.addLine("Water the plants", group: nil, planner: view.planner, note: .day(day))).contains("- [ ] Buy a card\n- [ ] Water the plants\n\n### Calendar"))
 
         let calendar = view.planner.groups[1]
-        XCTAssertTrue(try apply(builder.addLine("Dentist", group: calendar, planner: view.planner, day: day)).contains("<!--gcal:5b7e3c9a1f24-->\n- [ ] Dentist\n\n## Personal"))
+        XCTAssertTrue(try apply(builder.addLine("Dentist", group: calendar, planner: view.planner, note: .day(day))).contains("<!--gcal:5b7e3c9a1f24-->\n- [ ] Dentist\n\n## Personal"))
 
-        let moved = builder.moveToSoon(deepWork, planner: view.planner, day: day)
+        let moved = builder.moveToSoon(deepWork, planner: view.planner, note: .day(day))
         XCTAssertEqual(moved.map(\.document.path), ["daily/2026-10-02.md", "backlog.md"])
         change = changedLines(planner, SyncCore.apply(existing: planner, write: moved[0].document).text)
         XCTAssertEqual(change.removed, ["- [ ] 09:30 - 11:00 Deep work"])
@@ -317,6 +317,195 @@ final class VaultTests: XCTestCase {
         let backlog = "# Backlog\n\n## Soon\n\n- [ ] Renew the passport\n\n### Home\n\n- [ ] Fix the light\n\n## Someday\n"
         XCTAssertEqual(SyncCore.apply(existing: backlog, write: moved[1].document).text,
                        "# Backlog\n\n## Soon\n\n- [ ] Renew the passport\n- [ ] Deep work\n\n### Home\n\n- [ ] Fix the light\n\n## Someday\n")
+    }
+
+    // MARK: V37 §10, the week
+
+    func testWeeksAreNamedAsTheVaultNamesThem() {
+        // 2026 has 53 ISO weeks; its last one runs into January 2027.
+        let lastMonday = VaultDay(year: 2026, month: 12, day: 28)
+        XCTAssertEqual(VaultWeek(lastMonday), VaultWeek(year: 2026, week: 53))
+        XCTAssertEqual(VaultWeek(VaultDay(year: 2027, month: 1, day: 1)), VaultWeek(year: 2026, week: 53))
+        XCTAssertEqual(VaultWeek(VaultDay(year: 2027, month: 1, day: 4)), VaultWeek(year: 2027, week: 1))
+        XCTAssertEqual(VaultWeek(year: 2026, week: 53).monday, lastMonday)
+        XCTAssertEqual(VaultWeek(year: 2027, week: 1).monday, VaultDay(year: 2027, month: 1, day: 4))
+        XCTAssertEqual(VaultWeek(year: 2026, week: 1).monday, VaultDay(year: 2025, month: 12, day: 29))
+        XCTAssertEqual(config.weeklyPath(VaultWeek(year: 2026, week: 53)), "weekly/2026-W53.md")
+        XCTAssertEqual(config.path(.week(VaultWeek(day))), config.weeklyPath(day))
+
+        let week = VaultWeek(day)
+        XCTAssertEqual(week.days.map(\.iso), ["2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04"])
+        XCTAssertTrue(week.contains(day))
+        XCTAssertEqual(week.adding(weeks: 1), VaultWeek(year: 2026, week: 41))
+        XCTAssertEqual(week.weeks(until: VaultWeek(year: 2027, week: 1)), 14)
+        // Every day of every week agrees with the day's own week fields.
+        var probe = VaultDay(year: 2024, month: 12, day: 20)
+        for _ in 0..<800 {
+            XCTAssertTrue(VaultWeek(probe).contains(probe), probe.iso)
+            XCTAssertEqual(config.weeklyPath(VaultWeek(probe)), config.weeklyPath(probe), probe.iso)
+            probe = probe.adding(days: 1)
+        }
+    }
+
+    func testAMonthIsRowsOfWholeWeeks() {
+        let october = VaultMonth(year: 2026, month: 10)
+        XCTAssertEqual(october.weeks.map(\.week), [40, 41, 42, 43, 44])
+        XCTAssertEqual(october.weeks.first?.days.first?.iso, "2026-09-28")
+        XCTAssertEqual(october.weeks.last?.days.last?.iso, "2026-11-01")
+        XCTAssertEqual(october.name, "October 2026")
+        XCTAssertEqual(october.adding(months: 3), VaultMonth(year: 2027, month: 1))
+        XCTAssertEqual(october.adding(months: -10), VaultMonth(year: 2025, month: 12))
+        XCTAssertEqual(VaultMonth(year: 2027, month: 1).weeks.map { "\($0.year)-W\($0.week)" }, ["2026-W53", "2027-W1", "2027-W2", "2027-W3", "2027-W4"])
+        XCTAssertEqual(VaultMonth(year: 2026, month: 2).weeks.count, 5)
+        XCTAssertEqual(VaultMonth(year: 2027, month: 2).weeks.count, 4)
+        XCTAssertNil(config.day(ofDailyPath: "weekly/2026-W40.md"))
+        XCTAssertEqual(config.day(ofDailyPath: "daily/2026-10-02.md"), day)
+        XCTAssertNil(config.day(ofDailyPath: "daily/old/2026-10-02.md"))
+    }
+
+    let weekly = """
+    # Week 40, 2026
+
+    _Seven days, one page._
+
+    ___
+
+    ## Goals
+
+    _Two or three things that would make this a good week._
+
+    - [x] Ship the sync status dot
+    - [ ] Read 100 pages
+
+    ___
+
+    ## Notes
+
+    A lighter week on purpose.
+    Thursday is the only full day.
+
+    ## Week review
+
+    _How did it go?_
+
+    # AI Week Review
+
+    Four of five planned days had deep work before noon.
+
+    ## Things Thock could forget
+
+    - [ ] The Sunday idea
+
+    """
+
+    func testTheWeekIsDrawnFromItsNoteWithGoalsAsItsChecklist() throws {
+        let view = NoteView(text: weekly, config: config, kind: .weekly)
+        XCTAssertEqual(view.cards.map(\.kind), [.preamble, .planner, .prose, .prose, .agent])
+        XCTAssertEqual(view.cards.map(\.title), ["", "Goals", "Notes", "Week review", "AI Week Review"])
+        XCTAssertEqual(view.planner.heading.text, "Goals")
+        XCTAssertEqual(view.planner.items.map(\.label), ["Ship the sync status dot", "Read 100 pages"])
+        XCTAssertEqual(view.planner.doneCount, 1)
+        XCTAssertFalse(view.journal.exists)
+        // Only the user's prose paragraphs are editable: not the preamble,
+        // not the agent's text, not its checklist.
+        let notes = try XCTUnwrap(view.cards.first { $0.title == "Notes" })
+        let paragraph = try XCTUnwrap(notes.blocks.first { $0.kind == .paragraph })
+        XCTAssertTrue(view.isEditable(paragraph, in: notes))
+        let preamble = view.cards[0]
+        XCTAssertFalse(view.isEditable(try XCTUnwrap(preamble.blocks.first { $0.kind == .paragraph }), in: preamble))
+        let agent = view.cards[4]
+        XCTAssertFalse(view.isEditable(try XCTUnwrap(agent.blocks.first { $0.kind == .paragraph }), in: agent))
+        // The template's prompt is drawn, not replaced: a tap on it starts a paragraph.
+        let review = try XCTUnwrap(view.cards.first { $0.title == "Week review" })
+        let prompt = try XCTUnwrap(review.blocks.first { $0.kind == .paragraph })
+        XCTAssertTrue(NoteView.isPrompt(prompt))
+        XCTAssertFalse(view.isEditable(prompt, in: review))
+        // A daily note is unchanged by the weekly rules: its goals, if any, are prose.
+        XCTAssertEqual(NoteView(text: weekly, config: config).planner.exists, false)
+    }
+
+    func testEveryGoalMoveChangesExactlyOneLine() throws {
+        let builder = writes()
+        let week = NoteID.week(VaultWeek(day))
+        let view = NoteView(text: weekly, config: config, kind: .weekly)
+        let pages = try XCTUnwrap(view.planner.items.first { $0.label == "Read 100 pages" })
+
+        func apply(_ planned: PlannedWrite?) throws -> String {
+            SyncCore.apply(existing: weekly, write: try XCTUnwrap(planned).document).text
+        }
+
+        var change = changedLines(weekly, try apply(builder.tick(pages, planner: view.planner, note: week)))
+        XCTAssertEqual(change.removed, ["- [ ] Read 100 pages"])
+        XCTAssertEqual(change.added, ["- [x] Read 100 pages"])
+
+        change = changedLines(weekly, try apply(builder.editText(pages, text: "Read 60 pages", planner: view.planner, note: week)))
+        XCTAssertEqual(change.removed, ["- [ ] Read 100 pages"])
+        XCTAssertEqual(change.added, ["- [ ] Read 60 pages"])
+
+        change = changedLines(weekly, try apply(builder.remove(pages, planner: view.planner, note: week)))
+        XCTAssertEqual(change.removed, ["- [ ] Read 100 pages"])
+        XCTAssertEqual(change.added, [])
+
+        let added = try apply(builder.addLine("Two no-screen evenings", group: nil, planner: view.planner, note: week))
+        XCTAssertEqual(changedLines(weekly, added).added, ["- [ ] Two no-screen evenings"])
+        XCTAssertTrue(added.contains("- [ ] Read 100 pages\n- [ ] Two no-screen evenings\n\n___\n\n## Notes"))
+        let addLine = try XCTUnwrap(builder.addLine("x", group: nil, planner: view.planner, note: week))
+        XCTAssertEqual(addLine.document.path, "weekly/2026-W40.md")
+        XCTAssertEqual(addLine.seed, SeedInfo(kind: .weekly, day: VaultDay(year: 2026, month: 9, day: 28), time: builder.clock))
+
+        let moved = builder.moveToSoon(pages, planner: view.planner, note: week)
+        XCTAssertEqual(moved.map(\.document.path), ["weekly/2026-W40.md", "backlog.md"])
+        XCTAssertEqual(changedLines(weekly, SyncCore.apply(existing: weekly, write: moved[0].document).text).removed, ["- [ ] Read 100 pages"])
+        XCTAssertEqual(SyncCore.apply(existing: "# Backlog\n\n## Soon\n\n- [ ] Renew the passport\n\n## Someday\n", write: moved[1].document).text,
+                       "# Backlog\n\n## Soon\n\n- [ ] Renew the passport\n- [ ] Read 100 pages\n\n## Someday\n")
+
+        // The agent's checklist is not the week's goals.
+        XCTAssertFalse(view.planner.items.contains { $0.label == "The Sunday idea" })
+    }
+
+    func testAParagraphIsReplacedOrAddedInPlace() throws {
+        let builder = writes()
+        let week = NoteID.week(VaultWeek(day))
+        let view = NoteView(text: weekly, config: config, kind: .weekly)
+        let notes = try XCTUnwrap(view.cards.first { $0.title == "Notes" })
+        let wrapped = try XCTUnwrap(notes.blocks.first { $0.kind == .paragraph })
+        XCTAssertEqual(wrapped.source.count, 2)
+
+        // A wrapped paragraph rewrites its section, guarded by the section's hash.
+        let replaced = try XCTUnwrap(builder.replaceParagraph(wrapped, with: "A lighter week on purpose.", heading: try XCTUnwrap(notes.heading), note: week, text: weekly))
+        XCTAssertEqual(replaced.document.kind, .replaceSection)
+        var change = changedLines(weekly, SyncCore.apply(existing: weekly, write: replaced.document).text)
+        XCTAssertEqual(change.removed, ["Thursday is the only full day."])
+        XCTAssertEqual(change.added, [])
+
+        // A one-line paragraph is a single-line replacement.
+        let review = try XCTUnwrap(view.cards.first { $0.title == "Week review" })
+        let prompt = try XCTUnwrap(review.blocks.first { $0.kind == .paragraph })
+        let fixed = try XCTUnwrap(builder.replaceParagraph(prompt, with: "Good week for shipping.", heading: try XCTUnwrap(review.heading), note: week, text: weekly))
+        XCTAssertEqual(fixed.document.kind, .replaceLine)
+        change = changedLines(weekly, SyncCore.apply(existing: weekly, write: fixed.document).text)
+        XCTAssertEqual(change.removed, ["_How did it go?_"])
+        XCTAssertEqual(change.added, ["Good week for shipping."])
+
+        // An added paragraph lands at the end of its section, before the next heading.
+        let appended = try XCTUnwrap(builder.appendParagraph(blocks: Blocks.parse("Keep Friday afternoon free."), heading: try XCTUnwrap(review.heading), note: week))
+        XCTAssertEqual(appended.seed?.kind, .weekly)
+        let after = SyncCore.apply(existing: weekly, write: appended.document).text
+        XCTAssertEqual(changedLines(weekly, after).added.filter { !$0.isEmpty }, ["Keep Friday afternoon free."])
+        XCTAssertEqual(changedLines(weekly, after).removed, [])
+        XCTAssertTrue(after.contains("_How did it go?_\n\nKeep Friday afternoon free.\n\n# AI Week Review"))
+        XCTAssertNil(builder.appendParagraph(blocks: Blocks.parse("   "), heading: try XCTUnwrap(review.heading), note: week))
+
+        // The same on a day's prose section.
+        let dayView = NoteView(text: planner, config: config)
+        let personal = try XCTUnwrap(dayView.cards.first { $0.title == "Personal" })
+        let text = try XCTUnwrap(personal.blocks.first { $0.kind == .paragraph })
+        XCTAssertTrue(dayView.isEditable(text, in: personal))
+        let edited = try XCTUnwrap(builder.replaceParagraph(text, with: "Text, edited.", heading: try XCTUnwrap(personal.heading), note: .day(day), text: planner))
+        XCTAssertEqual(edited.document.path, "daily/2026-10-02.md")
+        change = changedLines(planner, SyncCore.apply(existing: planner, write: edited.document).text)
+        XCTAssertEqual(change.removed, ["Text"])
+        XCTAssertEqual(change.added, ["Text, edited."])
     }
 
     func testATickKeepsEverythingElseOnTheLine() throws {

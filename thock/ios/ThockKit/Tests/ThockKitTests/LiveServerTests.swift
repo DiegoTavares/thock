@@ -197,8 +197,8 @@ final class LiveServerTests: XCTestCase {
         // The phone ticks a task, adds one and captures to the inbox.
         let planner = planner(store)
         let deepWork = try XCTUnwrap(planner.items.first { $0.label.hasPrefix("Deep work") })
-        try store.record([try XCTUnwrap(writes(store).tick(deepWork, planner: planner, day: day))])
-        try store.record([try XCTUnwrap(writes(store).addLine("Water the plants", group: nil, planner: planner, day: day))])
+        try store.record([try XCTUnwrap(writes(store).tick(deepWork, planner: planner, note: .day(day)))])
+        try store.record([try XCTUnwrap(writes(store).addLine("Water the plants", group: nil, planner: planner, note: .day(day)))])
         let captured = try XCTUnwrap(writes(store).capture(blocks: Blocks.parse("A weekly no-plans Sunday"), destination: .inbox, todayNote: nil, template: nil, taken: store.exists))
         try store.record(captured.writes)
         store.addCapture(captured.record)
@@ -253,7 +253,7 @@ final class LiveServerTests: XCTestCase {
 
         let planner = planner(store)
         let item = try XCTUnwrap(planner.items.first { $0.label.hasPrefix("Read 20") })
-        try store.record([try XCTUnwrap(writes(store).tick(item, planner: planner, day: day))])
+        try store.record([try XCTUnwrap(writes(store).tick(item, planner: planner, note: .day(day)))])
         await engine.sync()
         XCTAssertEqual(store.pending().first?.baseVersion, baseVersion)
 
@@ -277,7 +277,7 @@ final class LiveServerTests: XCTestCase {
 
         let planner = planner(store)
         let item = try XCTUnwrap(planner.items.first { $0.label.hasPrefix("Read 20") })
-        try store.record([try XCTUnwrap(writes(store).tick(item, planner: planner, day: day))])
+        try store.record([try XCTUnwrap(writes(store).tick(item, planner: planner, note: .day(day)))])
         await engine.sync()
         let state = await engine.state
         XCTAssertEqual(state, .disconnected)

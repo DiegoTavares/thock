@@ -87,17 +87,22 @@ public struct Journal: Equatable, Sendable {
 /// A daily or weekly note read for display. Nothing here is written back;
 /// every change goes through a write (`PhoneWrites`).
 public struct NoteView: Equatable, Sendable {
+    public var kind: NoteKind
     public var title: String?
     public var cards: [NoteCard]
+    /// The day's planner, or the week's goals: the checklist the nudges act on.
     public var planner: Planner
     public var journal: Journal
 
-    public init(text: String, config: VaultConfig) {
+    public init(text: String, config: VaultConfig, kind: NoteKind = .daily) {
+        self.kind = kind
         let file = TextFile(text)
         let lines = file.lines.map(\.text)
         let headings = file.headings()
-        let plannerHeading = file.resolve(names: config.plannerHeadings)
-        let journalHeading = file.resolve(names: config.journalHeadings)
+        // A week has goals where a day has its planner, and no journal.
+        let checklistNames = kind == .weekly ? config.goalsHeadings : config.plannerHeadings
+        let plannerHeading = file.resolve(names: checklistNames)
+        let journalHeading = kind == .weekly ? nil : file.resolve(names: config.journalHeadings)
 
         var titleHeading: HeadingLine?
         if let first = headings.first, first.level == 1 {
@@ -148,8 +153,22 @@ public struct NoteView: Equatable, Sendable {
             cards.append(NoteCard(id: heading.index, kind: kind, title: Inline.plainText(heading.text), heading: Self.reference(heading, in: headings), blocks: blocks))
         }
         self.cards = cards
-        self.planner = Self.planner(file: file, heading: plannerHeading, headings: headings, config: config)
+        self.planner = Self.planner(file: file, heading: plannerHeading, headings: headings, names: checklistNames)
         self.journal = Self.journal(file: file, heading: journalHeading, headings: headings, config: config)
+    }
+
+    /// The paragraphs the phone may replace in place (V37 §6, §8): those of
+    /// the user's own prose sections. The preamble, the agent's sections and
+    /// anything outside the subset stay as the desk wrote them.
+    public func isEditable(_ block: Block, in card: NoteCard) -> Bool {
+        card.kind == .prose && block.kind == .paragraph && !Self.isPrompt(block)
+    }
+
+    /// The template's italic hint, left in the file for the desk and never
+    /// replaced from the phone: a tap on it starts a new paragraph instead
+    /// (V37 §11 #10).
+    public static func isPrompt(_ block: Block) -> Bool {
+        block.kind == .paragraph && isItalicOnly(block.text)
     }
 
     /// Names a heading the way a write must: its own text, and which of the
@@ -161,9 +180,9 @@ public struct NoteView: Equatable, Sendable {
         return HeadingRef(text: heading.text, level: heading.level, ordinal: ordinal)
     }
 
-    static func planner(file: TextFile, heading: HeadingLine?, headings: [HeadingLine], config: VaultConfig) -> Planner {
+    static func planner(file: TextFile, heading: HeadingLine?, headings: [HeadingLine], names: [String]) -> Planner {
         guard let heading else {
-            let reference = HeadingRef(text: config.plannerHeadings.first ?? "Day planner", level: 2)
+            let reference = HeadingRef(text: names.first ?? "Day planner", level: 2)
             return Planner(heading: reference, exists: false, groups: [PlannerGroup(id: -1, name: nil, heading: reference, items: [])])
         }
         let reference = reference(heading, in: headings)

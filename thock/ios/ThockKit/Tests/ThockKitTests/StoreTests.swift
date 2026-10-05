@@ -38,7 +38,7 @@ final class StoreTests: XCTestCase {
         // The empty checkboxes are slots, not lines to act on.
         XCTAssertEqual(view.planner.items.map(\.label), ["Regar as plantas"])
 
-        try session.tick(try XCTUnwrap(view.planner.items.first), day: today)
+        try session.tick(try XCTUnwrap(view.planner.items.first), note: .day(today))
         let ticked = seed.replacingOccurrences(of: "- [ ] Regar as plantas", with: "- [x] Regar as plantas")
         XCTAssertEqual(store.content(path), ticked)
         let pending = store.pending(path: path)
@@ -63,7 +63,7 @@ final class StoreTests: XCTestCase {
 
         // Once the note exists a line edit is one write again.
         let item = try XCTUnwrap(session.view(today)?.planner.items.first)
-        try session.editText(item, text: "Regar as plantas da varanda", day: today)
+        try session.editText(item, text: "Regar as plantas da varanda", note: .day(today))
         XCTAssertEqual(store.pending(path: path).count, 3)
         XCTAssertEqual(store.content(path), seed.replacingOccurrences(of: "- [ ] Regar as plantas", with: "- [x] Regar as plantas da varanda"))
     }
@@ -73,7 +73,7 @@ final class StoreTests: XCTestCase {
         let today = session.today()
         let seed = try XCTUnwrap(store.seedText(session.writes().dailySeed(today)))
         let item = try XCTUnwrap(session.view(today)?.planner.items.first)
-        try session.moveToSoon(item, day: today)
+        try session.moveToSoon(item, note: .day(today))
         XCTAssertEqual(store.content(session.config.dailyPath(today)), seed.replacingOccurrences(of: "- [ ] Regar as plantas\n", with: ""))
         XCTAssertEqual(store.content("backlog.md"), "## Soon\n- [ ] Regar as plantas\n\n")
     }
@@ -83,7 +83,7 @@ final class StoreTests: XCTestCase {
         let today = session.today()
         let seed = try XCTUnwrap(store.seedText(session.writes().dailySeed(today)))
         let group = try XCTUnwrap(session.view(today)?.planner.groups.first { $0.name == "🎯 A mais importante" })
-        try session.addLine("Testing", group: group, day: today)
+        try session.addLine("Testing", group: group, note: .day(today))
         XCTAssertEqual(store.content(session.config.dailyPath(today)), seed.replacingOccurrences(of: "- [ ] \n\n## 📒", with: "- [ ] \n- [ ] Testing\n\n## 📒"))
     }
 

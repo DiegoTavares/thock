@@ -5,16 +5,16 @@ struct CardView: View {
     @Environment(AppModel.self) private var model
     var card: NoteCard
     var view: NoteView
-    var day: VaultDay
+    var note: NoteID
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Hairline()
             switch card.kind {
             case .journal:
-                JournalCard(card: card, journal: view.journal, day: day)
+                JournalCard(card: card, journal: view.journal, day: note.day ?? .today())
             case .planner:
-                PlannerCard(planner: view.planner, day: day, title: card.title)
+                PlannerCard(planner: view.planner, note: note, title: card.title)
             case .agent:
                 CardLabel(title: card.title)
                 VStack(alignment: .leading, spacing: 8) {
@@ -29,9 +29,52 @@ struct CardView: View {
             case .preamble:
                 BlockList(blocks: card.blocks)
             case .prose:
-                CardLabel(title: card.title)
-                BlockList(blocks: card.blocks)
+                ProseCard(card: card, view: view, note: note)
             }
+        }
+    }
+}
+
+/// A section the user wrote: its paragraphs can be changed in place and a
+/// new one added at the end (V37 §6, §8). The heading, the rules and any
+/// block outside the subset are drawn as they are.
+struct ProseCard: View {
+    @Environment(AppModel.self) private var model
+    var card: NoteCard
+    var view: NoteView
+    var note: NoteID
+
+    var body: some View {
+        let editable = !model.isReadOnly
+        let visible = card.blocks.filter { $0.kind != .blank && $0.kind != .rule }
+        CardLabel(title: card.title)
+        ForEach(visible) { block in
+            if editable, view.isEditable(block, in: card) {
+                BlockView(block: block)
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.sheet = .section(note: note, card: card.id, editing: block.line) }
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint("Edits this paragraph")
+            } else if editable, NoteView.isPrompt(block) {
+                // The prompt stays in the file; writing starts below it.
+                BlockView(block: block)
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.sheet = .section(note: note, card: card.id, editing: nil) }
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint("Starts a paragraph")
+            } else {
+                BlockView(block: block)
+            }
+        }
+        if editable {
+            Text(view.kind == .weekly ? "Add a note…" : "Add a line…")
+                .font(.system(size: 17))
+                .foregroundStyle(Theme.dim)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { model.sheet = .section(note: note, card: card.id, editing: nil) }
+                .accessibilityLabel("Add to \(card.title)")
+                .accessibilityAddTraits(.isButton)
         }
     }
 }
@@ -245,14 +288,14 @@ struct JournalParagraph: View {
 struct PlannerCard: View {
     @Environment(AppModel.self) private var model
     var planner: Planner
-    var day: VaultDay
+    var note: NoteID
     var title: String
 
     @State private var timing: PlannerItem?
     @State private var editing: PlannerItem?
 
     var body: some View {
-        let items = planner.items.filter { !model.isBeingRemoved($0, day: day) }
+        let items = planner.items.filter { !model.isBeingRemoved($0, note: note) }
         VStack(alignment: .leading, spacing: 4) {
             CardLabel(title: title, note: items.isEmpty ? nil : "\(items.filter(\.done).count) of \(items.count)")
                 .padding(.bottom, 4)
@@ -264,23 +307,23 @@ struct PlannerCard: View {
                         .padding(.top, 8)
                         .padding(.bottom, 2)
                 }
-                ForEach(group.items.filter { !model.isBeingRemoved($0, day: day) }) { item in
-                    PlannerRow(item: item, day: day, timing: $timing, editing: $editing)
+                ForEach(group.items.filter { !model.isBeingRemoved($0, note: note) }) { item in
+                    PlannerRow(item: item, note: note, timing: $timing, editing: $editing)
                 }
                 if !group.isCalendar, !model.isReadOnly {
-                    AddLineRow(group: group, day: day)
+                    AddLineRow(group: group, note: note)
                 }
             }
         }
         .sheet(item: $timing) { item in
-            SetTimeSheet(item: item, day: day)
+            SetTimeSheet(item: item, note: note)
                 .presentationDetents([.height(360)])
                 .presentationBackground(Theme.surface)
                 .presentationCornerRadius(26)
                 .preferredColorScheme(model.appearance.scheme)
         }
         .sheet(item: $editing) { item in
-            EditLineSheet(item: item, day: day)
+            EditLineSheet(item: item, note: note)
                 .presentationDetents([.medium])
                 .presentationBackground(Theme.surface)
                 .presentationCornerRadius(26)
@@ -314,7 +357,7 @@ enum PlannerPalette {
 struct PlannerRow: View {
     @Environment(AppModel.self) private var model
     var item: PlannerItem
-    var day: VaultDay
+    var note: NoteID
     @Binding var timing: PlannerItem?
     @Binding var editing: PlannerItem?
 
@@ -354,18 +397,21 @@ struct PlannerRow: View {
             row.accessibilityHint(item.isCalendar ? "From your calendar" : "")
         } else {
             row
-                .onTapGesture { model.tick(item, day: day) }
+                .onTapGesture { model.tick(item, note: note) }
                 .accessibilityAddTraits(.isButton)
                 .contextMenu {
-                    Button(item.done ? "Untick" : "Tick") { model.tick(item, day: day) }
-                    Button("Set a time…") { timing = item }
-                    Button("Edit this line") { editing = item }
+                    Button(item.done ? "Untick" : "Tick") { model.tick(item, note: note) }
+                    // Goals have no hours (V37 §5).
+                    if note.kind == .daily {
+                        Button("Set a time…") { timing = item }
+                    }
+                    Button(note.kind == .weekly ? "Edit this goal" : "Edit this line") { editing = item }
                     Button("Move to Soon") {
-                        if model.perform({ try $0.moveToSoon(item, day: day) }) {
+                        if model.perform({ try $0.moveToSoon(item, note: note) }) {
                             model.show("Moved to Backlog · Soon")
                         }
                     }
-                    Button("Remove", role: .destructive) { model.remove(item, day: day) }
+                    Button("Remove", role: .destructive) { model.remove(item, note: note) }
                 }
         }
     }
@@ -374,7 +420,7 @@ struct PlannerRow: View {
 struct AddLineRow: View {
     @Environment(AppModel.self) private var model
     var group: PlannerGroup
-    var day: VaultDay
+    var note: NoteID
     @State private var text = ""
     @State private var adding = false
     @FocusState private var focused: Bool
@@ -386,7 +432,7 @@ struct AddLineRow: View {
                 .foregroundStyle(Theme.amber)
                 .frame(width: 20)
             if adding {
-                TextField("A line for the plan", text: $text)
+                TextField(note.kind == .weekly ? "A goal for the week" : "A line for the plan", text: $text)
                     .font(.system(size: 17))
                     .foregroundStyle(Theme.ink)
                     .focused($focused)
@@ -399,7 +445,7 @@ struct AddLineRow: View {
                         }
                     }
             } else {
-                Text("Add a line")
+                Text(note.kind == .weekly ? "Add a goal" : "Add a line")
                     .font(.system(size: 17))
                     .foregroundStyle(Theme.dim)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -411,7 +457,7 @@ struct AddLineRow: View {
             adding = true
             focused = true
         }
-        .accessibilityLabel(group.name.map { "Add a line to \($0)" } ?? "Add a line")
+        .accessibilityLabel(group.name.map { "Add a line to \($0)" } ?? (note.kind == .weekly ? "Add a goal" : "Add a line"))
         .accessibilityAddTraits(.isButton)
     }
 
@@ -419,6 +465,6 @@ struct AddLineRow: View {
         let line = text
         text = ""
         guard !line.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        model.perform { try $0.addLine(line, group: group, day: day) }
+        model.perform { try $0.addLine(line, group: group, note: note) }
     }
 }
