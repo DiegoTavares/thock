@@ -207,6 +207,10 @@ public struct NoteView: Equatable, Sendable {
                     label = String(inner.rest)
                 }
             }
+            // An empty checkbox is a slot the template left to be filled at
+            // the desk. It has no words for a write to name it by, so it is
+            // not a line the phone can tick, edit or remove.
+            guard !SyncCore.lineIdentity(text).isEmpty, !label.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
             let isCalendar = text.contains("<!--gcal:") || groups[groups.count - 1].isCalendar
             let marker = text.trimmingLeadingWhitespace().first ?? "-"
             groups[groups.count - 1].items.append(PlannerItem(

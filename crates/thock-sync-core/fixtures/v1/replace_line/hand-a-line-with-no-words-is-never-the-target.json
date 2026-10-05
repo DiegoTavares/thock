@@ -1,0 +1,25 @@
+{
+  "name": "a line with no words is never the target",
+  "before": "## Day planner\n\n- [ ] \n- [ ] Walk\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-wordless",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "replace_line",
+    "heading": {
+      "text": "Day planner",
+      "level": 2,
+      "ordinal": 0
+    },
+    "line_hash": "e3b0c44298fc1c14",
+    "ordinal": 0,
+    "new_line": "- [ ] Dentist"
+  },
+  "after": "## Day planner\n\n- [ ] \n- [ ] Walk\n- [ ] Dentist <!--thock:also-->\n",
+  "outcome": "kept_both",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

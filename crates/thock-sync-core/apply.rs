@@ -1,6 +1,6 @@
 //! The application rules of spec §8: deterministic, total, idempotent.
 
-use crate::markdown::{Document, Section, hash_lines, line_hash};
+use crate::markdown::{Document, Section, hash_lines, line_hash, normalize_line};
 use crate::write::{Heading, Operation, Placement, Write};
 
 /// The marker a kept-both line ends with (spec §8.5).
@@ -380,7 +380,9 @@ fn find_line(
     let matches: Vec<usize> = document
         .matchable(section)
         .into_iter()
-        .filter(|(_, text)| line_hash(text) == wanted)
+        // A line with nothing left to name it by (blank, or an empty
+        // checkbox) is never a target: every such line shares one hash.
+        .filter(|(_, text)| line_hash(text) == wanted && !normalize_line(text).is_empty())
         .map(|(index, _)| index)
         .collect();
     matches.get(ordinal).or_else(|| matches.first()).copied()

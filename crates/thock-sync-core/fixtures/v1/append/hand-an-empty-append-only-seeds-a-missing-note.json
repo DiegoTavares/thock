@@ -1,0 +1,22 @@
+{
+  "name": "an empty append only seeds a missing note",
+  "before": null,
+  "seed": "# Day\n\n# Plan\n\n## First\n- [ ] \n\n## Wins\n_Tell me._",
+  "write": {
+    "v": 1,
+    "client_id": "hand-seed-only",
+    "path": "daily/2026-10-03.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "append",
+    "heading": null,
+    "lines": [],
+    "placement": "end",
+    "blank_line_before": false,
+    "create_from_template": true
+  },
+  "after": "# Day\n\n# Plan\n\n## First\n- [ ] \n\n## Wins\n_Tell me._",
+  "outcome": "created",
+  "effect_present_before": false,
+  "effect_present_after": true
+}
