@@ -392,6 +392,12 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   sees a note. Short answers by default, the notes it read named underneath, *Keep this* appends to
   today. Spec `specs/v35-phone-ask.md`. _(in progress: backend grant route, the phone loop and the Ask
   screen)_
+- [ ] **The week, from the date:** tap the date at the top of the phone to open a calendar, reach any
+  day, or open the week's note as a second canvas drawn by the same rules as today. Goals tick like
+  planner lines; a paragraph in any prose section, on the week or on a day, can be changed or added in
+  place. Headings, rules and the agent's review are drawn, never edited, and looking writes nothing.
+  Design reference: https://claude.ai/artifact/JCHoKASWt7gcYe49YGkPHn. Spec `specs/v37-week-plan.md`.
+  _(planned)_
 
 ---
 
