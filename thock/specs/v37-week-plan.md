@@ -92,7 +92,7 @@ the header does nothing, because the calendar reads the vault.
 The day pager today holds thirty days back and seven forward. Picking a date outside that range
 re-centres the pager on the chosen day so swiping continues from there. The same holds for weeks.
 A day older than the phone's copy of the vault reads *Not on this phone yet*, not *No note for this
-day* (see §11).
+day* (§11 #7).
 
 ## 5. The week canvas
 
@@ -218,10 +218,15 @@ From the design document's option cards, with Diego's answers:
 3. **Where the week canvas lives: N1.** The same slot as the day; the header switches between them.
 4. **Prose editing depth: L1.** Paragraph in place, no confirmation screen.
 5. **Prose parity:** daily notes get the same paragraph editing (§8).
-
-Still open:
-
-- **Future weeks.** Adding a goal on a Friday creates next week's note a few days early. Accepted
-  for now, since it is the same moment V33 accepted for tomorrow's note; revisit if it surprises.
-- **Days older than the phone's copy.** Whether the phone holds every day ever written is a V34
-  question. Until it is answered, a day the phone does not have reads *Not on this phone yet*.
+6. **Future weeks: any week.** The first edit creates the note from the template, whichever week
+   it is; a goal added on a Friday may create next week's note early, the same moment V33 accepted
+   for tomorrow's note.
+7. **Days the phone does not hold** read *Not on this phone yet*, distinct from *No note for this
+   day*. Until V34 says how far back the phone's copy reaches, any day before the oldest synced
+   daily note counts as not held.
+8. **Move to Soon stays in the goal menu** (§7).
+9. **The compose dock on the week canvas** behaves as everywhere: Today by default, Inbox and
+   Backlog chips. *Add a goal* is the only way into the Goals section.
+10. **Tapping a section that shows only its prompt** starts a new paragraph. The prompt line stays
+    in the file and is hidden on the phone once the section has the user's words, as the journal
+    does; the desk still shows it.
