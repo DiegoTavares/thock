@@ -199,8 +199,8 @@ final class SyncTests: XCTestCase {
 
         let planner = harness.planner()
         let deepWork = try XCTUnwrap(planner.items.first { $0.label.hasPrefix("Deep work") })
-        try harness.store.record([try XCTUnwrap(harness.writes.tick(deepWork, planner: planner, day: harness.day))])
-        try harness.store.record([try XCTUnwrap(harness.writes.addLine("Water the plants", group: nil, planner: planner, day: harness.day))])
+        try harness.store.record([try XCTUnwrap(harness.writes.tick(deepWork, planner: planner, note: .day(harness.day)))])
+        try harness.store.record([try XCTUnwrap(harness.writes.addLine("Water the plants", group: nil, planner: planner, note: .day(harness.day)))])
         let captured = try XCTUnwrap(harness.writes.capture(blocks: Blocks.parse("A weekly no-plans Sunday"), destination: .inbox, todayNote: nil, template: nil, taken: harness.store.exists))
         try harness.store.record(captured.writes)
         harness.store.addCapture(captured.record)
@@ -246,7 +246,7 @@ final class SyncTests: XCTestCase {
 
         let planner = harness.planner()
         let walk = try XCTUnwrap(planner.items.first { $0.label.hasPrefix("Read 20") })
-        try harness.store.record([try XCTUnwrap(harness.writes.tick(walk, planner: planner, day: harness.day))])
+        try harness.store.record([try XCTUnwrap(harness.writes.tick(walk, planner: planner, note: .day(harness.day)))])
         try harness.store.record([try XCTUnwrap(harness.writes.journalAppend(blocks: Blocks.parse("Written with no signal."), journal: NoteView(text: harness.store.content(harness.todayPath) ?? "", config: harness.store.config).journal))])
         await harness.engine.sync()
         var state = await harness.engine.state
@@ -292,7 +292,7 @@ final class SyncTests: XCTestCase {
         try harness.store.record(capture.writes)
         let planner = harness.planner()
         let item = try XCTUnwrap(planner.items.first { $0.label.hasPrefix("Read 20") })
-        try harness.store.record([try XCTUnwrap(harness.writes.tick(item, planner: planner, day: harness.day))])
+        try harness.store.record([try XCTUnwrap(harness.writes.tick(item, planner: planner, note: .day(harness.day)))])
         try await harness.settle()
         // A feed-driven round may be running, which a second sync() only
         // flags; wait for the queue rather than for one call.
@@ -342,7 +342,7 @@ final class SyncTests: XCTestCase {
 
         let planner = harness.planner()
         let dentist = try XCTUnwrap(planner.items.first { $0.label.hasPrefix("Call the dentist") })
-        try harness.store.record([try XCTUnwrap(harness.writes.editText(dentist, text: "Call the dentist about Friday", planner: planner, day: harness.day))])
+        try harness.store.record([try XCTUnwrap(harness.writes.editText(dentist, text: "Call the dentist about Friday", planner: planner, note: .day(harness.day)))])
         await harness.engine.sync()
 
         // Meanwhile the desk rewords the same line.
@@ -367,7 +367,7 @@ final class SyncTests: XCTestCase {
         try await harness.pair()
         try await harness.desk.setAwake(false)
         let planner = harness.planner()
-        try harness.store.record([try XCTUnwrap(harness.writes.addLine("From the phone", group: nil, planner: planner, day: harness.day))])
+        try harness.store.record([try XCTUnwrap(harness.writes.addLine("From the phone", group: nil, planner: planner, note: .day(harness.day)))])
         await harness.engine.sync()
 
         // The desk uploads an edit of its own before it gets to the queue.

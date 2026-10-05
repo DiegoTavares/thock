@@ -168,6 +168,9 @@ public struct VaultConfig: Equatable, Sendable {
     public var plannerHeadings = ["Day planner"]
     public var journalHeadings = ["Journal"]
     public var personalHeadings = ["Personal"]
+    /// The weekly note's checklist section (V37 §6); the desk has no setting
+    /// for it, so the shipped template's name is the only one.
+    public var goalsHeadings = ["Goals"]
     public var inboxDir = "inbox"
     /// The language the Set Language ritual recorded (V19), in the person's
     /// own words and as a tag. Either may be missing.
@@ -257,9 +260,157 @@ public struct VaultConfig: Equatable, Sendable {
         Self.join(weekly.dir, "\(day.formatted(weekly.filename)).md")
     }
 
+    public func weeklyPath(_ week: VaultWeek) -> String {
+        weeklyPath(week.monday)
+    }
+
+    public func path(_ note: NoteID) -> String {
+        switch note {
+        case .day(let day): return dailyPath(day)
+        case .week(let week): return weeklyPath(week)
+        }
+    }
+
+    /// The day named by a path under the daily folder, when the vault uses
+    /// the shipped `YYYY-MM-DD` names; any other pattern cannot be read back.
+    public func day(ofDailyPath path: String) -> VaultDay? {
+        guard daily.filename == "YYYY-MM-DD" else { return nil }
+        let prefix = daily.dir.isEmpty ? "" : daily.dir + "/"
+        guard path.hasPrefix(prefix), path.hasSuffix(".md") else { return nil }
+        let stem = path.dropFirst(prefix.count).dropLast(3)
+        guard !stem.contains("/") else { return nil }
+        return VaultDay(iso: String(stem))
+    }
+
     /// `.` as a folder is the vault's root.
     static func join(_ folder: String, _ name: String) -> String {
         folder.isEmpty ? name : folder + "/" + name
+    }
+}
+
+/// A note the canvas can show and the phone can write to: a day or a week.
+public enum NoteID: Hashable, Sendable {
+    case day(VaultDay)
+    case week(VaultWeek)
+
+    public var kind: NoteKind {
+        switch self {
+        case .day: return .daily
+        case .week: return .weekly
+        }
+    }
+
+    public var day: VaultDay? {
+        if case .day(let day) = self { return day }
+        return nil
+    }
+}
+
+/// An ISO week, the unit the vault names weekly notes by (`2026-W41` runs
+/// Monday 5 to Sunday 11 October).
+public struct VaultWeek: Hashable, Comparable, Sendable {
+    public var year: Int
+    public var week: Int
+
+    public init(year: Int, week: Int) {
+        self.year = year
+        self.week = week
+    }
+
+    public init(_ day: VaultDay) {
+        self.init(year: day.isoWeekYear, week: day.isoWeek)
+    }
+
+    public static func current() -> VaultWeek {
+        VaultWeek(.today())
+    }
+
+    public var monday: VaultDay {
+        VaultDay.isoWeekMonday(year: year, week: week)
+    }
+
+    public var sunday: VaultDay {
+        monday.adding(days: 6)
+    }
+
+    /// Monday through Sunday.
+    public var days: [VaultDay] {
+        (0..<7).map { monday.adding(days: $0) }
+    }
+
+    public func contains(_ day: VaultDay) -> Bool {
+        VaultWeek(day) == self
+    }
+
+    public func adding(weeks: Int) -> VaultWeek {
+        VaultWeek(monday.adding(days: 7 * weeks))
+    }
+
+    public func weeks(until other: VaultWeek) -> Int {
+        monday.days(until: other.monday) / 7
+    }
+
+    public static func < (left: VaultWeek, right: VaultWeek) -> Bool {
+        (left.year, left.week) < (right.year, right.week)
+    }
+}
+
+/// A month of the calendar, as rows of ISO weeks so that each week's note is
+/// one row and the gutter can name it.
+public struct VaultMonth: Hashable, Sendable {
+    public var year: Int
+    public var month: Int
+
+    public init(year: Int, month: Int) {
+        self.year = year
+        self.month = month
+    }
+
+    public init(_ day: VaultDay) {
+        self.init(year: day.year, month: day.month)
+    }
+
+    public var first: VaultDay {
+        VaultDay(year: year, month: month, day: 1)
+    }
+
+    public var name: String {
+        "\(first.monthName) \(year)"
+    }
+
+    public func adding(months: Int) -> VaultMonth {
+        var total = year * 12 + (month - 1) + months
+        if total < 0 { total = 0 }
+        return VaultMonth(year: total / 12, month: total % 12 + 1)
+    }
+
+    public func contains(_ day: VaultDay) -> Bool {
+        day.year == year && day.month == month
+    }
+
+    /// Every ISO week that touches the month, first to last.
+    public var weeks: [VaultWeek] {
+        let start = VaultWeek(first)
+        let last = adding(months: 1).first.adding(days: -1)
+        let end = VaultWeek(last)
+        var weeks: [VaultWeek] = []
+        var week = start
+        while week <= end {
+            weeks.append(week)
+            week = week.adding(weeks: 1)
+        }
+        return weeks
+    }
+}
+
+extension VaultDay {
+    /// The Monday that opens ISO week `week` of `year`: the week holding
+    /// 4 January, stepped back to its Monday, then forward by whole weeks.
+    static func isoWeekMonday(year: Int, week: Int) -> VaultDay {
+        let fourth = VaultDay(year: year, month: 1, day: 4)
+        // `weekday` is 1 for Sunday; ISO counts Monday as the first day.
+        let offset = (fourth.weekday + 5) % 7
+        return fourth.adding(days: -offset + 7 * (week - 1))
     }
 }
 

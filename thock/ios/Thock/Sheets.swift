@@ -397,7 +397,7 @@ struct SetTimeSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     var item: PlannerItem
-    var day: VaultDay
+    var note: NoteID
 
     @State private var start = Date()
     @State private var end = Date()
@@ -415,12 +415,12 @@ struct SetTimeSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             SheetHeader(leading: "No time", title: "Set a time", trailing: "Done") {
-                model.perform { try $0.setTime(item, startMinutes: nil, endMinutes: nil, day: day) }
+                model.perform { try $0.setTime(item, startMinutes: nil, endMinutes: nil, note: note) }
                 dismiss()
             } onTrailing: {
                 let from = minutes(start)
                 let until = minutes(end)
-                model.perform { try $0.setTime(item, startMinutes: from, endMinutes: hasEnd && until > from ? until : nil, day: day) }
+                model.perform { try $0.setTime(item, startMinutes: from, endMinutes: hasEnd && until > from ? until : nil, note: note) }
                 dismiss()
             }
             Text(Inline.plainText(item.label))
@@ -463,7 +463,7 @@ struct EditLineSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     var item: PlannerItem
-    var day: VaultDay
+    var note: NoteID
 
     @State private var text = ""
     @FocusState private var focused: Bool
@@ -473,7 +473,7 @@ struct EditLineSheet: View {
             SheetHeader(leading: "Cancel", title: "Edit this line", trailing: "Done", trailingEnabled: !text.trimmingCharacters(in: .whitespaces).isEmpty) {
                 dismiss()
             } onTrailing: {
-                model.perform { try $0.editText(item, text: text, day: day) }
+                model.perform { try $0.editText(item, text: text, note: note) }
                 dismiss()
             }
             TextField("The line", text: $text, axis: .vertical)

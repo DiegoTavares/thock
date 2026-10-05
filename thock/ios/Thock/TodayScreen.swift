@@ -6,19 +6,41 @@ import ThockKit
 struct TodayScreen: View {
     @Environment(AppModel.self) private var model
 
+    /// Thirty days back and a week ahead of today, stretched to hold a day
+    /// the calendar jumped to, so swiping carries on from wherever it landed.
     private var days: [VaultDay] {
         let today = VaultDay.today()
-        return (-30...7).map { today.adding(days: $0) }
+        let first = min(today, model.selectedDay).adding(days: -30)
+        let last = max(today, model.selectedDay).adding(days: 7)
+        return (0...first.days(until: last)).map { first.adding(days: $0) }
+    }
+
+    private var weeks: [VaultWeek] {
+        let current = VaultWeek.current()
+        let first = min(current, model.selectedWeek).adding(weeks: -26)
+        let last = max(current, model.selectedWeek).adding(weeks: 4)
+        return (0...first.weeks(until: last)).map { first.adding(weeks: $0) }
     }
 
     var body: some View {
         @Bindable var model = model
         VStack(spacing: 0) {
             if model.isUnlocked {
-                TabView(selection: $model.selectedDay) {
-                    ForEach(days, id: \.self) { day in
-                        DayCanvas(day: day)
-                            .tag(day)
+                Group {
+                    if model.showingWeek {
+                        TabView(selection: $model.selectedWeek) {
+                            ForEach(weeks, id: \.self) { week in
+                                WeekCanvas(week: week)
+                                    .tag(week)
+                            }
+                        }
+                    } else {
+                        TabView(selection: $model.selectedDay) {
+                            ForEach(days, id: \.self) { day in
+                                DayCanvas(day: day)
+                                    .tag(day)
+                            }
+                        }
                     }
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
@@ -175,23 +197,20 @@ struct DayCanvas: View {
         return "\(name) · week \(day.isoWeek)"
     }
 
+    /// A day before the oldest note the phone holds is one sync has not
+    /// brought down yet, not one that was never written (V37 §11 #7).
+    private var emptyText: String {
+        if isToday { return "Nothing written today yet." }
+        if let oldest = model.session?.oldestDay(), day < oldest { return "Not on this phone yet." }
+        return "No note for this day."
+    }
+
     var body: some View {
         let _ = model.revision
         let view = model.session?.view(day)
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(eyebrow.uppercased())
-                        .font(Theme.label())
-                        .tracking(0.9)
-                        .foregroundStyle(Theme.dim)
-                    Text(day.formatted("dddd, MMMM D"))
-                        .font(Theme.serif(30, style: .title1))
-                        .foregroundStyle(Theme.ink)
-                }
-                .padding(.top, 14)
-                .accessibilityElement(children: .combine)
-                .accessibilityAddTraits(.isHeader)
+                NoteHeader(eyebrow: eyebrow, title: day.formatted("dddd, MMMM D"))
 
                 if isToday {
                     QuickActions()
@@ -200,7 +219,7 @@ struct DayCanvas: View {
                 if let view {
                     let inboxAfter = view.cards.last { $0.kind == .planner || $0.kind == .journal }?.id
                     ForEach(view.cards) { card in
-                        CardView(card: card, view: view, day: day)
+                        CardView(card: card, view: view, note: .day(day))
                         if isToday, card.id == inboxAfter {
                             InboxRow()
                         }
@@ -210,7 +229,7 @@ struct DayCanvas: View {
                     }
                 } else {
                     Hairline()
-                    Text(isToday ? "Nothing written today yet." : "No note for this day.")
+                    Text(emptyText)
                         .font(.system(size: 16))
                         .foregroundStyle(Theme.dim)
                     if isToday {
@@ -223,6 +242,128 @@ struct DayCanvas: View {
             .padding(.bottom, 28)
         }
         .scrollDismissesKeyboard(.interactively)
+    }
+}
+
+/// The eyebrow and the title in Petrona, and the door to the calendar
+/// (V37 §4.1): the same header on a day and on a week.
+struct NoteHeader: View {
+    @Environment(AppModel.self) private var model
+    var eyebrow: String
+    var title: String
+
+    var body: some View {
+        Button {
+            model.openCalendar()
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(eyebrow.uppercased())
+                    .font(Theme.label())
+                    .tracking(0.9)
+                    .foregroundStyle(Theme.dim)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(title)
+                        .font(Theme.serif(30, style: .title1))
+                        .foregroundStyle(Theme.ink)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.dim)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 14)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+        .accessibilityHint("Opens the calendar")
+    }
+}
+
+/// One week: the header, the day strip, and a card per section of the
+/// weekly note (V37 §5).
+struct WeekCanvas: View {
+    @Environment(AppModel.self) private var model
+    var week: VaultWeek
+
+    private var eyebrow: String {
+        let offset = VaultWeek.current().weeks(until: week)
+        let name: String
+        switch offset {
+        case 0: name = "This week"
+        case -1: name = "Last week"
+        case 1: name = "Next week"
+        default: name = offset < 0 ? "\(-offset) weeks ago" : "In \(offset) weeks"
+        }
+        let monday = week.monday
+        let sunday = week.sunday
+        let range = monday.month == sunday.month
+            ? "\(monday.formatted("MMM D")) – \(sunday.formatted("D"))"
+            : "\(monday.formatted("MMM D")) – \(sunday.formatted("MMM D"))"
+        return "\(name) · \(range)"
+    }
+
+    var body: some View {
+        let _ = model.revision
+        let view = model.session?.view(.week(week))
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                NoteHeader(eyebrow: eyebrow, title: "Week \(week.week)")
+                DayStrip(week: week)
+                if let view {
+                    ForEach(view.cards) { card in
+                        CardView(card: card, view: view, note: .week(week))
+                    }
+                } else {
+                    Hairline()
+                    Text("No note for this week.")
+                        .font(.system(size: 16))
+                        .foregroundStyle(Theme.dim)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 22)
+            .padding(.bottom, 28)
+        }
+        .scrollDismissesKeyboard(.interactively)
+    }
+}
+
+/// Monday to Sunday under the week's title; a tap jumps to that day's
+/// canvas. Today is amber, a day without a note is dim.
+struct DayStrip: View {
+    @Environment(AppModel.self) private var model
+    var week: VaultWeek
+
+    var body: some View {
+        let today = VaultDay.today()
+        let written = model.session?.daysWithNotes(in: VaultMonth(week.monday)).union(model.session?.daysWithNotes(in: VaultMonth(week.sunday)) ?? []) ?? []
+        HStack(spacing: 0) {
+            ForEach(week.days, id: \.self) { day in
+                let isToday = day == today
+                let hasNote = written.contains(day)
+                Button {
+                    model.go(to: day)
+                } label: {
+                    VStack(spacing: 2) {
+                        Text(String(day.weekdayName.prefix(1)))
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.dim)
+                        Text("\(day.day)")
+                            .font(Theme.serif(17, style: .body))
+                            .foregroundStyle(isToday ? Theme.amber : (hasNote ? Theme.ink : Theme.dim))
+                        Circle()
+                            .fill(hasNote ? Theme.cal : .clear)
+                            .frame(width: 4, height: 4)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(day.weekdayName) \(day.day)\(isToday ? ", today" : "")\(hasNote ? ", has a note" : "")")
+            }
+        }
     }
 }
 
