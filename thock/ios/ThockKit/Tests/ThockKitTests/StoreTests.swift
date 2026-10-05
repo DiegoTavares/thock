@@ -15,6 +15,78 @@ final class StoreTests: XCTestCase {
         try store.applySnapshot(path: path ?? self.path, version: version, content: content, contentHash: "h\(version)", blobID: "b\(version)")
     }
 
+    /// A vault whose daily template has its planner at level 1, groups under
+    /// it and empty checkboxes left as slots, and no note for today yet.
+    func sessionWithATemplateOfItsOwn() throws -> (VaultSession, VaultStore) {
+        let store = try VaultStore(url: nil)
+        store.setMeta("vault_id", "v")
+        try snapshot(store, "[daily]\ntemplate = \"templates/day.md\"\n\n[day_planner]\nheading = \"Plano do Dia\"\n", version: 1, path: VaultConfig.configPath)
+        try snapshot(store, "# 🗓️ {{date:YYYY-MM-DD}}\n\n## 🍵 Primeiro chá\n_Uma linha já vale._\n\n# Plano do Dia\n\n## 🎯 A mais importante\n- [ ] \n\n## 📒 Luly\n- [ ] Regar as plantas\n- [ ]\n\n## 🏅 Vitórias\n_Conta tudo._", version: 2, path: "templates/day.md")
+        return (VaultSession(store: store), store)
+    }
+
+    func testALineEditOnANoteDrawnFromItsTemplateCreatesTheNoteFromIt() throws {
+        let (session, store) = try sessionWithATemplateOfItsOwn()
+        let today = session.today()
+        let path = session.config.dailyPath(today)
+        let seed = try XCTUnwrap(store.seedText(session.writes().dailySeed(today)))
+        XCTAssertNil(store.content(path))
+
+        let view = try XCTUnwrap(session.view(today))
+        XCTAssertEqual(view.planner.heading, HeadingRef(text: "Plano do Dia", level: 1))
+        XCTAssertEqual(view.planner.groups.map(\.name), [nil, "🎯 A mais importante", "📒 Luly", "🏅 Vitórias"])
+        // The empty checkboxes are slots, not lines to act on.
+        XCTAssertEqual(view.planner.items.map(\.label), ["Regar as plantas"])
+
+        try session.tick(try XCTUnwrap(view.planner.items.first), day: today)
+        let ticked = seed.replacingOccurrences(of: "- [ ] Regar as plantas", with: "- [x] Regar as plantas")
+        XCTAssertEqual(store.content(path), ticked)
+        let pending = store.pending(path: path)
+        XCTAssertEqual(pending.map(\.document.kind), [.append, .replaceLine])
+        XCTAssertTrue(pending[0].document.createFromTemplate)
+        XCTAssertTrue(pending[0].document.lines.isEmpty)
+
+        // The desk, with no note either, ends with the same text.
+        var desk: String?
+        for write in pending {
+            desk = SyncCore.apply(existing: desk, write: write.document, seed: seed).text
+        }
+        XCTAssertEqual(desk, ticked)
+
+        // A desk that made the note meanwhile keeps its own and takes the tick.
+        let made = seed + "\n\n# Daily Closure\nFeito.\n"
+        var kept: String? = made
+        for write in pending {
+            kept = SyncCore.apply(existing: kept, write: write.document, seed: seed).text
+        }
+        XCTAssertEqual(kept, made.replacingOccurrences(of: "- [ ] Regar as plantas", with: "- [x] Regar as plantas"))
+
+        // Once the note exists a line edit is one write again.
+        let item = try XCTUnwrap(session.view(today)?.planner.items.first)
+        try session.editText(item, text: "Regar as plantas da varanda", day: today)
+        XCTAssertEqual(store.pending(path: path).count, 3)
+        XCTAssertEqual(store.content(path), seed.replacingOccurrences(of: "- [ ] Regar as plantas", with: "- [x] Regar as plantas da varanda"))
+    }
+
+    func testRemovingALineFromANoteDrawnFromItsTemplateKeepsTheRestOfIt() throws {
+        let (session, store) = try sessionWithATemplateOfItsOwn()
+        let today = session.today()
+        let seed = try XCTUnwrap(store.seedText(session.writes().dailySeed(today)))
+        let item = try XCTUnwrap(session.view(today)?.planner.items.first)
+        try session.moveToSoon(item, day: today)
+        XCTAssertEqual(store.content(session.config.dailyPath(today)), seed.replacingOccurrences(of: "- [ ] Regar as plantas\n", with: ""))
+        XCTAssertEqual(store.content("backlog.md"), "## Soon\n- [ ] Regar as plantas\n\n")
+    }
+
+    func testAddingALineToAGroupOfANoteDrawnFromItsTemplate() throws {
+        let (session, store) = try sessionWithATemplateOfItsOwn()
+        let today = session.today()
+        let seed = try XCTUnwrap(store.seedText(session.writes().dailySeed(today)))
+        let group = try XCTUnwrap(session.view(today)?.planner.groups.first { $0.name == "🎯 A mais importante" })
+        try session.addLine("Testing", group: group, day: today)
+        XCTAssertEqual(store.content(session.config.dailyPath(today)), seed.replacingOccurrences(of: "- [ ] \n\n## 📒", with: "- [ ] \n- [ ] Testing\n\n## 📒"))
+    }
+
     func testWritesAreAppliedAndQueuedInOrder() throws {
         let store = try VaultStore(url: nil)
         try snapshot(store, "## Day planner\n", version: 3)

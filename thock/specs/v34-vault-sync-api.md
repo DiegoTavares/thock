@@ -620,6 +620,10 @@ expanded with the same tokens). Outcomes: `created`, `section_added`, `applied`,
    file becomes the heading line (`#` × level + space + text, `level` default 2) followed by a blank
    line, then continue. `replace_line` / `remove_line` / `replace_section` with no file fall through to
    the target-missing rules below.
+   Because only an `append` carries the template, a phone that drew a note from its template and
+   then changes one of its lines sends an `append` with `heading: null`, no `lines` and
+   `create_from_template` first: it makes the file from the seed where it is missing and is a `noop`
+   where it exists.
 3. **`create` on an existing file** with different content: becomes `append` of `content`'s lines at
    the end of the file with `blank_line_before: true` → `applied`.
 4. **Heading missing** (and not `null`): the heading line is inserted, preceded by one blank line,

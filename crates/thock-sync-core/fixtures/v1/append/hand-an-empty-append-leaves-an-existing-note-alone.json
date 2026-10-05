@@ -1,0 +1,22 @@
+{
+  "name": "an empty append leaves an existing note alone",
+  "before": "# Day\n\n## Day planner\n- [x] Walk\n",
+  "seed": "# Day\n\n## Day planner\n",
+  "write": {
+    "v": 1,
+    "client_id": "hand-seed-only-existing",
+    "path": "daily/2026-10-03.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "append",
+    "heading": null,
+    "lines": [],
+    "placement": "end",
+    "blank_line_before": false,
+    "create_from_template": true
+  },
+  "after": "# Day\n\n## Day planner\n- [x] Walk\n",
+  "outcome": "noop",
+  "effect_present_before": true,
+  "effect_present_after": true
+}

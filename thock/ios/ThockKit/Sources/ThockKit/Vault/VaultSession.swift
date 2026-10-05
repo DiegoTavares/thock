@@ -49,6 +49,20 @@ public struct VaultSession: Sendable {
         try store.record(writes)
     }
 
+    /// Records writes that name lines of a day's note. When the note was
+    /// drawn from its template and is not in the vault yet, it is created
+    /// from the template first: without that both ends would make a bare
+    /// note holding only the heading the write names.
+    private func record(_ writes: [PlannedWrite], onNoteOf day: VaultDay, now: Date = Date()) throws {
+        guard !writes.isEmpty else { return }
+        let builder = self.writes(now: now)
+        if noteText(day) == nil, store.seedText(builder.dailySeed(day)) != nil {
+            try record([builder.noteFromTemplate(day)] + writes)
+        } else {
+            try record(writes)
+        }
+    }
+
     @discardableResult
     public func capture(blocks: [Block], destination: CaptureDestination, now: Date = Date()) throws -> CaptureRecord? {
         let builder = writes(now: now)
@@ -144,27 +158,27 @@ public struct VaultSession: Sendable {
 
     public func tick(_ item: PlannerItem, day: VaultDay) throws {
         guard let planner = planner(day), let write = writes().tick(item, planner: planner, day: day) else { return }
-        try record([write])
+        try record([write], onNoteOf: day)
     }
 
     public func setTime(_ item: PlannerItem, startMinutes: Int?, endMinutes: Int?, day: VaultDay) throws {
         guard let planner = planner(day), let write = writes().setTime(item, startMinutes: startMinutes, endMinutes: endMinutes, planner: planner, day: day) else { return }
-        try record([write])
+        try record([write], onNoteOf: day)
     }
 
     public func editText(_ item: PlannerItem, text: String, day: VaultDay) throws {
         guard let planner = planner(day), let write = writes().editText(item, text: text, planner: planner, day: day) else { return }
-        try record([write])
+        try record([write], onNoteOf: day)
     }
 
     public func remove(_ item: PlannerItem, day: VaultDay) throws {
         guard let planner = planner(day) else { return }
-        try record([writes().remove(item, planner: planner, day: day)])
+        try record([writes().remove(item, planner: planner, day: day)], onNoteOf: day)
     }
 
     public func moveToSoon(_ item: PlannerItem, day: VaultDay) throws {
         guard let planner = planner(day) else { return }
-        try record(writes().moveToSoon(item, planner: planner, day: day))
+        try record(writes().moveToSoon(item, planner: planner, day: day), onNoteOf: day)
     }
 
     public func addLine(_ text: String, group: PlannerGroup?, day: VaultDay) throws {

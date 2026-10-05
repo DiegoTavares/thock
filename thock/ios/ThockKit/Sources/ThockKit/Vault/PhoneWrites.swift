@@ -136,6 +136,16 @@ public struct PhoneWrites: Sendable {
         SeedInfo(kind: .daily, day: day, time: clock)
     }
 
+    /// Creates a day's note from its template and adds nothing to it. Only an
+    /// append can carry the template, so this goes ahead of a tick, an edit
+    /// or a removal made on a note the phone drew from the template before
+    /// anything had created it. Where the note exists it is a no-op.
+    public func noteFromTemplate(_ day: VaultDay) -> PlannedWrite {
+        var write = document(.append, path: config.dailyPath(day))
+        write.createFromTemplate = true
+        return PlannedWrite(document: write, seed: dailySeed(day))
+    }
+
     /// The first 12 hex of `sha256(device ‖ 0 ‖ "thock-ios" ‖ 0 ‖ instant)`:
     /// the desk's capture digest (V13 §6) with the device as the account and
     /// the capture instant as the item id.
