@@ -18,6 +18,9 @@ public struct NoteCard: Identifiable, Equatable, Sendable {
     public var title: String
     public var heading: HeadingRef?
     public var blocks: [Block]
+    /// The checklist lines of a user's prose section, which tick and edit
+    /// like the planner's (V37 §6, §8). Empty for every other kind of card.
+    public var items: [PlannerItem] = []
 }
 
 public struct PlannerItem: Identifiable, Equatable, Sendable {
@@ -32,6 +35,9 @@ public struct PlannerItem: Identifiable, Equatable, Sendable {
     public var struck: Bool
     /// Calendar lines are owned by the desk's calendar sync and read-only.
     public var isCalendar: Bool
+    /// The section a write to this line names: the planner's heading, or
+    /// the prose section the line sits in.
+    public var heading: HeadingRef
     public var hash: String
     /// Position among the planner's lines with the same hash.
     public var ordinal: Int
@@ -153,18 +159,26 @@ public struct NoteView: Equatable, Sendable {
                 kind = .prose
             }
             let blocks = Blocks.parse(lines: Array(lines[(heading.index + 1)..<end]), firstLine: heading.index + 1, alreadyInsideNote: true)
-            cards.append(NoteCard(id: heading.index, kind: kind, title: Inline.plainText(heading.text), heading: Self.reference(heading, in: headings), blocks: blocks))
+            let items = kind == .prose ? Self.checklist(file: file, heading: heading, headings: headings).items : []
+            cards.append(NoteCard(id: heading.index, kind: kind, title: Inline.plainText(heading.text), heading: Self.reference(heading, in: headings), blocks: blocks, items: items))
         }
         self.cards = cards
         self.planner = Self.planner(file: file, heading: plannerHeading, headings: headings, names: checklistNames)
         self.journal = Self.journal(file: file, heading: journalHeading, headings: headings, config: config)
     }
 
-    /// The paragraphs the phone may replace in place (V37 §6, §8): those of
-    /// the user's own prose sections. The preamble, the agent's sections and
-    /// anything outside the subset stay as the desk wrote them.
+    /// The text the phone may replace in place (V37 §6, §8): a paragraph, a
+    /// bullet or a quote in one of the user's own prose sections. Checklist
+    /// lines have their own moves (`NoteCard.items`); a numbered item is
+    /// left alone because the editor would write it back as a bullet. The
+    /// preamble, the agent's sections and anything outside the subset stay
+    /// as the desk wrote them.
     public func isEditable(_ block: Block, in card: NoteCard) -> Bool {
-        card.kind == .prose && block.kind == .paragraph && !Self.isPrompt(block)
+        guard card.kind == .prose, !Self.isPrompt(block) else { return false }
+        switch block.kind {
+        case .paragraph, .bullet, .quote: return true
+        default: return false
+        }
     }
 
     /// The template's italic hint, left in the file for the desk and never
@@ -188,6 +202,13 @@ public struct NoteView: Equatable, Sendable {
             let reference = HeadingRef(text: names.first ?? "Day planner", level: 2)
             return Planner(heading: reference, exists: false, groups: [PlannerGroup(id: -1, name: nil, heading: reference, items: [])])
         }
+        return checklist(file: file, heading: heading, headings: headings)
+    }
+
+    /// The checklist lines of one section, grouped by its subsections. Every
+    /// line names the section's own heading, so a write finds it whichever
+    /// group it sits in.
+    static func checklist(file: TextFile, heading: HeadingLine, headings: [HeadingLine]) -> Planner {
         let reference = reference(heading, in: headings)
         let section = file.section(of: heading)
         let mask = file.contentMask()
@@ -238,7 +259,7 @@ public struct NoteView: Equatable, Sendable {
             groups[groups.count - 1].items.append(PlannerItem(
                 line: index, raw: text, done: done, time: time,
                 label: label.trimmingCharacters(in: .whitespaces), struck: struck, isCalendar: isCalendar,
-                hash: hash, ordinal: ordinal, indent: item.indent, marker: marker))
+                heading: reference, hash: hash, ordinal: ordinal, indent: item.indent, marker: marker))
         }
         for position in groups.indices {
             let start = position == 0 ? section.start : groups[position].id + 1

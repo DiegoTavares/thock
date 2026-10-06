@@ -198,28 +198,26 @@ public struct VaultSession: Sendable {
     }
 
     public func tick(_ item: PlannerItem, note: NoteID) throws {
-        guard let planner = planner(note), let write = writes().tick(item, planner: planner, note: note) else { return }
+        guard let write = writes().tick(item, note: note) else { return }
         try record([write], on: note)
     }
 
     public func setTime(_ item: PlannerItem, startMinutes: Int?, endMinutes: Int?, note: NoteID) throws {
-        guard let planner = planner(note), let write = writes().setTime(item, startMinutes: startMinutes, endMinutes: endMinutes, planner: planner, note: note) else { return }
+        guard let write = writes().setTime(item, startMinutes: startMinutes, endMinutes: endMinutes, note: note) else { return }
         try record([write], on: note)
     }
 
     public func editText(_ item: PlannerItem, text: String, note: NoteID) throws {
-        guard let planner = planner(note), let write = writes().editText(item, text: text, planner: planner, note: note) else { return }
+        guard let write = writes().editText(item, text: text, note: note) else { return }
         try record([write], on: note)
     }
 
     public func remove(_ item: PlannerItem, note: NoteID) throws {
-        guard let planner = planner(note) else { return }
-        try record([writes().remove(item, planner: planner, note: note)], on: note)
+        try record([writes().remove(item, note: note)], on: note)
     }
 
     public func moveToSoon(_ item: PlannerItem, note: NoteID) throws {
-        guard let planner = planner(note) else { return }
-        try record(writes().moveToSoon(item, planner: planner, note: note), on: note)
+        try record(writes().moveToSoon(item, note: note), on: note)
     }
 
     public func addLine(_ text: String, group: PlannerGroup?, note: NoteID) throws {

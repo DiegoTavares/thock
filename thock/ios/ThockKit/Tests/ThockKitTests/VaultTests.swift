@@ -99,7 +99,7 @@ final class VaultTests: XCTestCase {
         let view = NoteView(text: note, config: config)
         let task = try XCTUnwrap(view.planner.items.first)
         XCTAssertEqual(task.ordinal, 1)
-        let tick = try XCTUnwrap(writes().tick(task, planner: view.planner, note: .day(day)))
+        let tick = try XCTUnwrap(writes().tick(task, note: .day(day)))
         XCTAssertEqual(SyncCore.apply(existing: note, write: tick.document).text, "# Day\n\n## Day planner\n\n- Call Ana\n- [x] Call Ana\n")
     }
 
@@ -282,22 +282,22 @@ final class VaultTests: XCTestCase {
             SyncCore.apply(existing: planner, write: try XCTUnwrap(planned).document).text
         }
 
-        var change = changedLines(planner, try apply(builder.tick(deepWork, planner: view.planner, note: .day(day))))
+        var change = changedLines(planner, try apply(builder.tick(deepWork, note: .day(day))))
         XCTAssertEqual(change.removed, ["- [ ] 09:30 - 11:00 Deep work"])
         XCTAssertEqual(change.added, ["- [x] 09:30 - 11:00 Deep work"])
 
-        change = changedLines(planner, try apply(builder.setTime(card, startMinutes: 15 * 60, endMinutes: 15 * 60 + 30, planner: view.planner, note: .day(day))))
+        change = changedLines(planner, try apply(builder.setTime(card, startMinutes: 15 * 60, endMinutes: 15 * 60 + 30, note: .day(day))))
         XCTAssertEqual(change.removed, ["- [ ] Buy a card"])
         XCTAssertEqual(change.added, ["- [ ] 15:00 - 15:30 Buy a card"])
 
-        change = changedLines(planner, try apply(builder.setTime(deepWork, startMinutes: nil, endMinutes: nil, planner: view.planner, note: .day(day))))
+        change = changedLines(planner, try apply(builder.setTime(deepWork, startMinutes: nil, endMinutes: nil, note: .day(day))))
         XCTAssertEqual(change.added, ["- [ ] Deep work"])
 
-        change = changedLines(planner, try apply(builder.editText(deepWork, text: "Deep work: the budget", planner: view.planner, note: .day(day))))
+        change = changedLines(planner, try apply(builder.editText(deepWork, text: "Deep work: the budget", note: .day(day))))
         XCTAssertEqual(change.removed, ["- [ ] 09:30 - 11:00 Deep work"])
         XCTAssertEqual(change.added, ["- [ ] 09:30 - 11:00 Deep work: the budget"])
 
-        change = changedLines(planner, try apply(builder.remove(card, planner: view.planner, note: .day(day))))
+        change = changedLines(planner, try apply(builder.remove(card, note: .day(day))))
         XCTAssertEqual(change.removed, ["- [ ] Buy a card"])
         XCTAssertEqual(change.added, [])
 
@@ -308,13 +308,13 @@ final class VaultTests: XCTestCase {
 
         let calendar = view.planner.groups[1]
         let lunch = try XCTUnwrap(calendar.items.first)
-        change = changedLines(planner, try apply(builder.tick(lunch, planner: view.planner, note: .day(day))))
+        change = changedLines(planner, try apply(builder.tick(lunch, note: .day(day))))
         XCTAssertEqual(change.removed, ["- [ ] 12:30 Lunch with Ana <!--gcal:5b7e3c9a1f24-->"])
         XCTAssertEqual(change.added, ["- [x] 12:30 Lunch with Ana <!--gcal:5b7e3c9a1f24-->"])
 
         XCTAssertTrue(try apply(builder.addLine("Dentist", group: calendar, planner: view.planner, note: .day(day))).contains("<!--gcal:5b7e3c9a1f24-->\n- [ ] Dentist\n\n## Personal"))
 
-        let moved = builder.moveToSoon(deepWork, planner: view.planner, note: .day(day))
+        let moved = builder.moveToSoon(deepWork, note: .day(day))
         XCTAssertEqual(moved.map(\.document.path), ["daily/2026-10-02.md", "backlog.md"])
         change = changedLines(planner, SyncCore.apply(existing: planner, write: moved[0].document).text)
         XCTAssertEqual(change.removed, ["- [ ] 09:30 - 11:00 Deep work"])
@@ -411,8 +411,8 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(view.planner.items.map(\.label), ["Ship the sync status dot", "Read 100 pages"])
         XCTAssertEqual(view.planner.doneCount, 1)
         XCTAssertFalse(view.journal.exists)
-        // Only the user's prose paragraphs are editable: not the preamble,
-        // not the agent's text, not its checklist.
+        // Only the user's own text is editable: not the preamble, not the
+        // agent's text, not its checklist.
         let notes = try XCTUnwrap(view.cards.first { $0.title == "Notes" })
         let paragraph = try XCTUnwrap(notes.blocks.first { $0.kind == .paragraph })
         XCTAssertTrue(view.isEditable(paragraph, in: notes))
@@ -439,15 +439,15 @@ final class VaultTests: XCTestCase {
             SyncCore.apply(existing: weekly, write: try XCTUnwrap(planned).document).text
         }
 
-        var change = changedLines(weekly, try apply(builder.tick(pages, planner: view.planner, note: week)))
+        var change = changedLines(weekly, try apply(builder.tick(pages, note: week)))
         XCTAssertEqual(change.removed, ["- [ ] Read 100 pages"])
         XCTAssertEqual(change.added, ["- [x] Read 100 pages"])
 
-        change = changedLines(weekly, try apply(builder.editText(pages, text: "Read 60 pages", planner: view.planner, note: week)))
+        change = changedLines(weekly, try apply(builder.editText(pages, text: "Read 60 pages", note: week)))
         XCTAssertEqual(change.removed, ["- [ ] Read 100 pages"])
         XCTAssertEqual(change.added, ["- [ ] Read 60 pages"])
 
-        change = changedLines(weekly, try apply(builder.remove(pages, planner: view.planner, note: week)))
+        change = changedLines(weekly, try apply(builder.remove(pages, note: week)))
         XCTAssertEqual(change.removed, ["- [ ] Read 100 pages"])
         XCTAssertEqual(change.added, [])
 
@@ -458,7 +458,7 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(addLine.document.path, "weekly/2026-W40.md")
         XCTAssertEqual(addLine.seed, SeedInfo(kind: .weekly, day: VaultDay(year: 2026, month: 9, day: 28), time: builder.clock))
 
-        let moved = builder.moveToSoon(pages, planner: view.planner, note: week)
+        let moved = builder.moveToSoon(pages, note: week)
         XCTAssertEqual(moved.map(\.document.path), ["weekly/2026-W40.md", "backlog.md"])
         XCTAssertEqual(changedLines(weekly, SyncCore.apply(existing: weekly, write: moved[0].document).text).removed, ["- [ ] Read 100 pages"])
         XCTAssertEqual(SyncCore.apply(existing: "# Backlog\n\n## Soon\n\n- [ ] Renew the passport\n\n## Someday\n", write: moved[1].document).text,
@@ -511,6 +511,119 @@ final class VaultTests: XCTestCase {
         change = changedLines(planner, SyncCore.apply(existing: planner, write: edited.document).text)
         XCTAssertEqual(change.removed, ["Text"])
         XCTAssertEqual(change.added, ["Text, edited."])
+    }
+
+    // V37 §8: the structure is the note's; the text in it is the user's.
+
+    let plan = """
+    # Week 40, 2026
+
+    ## Plan
+
+    - [ ] Ship the status dot
+    - [x] Book the dentist
+    - A loose note among the tasks
+      - A nested one
+    > Keep Fridays light
+    1. First
+
+    ### Later
+
+    - [ ] Ship the status dot
+
+    ## Notes
+
+    _Anything worth keeping._
+
+    # AI Week Review
+
+    - [ ] Not the user's
+    Nor this.
+
+    """
+
+    func testAnyChecklistLineInAUsersSectionTakesTheNudges() throws {
+        let builder = writes()
+        let week = NoteID.week(VaultWeek(day))
+        let view = NoteView(text: plan, config: config, kind: .weekly)
+        // No `## Goals`: the week's planner is drawn empty, and the
+        // checklist lives on the Plan card instead.
+        XCTAssertFalse(view.planner.exists)
+        XCTAssertEqual(view.cards.map(\.kind), [.prose, .prose, .agent])
+        let planCard = try XCTUnwrap(view.cards.first { $0.title == "Plan" })
+        XCTAssertEqual(planCard.items.map(\.label), ["Ship the status dot", "Book the dentist", "Ship the status dot"])
+        XCTAssertEqual(planCard.items.map(\.ordinal), [0, 0, 1])
+        XCTAssertTrue(planCard.items.allSatisfy { $0.heading.text == "Plan" })
+        XCTAssertTrue(try XCTUnwrap(view.cards.last).items.isEmpty, "the agent's checklist is not the user's")
+        XCTAssertTrue(try XCTUnwrap(view.cards.first { $0.title == "Notes" }).items.isEmpty)
+
+        func apply(_ planned: PlannedWrite?) throws -> String {
+            SyncCore.apply(existing: plan, write: try XCTUnwrap(planned).document).text
+        }
+
+        let later = planCard.items[2]
+        var change = changedLines(plan, try apply(builder.tick(later, note: week)))
+        XCTAssertEqual(change.removed, ["- [ ] Ship the status dot"])
+        XCTAssertEqual(change.added, ["- [x] Ship the status dot"])
+        XCTAssertTrue(try apply(builder.tick(later, note: week)).contains("### Later\n\n- [x] Ship the status dot"), "the twin under Later is the one that ticks")
+
+        let dentist = planCard.items[1]
+        change = changedLines(plan, try apply(builder.editText(dentist, text: "Book the dentist for May", note: week)))
+        XCTAssertEqual(change.removed, ["- [x] Book the dentist"])
+        XCTAssertEqual(change.added, ["- [x] Book the dentist for May"])
+
+        change = changedLines(plan, try apply(builder.remove(dentist, note: week)))
+        XCTAssertEqual(change.removed, ["- [x] Book the dentist"])
+        XCTAssertEqual(change.added, [])
+
+        let moved = builder.moveToSoon(planCard.items[0], note: week)
+        XCTAssertEqual(moved.map(\.document.path), ["weekly/2026-W40.md", "backlog.md"])
+        XCTAssertEqual(moved[0].document.heading?.text, "Plan")
+        XCTAssertEqual(changedLines(plan, SyncCore.apply(existing: plan, write: moved[0].document).text).removed, ["- [ ] Ship the status dot"])
+
+        // The same on a day: a task written under Personal ticks there.
+        let dayNote = planner.replacingOccurrences(of: "## Personal\n\nText", with: "## Personal\n\n- [ ] Call Mum")
+        let dayView = NoteView(text: dayNote, config: config)
+        let personal = try XCTUnwrap(dayView.cards.first { $0.title == "Personal" })
+        XCTAssertEqual(personal.items.map(\.label), ["Call Mum"])
+        XCTAssertEqual(dayView.planner.items.map(\.label), ["Morning walk", "Deep work", "Buy a card", "Lunch with Ana"])
+        let ticked = SyncCore.apply(existing: dayNote, write: try XCTUnwrap(builder.tick(personal.items[0], note: .day(day))).document).text
+        XCTAssertEqual(changedLines(dayNote, ticked).added, ["- [x] Call Mum"])
+    }
+
+    func testAnyTextInAUsersSectionIsEditedInPlace() throws {
+        let builder = writes()
+        let week = NoteID.week(VaultWeek(day))
+        let view = NoteView(text: plan, config: config, kind: .weekly)
+        let planCard = try XCTUnwrap(view.cards.first { $0.title == "Plan" })
+        let bullet = try XCTUnwrap(planCard.blocks.first { $0.kind == .bullet })
+        let nested = try XCTUnwrap(planCard.blocks.first { $0.kind == .bullet && !$0.indent.isEmpty })
+        let quote = try XCTUnwrap(planCard.blocks.first { $0.kind == .quote })
+        let numbered = try XCTUnwrap(planCard.blocks.first { if case .numbered = $0.kind { return true } else { return false } })
+        let task = try XCTUnwrap(planCard.blocks.first { if case .task = $0.kind { return true } else { return false } })
+        XCTAssertTrue(view.isEditable(bullet, in: planCard))
+        XCTAssertTrue(view.isEditable(nested, in: planCard))
+        XCTAssertTrue(view.isEditable(quote, in: planCard))
+        XCTAssertFalse(view.isEditable(numbered, in: planCard), "the editor would write it back as a bullet")
+        XCTAssertFalse(view.isEditable(task, in: planCard), "a checklist line has its own moves")
+        let agent = try XCTUnwrap(view.cards.last)
+        XCTAssertFalse(view.isEditable(try XCTUnwrap(agent.blocks.first { $0.kind == .paragraph }), in: agent))
+
+        // A bullet comes back as a bullet, with its indent; the text passed
+        // is what the editor writes for the block, marker included.
+        let heading = try XCTUnwrap(planCard.heading)
+        var edited = Block(id: 0, kind: nested.kind, text: "A nested one, kept", indent: nested.indent, touched: true)
+        let replaced = try XCTUnwrap(builder.replaceParagraph(nested, with: edited.markdownLines().joined(separator: "\n"), heading: heading, note: week, text: plan))
+        XCTAssertEqual(replaced.document.kind, .replaceLine)
+        var change = changedLines(plan, SyncCore.apply(existing: plan, write: replaced.document).text)
+        XCTAssertEqual(change.removed, ["  - A nested one"])
+        XCTAssertEqual(change.added, ["  - A nested one, kept"])
+
+        edited = Block(id: 0, kind: .quote, text: "Keep Fridays light, Mondays too", touched: true)
+        let requoted = try XCTUnwrap(builder.replaceParagraph(quote, with: edited.markdownLines().joined(separator: "\n"), heading: heading, note: week, text: plan))
+        change = changedLines(plan, SyncCore.apply(existing: plan, write: requoted.document).text)
+        XCTAssertEqual(change.removed, ["> Keep Fridays light"])
+        XCTAssertEqual(change.added, ["> Keep Fridays light, Mondays too"])
     }
 
     func testATickKeepsEverythingElseOnTheLine() throws {
