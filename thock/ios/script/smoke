@@ -2,8 +2,9 @@
 # Builds the app for an iOS simulator, installs it fresh, launches it into the
 # practice notebook and checks that scripted flows land where they should:
 #
-#   1. a capture to today, an inbox capture and a journal entry reach the
-#      phone's store and, through the in-process server, the practice desk;
+#   1. captures to today (a task and plain text), an inbox capture and a
+#      journal entry reach the phone's store and, through the in-process
+#      server, the practice desk;
 #   2. text typed into the capture editor is saved as the expected Markdown.
 #
 # Exits non-zero on the first failure.
@@ -109,8 +110,10 @@ token="Smoke$(date +%s)"
 
 step "practice notebook: capture, inbox, journal"
 xcrun simctl launch --terminate-running-process "$udid" "$bundle" -thock-practice \
-    -thock-script "capture:today:$token task;capture:inbox:$token idea;journal:$token journal" >/dev/null
+    -thock-script "capture:today:- [ ] $token task;capture:today:$token note;capture:inbox:$token idea;journal:$token journal" >/dev/null
 wait_for "the today capture in the phone's store" store_has "- [ ] $token task"
+wait_for "the plain today capture in the phone's store" store_has "$token note"
+! store_has "- [ ] $token note" || fail "a plain today capture became a task"
 wait_for "the journal entry in the phone's store" store_has "$token journal"
 wait_for "the inbox capture in the phone's store" store_has "# $token idea"
 wait_for "the today capture at the practice desk" desk_has "- [ ] $token task"

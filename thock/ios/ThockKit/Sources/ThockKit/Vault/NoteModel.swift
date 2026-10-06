@@ -45,6 +45,9 @@ public struct PlannerGroup: Identifiable, Equatable, Sendable {
     public var name: String?
     public var heading: HeadingRef?
     public var items: [PlannerItem]
+    /// Plain text written among the tasks, such as a capture that was not a
+    /// checkbox. Drawn below the group's tasks, never ticked.
+    public var notes: [Block] = []
 
     public var isCalendar: Bool {
         name.map { SyncCore.headingKey($0) == "calendar" } ?? false
@@ -237,7 +240,26 @@ public struct NoteView: Equatable, Sendable {
                 label: label.trimmingCharacters(in: .whitespaces), struck: struck, isCalendar: isCalendar,
                 hash: hash, ordinal: ordinal, indent: item.indent, marker: marker))
         }
+        for position in groups.indices {
+            let start = position == 0 ? section.start : groups[position].id + 1
+            let end = position + 1 < groups.count ? groups[position + 1].id : section.end
+            guard start < end else { continue }
+            let lines = file.lines[start..<end].map(\.text)
+            groups[position].notes = Blocks.parse(lines: lines, firstLine: start, alreadyInsideNote: true).filter(Self.isPlannerNote)
+        }
         return Planner(heading: reference, exists: true, groups: groups)
+    }
+
+    /// Paragraphs, quotes and top-level bullets. The template's italic hint
+    /// stays out, as do a task's indented continuation lines, which belong to
+    /// the task rather than standing on their own.
+    static func isPlannerNote(_ block: Block) -> Bool {
+        switch block.kind {
+        case .paragraph: return !isPrompt(block)
+        case .quote: return true
+        case .bullet, .numbered: return block.indent.isEmpty
+        default: return false
+        }
     }
 
     static func strippingTrailingComments(_ text: String) -> String {

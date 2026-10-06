@@ -240,7 +240,18 @@ public struct PhoneWrites: Sendable {
             if single {
                 var write = document(.append, path: path)
                 write.heading = view.planner.heading
-                write.lines = ["- [ ] " + first.text]
+                switch first.kind {
+                case .task:
+                    write.lines = first.markdownLines()
+                case .paragraph, .heading:
+                    // Only a capture that asked for a checkbox becomes a task;
+                    // anything else is a note, set apart from the tasks above it.
+                    write.lines = [first.text]
+                    write.blankLineBefore = true
+                default:
+                    write.lines = first.markdownLines()
+                    write.blankLineBefore = true
+                }
                 write.placement = .beforeChildren
                 write.createFromTemplate = true
                 return ([PlannedWrite(document: write, seed: dailySeed(today))], record)

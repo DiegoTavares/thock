@@ -307,6 +307,11 @@ final class VaultTests: XCTestCase {
         XCTAssertTrue(try apply(builder.addLine("Water the plants", group: nil, planner: view.planner, note: .day(day))).contains("- [ ] Buy a card\n- [ ] Water the plants\n\n### Calendar"))
 
         let calendar = view.planner.groups[1]
+        let lunch = try XCTUnwrap(calendar.items.first)
+        change = changedLines(planner, try apply(builder.tick(lunch, planner: view.planner, note: .day(day))))
+        XCTAssertEqual(change.removed, ["- [ ] 12:30 Lunch with Ana <!--gcal:5b7e3c9a1f24-->"])
+        XCTAssertEqual(change.added, ["- [x] 12:30 Lunch with Ana <!--gcal:5b7e3c9a1f24-->"])
+
         XCTAssertTrue(try apply(builder.addLine("Dentist", group: calendar, planner: view.planner, note: .day(day))).contains("<!--gcal:5b7e3c9a1f24-->\n- [ ] Dentist\n\n## Personal"))
 
         let moved = builder.moveToSoon(deepWork, planner: view.planner, note: .day(day))
@@ -588,13 +593,25 @@ final class VaultTests: XCTestCase {
         XCTAssertNil(PhoneWrites.inboxEditorText("no heading here\n"))
     }
 
-    func testATodayCaptureIsATaskWhenOneLineAndProseWhenSeveral() throws {
+    func testATodayCaptureIsATaskOnlyWhenItIsACheckbox() throws {
         let builder = writes()
         let today = try XCTUnwrap(SampleVault.make(today: day).files["daily/2026-10-02.md"])
-        let one = try XCTUnwrap(builder.capture(blocks: Blocks.parse("Call the notary"), destination: .today, todayNote: today, template: nil, taken: { _ in false }))
-        XCTAssertEqual(one.record.destination, .today)
-        var after = SyncCore.apply(existing: today, write: one.writes[0].document).text
+        let task = try XCTUnwrap(builder.capture(blocks: Blocks.parse("- [ ] Call the notary"), destination: .today, todayNote: today, template: nil, taken: { _ in false }))
+        XCTAssertEqual(task.record.destination, .today)
+        var after = SyncCore.apply(existing: today, write: task.writes[0].document).text
         XCTAssertTrue(after.contains("- [ ] Read 20 pages 📖\n- [ ] Call the notary\n\n### Calendar"))
+
+        let plain = try XCTUnwrap(builder.capture(blocks: Blocks.parse("[Thock] Captures can be plain text"), destination: .today, todayNote: today, template: nil, taken: { _ in false }))
+        after = SyncCore.apply(existing: today, write: plain.writes[0].document).text
+        XCTAssertTrue(after.contains("- [ ] Read 20 pages 📖\n\n[Thock] Captures can be plain text\n\n### Calendar"))
+        let view = NoteView(text: after, config: config)
+        XCTAssertEqual(view.planner.groups[0].notes.map(\.text), ["[Thock] Captures can be plain text"])
+        XCTAssertEqual(view.planner.groups[1].notes, [])
+        XCTAssertEqual(view.planner.items.count, 7)
+
+        let bullet = try XCTUnwrap(builder.capture(blocks: Blocks.parse("- Eggs"), destination: .today, todayNote: today, template: nil, taken: { _ in false }))
+        XCTAssertEqual(bullet.writes[0].document.lines, ["- Eggs"])
+        XCTAssertTrue(bullet.writes[0].document.blankLineBefore)
 
         let several = try XCTUnwrap(builder.capture(blocks: Blocks.parse("First thought.\n\nSecond thought."), destination: .today, todayNote: today, template: nil, taken: { _ in false }))
         XCTAssertEqual(several.writes[0].document.heading?.text, "Personal")
@@ -603,7 +620,7 @@ final class VaultTests: XCTestCase {
 
         // With no note yet, the note is created from the template first.
         let seed = Template.expand(Template.defaultDaily, day: day, time: "21:14", title: "2026-10-02")
-        let fresh = try XCTUnwrap(builder.capture(blocks: Blocks.parse("Call the notary"), destination: .today, todayNote: nil, template: Template.defaultDaily, taken: { _ in false }))
+        let fresh = try XCTUnwrap(builder.capture(blocks: Blocks.parse("- [ ] Call the notary"), destination: .today, todayNote: nil, template: Template.defaultDaily, taken: { _ in false }))
         XCTAssertEqual(fresh.writes[0].seed, SeedInfo(kind: .daily, day: day, time: "21:14"))
         let created = SyncCore.apply(existing: nil, write: fresh.writes[0].document, seed: seed)
         XCTAssertEqual(created.outcome, .created)
