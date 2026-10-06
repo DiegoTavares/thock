@@ -6,20 +6,12 @@ import ThockKit
 struct TodayScreen: View {
     @Environment(AppModel.self) private var model
 
-    /// Thirty days back and a week ahead of today, stretched to hold a day
-    /// the calendar jumped to, so swiping carries on from wherever it landed.
     private var days: [VaultDay] {
-        let today = VaultDay.today()
-        let first = min(today, model.selectedDay).adding(days: -30)
-        let last = max(today, model.selectedDay).adding(days: 7)
-        return (0...first.days(until: last)).map { first.adding(days: $0) }
+        VaultDay.pages(around: model.dayPagesAnchor, today: .today())
     }
 
     private var weeks: [VaultWeek] {
-        let current = VaultWeek.current()
-        let first = min(current, model.selectedWeek).adding(weeks: -26)
-        let last = max(current, model.selectedWeek).adding(weeks: 4)
-        return (0...first.weeks(until: last)).map { first.adding(weeks: $0) }
+        VaultWeek.pages(around: model.weekPagesAnchor, current: .current())
     }
 
     var body: some View {

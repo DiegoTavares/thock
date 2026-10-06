@@ -350,6 +350,16 @@ public struct VaultWeek: Hashable, Comparable, Sendable {
         monday.days(until: other.monday) / 7
     }
 
+    /// The weeks the week canvas swipes through: half a year back and a
+    /// month ahead of `current`, stretched to hold `anchor`. It takes the
+    /// week last jumped to rather than the one on screen, because a page
+    /// view whose pages change under a swipe stalls halfway.
+    public static func pages(around anchor: VaultWeek, current: VaultWeek) -> [VaultWeek] {
+        let first = min(current, anchor).adding(weeks: -26)
+        let last = max(current, anchor).adding(weeks: 4)
+        return (0...first.weeks(until: last)).map { first.adding(weeks: $0) }
+    }
+
     public static func < (left: VaultWeek, right: VaultWeek) -> Bool {
         (left.year, left.week) < (right.year, right.week)
     }
@@ -464,6 +474,15 @@ public struct VaultDay: Hashable, Comparable, Sendable, Codable {
 
     public func days(until other: VaultDay) -> Int {
         Self.utc.dateComponents([.day], from: utcDate, to: other.utcDate).day ?? 0
+    }
+
+    /// The days the day canvas swipes through: thirty back and a week ahead
+    /// of `today`, stretched to hold `anchor`, the day last jumped to. Like
+    /// `VaultWeek.pages`, it never follows the day on screen.
+    public static func pages(around anchor: VaultDay, today: VaultDay) -> [VaultDay] {
+        let first = min(today, anchor).adding(days: -30)
+        let last = max(today, anchor).adding(days: 7)
+        return (0...first.days(until: last)).map { first.adding(days: $0) }
     }
 
     /// 1 for Sunday through 7 for Saturday.

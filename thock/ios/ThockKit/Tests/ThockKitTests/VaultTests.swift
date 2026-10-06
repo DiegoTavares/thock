@@ -368,6 +368,27 @@ final class VaultTests: XCTestCase {
         XCTAssertNil(config.day(ofDailyPath: "daily/old/2026-10-02.md"))
     }
 
+    func testSwipingNeverReshapesThePages() {
+        let today = VaultDay(year: 2026, month: 10, day: 5)
+        let days = VaultDay.pages(around: today, today: today)
+        XCTAssertEqual(days.first, today.adding(days: -30))
+        XCTAssertEqual(days.last, today.adding(days: 7))
+        XCTAssertEqual(days.count, 38)
+        let jumped = today.adding(days: -90)
+        let stretched = VaultDay.pages(around: jumped, today: today)
+        XCTAssertEqual(stretched.first, jumped.adding(days: -30))
+        XCTAssertEqual(stretched.last, today.adding(days: 7))
+        XCTAssertEqual(VaultDay.pages(around: today.adding(days: 3), today: today).last, today.adding(days: 10))
+
+        let current = VaultWeek(today)
+        let weeks = VaultWeek.pages(around: current, current: current)
+        XCTAssertEqual(weeks.first, current.adding(weeks: -26))
+        XCTAssertEqual(weeks.last, current.adding(weeks: 4))
+        XCTAssertEqual(Set(weeks).count, weeks.count)
+        let later = VaultWeek.pages(around: current.adding(weeks: 10), current: current)
+        XCTAssertEqual(later.last, current.adding(weeks: 14))
+    }
+
     let weekly = """
     # Week 40, 2026
 
