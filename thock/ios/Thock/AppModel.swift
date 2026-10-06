@@ -83,6 +83,10 @@ final class AppModel {
     var isUnlocked = false
     var selectedDay: VaultDay = .today()
     var selectedWeek: VaultWeek = .current()
+    /// Where the canvases' pages are centred. Only a jump moves them, never
+    /// a swipe, so the pages hold still while one is under the finger.
+    private(set) var dayPagesAnchor: VaultDay = .today()
+    private(set) var weekPagesAnchor: VaultWeek = .current()
     /// The week canvas takes the day canvas's slot (V37 §5, N1).
     var showingWeek = false
     var pairingError: String?
@@ -399,18 +403,22 @@ final class AppModel {
     }
 
     func go(to day: VaultDay) {
+        dayPagesAnchor = day
         selectedDay = day
         showingWeek = false
         sheet = nil
     }
 
     func go(to week: VaultWeek) {
+        weekPagesAnchor = week
         selectedWeek = week
         showingWeek = true
         sheet = nil
     }
 
     func goToToday() {
+        dayPagesAnchor = .today()
+        weekPagesAnchor = .current()
         selectedDay = .today()
         selectedWeek = .current()
         showingWeek = false
@@ -458,7 +466,7 @@ final class AppModel {
             appearance = looks
         }
         if let offset = value(after: "-thock-day").flatMap(Int.init) {
-            selectedDay = VaultDay.today().adding(days: offset)
+            go(to: VaultDay.today().adding(days: offset))
         }
         if let offset = value(after: "-thock-week").flatMap(Int.init) {
             go(to: VaultWeek.current().adding(weeks: offset))
