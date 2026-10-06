@@ -394,8 +394,10 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   screen)_
 - [ ] **The week, from the date:** tap the date at the top of the phone to open a calendar, reach any
   day, or open the week's note as a second canvas drawn by the same rules as today. Goals tick like
-  planner lines; a paragraph in any prose section, on the week or on a day, can be changed or added in
-  place. Headings, rules and the agent's review are drawn, never edited, and looking writes nothing.
+  planner lines; a paragraph, bullet or quote in any prose section, on the week or on a day, can be
+  changed or added in place, and a checklist line in any section of the user's ticks, edits and moves
+  like a goal — the structure is the note's, the text is the user's (widened 2026-10-06). Headings,
+  rules and the agent's review are drawn, never edited, and looking writes nothing.
   Design reference: https://claude.ai/artifact/JCHoKASWt7gcYe49YGkPHn. Spec `specs/v37-week-plan.md`.
   _(on `main`; ships with the next phone build)_
 

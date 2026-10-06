@@ -35,47 +35,90 @@ struct CardView: View {
     }
 }
 
-/// A section the user wrote: its paragraphs can be changed in place and a
-/// new one added at the end (V37 §6, §8). The heading, the rules and any
-/// block outside the subset are drawn as they are.
+/// A section the user wrote: its text can be changed in place, its checklist
+/// lines tick and take the planner's nudges, and a new paragraph can be
+/// added at the end (V37 §6, §8). The heading, the rules and any block
+/// outside the subset are drawn as they are.
 struct ProseCard: View {
     @Environment(AppModel.self) private var model
     var card: NoteCard
     var view: NoteView
     var note: NoteID
 
+    @State private var timing: PlannerItem?
+    @State private var editing: PlannerItem?
+
     var body: some View {
         let editable = !model.isReadOnly
         let visible = card.blocks.filter { $0.kind != .blank && $0.kind != .rule }
-        CardLabel(title: card.title)
-        ForEach(visible) { block in
-            if editable, view.isEditable(block, in: card) {
-                BlockView(block: block)
-                    .contentShape(Rectangle())
-                    .onTapGesture { model.sheet = .section(note: note, card: card.id, editing: block.line) }
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityHint("Edits this paragraph")
-            } else if editable, NoteView.isPrompt(block) {
-                // The prompt stays in the file; writing starts below it.
-                BlockView(block: block)
+        VStack(alignment: .leading, spacing: 10) {
+            CardLabel(title: card.title)
+            ForEach(visible) { block in
+                if let item = card.items.first(where: { $0.line == block.line }) {
+                    if !model.isBeingRemoved(item, note: note) {
+                        PlannerRow(item: item, note: note, timing: $timing, editing: $editing, allowsTime: false)
+                    }
+                } else if editable, view.isEditable(block, in: card) {
+                    BlockView(block: block)
+                        .contentShape(Rectangle())
+                        .onTapGesture { model.sheet = .section(note: note, card: card.id, editing: block.line) }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityHint("Edits this line")
+                } else if editable, NoteView.isPrompt(block) {
+                    // The prompt stays in the file; writing starts below it.
+                    BlockView(block: block)
+                        .contentShape(Rectangle())
+                        .onTapGesture { model.sheet = .section(note: note, card: card.id, editing: nil) }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityHint("Starts a paragraph")
+                } else {
+                    BlockView(block: block)
+                }
+            }
+            if editable {
+                Text(view.kind == .weekly ? "Add a note…" : "Add a line…")
+                    .font(.system(size: 17))
+                    .foregroundStyle(Theme.dim)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                     .onTapGesture { model.sheet = .section(note: note, card: card.id, editing: nil) }
+                    .accessibilityLabel("Add to \(card.title)")
                     .accessibilityAddTraits(.isButton)
-                    .accessibilityHint("Starts a paragraph")
-            } else {
-                BlockView(block: block)
             }
         }
-        if editable {
-            Text(view.kind == .weekly ? "Add a note…" : "Add a line…")
-                .font(.system(size: 17))
-                .foregroundStyle(Theme.dim)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture { model.sheet = .section(note: note, card: card.id, editing: nil) }
-                .accessibilityLabel("Add to \(card.title)")
-                .accessibilityAddTraits(.isButton)
-        }
+        .lineSheets(timing: $timing, editing: $editing, note: note)
+    }
+}
+
+/// The sheets a checklist row opens, shared by every card that draws one.
+struct LineSheets: ViewModifier {
+    @Environment(AppModel.self) private var model
+    @Binding var timing: PlannerItem?
+    @Binding var editing: PlannerItem?
+    var note: NoteID
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(item: $timing) { item in
+                SetTimeSheet(item: item, note: note)
+                    .presentationDetents([.height(360)])
+                    .presentationBackground(Theme.surface)
+                    .presentationCornerRadius(26)
+                    .preferredColorScheme(model.appearance.scheme)
+            }
+            .sheet(item: $editing) { item in
+                EditLineSheet(item: item, note: note)
+                    .presentationDetents([.medium])
+                    .presentationBackground(Theme.surface)
+                    .presentationCornerRadius(26)
+                    .preferredColorScheme(model.appearance.scheme)
+            }
+    }
+}
+
+extension View {
+    func lineSheets(timing: Binding<PlannerItem?>, editing: Binding<PlannerItem?>, note: NoteID) -> some View {
+        modifier(LineSheets(timing: timing, editing: editing, note: note))
     }
 }
 
@@ -319,20 +362,7 @@ struct PlannerCard: View {
                 }
             }
         }
-        .sheet(item: $timing) { item in
-            SetTimeSheet(item: item, note: note)
-                .presentationDetents([.height(360)])
-                .presentationBackground(Theme.surface)
-                .presentationCornerRadius(26)
-                .preferredColorScheme(model.appearance.scheme)
-        }
-        .sheet(item: $editing) { item in
-            EditLineSheet(item: item, note: note)
-                .presentationDetents([.medium])
-                .presentationBackground(Theme.surface)
-                .presentationCornerRadius(26)
-                .preferredColorScheme(model.appearance.scheme)
-        }
+        .lineSheets(timing: $timing, editing: $editing, note: note)
     }
 }
 
@@ -364,6 +394,9 @@ struct PlannerRow: View {
     var note: NoteID
     @Binding var timing: PlannerItem?
     @Binding var editing: PlannerItem?
+    /// Only the day's planner takes hours (V37 §5); goals and the checklists
+    /// of other sections do not.
+    var allowsTime = true
 
     private var timeText: String {
         guard let time = item.time else { return "" }
@@ -415,8 +448,7 @@ struct PlannerRow: View {
                 .accessibilityAddTraits(.isButton)
                 .contextMenu {
                     Button(item.done ? "Untick" : "Tick") { model.tick(item, note: note) }
-                    // Goals have no hours (V37 §5).
-                    if note.kind == .daily {
+                    if allowsTime, note.kind == .daily {
                         Button("Set a time…") { timing = item }
                     }
                     Button(note.kind == .weekly ? "Edit this goal" : "Edit this line") { editing = item }

@@ -45,14 +45,14 @@ struct SectionScreen: View {
                         if let view, let card {
                             ForEach(card.blocks.filter { $0.kind != .blank && $0.kind != .rule }) { block in
                                 if block.line == editing {
-                                    liveParagraph(initial: [Block(id: 0, kind: .paragraph, text: block.text.replacingOccurrences(of: "\n", with: " "))])
+                                    liveParagraph(initial: [Self.opened(block)])
                                         .id("live")
                                 } else if view.isEditable(block, in: card) {
                                     BlockView(block: block)
                                         .foregroundStyle(Theme.muted)
                                         .contentShape(Rectangle())
                                         .onTapGesture { switchTo(block.line) }
-                                        .accessibilityHint("Edits this paragraph")
+                                        .accessibilityHint("Edits this line")
                                 } else {
                                     BlockView(block: block)
                                 }
@@ -87,6 +87,13 @@ struct SectionScreen: View {
         }
     }
 
+    /// The block as the editor opens it: the same kind and indent, so a
+    /// bullet or a quote is written back as one, with soft-wrapped lines
+    /// joined because the editor has no line breaks inside a paragraph.
+    private static func opened(_ block: Block) -> Block {
+        Block(id: 0, kind: block.kind, text: block.text.replacingOccurrences(of: "\n", with: " "), indent: block.indent)
+    }
+
     private func liveParagraph(initial: [Block]) -> some View {
         RichTextEditor(initial: initial, handle: handle, placeholder: "A few lines…", fontSize: 17, scrolls: false) { query in
             model.session?.noteTitles(matching: query) ?? []
@@ -114,9 +121,11 @@ struct SectionScreen: View {
         let captured = blocks
         blocks = []
         if let line = editing, let block = card.blocks.first(where: { $0.line == line }) {
-            let text = EditorDocument(blocks: content).lines().joined(separator: "\n")
-            guard text != block.text.replacingOccurrences(of: "\n", with: " ") else { return }
-            model.perform { try $0.replaceParagraph(block, in: card, with: text, note: note) }
+            let lines = EditorDocument(blocks: content).lines()
+            var original = Self.opened(block)
+            original.touched = true
+            guard lines != original.markdownLines() else { return }
+            model.perform { try $0.replaceParagraph(block, in: card, with: lines.joined(separator: "\n"), note: note) }
         } else {
             var saved = false
             model.perform { saved = try $0.appendParagraph(blocks: captured, to: card, note: note) }

@@ -149,7 +149,8 @@ structure is not.
 | Move a goal to Soon | line removed; `- [ ] <text>` appended under **Soon** in `backlog.md` (V33 §17 #14) |
 | Remove a goal | line deleted, with a few seconds of undo |
 | Add a paragraph to Notes or Week review | paragraph appended at the end of that section, before the next heading |
-| Edit a paragraph | that paragraph's lines replaced through the journal's scoped rewrite (V33 §9); everything around it byte-identical |
+| Edit a paragraph, a bullet or a quote | that block's lines replaced through the journal's scoped rewrite (V33 §9), marker and indent kept; everything around it byte-identical |
+| Tick, edit, remove or move a checklist line in any other section of the user's | the same single-line moves as a goal, written through that section's heading |
 | The template's italic prompt | kept in the file; hidden once the section has the user's words, as the journal does |
 | Headings, rules, the opening italic line | drawn, never editable; no adding, renaming or reordering sections |
 | `# AI Week Review` and anything after it | read-only |
@@ -166,11 +167,22 @@ applies the edit.
 one, and the desk's own wrap flow sends unfinished work to Soon. The line is appended under the
 configured Soon heading like any planner line; nothing is written to the triage log.
 
-## 8. Prose parity on daily notes (decided 2026-10-05)
+## 8. Prose parity on daily notes (decided 2026-10-05, widened 2026-10-06)
 
-Every prose section the user wrote gets the same paragraph editing, on both canvases. On a daily
-note that means `## Personal` and any other read-only prose card from V33 §5: tapping a paragraph
-makes it live, tapping below the last adds one, and saving replaces or appends only those lines.
+Every prose section the user wrote gets the same editing, on both canvases. On a daily note that
+means `## Personal` and any other read-only prose card from V33 §5: tapping a paragraph makes it
+live, tapping below the last adds one, and saving replaces or appends only those lines.
+
+**The structure is the note's; the text in it is the user's.** The first build only let a
+*paragraph* be edited and only ticked under the exact `Goals` or `Day planner` heading, which left a
+week planned under `## Plan`, or a section written as bullets, read-only. Widened:
+
+- A bullet or a quote in a user's section is edited in place like a paragraph, and comes back as
+  the same kind with its indent. A numbered item stays read-only, because the editor would write it
+  back as a bullet.
+- A checklist line in *any* section of the user's takes the goal moves: tick, edit, remove, move to
+  Soon. The write names the section the line sits in, so a vault whose weekly note never had a
+  `## Goals` works the same. *Set a time* stays the Day planner's own.
 
 The exceptions stay exactly as V33 drew them: nothing under an agent heading (`# Daily Closure`,
 `# Asked on the go`, `# AI Week Review`), nothing in a grey block, no heading, no rule. `## Journal`
@@ -205,6 +217,10 @@ phone's local store.
 - **Paragraph edits:** replace one paragraph in Notes, append one to Week review, and the same on
   a daily `## Personal`: only those lines differ. A paragraph under an agent heading is not
   offered for editing.
+- **Any section's text (§8):** a weekly note with `## Plan` instead of `## Goals`: its checklist
+  lines tick, edit, remove and move to Soon through `Plan`, the twin under a `###` subsection is
+  the one that ticks, a nested bullet and a quote come back as themselves, a numbered item and the
+  agent's lines are not offered; a task under a daily `## Personal` ticks there.
 - **First edit creates the note:** a tick on a week with no note creates it from the template and
   then applies the tick; viewing it first does not.
 - **Locked:** the header does nothing while the phone is locked.

@@ -531,52 +531,54 @@ public struct PhoneWrites: Sendable {
 
     // MARK: Plan
 
-    func replace(_ item: PlannerItem, with line: String, planner: Planner, note: NoteID) -> PlannedWrite {
+    // A checklist line is written through the section it was read from
+    // (`item.heading`): the planner, the week's goals, or any prose section
+    // of the user's own (V37 §8).
+    func replace(_ item: PlannerItem, with line: String, note: NoteID) -> PlannedWrite {
         var write = document(.replaceLine, path: config.path(note))
-        write.heading = planner.heading
+        write.heading = item.heading
         write.lineHash = item.hash
         write.ordinal = item.ordinal
         write.newLine = line
         return PlannedWrite(document: write)
     }
 
-    public func tick(_ item: PlannerItem, planner: Planner, note: NoteID) -> PlannedWrite? {
+    public func tick(_ item: PlannerItem, note: NoteID) -> PlannedWrite? {
         guard let parts = TaskLineParts(item.raw) else { return nil }
-        return replace(item, with: parts.line(done: !item.done), planner: planner, note: note)
+        return replace(item, with: parts.line(done: !item.done), note: note)
     }
 
-    public func setTime(_ item: PlannerItem, startMinutes: Int?, endMinutes: Int?, planner: Planner, note: NoteID) -> PlannedWrite? {
+    public func setTime(_ item: PlannerItem, startMinutes: Int?, endMinutes: Int?, note: NoteID) -> PlannedWrite? {
         guard var parts = TaskLineParts(item.raw) else { return nil }
         parts.time = startMinutes.map { TimePrefix.format(startMinutes: $0, endMinutes: endMinutes) }
-        return replace(item, with: parts.line(), planner: planner, note: note)
+        return replace(item, with: parts.line(), note: note)
     }
 
-    public func editText(_ item: PlannerItem, text: String, planner: Planner, note: NoteID) -> PlannedWrite? {
+    public func editText(_ item: PlannerItem, text: String, note: NoteID) -> PlannedWrite? {
         guard var parts = TaskLineParts(item.raw) else { return nil }
         let cleaned = text.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
         guard !cleaned.isEmpty else { return nil }
         parts.text = cleaned
-        return replace(item, with: parts.line(), planner: planner, note: note)
+        return replace(item, with: parts.line(), note: note)
     }
 
-    public func remove(_ item: PlannerItem, planner: Planner, note: NoteID) -> PlannedWrite {
+    public func remove(_ item: PlannerItem, note: NoteID) -> PlannedWrite {
         var write = document(.removeLine, path: config.path(note))
-        write.heading = planner.heading
+        write.heading = item.heading
         write.lineHash = item.hash
         write.ordinal = item.ordinal
         return PlannedWrite(document: write)
     }
 
-    /// The line leaves the planner, or the week's goals, and lands under
-    /// Soon, as the desk's wrap flow does. It never creates tomorrow's note a
-    /// day early (V33 §17 #14).
-    public func moveToSoon(_ item: PlannerItem, planner: Planner, note: NoteID) -> [PlannedWrite] {
+    /// The line leaves its section and lands under Soon, as the desk's wrap
+    /// flow does. It never creates tomorrow's note a day early (V33 §17 #14).
+    public func moveToSoon(_ item: PlannerItem, note: NoteID) -> [PlannedWrite] {
         guard let parts = TaskLineParts(item.raw) else { return [] }
         var append = document(.append, path: config.backlogFile)
         append.heading = HeadingRef(text: config.soonHeading, level: 2)
         append.lines = ["- [ ] " + parts.text]
         append.placement = .beforeChildren
-        return [remove(item, planner: planner, note: note), PlannedWrite(document: append)]
+        return [remove(item, note: note), PlannedWrite(document: append)]
     }
 
     /// A new line at the end of the planner, or of the group it was added from.
