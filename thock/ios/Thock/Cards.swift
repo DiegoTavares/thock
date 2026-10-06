@@ -310,6 +310,10 @@ struct PlannerCard: View {
                 ForEach(group.items.filter { !model.isBeingRemoved($0, note: note) }) { item in
                     PlannerRow(item: item, note: note, timing: $timing, editing: $editing)
                 }
+                ForEach(group.notes) { block in
+                    BlockView(block: block)
+                        .padding(.vertical, 5)
+                }
                 if !group.isCalendar, !model.isReadOnly {
                     AddLineRow(group: group, note: note)
                 }
@@ -393,8 +397,18 @@ struct PlannerRow: View {
         .accessibilityLabel("\(timeText.isEmpty ? "" : timeText + ", ")\(Inline.plainText(item.label))")
         .accessibilityValue(item.done ? "Done" : "Not done")
 
-        if item.isCalendar || model.isReadOnly {
+        if model.isReadOnly {
             row.accessibilityHint(item.isCalendar ? "From your calendar" : "")
+        } else if item.isCalendar {
+            // The desk's calendar sync owns the words and the hour; a tick is
+            // the person's own and survives the next sync.
+            row
+                .onTapGesture { model.tick(item, note: note) }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("From your calendar")
+                .contextMenu {
+                    Button(item.done ? "Untick" : "Tick") { model.tick(item, note: note) }
+                }
         } else {
             row
                 .onTapGesture { model.tick(item, note: note) }
