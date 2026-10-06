@@ -584,8 +584,9 @@ pub fn append_done_to_note_edit(
 }
 
 /// The edit appending `block` (newline-terminated lines, e.g. a task with its
-/// children) at the end of a daily note's planner/task section, or at the end
-/// of the file when the heading is missing. Never touches existing content.
+/// children) at the end of a daily note's planner/task section — above any
+/// child heading such as the calendar's — or at the end of the file when the
+/// heading is missing. Never touches existing content.
 pub fn append_block_to_note_edit(
     note_text: &str,
     heading: &day_plan::HeadingNames,
@@ -596,6 +597,13 @@ pub fn append_block_to_note_edit(
     let section = section_line_range(&lines, heading).map(|(range, _)| range);
     match section {
         Some(range) => {
+            // Only the planner's own list, above its first child heading —
+            // a subsection like the calendar's belongs to whoever writes it.
+            let body_end = range
+                .clone()
+                .find(|&row| heading_level_and_text(lines[row].content).is_some())
+                .unwrap_or(range.end);
+            let range = range.start..body_end;
             let anchor = lines[range.clone()]
                 .iter()
                 .rposition(|entry| !entry.content.trim().is_empty())
@@ -980,6 +988,32 @@ Some orienting prose the model must never touch.
             "# Monday\n\n## Day planner\n\n- [ ] 09:00 Standup\n- [x] Renew passport\n\n\
              ## Personal\n\nprose\n"
         );
+    }
+
+    #[test]
+    fn append_block_to_note_lands_above_planner_subsections() {
+        let block = "- [ ] Renew passport\n  - [ ] Book photo\n";
+        let cases = [
+            (
+                "Day planner",
+                "# Journal\n\n# Day planner\n\n- [ ] Workout\n\n## Calendar\n\n\
+                 - [ ] 10:00 - 10:30 Sync <!--gcal:abc-->\n",
+                "# Journal\n\n# Day planner\n\n- [ ] Workout\n- [ ] Renew passport\n  \
+                 - [ ] Book photo\n\n## Calendar\n\n- [ ] 10:00 - 10:30 Sync <!--gcal:abc-->\n",
+            ),
+            // A customized template: renamed heading, its own subsections.
+            (
+                "Plan",
+                "## Plan\n\n### Work\n\n- [ ] Ship\n\n### Calendar\n\n- [ ] 10:00 Sync\n",
+                "## Plan\n- [ ] Renew passport\n  - [ ] Book photo\n\n### Work\n\n\
+                 - [ ] Ship\n\n### Calendar\n\n- [ ] 10:00 Sync\n",
+            ),
+        ];
+        for (heading, note, expected) in cases {
+            let heading = day_plan::HeadingNames::new([heading]);
+            let edited = apply_edits(note, vec![append_block_to_note_edit(note, &heading, block)]);
+            assert_eq!(edited, expected);
+        }
     }
 
     #[test]
