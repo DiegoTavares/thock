@@ -1451,9 +1451,6 @@ impl GitStore {
         let task = cx
             .spawn(async move |this, cx| {
                 let result: Result<Entity<BufferDiff>> = async {
-                    let buffer_snapshot = buffer.update(cx, |buffer, _| buffer.snapshot());
-                    let language_registry =
-                        buffer.update(cx, |buffer, _| buffer.language_registry());
                     let content: Option<Arc<str>> = match oid {
                         None => None,
                         Some(oid) => Some({
@@ -1464,6 +1461,10 @@ impl GitStore {
                             content.into()
                         }),
                     };
+                    let (buffer_snapshot, language_registry) = buffer.read_with(cx, |buffer, _| {
+                        (buffer.snapshot(), buffer.language_registry())
+                    });
+                    let buffer_version = buffer_snapshot.version.clone();
                     let buffer_diff = cx.new(|cx| {
                         BufferDiff::new(
                             &buffer_snapshot,
@@ -1485,7 +1486,7 @@ impl GitStore {
                         buffer_diff.set_secondary_diff(unstaged_diff);
                     });
 
-                    this.update(cx, |this, cx| {
+                    let recalculation = this.update(cx, |this, cx| {
                         this.loading_diffs.remove(&(buffer_id, diff_kind));
 
                         let git_store = cx.weak_entity();
@@ -1494,15 +1495,23 @@ impl GitStore {
                             .entry(buffer_id)
                             .or_insert_with(|| cx.new(|cx| BufferGitState::new(git_store, cx)));
 
-                        diff_state.update(cx, |state, _| {
+                        diff_state.update(cx, |state, cx| {
                             if let Some(oid) = oid {
                                 if let Some(content) = content {
                                     state.oid_texts.insert(oid, content);
                                 }
                             }
                             state.oid_diffs.insert(oid, buffer_diff.downgrade());
-                        });
+                            let buffer = buffer.read(cx);
+                            if buffer.version() != buffer_version {
+                                state.recalculate_diffs(buffer.text_snapshot(), cx);
+                            }
+                            state.wait_for_recalculation()
+                        })
                     })?;
+                    if let Some(recalculation) = recalculation {
+                        recalculation.await;
+                    }
 
                     Ok(buffer_diff)
                 }
@@ -5267,6 +5276,31 @@ impl BufferGitState {
             // for a bit
             yield_now().await;
 
+            for (oid, oid_diff, base_text_buffer, base_text) in oid_diffs {
+                let base_text_snapshot =
+                    base_text_buffer.read_with(cx, |buffer, _| buffer.snapshot());
+                let new_oid_diff = cx
+                    .update(|cx| {
+                        oid_diff.read(cx).update_diff(
+                            buffer.clone(),
+                            &base_text_snapshot,
+                            base_text.clone(),
+                            cx,
+                        )
+                    })
+                    .await;
+
+                oid_diff.update(cx, |diff, cx| diff.set_snapshot(new_oid_diff, cx));
+
+                log::debug!(
+                    "finished recalculating oid diff for buffer {} oid {:?}",
+                    buffer.remote_id(),
+                    oid
+                );
+
+                yield_now().await;
+            }
+
             let cancel = this.update(cx, |this, _| {
                 // This checks whether all pending stage/unstage operations
                 // have quiesced (i.e. both the corresponding write and the
@@ -5356,31 +5390,6 @@ impl BufferGitState {
             })?;
 
             yield_now().await;
-
-            for (oid, oid_diff, base_text_buffer, base_text) in oid_diffs {
-                let base_text_snapshot =
-                    base_text_buffer.read_with(cx, |buffer, _| buffer.snapshot());
-                let new_oid_diff = cx
-                    .update(|cx| {
-                        oid_diff.read(cx).update_diff(
-                            buffer.clone(),
-                            &base_text_snapshot,
-                            base_text.clone(),
-                            cx,
-                        )
-                    })
-                    .await;
-
-                oid_diff.update(cx, |diff, cx| diff.set_snapshot(new_oid_diff, cx));
-
-                log::debug!(
-                    "finished recalculating oid diff for buffer {} oid {:?}",
-                    buffer.remote_id(),
-                    oid
-                );
-
-                yield_now().await;
-            }
 
             log::debug!(
                 "finished recalculating diffs for buffer {}",
