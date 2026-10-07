@@ -1118,7 +1118,7 @@ mod tests {
 
         // `Someday › Home` is not Soon's Home: the category is made again
         // under Someday, the desk's own rule for a chevron move.
-        let same_name = move_block(
+        let mut same_name = move_block(
             "Home",
             "Buy a smoke alarm",
             "Home",
@@ -1126,6 +1126,13 @@ mod tests {
             None,
             Some("Someday"),
         );
+        if let Operation::MoveBlock { to, .. } = &mut same_name.operation {
+            *to = Some(Heading {
+                text: "Home".into(),
+                level: 3,
+                ordinal: 0,
+            });
+        }
         let result = apply(Some(BACKLOG), &same_name, None);
         assert_eq!(result.outcome, Outcome::SectionAdded);
         assert!(result.text.contains(

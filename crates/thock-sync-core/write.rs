@@ -375,8 +375,7 @@ mod tests {
         );
         assert_eq!(
             parse_write(
-                r#"{"v":1,"client_id":"c","kind":"move_block","path":"backlog.md","heading":null,"line_hash":"abc","to":null,"new_line":"a
-b"}"#
+                r#"{"v":1,"client_id":"c","kind":"move_block","path":"backlog.md","heading":null,"line_hash":"abc","to":null,"new_line":"a\nb"}"#
             ),
             Err(WriteError::LineBreakInLine)
         );
