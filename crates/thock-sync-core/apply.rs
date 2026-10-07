@@ -306,6 +306,7 @@ pub fn effect_present(content: &str, write: &Write) -> bool {
             place,
             new_line,
             create_under,
+            ..
         } => {
             let Some(destination) =
                 find_group(&document, to.as_ref(), create_under.as_ref()).map(own)
@@ -339,12 +340,11 @@ pub fn effect_present(content: &str, write: &Write) -> bool {
             // Moved between groups, the source must have let go of it too;
             // reordered inside one group, the placed line is the source.
             match find_section(&document, heading.as_ref()).map(own) {
-                Some(source) if source.heading != destination.heading => !document
-                    .matchable(&source)
-                    .iter()
-                    .any(|(_, text)| {
+                Some(source) if source.heading != destination.heading => {
+                    !document.matchable(&source).iter().any(|(_, text)| {
                         line_hash(text) == *wanted && !normalize_line(text).is_empty()
-                    }),
+                    })
+                }
                 _ => true,
             }
         }
@@ -387,7 +387,12 @@ fn own(section: Section) -> Section {
 /// has none: where `place: top` lands.
 fn first_body_line(document: &Document, section: &Section) -> usize {
     (section.start..section.body_end)
-        .find(|index| document.lines.get(*index).is_some_and(|line| !line.is_blank()))
+        .find(|index| {
+            document
+                .lines
+                .get(*index)
+                .is_some_and(|line| !line.is_blank())
+        })
         .unwrap_or(section.body_end)
 }
 
@@ -427,7 +432,10 @@ fn cut(document: &mut Document, start: usize, end: usize) {
             .lines
             .get(start - 1)
             .is_some_and(|line| line.is_blank());
-    let after_blank = document.lines.get(start).is_some_and(|line| line.is_blank());
+    let after_blank = document
+        .lines
+        .get(start)
+        .is_some_and(|line| line.is_blank());
     if before_blank && after_blank {
         document.lines.remove(start);
     }
@@ -1028,7 +1036,11 @@ mod tests {
                 .contains("## Soon\n\n- [ ] Call the dentist\n- [ ] Renew passport\n\n### Home")
         );
         // The group's end is above its categories, never inside one.
-        assert!(!result.text.contains("Buy a smoke alarm\n- [ ] Renew passport"));
+        assert!(
+            !result
+                .text
+                .contains("Buy a smoke alarm\n- [ ] Renew passport")
+        );
     }
 
     #[test]
@@ -1048,7 +1060,10 @@ mod tests {
             "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n"
         );
         assert!(effect_present(&result.text, &gate));
-        assert_eq!(apply(Some(&result.text), &gate, None).outcome, Outcome::Noop);
+        assert_eq!(
+            apply(Some(&result.text), &gate, None).outcome,
+            Outcome::Noop
+        );
 
         // Dropping after a task that has children lands below the children.
         let below = move_block(
@@ -1091,7 +1106,10 @@ mod tests {
                 .text
                 .contains("## Soon\n\n- [ ] Renew passport\n\n### Home")
         );
-        assert_eq!(apply(Some(&result.text), &anchor_gone, None).outcome, Outcome::Noop);
+        assert_eq!(
+            apply(Some(&result.text), &anchor_gone, None).outcome,
+            Outcome::Noop
+        );
 
         let source_gone = move_block("Soon", "Not here", "Someday", Place::End, None, None);
         let result = apply(Some(BACKLOG), &source_gone, None);
@@ -1110,14 +1128,15 @@ mod tests {
         );
         let result = apply(Some(BACKLOG), &same_name, None);
         assert_eq!(result.outcome, Outcome::SectionAdded);
-        assert!(
-            result
-                .text
-                .contains("### Thock\n\n- [ ] Week widget\n\n### Home\n- [ ] Buy a smoke alarm\n\n## Completed")
-        );
+        assert!(result.text.contains(
+            "### Thock\n\n- [ ] Week widget\n\n### Home\n- [ ] Buy a smoke alarm\n\n## Completed"
+        ));
         assert!(result.text.contains("  - then the latch\n\n## Someday"));
         assert!(effect_present(&result.text, &same_name));
-        assert_eq!(apply(Some(&result.text), &same_name, None).outcome, Outcome::Noop);
+        assert_eq!(
+            apply(Some(&result.text), &same_name, None).outcome,
+            Outcome::Noop
+        );
 
         let new_group = move_block(
             "Home",
@@ -1137,12 +1156,13 @@ mod tests {
         }
         let result = apply(Some(BACKLOG), &new_group, None);
         assert_eq!(result.outcome, Outcome::SectionAdded);
-        assert!(
-            result
-                .text
-                .contains("### Thock\n\n- [ ] Week widget\n\n### Garden\n- [ ] Buy a smoke alarm\n\n## Completed")
+        assert!(result.text.contains(
+            "### Thock\n\n- [ ] Week widget\n\n### Garden\n- [ ] Buy a smoke alarm\n\n## Completed"
+        ));
+        assert_eq!(
+            apply(Some(&result.text), &new_group, None).outcome,
+            Outcome::Noop
         );
-        assert_eq!(apply(Some(&result.text), &new_group, None).outcome, Outcome::Noop);
     }
 
     #[test]
@@ -1157,14 +1177,21 @@ mod tests {
         );
         let result = apply(Some(BACKLOG), &tick, None);
         assert_eq!(result.outcome, Outcome::Applied);
-        assert!(result.text.contains("### Home\n\n- [ ] Buy a smoke alarm\n\n## Someday"));
+        assert!(
+            result
+                .text
+                .contains("### Home\n\n- [ ] Buy a smoke alarm\n\n## Someday")
+        );
         assert!(
             result
                 .text
                 .ends_with("## Completed\n\n- [x] Book the car ✅ 2026-10-01\n- [x] Fix the gate ✅ 2026-10-06\n  - the hinge first\n\n  - then the latch\n")
         );
         assert!(effect_present(&result.text, &tick));
-        assert_eq!(apply(Some(&result.text), &tick, None).outcome, Outcome::Noop);
+        assert_eq!(
+            apply(Some(&result.text), &tick, None).outcome,
+            Outcome::Noop
+        );
     }
 
     #[test]
@@ -1176,9 +1203,16 @@ mod tests {
         });
         let result = apply(Some(BACKLOG), &remove, None);
         assert_eq!(result.outcome, Outcome::Applied);
-        assert!(result.text.contains("### Home\n\n- [ ] Buy a smoke alarm\n\n## Someday"));
+        assert!(
+            result
+                .text
+                .contains("### Home\n\n- [ ] Buy a smoke alarm\n\n## Someday")
+        );
         assert!(effect_present(&result.text, &remove));
-        assert_eq!(apply(Some(&result.text), &remove, None).outcome, Outcome::Noop);
+        assert_eq!(
+            apply(Some(&result.text), &remove, None).outcome,
+            Outcome::Noop
+        );
 
         let only = write(Operation::RemoveBlock {
             heading: heading("Thock"),

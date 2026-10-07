@@ -344,7 +344,10 @@ mod tests {
         let write = parse_write(json).expect("parses");
         match &write.operation {
             Operation::MoveBlock {
-                to, place, new_line, ..
+                to,
+                place,
+                new_line,
+                ..
             } => {
                 assert_eq!(to.as_ref().map(|h| h.text.as_str()), Some("Someday"));
                 assert_eq!(
