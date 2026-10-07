@@ -169,8 +169,10 @@ public struct VaultConfig: Equatable, Sendable {
     public var journalHeadings = ["Journal"]
     public var personalHeadings = ["Personal"]
     /// The weekly note's checklist section (V37 §6); the desk has no setting
-    /// for it, so the shipped template's name is the only one.
-    public var goalsHeadings = ["Goals"]
+    /// for it, so the shipped template's name comes first and the Week
+    /// Review ritual's `# Week Goals` after it. Without the alias a
+    /// level-1 `# Week Goals` reads as the agent's voice and cannot be ticked.
+    public var goalsHeadings = ["Goals", "Week goals"]
     public var inboxDir = "inbox"
     /// The language the Set Language ritual recorded (V19), in the person's
     /// own words and as a tag. Either may be missing.
