@@ -57,6 +57,8 @@ enum AppSheet: Identifiable, Equatable {
 struct Toast: Equatable, Identifiable {
     let id = UUID()
     var text: String
+    /// The button's title; `Undo` unless the toast offers something else.
+    var action = "Undo"
     var undo: (() -> Void)?
 
     static func == (left: Toast, right: Toast) -> Bool {
@@ -89,6 +91,8 @@ final class AppModel {
     private(set) var weekPagesAnchor: VaultWeek = .current()
     /// The week canvas takes the day canvas's slot (V37 §5, N1).
     var showingWeek = false
+    /// The backlog is a canvas over the pager, never a sheet (V38 §4).
+    var showingBacklog = false
     var pairingError: String?
     var isPairing = false
     var deskAwake = true
@@ -113,6 +117,7 @@ final class AppModel {
     private var observers: [NSObjectProtocol] = []
     private var toastTask: Task<Void, Never>?
     private var pendingRemoval: (item: PlannerItem, note: NoteID)?
+    private var pendingBacklogRemoval: BacklogTask?
     private var isAuthenticating = false
     /// Set on launch and on every return from the background.
     private var needsGreeting = true
@@ -422,6 +427,22 @@ final class AppModel {
         selectedDay = .today()
         selectedWeek = .current()
         showingWeek = false
+        showingBacklog = false
+    }
+
+    // MARK: The backlog
+
+    /// Opens the backlog over the pager. It reads the vault, so it waits
+    /// for the unlock like every other read.
+    func openBacklog() {
+        guard phase == .ready, isUnlocked else { return }
+        sheet = nil
+        withAnimation(.snappy) { showingBacklog = true }
+    }
+
+    func closeBacklog() {
+        commitPendingRemoval()
+        withAnimation(.snappy) { showingBacklog = false }
     }
 
     func takePendingEntry() {
@@ -434,6 +455,10 @@ final class AppModel {
         guard url.scheme == "thock" else { return }
         if url.host == "pair" {
             Task { await pair(text: url.absoluteString) }
+            return
+        }
+        if url.host == "backlog" {
+            openBacklog()
             return
         }
         if let host = url.host, let entry = EntryPoint(rawValue: host == "capture" ? "idea" : host) {
@@ -450,7 +475,7 @@ final class AppModel {
 
     /// Launch arguments for looking at a screen without tapping to it:
     /// `-thock-practice` opens the practice notebook from a fresh install,
-    /// `-thock-open <journal|idea|clip|ask|receipts|you|dock|calendar>` opens a sheet,
+    /// `-thock-open <journal|idea|clip|ask|receipts|you|dock|calendar|backlog>` opens a sheet or the backlog,
     /// `-thock-day <offset>` shows another day, `-thock-week <offset>` a week,
     /// `-thock-looks <dark|light|system>` sets the appearance.
     private func applyLaunchArguments() async {
@@ -480,6 +505,7 @@ final class AppModel {
         case "receipts"?: sheet = .receipts
         case "you"?: sheet = .you
         case "calendar"?: sheet = .calendar
+        case "backlog"?: openBacklog()
         case "dock"?: sheet = .capture(entry: "dock", preset: nil)
         case let other?:
             if let entry = EntryPoint(rawValue: other) { open(entry) }
@@ -508,6 +534,28 @@ final class AppModel {
                 if let item = session?.view(today)?.planner.items.first(where: { $0.label.hasPrefix(parts[1]) }) {
                     perform { try $0.moveToSoon(item, note: .day(today)) }
                 }
+            case "backlog-move" where parts.count == 3:
+                // `backlog-move:<label prefix>:<soon|someday|today|top>`: the
+                // menu's section items, Move to today, or a drag to the top
+                // of the task's own group.
+                if let backlog = session?.backlog(), let task = backlog.openSections.flatMap(\.tasks).first(where: { $0.label.hasPrefix(parts[1]) }), let group = backlog.group(of: task) {
+                    switch parts[2] {
+                    case "soon": backlogMove(task, from: group, toSection: backlog.soon)
+                    case "someday": backlogMove(task, from: group, toSection: backlog.someday)
+                    case "today": backlogMoveToToday(task)
+                    case "top": backlogMove(task, to: group, place: .top)
+                    default: break
+                    }
+                }
+            case "backlog-tick" where parts.count >= 2:
+                if let task = session?.backlog().openSections.flatMap(\.tasks).first(where: { $0.label.hasPrefix(parts[1]) }) {
+                    backlogTick(task)
+                }
+            case "backlog-remove" where parts.count >= 2:
+                if let task = session?.backlog().openSections.flatMap(\.tasks).first(where: { $0.label.hasPrefix(parts[1]) }) {
+                    backlogRemove(task)
+                    commitPendingRemoval()
+                }
             case "asked" where parts.count == 3:
                 // A finished turn in the day's thread, as if the agent had
                 // read today's note: `asked:<question>:<answer>`.
@@ -532,9 +580,9 @@ final class AppModel {
 
     // MARK: Doing things
 
-    func show(_ text: String, undo: (() -> Void)? = nil) {
+    func show(_ text: String, action: String = "Undo", undo: (() -> Void)? = nil) {
         toastTask?.cancel()
-        let toast = Toast(text: text, undo: undo)
+        let toast = Toast(text: text, action: action, undo: undo)
         withAnimation(.snappy) { self.toast = toast }
         toastTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: undo == nil ? 2_200_000_000 : 4_000_000_000)
@@ -706,9 +754,93 @@ final class AppModel {
     }
 
     func commitPendingRemoval() {
-        guard let removal = pendingRemoval else { return }
-        pendingRemoval = nil
-        perform { try $0.remove(removal.item, note: removal.note) }
+        if let removal = pendingRemoval {
+            pendingRemoval = nil
+            perform { try $0.remove(removal.item, note: removal.note) }
+        }
+        if let task = pendingBacklogRemoval {
+            pendingBacklogRemoval = nil
+            perform { try $0.removeBacklog(task) }
+        }
+    }
+
+    // MARK: The backlog's moves (V38 §6)
+
+    /// Where a task sits now, so a move can be undone: back into its group,
+    /// after the task above it or at the top.
+    private func placeBefore(_ task: BacklogTask) -> (group: BacklogGroup, place: BacklogPlace)? {
+        guard let backlog = session?.backlog(), let group = backlog.group(of: task) else { return nil }
+        let open = group.openTasks
+        guard let index = open.firstIndex(of: task) else { return nil }
+        return (group, index == 0 ? .top : .after(open[index - 1]))
+    }
+
+    func backlogMove(_ task: BacklogTask, to group: BacklogGroup, place: BacklogPlace) {
+        let before = placeBefore(task)
+        guard perform({ try $0.moveBacklog(task, to: group, place: place) }) else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        let destination = group.name ?? session?.backlog().section(group.heading) ?? "Backlog"
+        show("Moved to \(destination)") { [weak self] in
+            self?.undoMove(of: task, to: before)
+        }
+    }
+
+    func backlogMove(_ task: BacklogTask, from group: BacklogGroup, toSection section: BacklogSection) {
+        let before = placeBefore(task)
+        guard perform({ try $0.moveBacklog(task, from: group, toSection: section) }) else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        show("Moved to \(section.title)") { [weak self] in
+            self?.undoMove(of: task, to: before)
+        }
+    }
+
+    /// The moved task is found again by its words in its new place; its
+    /// line and ordinal there are not the ones it left with.
+    private func undoMove(of task: BacklogTask, to before: (group: BacklogGroup, place: BacklogPlace)?) {
+        guard let before, let backlog = session?.backlog(),
+              let now = backlog.openSections.flatMap(\.tasks).first(where: { $0.hash == task.hash })
+        else { return }
+        perform { try $0.moveBacklog(now, to: before.group, place: before.place) }
+        withAnimation(.snappy) { toast = nil }
+    }
+
+    func backlogTick(_ task: BacklogTask) {
+        if perform({ try $0.tickBacklog(task) }) {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            show("Done, and in today's note")
+        }
+    }
+
+    func backlogMoveToToday(_ task: BacklogTask) {
+        if perform({ try $0.moveBacklogToToday(task) }) {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            show("Moved to today")
+        }
+    }
+
+    func backlogEdit(_ task: BacklogTask, text: String) {
+        perform { try $0.editBacklog(task, text: text) }
+    }
+
+    func backlogAdd(_ text: String, to group: BacklogGroup) {
+        perform { try $0.addBacklog(text, to: group) }
+    }
+
+    /// Removal waits a few seconds for an undo before it is written, as a
+    /// planner line's does.
+    func backlogRemove(_ task: BacklogTask) {
+        commitPendingRemoval()
+        pendingBacklogRemoval = task
+        revision += 1
+        show("Task removed") { [weak self] in
+            self?.pendingBacklogRemoval = nil
+            self?.revision += 1
+            withAnimation(.snappy) { self?.toast = nil }
+        }
+    }
+
+    func isBeingRemoved(_ task: BacklogTask) -> Bool {
+        pendingBacklogRemoval == task
     }
 
     func checkAgain() async {

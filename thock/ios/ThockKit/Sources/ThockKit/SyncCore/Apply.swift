@@ -46,6 +46,9 @@ extension SyncCore {
             insertAtEnd(of: file.wholeFile(), lines: lines, blankLineBefore: true, in: &file, section: nil)
             return Applied(text: file.text, outcome: .applied)
         }
+        if write.kind == .moveBlock || write.kind == .removeBlock {
+            return applyBlock(write, to: &file, created: created)
+        }
 
         var sectionAdded = false
         var keptBoth = false
@@ -84,6 +87,8 @@ extension SyncCore {
             }
             // Against a missing file the corpus still creates the heading:
             // every write yields a file, even one with nothing to remove.
+        case .moveBlock, .removeBlock:
+            break
         case .replaceSection:
             let current = sectionHash(lines: file.lines[section.body].map(\.text))
             if current == write.baseHash {
@@ -159,7 +164,163 @@ extension SyncCore {
             }
             guard let first = write.lines.first(where: { !$0.allSatisfy(\.isWhitespace) }) else { return false }
             return section.body.contains { file.lines[$0].text.trimmingTrailingWhitespace() == first.trimmingTrailingWhitespace() + conflictMarker }
+        case .moveBlock:
+            guard let destination = findGroup(write.to, under: write.createUnder, in: file).map(own) else { return false }
+            let wanted = write.lineHash ?? ""
+            let landed = write.newLine.map(lineHash) ?? wanted
+            let mask = file.contentMask()
+            let placed = destination.body.contains { index in
+                guard mask[index], lineHash(file.lines[index].text) == landed, !lineIdentity(file.lines[index].text).isEmpty else { return false }
+                switch write.place {
+                case .top:
+                    return index == firstBodyLine(of: destination, in: file)
+                case .end:
+                    return blockEnd(from: index, in: destination, file: file) == destination.bodyEnd
+                case .after(let anchorHash, let anchorOrdinal):
+                    // A missing anchor put the block at the end (§7.2), so
+                    // that is where a retry looks for it.
+                    if let anchor = targetLine(in: file, section: destination, hash: anchorHash, ordinal: anchorOrdinal) {
+                        return blockEnd(from: anchor, in: destination, file: file) == index
+                    }
+                    return blockEnd(from: index, in: destination, file: file) == destination.bodyEnd
+                }
+            }
+            guard placed else { return false }
+            // Moved between groups, the source must have let go of it too;
+            // reordered inside one group, the placed line is the source.
+            guard let source = resolveSection(write.heading, in: file).map(own), source.headingIndex != destination.headingIndex else { return true }
+            return targetLine(in: file, section: source, hash: wanted, ordinal: 0) == nil
+        case .removeBlock:
+            guard let section = resolveSection(write.heading, in: file).map(own) else { return true }
+            return targetLine(in: file, section: section, hash: write.lineHash ?? "", ordinal: 0) == nil
         }
+    }
+
+    /// `move_block` and `remove_block` (V38 §7): a block is the line plus its
+    /// indented continuation, found by hash inside its group's own lines.
+    private static func applyBlock(_ write: WriteDocument, to file: inout TextFile, created: Bool) -> Applied {
+        // A missing source is a task the desk renamed, moved or completed
+        // meanwhile; a move must never become a copy, so nothing happens.
+        let untouched = Applied(text: file.text, outcome: created ? .created : .noop)
+        guard let source = resolveSection(write.heading, in: file).map(own),
+              let index = targetLine(in: file, section: source, hash: write.lineHash ?? "", ordinal: write.ordinal)
+        else { return untouched }
+        let end = blockEnd(from: index, in: source, file: file)
+        var texts = file.lines[index..<end].map(\.text)
+        if write.kind == .removeBlock {
+            cut(index..<end, from: &file)
+            return Applied(text: file.text, outcome: created ? .created : .applied)
+        }
+        if let newLine = write.newLine, !texts.isEmpty {
+            texts[0] = newLine
+        }
+        cut(index..<end, from: &file)
+        var sectionAdded = false
+        let destination = own(locateGroup(write.to, under: write.createUnder, in: &file, sectionAdded: &sectionAdded))
+        let at: Int
+        switch write.place {
+        case .top:
+            at = firstBodyLine(of: destination, in: file)
+        case .end:
+            at = destination.bodyEnd
+        case .after(let anchorHash, let anchorOrdinal):
+            if let anchor = targetLine(in: file, section: destination, hash: anchorHash, ordinal: anchorOrdinal) {
+                at = blockEnd(from: anchor, in: destination, file: file)
+            } else {
+                at = destination.bodyEnd
+            }
+        }
+        insert(texts, at: at, blankLineBefore: false, in: &file, section: destination)
+        return Applied(text: file.text, outcome: created ? .created : (sectionAdded ? .sectionAdded : .applied))
+    }
+
+    /// The section's own lines as a section of their own, so a block rule
+    /// never reaches into a subsection: a group is the lines under its
+    /// heading above the next heading (V38 §7.1).
+    private static func own(_ section: SectionRange) -> SectionRange {
+        var own = section
+        own.bodyEnd = section.ownEnd
+        return own
+    }
+
+    /// The first non-blank line of a section, or its end when it has none:
+    /// where `place: top` lands.
+    private static func firstBodyLine(of section: SectionRange, in file: TextFile) -> Int {
+        section.body.first { !file.lines[$0].isBlank } ?? section.bodyEnd
+    }
+
+    /// One past the last line of the block starting at `index`: the line plus
+    /// every indented, non-blank line after it inside the section, with blank
+    /// lines between them included and trailing blank lines left out. The
+    /// desk's own span rule, so both ends cut the same block.
+    static func blockEnd(from index: Int, in section: SectionRange, file: TextFile) -> Int {
+        var end = index + 1
+        var lastContent = end
+        while end < section.bodyEnd {
+            let line = file.lines[end]
+            if line.isBlank {
+                end += 1
+            } else if line.text.hasPrefix(" ") || line.text.hasPrefix("\t") {
+                end += 1
+                lastContent = end
+            } else {
+                break
+            }
+        }
+        return lastContent
+    }
+
+    /// Removes a run of lines. A blank line on each side of the gap would
+    /// leave two in a row, which neither end ever writes, so one goes with
+    /// the block.
+    private static func cut(_ range: Range<Int>, from file: inout TextFile) {
+        let range = range.lowerBound..<min(range.upperBound, file.lines.count)
+        guard !range.isEmpty else { return }
+        file.lines.removeSubrange(range)
+        let start = range.lowerBound
+        if start > 0, start < file.lines.count, file.lines[start - 1].isBlank, file.lines[start].isBlank {
+            file.lines.remove(at: start)
+        }
+    }
+
+    /// The group a block moves into. A missing `to` is created at the end of
+    /// `createUnder` (itself created like any missing heading), or, with no
+    /// parent named, where an append would create it. `Someday › Home` is
+    /// the Home inside Someday, whatever other Home the note has.
+    private static func locateGroup(_ to: HeadingRef?, under parent: HeadingRef?, in file: inout TextFile, sectionAdded: inout Bool) -> SectionRange {
+        guard let to else { return file.wholeFile() }
+        guard let parent else {
+            if let found = file.resolve(to) { return file.section(of: found) }
+            addHeading(to, to: &file)
+            sectionAdded = true
+            return file.resolve(to).map(file.section(of:)) ?? file.wholeFile()
+        }
+        let parentSection: SectionRange
+        if let found = file.resolve(parent) {
+            parentSection = file.section(of: found)
+        } else {
+            addHeading(parent, to: &file)
+            sectionAdded = true
+            parentSection = file.resolve(parent).map(file.section(of:)) ?? file.wholeFile()
+        }
+        if let found = file.resolve(to, within: parentSection.start..<parentSection.end) {
+            return file.section(of: found)
+        }
+        insert([headingLine(to)], at: parentSection.bodyEnd, blankLineBefore: true, in: &file, section: parentSection)
+        sectionAdded = true
+        return file.resolve(to, within: parentSection.start..<file.lines.count).map(file.section(of:)) ?? file.wholeFile()
+    }
+
+    /// The group a `move_block` names as its destination, when the note has
+    /// it: `to` inside `createUnder`'s section when a parent is named, else
+    /// `to` anywhere.
+    private static func findGroup(_ to: HeadingRef?, under parent: HeadingRef?, in file: TextFile) -> SectionRange? {
+        guard let to else { return file.wholeFile() }
+        if let parent {
+            guard let parentSection = resolveSection(parent, in: file), let found = file.resolve(to, within: parentSection.start..<parentSection.end) else { return nil }
+            return file.section(of: found)
+        }
+        return file.resolve(to).map(file.section(of:))
     }
 
     static func headingLine(_ heading: HeadingRef) -> String {

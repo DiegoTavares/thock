@@ -568,6 +568,13 @@ line starts at column 0.
 | `replace_line` | `heading`, `line_hash`, `ordinal` (int, default 0), `new_line` | replace one line |
 | `remove_line` | `heading`, `line_hash`, `ordinal` | remove one line |
 | `replace_section` | `heading`, `base_hash`, `lines` | replace the section's body with `lines` |
+| `move_block` | `heading`, `line_hash`, `ordinal`, `to` (object or null), `place` (`"end"` default, `"top"`, or `{"after": {"line_hash", "ordinal"}}`), `new_line` (string or null), `create_under` (object or null) | move one block (the line plus its indented continuation) from the group under `heading` into the group under `to` (V38 §7) |
+| `remove_block` | `heading`, `line_hash`, `ordinal` | remove one block |
+
+A **group** is a heading's own lines: under it, above its first subsection. The block kinds find
+their line there, never inside a subsection, so a task under `## Soon` and one under `### Home`
+are never confused. With `create_under`, `to` is resolved inside that section only (`Someday › Home`
+is not Soon's Home) and is created at its end when missing.
 
 Strings never contain `\r` or `\n`; the applier joins with the file's line ending (§8.1).
 
@@ -639,6 +646,13 @@ expanded with the same tokens). Outcomes: `created`, `section_added`, `applied`,
    are.
 7. **`replace_line`, target missing**: append `new_line + " <!--thock:also-->"` at the end of the body
    → `kept_both`. **`remove_line`, target missing** → `noop`.
+7. **`move_block` / `remove_block`** (V38 §7.2): the source line is found as in rule 6 among the
+   group's own lines; its block runs to the last indented, non-blank line after it. Source missing
+   → `noop`, never a copy. The block is cut (one of two blank lines left touching goes with it),
+   then placed in the destination group: `top` before its first non-blank line, `end` after its
+   own lines, `after` below the anchor's block, or at the end when the anchor is missing.
+   `new_line` replaces the block's first line as it lands. A missing `to` is created at the end
+   of `create_under`'s section (`section_added`), or like a missing heading in rule 4.
 8. **`replace_section`, `base_hash` matches** the current `section_hash`: the body is replaced by
    `lines` (trailing blank lines of the section preserved) → `applied`. **Mismatch**: `lines` are
    appended after the body with `blank_line_before: true` and ` <!--thock:also-->` on the first
@@ -653,6 +667,8 @@ expanded with the same tokens). Outcomes: `created`, `section_added`, `applied`,
 | `append` | the section's body (or the whole file for `null`) contains `lines` as a contiguous run, compared after trimming trailing whitespace of each line |
 | `replace_line` | when the target (`line_hash`, `ordinal`) is found: that line **equals** `new_line` (trailing whitespace ignored) or `new_line + " <!--thock:also-->"`; when it is not found: some body line equals either, or has `line_hash(new_line)`. Not a plain hash comparison (a tick keeps the hash), and not "any line equals" either: two identical lines must each be tickable by ordinal |
 | `remove_line` | no body line has `line_hash` |
+| `move_block` | a line with `line_hash(new_line)` (or `line_hash` when there is no `new_line`) sits in the destination group at the named place (`after` with a missing anchor reads as `end`), and, when the source is another group, no line of the source group has `line_hash` |
+| `remove_block` | no line of the group's own lines has `line_hash` |
 | `replace_section` | `section_hash` equals `section_hash` of `lines`, or the body contains `lines[0] + " <!--thock:also-->"` |
 
 Lines inside fenced code or front matter are never matched and a run never spans them. When a kind
@@ -726,8 +742,8 @@ port the rules to Swift against the same fixtures; the fixtures are what decide 
 
 `before: null` means no file. A runner applies `write` to `before`, asserts `after` and `outcome`, then
 applies `write` to `after` and asserts the text is unchanged with outcome `noop`. Areas: `append`,
-`create`, `replace_line`, `remove_line`, `replace_section`, `headings`, `line_endings`, `roundtrip`
-(`write` is `null`; parse and re-serialise must be byte-identical).
+`create`, `replace_line`, `remove_line`, `replace_section`, `move_block`, `remove_block`, `headings`,
+`line_endings`, `roundtrip` (`write` is `null`; parse and re-serialise must be byte-identical).
 
 Hash vectors: `fixtures/v1/hashes.json`, a list of `{"line": "…", "line_hash": "…"}` and
 `{"text": "…", "heading_key": "…"}`. Envelope vectors: `fixtures/v1/envelope.json`, a list of

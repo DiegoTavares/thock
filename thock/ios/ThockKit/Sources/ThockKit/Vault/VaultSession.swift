@@ -84,7 +84,7 @@ public struct VaultSession: Sendable {
             .min()
     }
 
-    private func record(_ writes: [PlannedWrite]) throws {
+    func record(_ writes: [PlannedWrite]) throws {
         guard store.isConnected else { throw VaultSessionError.notConnected }
         guard !store.isReadOnly else { throw VaultSessionError.readOnly }
         try store.record(writes)

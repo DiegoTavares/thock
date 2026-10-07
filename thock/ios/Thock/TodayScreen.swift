@@ -17,7 +17,9 @@ struct TodayScreen: View {
     var body: some View {
         @Bindable var model = model
         VStack(spacing: 0) {
-            if model.isUnlocked {
+            if model.isUnlocked, model.showingBacklog {
+                BacklogScreen()
+            } else if model.isUnlocked {
                 Group {
                     if model.showingWeek {
                         TabView(selection: $model.selectedWeek) {
@@ -40,7 +42,9 @@ struct TodayScreen: View {
             } else {
                 LockedView()
             }
-            if model.syncState == .disconnected {
+            if model.showingBacklog, model.isUnlocked {
+                EmptyView()
+            } else if model.syncState == .disconnected {
                 NoticeBar(text: "This phone is no longer connected to your desk.", action: "Connect again") {
                     Task { await model.disconnect() }
                 }
@@ -214,10 +218,12 @@ struct DayCanvas: View {
                         CardView(card: card, view: view, note: .day(day))
                         if isToday, card.id == inboxAfter {
                             InboxRow()
+                            BacklogRowOnToday()
                         }
                     }
                     if isToday, inboxAfter == nil {
                         InboxRow()
+                        BacklogRowOnToday()
                     }
                 } else {
                     Hairline()
@@ -226,6 +232,7 @@ struct DayCanvas: View {
                         .foregroundStyle(Theme.dim)
                     if isToday {
                         InboxRow()
+                        BacklogRowOnToday()
                     }
                 }
             }
