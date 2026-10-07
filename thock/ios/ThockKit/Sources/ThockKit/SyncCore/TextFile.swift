@@ -206,8 +206,17 @@ public struct TextFile: Equatable, Sendable {
         resolve(names: [reference.text], ordinal: reference.ordinal)
     }
 
+    /// `resolve`, among the headings inside `range`: how a `move_block`
+    /// names a category under a given section (V38 §7.1).
+    public func resolve(_ reference: HeadingRef, within range: Range<Int>) -> HeadingLine? {
+        resolve(names: [reference.text], ordinal: reference.ordinal, among: headings().filter { range.contains($0.index) })
+    }
+
     public func resolve(names: [String], ordinal: Int = 0) -> HeadingLine? {
-        let all = headings()
+        resolve(names: names, ordinal: ordinal, among: headings())
+    }
+
+    private func resolve(names: [String], ordinal: Int, among all: [HeadingLine]) -> HeadingLine? {
         for name in names {
             let wanted = name.trimmingCharacters(in: .whitespaces).lowercased()
             let exact = all.filter { $0.text.lowercased() == wanted }

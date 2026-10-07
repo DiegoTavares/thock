@@ -454,7 +454,7 @@ struct PlannerRow: View {
                     Button(note.kind == .weekly ? "Edit this goal" : "Edit this line") { editing = item }
                     Button("Move to Soon") {
                         if model.perform({ try $0.moveToSoon(item, note: note) }) {
-                            model.show("Moved to Backlog · Soon")
+                            model.show("Moved to Backlog · Soon", action: "Show") { model.openBacklog() }
                         }
                     }
                     Button("Remove", role: .destructive) { model.remove(item, note: note) }

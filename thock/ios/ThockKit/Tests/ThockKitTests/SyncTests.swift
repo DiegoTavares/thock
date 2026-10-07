@@ -360,6 +360,57 @@ final class SyncTests: XCTestCase {
         XCTAssertTrue(harness.planner().items.contains { $0.label == "Call the dentist about Friday" })
     }
 
+    // MARK: The backlog (V38 §8)
+
+    func testATaskMovedOnBothEndsEndsUpExactlyOnce() async throws {
+        let harness = try Harness()
+        try await harness.pair()
+        try await harness.desk.setAwake(false)
+        let backlog = BacklogView(text: harness.store.content("backlog.md") ?? "", config: harness.store.config)
+        let passport = try XCTUnwrap(backlog.soon.looseGroup.tasks.first { $0.label == "Renew the passport" })
+        try harness.store.record([harness.writes.backlogMove(passport, from: backlog.soon.looseGroup, toSection: backlog.someday)])
+        await harness.engine.sync()
+        XCTAssertEqual(harness.store.waitingForDeskCount, 1)
+
+        // Meanwhile the desk moves the same task to the top of Someday.
+        try await harness.desk.edit { disk in
+            disk["backlog.md"] = disk["backlog.md"]?
+                .replacingOccurrences(of: "- [ ] Renew the passport\n", with: "")
+                .replacingOccurrences(of: "## Someday\n\n", with: "## Someday\n\n- [ ] Renew the passport\n")
+        }
+        try await harness.desk.setAwake(true)
+        await harness.engine.sync()
+        await harness.assertConverged()
+        let text = harness.store.content("backlog.md") ?? ""
+        XCTAssertEqual(text.components(separatedBy: "Renew the passport").count - 1, 1)
+        XCTAssertTrue(text.contains("## Someday\n\n- [ ] Renew the passport\n- [ ] Learn to make sourdough"))
+        XCTAssertEqual(harness.store.waitingForDeskCount, 0)
+    }
+
+    func testATaskRenamedAtTheDeskStaysWhereTheDeskPutIt() async throws {
+        let harness = try Harness()
+        try await harness.pair()
+        try await harness.desk.setAwake(false)
+        let backlog = BacklogView(text: harness.store.content("backlog.md") ?? "", config: harness.store.config)
+        let dentist = try XCTUnwrap(backlog.soon.looseGroup.tasks.first { $0.label.hasPrefix("Dentist") })
+        try harness.store.record([harness.writes.backlogMove(dentist, from: backlog.soon.looseGroup, toSection: backlog.someday)])
+        await harness.engine.sync()
+        XCTAssertTrue(BacklogView(text: harness.store.content("backlog.md") ?? "", config: harness.store.config).someday.tasks.contains { $0.label.hasPrefix("Dentist") })
+
+        // Meanwhile the desk rewords the task. The phone's move finds no
+        // task to move and is dropped, never turned into a copy.
+        try await harness.desk.edit { disk in
+            disk["backlog.md"] = disk["backlog.md"]?.replacingOccurrences(of: "Dentist, call back about Friday", with: "Dentist, Friday is fine")
+        }
+        try await harness.desk.setAwake(true)
+        await harness.engine.sync()
+        await harness.assertConverged()
+        let after = BacklogView(text: harness.store.content("backlog.md") ?? "", config: harness.store.config)
+        XCTAssertEqual(after.soon.looseGroup.tasks.map(\.label), ["Renew the passport", "Dentist, Friday is fine"])
+        XCTAssertFalse(after.someday.tasks.contains { $0.label.hasPrefix("Dentist") })
+        XCTAssertEqual(harness.store.waitingForDeskCount, 0)
+    }
+
     // MARK: Rebase and prune
 
     func testRebaseKeepsPendingWritesOnTopOfANewSnapshot() async throws {

@@ -48,6 +48,23 @@ pub enum Placement {
     BeforeChildren,
 }
 
+/// Where a `move_block` lands inside its destination group (V38 §7.1).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Place {
+    /// Before the group's first body line.
+    Top,
+    /// After the group's own lines, above its first subsection.
+    #[default]
+    End,
+    /// After the named line and its indented continuation.
+    After {
+        line_hash: String,
+        #[serde(default)]
+        ordinal: usize,
+    },
+}
+
 /// The kind-specific half of a write (spec §7.3), tagged by `kind`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -83,6 +100,29 @@ pub enum Operation {
         base_hash: String,
         lines: Vec<String>,
     },
+    /// Moves a task block, the line plus its indented continuation, from
+    /// the group under `heading` to the group under `to` (V38 §7.1).
+    MoveBlock {
+        heading: Option<Heading>,
+        line_hash: String,
+        #[serde(default)]
+        ordinal: usize,
+        to: Option<Heading>,
+        #[serde(default)]
+        place: Place,
+        /// Replaces the block's first line as it lands.
+        #[serde(default)]
+        new_line: Option<String>,
+        /// The section a missing `to` is created at the end of.
+        #[serde(default)]
+        create_under: Option<Heading>,
+    },
+    RemoveBlock {
+        heading: Option<Heading>,
+        line_hash: String,
+        #[serde(default)]
+        ordinal: usize,
+    },
 }
 
 impl Operation {
@@ -93,6 +133,8 @@ impl Operation {
             Self::ReplaceLine { .. } => "replace_line",
             Self::RemoveLine { .. } => "remove_line",
             Self::ReplaceSection { .. } => "replace_section",
+            Self::MoveBlock { .. } => "move_block",
+            Self::RemoveBlock { .. } => "remove_block",
         }
     }
 
@@ -101,9 +143,24 @@ impl Operation {
             Self::Create { .. } => None,
             Self::Append { heading, .. }
             | Self::ReplaceLine { heading, .. }
-            | Self::RemoveLine { heading, .. } => heading.as_ref(),
+            | Self::RemoveLine { heading, .. }
+            | Self::MoveBlock { heading, .. }
+            | Self::RemoveBlock { heading, .. } => heading.as_ref(),
             Self::ReplaceSection { heading, .. } => Some(heading),
         }
+    }
+
+    /// Every heading the write names, for validation.
+    fn headings(&self) -> Vec<&Heading> {
+        let mut named: Vec<&Heading> = self.heading().into_iter().collect();
+        if let Self::MoveBlock {
+            to, create_under, ..
+        } = self
+        {
+            named.extend(to.iter());
+            named.extend(create_under.iter());
+        }
+        named
     }
 }
 
@@ -180,8 +237,11 @@ pub(crate) fn validate(write: &Write) -> Result<(), WriteError> {
     if write.path.trim().is_empty() {
         return Err(WriteError::MissingPath);
     }
-    if let Some(heading) = write.operation.heading()
-        && heading.text.trim().is_empty()
+    if write
+        .operation
+        .headings()
+        .iter()
+        .any(|heading| heading.text.trim().is_empty())
     {
         return Err(WriteError::EmptyHeading);
     }
@@ -192,7 +252,8 @@ pub(crate) fn validate(write: &Write) -> Result<(), WriteError> {
             lines.iter().any(has_break)
         }
         Operation::ReplaceLine { new_line, .. } => has_break(new_line),
-        Operation::RemoveLine { .. } => false,
+        Operation::MoveBlock { new_line, .. } => new_line.as_ref().is_some_and(has_break),
+        Operation::RemoveLine { .. } | Operation::RemoveBlock { .. } => false,
     };
     if broken {
         return Err(WriteError::LineBreakInLine);
@@ -275,6 +336,47 @@ mod tests {
             ),
             Err(WriteError::Json(_))
         ));
+    }
+
+    #[test]
+    fn parses_a_move_block() {
+        let json = r#"{"v":1,"client_id":"c","kind":"move_block","path":"backlog.md","heading":{"text":"Home","level":3},"line_hash":"abc","to":{"text":"Someday"},"place":{"after":{"line_hash":"def"}},"create_under":{"text":"Someday"}}"#;
+        let write = parse_write(json).expect("parses");
+        match &write.operation {
+            Operation::MoveBlock {
+                to, place, new_line, ..
+            } => {
+                assert_eq!(to.as_ref().map(|h| h.text.as_str()), Some("Someday"));
+                assert_eq!(
+                    *place,
+                    Place::After {
+                        line_hash: "def".into(),
+                        ordinal: 0
+                    }
+                );
+                assert_eq!(*new_line, None);
+            }
+            other => panic!("wrong kind {}", other.kind()),
+        }
+        assert_eq!(parse_write(&write.to_json()).expect("parses"), write);
+        let bare = r#"{"v":1,"client_id":"c","kind":"move_block","path":"backlog.md","heading":null,"line_hash":"abc","to":null}"#;
+        match parse_write(bare).expect("parses").operation {
+            Operation::MoveBlock { place, .. } => assert_eq!(place, Place::End),
+            _ => panic!("wrong kind"),
+        }
+        assert_eq!(
+            parse_write(
+                r#"{"v":1,"client_id":"c","kind":"move_block","path":"backlog.md","heading":null,"line_hash":"abc","to":{"text":" "}}"#
+            ),
+            Err(WriteError::EmptyHeading)
+        );
+        assert_eq!(
+            parse_write(
+                r#"{"v":1,"client_id":"c","kind":"move_block","path":"backlog.md","heading":null,"line_hash":"abc","to":null,"new_line":"a
+b"}"#
+            ),
+            Err(WriteError::LineBreakInLine)
+        );
     }
 
     #[test]

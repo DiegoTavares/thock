@@ -25,6 +25,59 @@ public enum WriteKind: String, Codable, Sendable {
     case replaceLine = "replace_line"
     case removeLine = "remove_line"
     case replaceSection = "replace_section"
+    case moveBlock = "move_block"
+    case removeBlock = "remove_block"
+}
+
+/// Where a `move_block` lands inside its destination group (V38 §7.1).
+public enum Place: Equatable, Sendable {
+    /// Before the group's first body line.
+    case top
+    /// After the group's own lines, above its first subsection.
+    case end
+    /// After the named line and its indented continuation.
+    case after(lineHash: String, ordinal: Int)
+}
+
+extension Place: Codable {
+    enum CodingKeys: String, CodingKey {
+        case after
+    }
+
+    enum AfterKeys: String, CodingKey {
+        case lineHash = "line_hash"
+        case ordinal
+    }
+
+    public init(from decoder: Decoder) throws {
+        if let single = try? decoder.singleValueContainer(), let name = try? single.decode(String.self) {
+            switch name {
+            case "top": self = .top
+            case "end": self = .end
+            default: throw WriteError.malformed("unknown place \(name)")
+            }
+            return
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let after = try container.nestedContainer(keyedBy: AfterKeys.self, forKey: .after)
+        self = .after(lineHash: try after.decode(String.self, forKey: .lineHash), ordinal: try after.decodeIfPresent(Int.self, forKey: .ordinal) ?? 0)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        switch self {
+        case .top:
+            var single = encoder.singleValueContainer()
+            try single.encode("top")
+        case .end:
+            var single = encoder.singleValueContainer()
+            try single.encode("end")
+        case .after(let lineHash, let ordinal):
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            var after = container.nestedContainer(keyedBy: AfterKeys.self, forKey: .after)
+            try after.encode(lineHash, forKey: .lineHash)
+            try after.encode(ordinal, forKey: .ordinal)
+        }
+    }
 }
 
 public enum Placement: String, Codable, Sendable {
@@ -56,6 +109,11 @@ public struct WriteDocument: Equatable, Sendable {
     public var ordinal = 0
     public var newLine: String?
     public var baseHash: String?
+    /// `move_block`: the destination group, where in it, and the section a
+    /// missing destination is created at the end of.
+    public var to: HeadingRef?
+    public var place: Place = .end
+    public var createUnder: HeadingRef?
 
     public init(clientID: String, kind: WriteKind, path: String, madeAt: String, deviceID: String) {
         self.clientID = clientID
@@ -94,9 +152,12 @@ public struct WriteDocument: Equatable, Sendable {
         // The desk reads these as unsigned numbers and refuses the write
         // otherwise, so the phone must not apply it either.
         guard ordinal >= 0 else { throw WriteError.malformed("negative ordinal") }
-        if let heading {
+        for heading in [heading, to, createUnder].compactMap({ $0 }) {
             guard !heading.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw WriteError.malformed("empty heading") }
             guard (0...255).contains(heading.level), heading.ordinal >= 0 else { throw WriteError.malformed("heading level or ordinal out of range") }
+        }
+        if case .after(_, let anchorOrdinal) = place, anchorOrdinal < 0 {
+            throw WriteError.malformed("negative ordinal")
         }
         let single = [newLine].compactMap { $0 } + lines
         if single.contains(where: { $0.contains("\n") || $0.contains("\r") }) {
@@ -114,6 +175,10 @@ public struct WriteDocument: Equatable, Sendable {
             guard lineHash != nil else { throw WriteError.malformed("remove_line incomplete") }
         case .replaceSection:
             guard heading != nil, baseHash != nil else { throw WriteError.malformed("replace_section incomplete") }
+        case .moveBlock:
+            guard lineHash != nil else { throw WriteError.malformed("move_block incomplete") }
+        case .removeBlock:
+            guard lineHash != nil else { throw WriteError.malformed("remove_block incomplete") }
         }
     }
 }
@@ -136,6 +201,9 @@ extension WriteDocument: Codable {
         case ordinal
         case newLine = "new_line"
         case baseHash = "base_hash"
+        case to
+        case place
+        case createUnder = "create_under"
     }
 
     public init(from decoder: Decoder) throws {
@@ -161,6 +229,9 @@ extension WriteDocument: Codable {
         ordinal = try container.decodeIfPresent(Int.self, forKey: .ordinal) ?? 0
         newLine = try container.decodeIfPresent(String.self, forKey: .newLine)
         baseHash = try container.decodeIfPresent(String.self, forKey: .baseHash)
+        to = try container.decodeIfPresent(HeadingRef.self, forKey: .to)
+        place = try container.decodeIfPresent(Place.self, forKey: .place) ?? .end
+        createUnder = try container.decodeIfPresent(HeadingRef.self, forKey: .createUnder)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -194,6 +265,18 @@ extension WriteDocument: Codable {
             try container.encode(heading, forKey: .heading)
             try container.encode(baseHash, forKey: .baseHash)
             try container.encode(lines, forKey: .lines)
+        case .moveBlock:
+            try container.encode(heading, forKey: .heading)
+            try container.encode(lineHash, forKey: .lineHash)
+            try container.encode(ordinal, forKey: .ordinal)
+            try container.encode(to, forKey: .to)
+            try container.encode(place, forKey: .place)
+            try container.encode(newLine, forKey: .newLine)
+            try container.encode(createUnder, forKey: .createUnder)
+        case .removeBlock:
+            try container.encode(heading, forKey: .heading)
+            try container.encode(lineHash, forKey: .lineHash)
+            try container.encode(ordinal, forKey: .ordinal)
         }
     }
 }

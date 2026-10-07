@@ -11,7 +11,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use thock_sync_core::{
-    Applied, Context, Heading, Operation, Outcome, Placement, Write, apply, content_hash,
+    Applied, Context, Heading, Operation, Outcome, Place, Placement, Write, apply, content_hash,
     effect_present, heading_key, is_syncable_path, key_check, line_hash, open, parse_write,
     seal_with_nonce, section_hash,
 };
@@ -36,12 +36,14 @@ struct Case {
     effect_present_after: bool,
 }
 
-const AREAS: [&str; 8] = [
+const AREAS: [&str; 10] = [
     "append",
     "create",
     "replace_line",
     "remove_line",
     "replace_section",
+    "move_block",
+    "remove_block",
     "headings",
     "line_endings",
     "roundtrip",
@@ -1170,7 +1172,15 @@ fn hand_cases() -> Vec<Spec> {
         }
     }
     let planner = || Some(Heading::new("Day planner"));
-    vec![
+    const BACKLOG: &str = "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n";
+    fn category(text: &str) -> Heading {
+        Heading {
+            text: text.into(),
+            level: 3,
+            ordinal: 0,
+        }
+    }
+    let mut cases = vec![
         spec(
             "replace_line",
             "spec-example-tick-after-retime",
@@ -1683,6 +1693,289 @@ fn hand_cases() -> Vec<Spec> {
             "## Day planner\n- [ ] Walk\n",
         ),
         spec(
+            "move_block",
+            "move-to-the-top-of-its-group",
+            Some(BACKLOG),
+            None,
+            w(
+                "mv1",
+                "backlog.md",
+                Operation::MoveBlock {
+                    heading: Some(Heading::new("Soon")),
+                    line_hash: line_hash("Call the dentist"),
+                    ordinal: 0,
+                    to: Some(Heading::new("Soon")),
+                    place: Place::Top,
+                    new_line: None,
+                    create_under: None,
+                },
+            ),
+            Outcome::Applied,
+            false,
+            "# Backlog\n\n## Soon\n\n- [ ] Call the dentist\n- [ ] Renew passport\n\n### Home\n\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n",
+        ),
+        spec(
+            "move_block",
+            "move-after-an-anchor-carries-the-children",
+            Some(BACKLOG),
+            None,
+            w(
+                "mv2",
+                "backlog.md",
+                Operation::MoveBlock {
+                    heading: Some(category("Home")),
+                    line_hash: line_hash("Fix the gate"),
+                    ordinal: 0,
+                    to: Some(Heading::new("Soon")),
+                    place: Place::After {
+                        line_hash: line_hash("Renew passport"),
+                        ordinal: 0,
+                    },
+                    new_line: None,
+                    create_under: None,
+                },
+            ),
+            Outcome::Applied,
+            false,
+            "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n",
+        ),
+        spec(
+            "move_block",
+            "move-into-another-category",
+            Some(BACKLOG),
+            None,
+            w(
+                "mv3",
+                "backlog.md",
+                Operation::MoveBlock {
+                    heading: Some(Heading::new("Soon")),
+                    line_hash: line_hash("Call the dentist"),
+                    ordinal: 0,
+                    to: Some(category("Thock")),
+                    place: Place::End,
+                    new_line: None,
+                    create_under: None,
+                },
+            ),
+            Outcome::Applied,
+            false,
+            "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n\n### Home\n\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n- [ ] Call the dentist\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n",
+        ),
+        spec(
+            "move_block",
+            "move-to-someday-lands-loose",
+            Some(BACKLOG),
+            None,
+            w(
+                "mv4",
+                "backlog.md",
+                Operation::MoveBlock {
+                    heading: Some(Heading::new("Soon")),
+                    line_hash: line_hash("Renew passport"),
+                    ordinal: 0,
+                    to: Some(Heading::new("Someday")),
+                    place: Place::End,
+                    new_line: None,
+                    create_under: None,
+                },
+            ),
+            Outcome::Applied,
+            false,
+            "# Backlog\n\n## Soon\n\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n- [ ] Renew passport\n\n### Thock\n\n- [ ] Week widget\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n",
+        ),
+        spec(
+            "move_block",
+            "move-to-someday-recreates-its-category",
+            Some(BACKLOG),
+            None,
+            w(
+                "mv5",
+                "backlog.md",
+                Operation::MoveBlock {
+                    heading: Some(category("Home")),
+                    line_hash: line_hash("Buy a smoke alarm"),
+                    ordinal: 0,
+                    to: Some(category("Home")),
+                    place: Place::End,
+                    new_line: None,
+                    create_under: Some(Heading::new("Someday")),
+                },
+            ),
+            Outcome::SectionAdded,
+            false,
+            "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n\n### Home\n- [ ] Buy a smoke alarm\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n",
+        ),
+        spec(
+            "move_block",
+            "move-creates-a-missing-category",
+            Some(BACKLOG),
+            None,
+            w(
+                "mv6",
+                "backlog.md",
+                Operation::MoveBlock {
+                    heading: Some(category("Home")),
+                    line_hash: line_hash("Buy a smoke alarm"),
+                    ordinal: 0,
+                    to: Some(category("Garden")),
+                    place: Place::End,
+                    new_line: None,
+                    create_under: Some(Heading::new("Someday")),
+                },
+            ),
+            Outcome::SectionAdded,
+            false,
+            "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n\n### Garden\n- [ ] Buy a smoke alarm\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n",
+        ),
+        spec(
+            "move_block",
+            "tick-lands-in-completed-with-the-stamp",
+            Some(BACKLOG),
+            None,
+            w(
+                "mv7",
+                "backlog.md",
+                Operation::MoveBlock {
+                    heading: Some(category("Home")),
+                    line_hash: line_hash("Fix the gate"),
+                    ordinal: 0,
+                    to: Some(Heading::new("Completed")),
+                    place: Place::End,
+                    new_line: Some("- [x] Fix the gate ✅ 2026-10-06".into()),
+                    create_under: None,
+                },
+            ),
+            Outcome::Applied,
+            false,
+            "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n- [x] Fix the gate ✅ 2026-10-06\n  - the hinge first\n\n  - then the latch\n",
+        ),
+        spec(
+            "move_block",
+            "a-missing-source-is-a-noop",
+            Some(BACKLOG),
+            None,
+            w(
+                "mv8",
+                "backlog.md",
+                Operation::MoveBlock {
+                    heading: Some(Heading::new("Soon")),
+                    line_hash: line_hash("Not here"),
+                    ordinal: 0,
+                    to: Some(Heading::new("Someday")),
+                    place: Place::End,
+                    new_line: None,
+                    create_under: None,
+                },
+            ),
+            Outcome::Noop,
+            false,
+            BACKLOG,
+        ),
+        spec(
+            "move_block",
+            "a-missing-anchor-lands-at-the-end",
+            Some(BACKLOG),
+            None,
+            w(
+                "mv9",
+                "backlog.md",
+                Operation::MoveBlock {
+                    heading: Some(Heading::new("Soon")),
+                    line_hash: line_hash("Call the dentist"),
+                    ordinal: 0,
+                    to: Some(category("Thock")),
+                    place: Place::After {
+                        line_hash: line_hash("Nowhere"),
+                        ordinal: 0,
+                    },
+                    new_line: None,
+                    create_under: None,
+                },
+            ),
+            Outcome::Applied,
+            false,
+            "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n\n### Home\n\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n- [ ] Call the dentist\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n",
+        ),
+        spec(
+            "move_block",
+            "dropping-where-it-is-changes-nothing",
+            Some(BACKLOG),
+            None,
+            w(
+                "mv10",
+                "backlog.md",
+                Operation::MoveBlock {
+                    heading: Some(category("Home")),
+                    line_hash: line_hash("Buy a smoke alarm"),
+                    ordinal: 0,
+                    to: Some(category("Home")),
+                    place: Place::After {
+                        line_hash: line_hash("Fix the gate"),
+                        ordinal: 0,
+                    },
+                    new_line: None,
+                    create_under: None,
+                },
+            ),
+            Outcome::Noop,
+            true,
+            BACKLOG,
+        ),
+        spec(
+            "remove_block",
+            "remove-takes-the-children",
+            Some(BACKLOG),
+            None,
+            w(
+                "rb1",
+                "backlog.md",
+                Operation::RemoveBlock {
+                    heading: Some(category("Home")),
+                    line_hash: line_hash("Fix the gate"),
+                    ordinal: 0,
+                },
+            ),
+            Outcome::Applied,
+            false,
+            "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n",
+        ),
+        spec(
+            "remove_block",
+            "removing-the-only-task-leaves-one-blank-line",
+            Some(BACKLOG),
+            None,
+            w(
+                "rb2",
+                "backlog.md",
+                Operation::RemoveBlock {
+                    heading: Some(category("Thock")),
+                    line_hash: line_hash("Week widget"),
+                    ordinal: 0,
+                },
+            ),
+            Outcome::Applied,
+            false,
+            "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n",
+        ),
+        spec(
+            "remove_block",
+            "remove-of-a-missing-block-is-a-noop",
+            Some(BACKLOG),
+            None,
+            w(
+                "rb3",
+                "backlog.md",
+                Operation::RemoveBlock {
+                    heading: Some(category("Home")),
+                    line_hash: line_hash("Not here"),
+                    ordinal: 0,
+                },
+            ),
+            Outcome::Noop,
+            true,
+            BACKLOG,
+        ),
+        spec(
             "replace_section",
             "fresh-base-replaces-the-body",
             Some("## Goals\n- a\n- b\n\n## Notes\n"),
@@ -1856,7 +2149,16 @@ fn hand_cases() -> Vec<Spec> {
             false,
             "## A\r\n- [x] x\r\n",
         ),
-    ]
+    ];
+    // A move whose source is gone leaves the note alone, so its effect is
+    // not there to find afterwards either.
+    if let Some(case) = cases
+        .iter_mut()
+        .find(|case| case.name == "a-missing-source-is-a-noop")
+    {
+        case.present_after = false;
+    }
+    cases
 }
 
 fn write_case(spec: &Spec) -> Case {

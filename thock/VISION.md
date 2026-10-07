@@ -400,6 +400,15 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   rules and the agent's review are drawn, never edited, and looking writes nothing.
   Design reference: https://claude.ai/artifact/JCHoKASWt7gcYe49YGkPHn. Spec `specs/v37-week-plan.md`.
   _(on `main`; ships with the next phone build)_
+- [ ] **The backlog on the phone:** a Backlog row under today's Inbox opens `backlog.md` drawn as cards,
+  Soon and Someday with their categories and a collapsed Done list. Tick, edit, add, send to today,
+  remove with undo, and above all move: press a row's handle and carry it anywhere, or take the long
+  trip from the menu (*Move to… Someday › Thock*, *Move up*, *Move down*). Every gesture is one write
+  of one task block, children travelling with it, through two new shared sync kinds (`move_block`,
+  `remove_block`) with fixtures the desk and the phone both pass. The phone is the first surface that
+  reorders the backlog; the desk pane only ever moved a task between Soon and Someday.
+  Design reference: https://claude.ai/artifact/KoKfR3FuYfJM2zjH7rw2pw. Spec `specs/v38-phone-backlog.md`.
+  _(on `main`; ships with the next phone build)_
 
 ---
 

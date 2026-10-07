@@ -12,7 +12,7 @@ mod write;
 pub use apply::{Applied, Outcome, apply, effect_present};
 pub use envelope::{Context, SealError, content_hash, key_check, open, seal, seal_with_nonce};
 pub use markdown::{heading_key, line_hash, section_hash};
-pub use write::{Heading, Operation, Placement, Write, WriteError, parse_write};
+pub use write::{Heading, Operation, Place, Placement, Write, WriteError, parse_write};
 
 use unicode_normalization::is_nfc;
 
