@@ -64,7 +64,7 @@ struct ToastView: View {
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(Theme.ink)
             if let undo = toast.undo {
-                Button("Undo", action: undo)
+                Button(toast.action, action: undo)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Theme.amber)
             }

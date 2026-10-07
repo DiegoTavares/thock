@@ -187,7 +187,21 @@ impl Document {
     /// The heading a write names (spec §7.2): exact lowercase equality first,
     /// then key equality, `ordinal` among the matches of the winning pass.
     pub(crate) fn resolve(&self, heading: &Heading) -> Option<HeadingLine> {
-        let headings = self.headings();
+        self.resolve_within(heading, 0..self.lines.len())
+    }
+
+    /// `resolve`, among the headings whose line is inside `range`: how a
+    /// `move_block` names a category under a given section (V38 §7.1).
+    pub(crate) fn resolve_within(
+        &self,
+        heading: &Heading,
+        range: std::ops::Range<usize>,
+    ) -> Option<HeadingLine> {
+        let headings: Vec<HeadingLine> = self
+            .headings()
+            .into_iter()
+            .filter(|candidate| range.contains(&candidate.index))
+            .collect();
         let wanted = heading.text.trim().to_lowercase();
         let exact: Vec<&HeadingLine> = headings
             .iter()

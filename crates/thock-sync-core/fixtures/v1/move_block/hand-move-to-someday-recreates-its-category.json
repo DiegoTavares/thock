@@ -1,0 +1,36 @@
+{
+  "name": "move to someday recreates its category",
+  "before": "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-mv5",
+    "path": "backlog.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "move_block",
+    "heading": {
+      "text": "Home",
+      "level": 3,
+      "ordinal": 0
+    },
+    "line_hash": "406896eaf6c8d150",
+    "ordinal": 0,
+    "to": {
+      "text": "Home",
+      "level": 3,
+      "ordinal": 0
+    },
+    "place": "end",
+    "new_line": null,
+    "create_under": {
+      "text": "Someday",
+      "level": 2,
+      "ordinal": 0
+    }
+  },
+  "after": "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n\n### Home\n- [ ] Buy a smoke alarm\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n",
+  "outcome": "section_added",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

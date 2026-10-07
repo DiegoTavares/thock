@@ -1,7 +1,7 @@
 //! The application rules of spec §8: deterministic, total, idempotent.
 
 use crate::markdown::{Document, Section, hash_lines, line_hash, normalize_line};
-use crate::write::{Heading, Operation, Placement, Write};
+use crate::write::{Heading, Operation, Place, Placement, Write};
 
 /// The marker a kept-both line ends with (spec §8.5).
 pub const CONFLICT_MARKER: &str = "<!--thock:also-->";
@@ -143,6 +143,72 @@ pub fn apply(existing: Option<&str>, write: &Write, seed: Option<&str>) -> Appli
                 Outcome::KeptBoth
             }
         }
+        Operation::MoveBlock {
+            heading,
+            line_hash: wanted,
+            ordinal,
+            to,
+            place,
+            new_line,
+            create_under,
+        } => {
+            // A missing source is a task the desk renamed, moved or completed
+            // meanwhile; a move must never become a copy, so nothing happens.
+            let Some(source) = find_section(&document, heading.as_ref()).map(own) else {
+                return unchanged(document, outcome);
+            };
+            let Some(index) = find_line(&document, &source, wanted, *ordinal) else {
+                return unchanged(document, outcome);
+            };
+            let end = block_end(&document, &source, index);
+            let mut texts: Vec<String> = document
+                .lines
+                .get(index..end)
+                .unwrap_or(&[])
+                .iter()
+                .map(|line| line.text.clone())
+                .collect();
+            if let (Some(new_line), Some(first)) = (new_line, texts.first_mut()) {
+                *first = new_line.clone();
+            }
+            cut(&mut document, index, end);
+            let destination = own(locate_group(
+                &mut document,
+                to.as_ref(),
+                create_under.as_ref(),
+                &mut outcome,
+            ));
+            let at = match place {
+                Place::Top => first_body_line(&document, &destination),
+                Place::End => destination.body_end,
+                Place::After {
+                    line_hash: anchor,
+                    ordinal: anchor_ordinal,
+                } => match find_line(&document, &destination, anchor, *anchor_ordinal) {
+                    Some(anchor) => block_end(&document, &destination, anchor),
+                    None => destination.body_end,
+                },
+            };
+            insert_lines(&mut document, &destination, at, &texts, false);
+            Outcome::Applied
+        }
+        Operation::RemoveBlock {
+            heading,
+            line_hash: wanted,
+            ordinal,
+        } => {
+            let Some(section) = find_section(&document, heading.as_ref()).map(own) else {
+                return unchanged(document, outcome);
+            };
+            match find_line(&document, &section, wanted, *ordinal) {
+                Some(index) => {
+                    let end = block_end(&document, &section, index);
+                    cut(&mut document, index, end);
+                    Outcome::Applied
+                }
+                None => return unchanged(document, outcome),
+            }
+        }
     };
 
     let outcome = match (outcome, applied) {
@@ -233,7 +299,203 @@ pub fn effect_present(content: &str, write: &Write) -> bool {
                 .find(|line| !line.trim().is_empty())
                 .is_some_and(|first| body.iter().any(|line| line.trim_end() == mark(first)))
         }
+        Operation::MoveBlock {
+            heading,
+            line_hash: wanted,
+            to,
+            place,
+            new_line,
+            create_under,
+            ..
+        } => {
+            let Some(destination) =
+                find_group(&document, to.as_ref(), create_under.as_ref()).map(own)
+            else {
+                return false;
+            };
+            let landed = new_line
+                .as_deref()
+                .map(line_hash)
+                .unwrap_or_else(|| wanted.clone());
+            let placed = document
+                .matchable(&destination)
+                .into_iter()
+                .filter(|(_, text)| line_hash(text) == landed && !normalize_line(text).is_empty())
+                .any(|(index, _)| match place {
+                    Place::Top => index == first_body_line(&document, &destination),
+                    Place::End => block_end(&document, &destination, index) == destination.body_end,
+                    // A missing anchor put the block at the end (§7.2), so
+                    // that is where a retry looks for it.
+                    Place::After {
+                        line_hash: anchor,
+                        ordinal,
+                    } => match find_line(&document, &destination, anchor, *ordinal) {
+                        Some(anchor) => block_end(&document, &destination, anchor) == index,
+                        None => block_end(&document, &destination, index) == destination.body_end,
+                    },
+                });
+            if !placed {
+                return false;
+            }
+            // Moved between groups, the source must have let go of it too;
+            // reordered inside one group, the placed line is the source.
+            match find_section(&document, heading.as_ref()).map(own) {
+                Some(source) if source.heading != destination.heading => {
+                    !document.matchable(&source).iter().any(|(_, text)| {
+                        line_hash(text) == *wanted && !normalize_line(text).is_empty()
+                    })
+                }
+                _ => true,
+            }
+        }
+        Operation::RemoveBlock {
+            heading,
+            line_hash: wanted,
+            ..
+        } => {
+            let Some(section) = find_section(&document, heading.as_ref()).map(own) else {
+                return true;
+            };
+            !document
+                .matchable(&section)
+                .iter()
+                .any(|(_, text)| line_hash(text) == *wanted && !normalize_line(text).is_empty())
+        }
     }
+}
+
+/// The write found nothing to do: a `noop` unless the file or a section
+/// was created on the way, which the outcome still reports.
+fn unchanged(document: Document, outcome: Option<Outcome>) -> Applied {
+    Applied {
+        text: document.join(),
+        outcome: outcome.unwrap_or(Outcome::Noop),
+    }
+}
+
+/// The section's own lines as a section of their own, so a block rule
+/// never reaches into a subsection: a group is the lines under its heading
+/// above the next heading (V38 §7.1).
+fn own(section: Section) -> Section {
+    Section {
+        body_end: section.own_end,
+        ..section
+    }
+}
+
+/// The index of the first non-blank line of a section, or its end when it
+/// has none: where `place: top` lands.
+fn first_body_line(document: &Document, section: &Section) -> usize {
+    (section.start..section.body_end)
+        .find(|index| {
+            document
+                .lines
+                .get(*index)
+                .is_some_and(|line| !line.is_blank())
+        })
+        .unwrap_or(section.body_end)
+}
+
+/// One past the last line of the block starting at `index`: the line plus
+/// every indented, non-blank line after it inside the section, with blank
+/// lines between them included and trailing blank lines left out. The
+/// desk's own span rule, so both ends cut the same block.
+fn block_end(document: &Document, section: &Section, index: usize) -> usize {
+    let mut end = index + 1;
+    let mut last_content = end;
+    while end < section.body_end {
+        let Some(line) = document.lines.get(end) else {
+            break;
+        };
+        if line.is_blank() {
+            end += 1;
+        } else if line.text.starts_with(' ') || line.text.starts_with('\t') {
+            end += 1;
+            last_content = end;
+        } else {
+            break;
+        }
+    }
+    last_content
+}
+
+/// Removes `start..end`. A blank line on each side of the gap would leave
+/// two in a row, which neither end ever writes, so one goes with the block.
+fn cut(document: &mut Document, start: usize, end: usize) {
+    let end = end.min(document.lines.len());
+    if start >= end {
+        return;
+    }
+    document.lines.drain(start..end);
+    let before_blank = start > 0
+        && document
+            .lines
+            .get(start - 1)
+            .is_some_and(|line| line.is_blank());
+    let after_blank = document
+        .lines
+        .get(start)
+        .is_some_and(|line| line.is_blank());
+    if before_blank && after_blank {
+        document.lines.remove(start);
+    }
+}
+
+/// The group a block moves into. A missing `to` is created at the end of
+/// `create_under` (itself created like any missing heading), or, with no
+/// parent named, where an append would create it.
+fn locate_group(
+    document: &mut Document,
+    to: Option<&Heading>,
+    create_under: Option<&Heading>,
+    outcome: &mut Option<Outcome>,
+) -> Section {
+    let Some(to) = to else {
+        return document.whole();
+    };
+    if create_under.is_none()
+        && let Some(found) = document.resolve(to)
+    {
+        return document.section(&found);
+    }
+    let Some(parent) = create_under else {
+        return locate(document, Some(to), outcome);
+    };
+    // `Someday › Home` is the Home inside Someday, whatever other Home the
+    // note has, so the category is looked for inside its section only.
+    let parent = locate(document, Some(parent), outcome);
+    if let Some(found) = document.resolve_within(to, parent.start..parent.end) {
+        return document.section(&found);
+    }
+    insert_lines(document, &parent, parent.body_end, &[to.line()], true);
+    if outcome.is_none() {
+        *outcome = Some(Outcome::SectionAdded);
+    }
+    match document.resolve_within(to, parent.start..document.lines.len()) {
+        Some(found) => document.section(&found),
+        None => document.whole(),
+    }
+}
+
+/// The group a `move_block` names as its destination, when the note has
+/// it: `to` inside `create_under`'s section when a parent is named, else
+/// `to` anywhere.
+fn find_group(
+    document: &Document,
+    to: Option<&Heading>,
+    create_under: Option<&Heading>,
+) -> Option<Section> {
+    let Some(to) = to else {
+        return Some(document.whole());
+    };
+    let found = match create_under {
+        Some(parent) => {
+            let parent = find_section(document, Some(parent))?;
+            document.resolve_within(to, parent.start..parent.end)?
+        }
+        None => document.resolve(to)?,
+    };
+    Some(document.section(&found))
 }
 
 fn mark(line: &str) -> String {
@@ -720,6 +982,260 @@ mod tests {
             text,
             &append(Some("Snippets"), &["- [ ] real task"])
         ));
+    }
+
+    const BACKLOG: &str = "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n";
+
+    fn move_block(
+        from: &str,
+        text: &str,
+        to: &str,
+        place: Place,
+        new_line: Option<&str>,
+        create_under: Option<&str>,
+    ) -> Write {
+        let mut write = write(Operation::MoveBlock {
+            heading: heading(from),
+            line_hash: line_hash(text),
+            ordinal: 0,
+            to: heading(to),
+            place,
+            new_line: new_line.map(str::to_string),
+            create_under: create_under.map(Heading::new),
+        });
+        write.path = "backlog.md".into();
+        write
+    }
+
+    fn after(text: &str) -> Place {
+        Place::After {
+            line_hash: line_hash(text),
+            ordinal: 0,
+        }
+    }
+
+    #[test]
+    fn move_block_reorders_inside_a_group() {
+        let up = move_block("Soon", "Call the dentist", "Soon", Place::Top, None, None);
+        let result = apply(Some(BACKLOG), &up, None);
+        assert_eq!(result.outcome, Outcome::Applied);
+        assert!(
+            result
+                .text
+                .contains("## Soon\n\n- [ ] Call the dentist\n- [ ] Renew passport\n\n### Home")
+        );
+        assert_eq!(apply(Some(&result.text), &up, None).outcome, Outcome::Noop);
+
+        let already = move_block("Soon", "Renew passport", "Soon", Place::Top, None, None);
+        assert_eq!(apply(Some(BACKLOG), &already, None).outcome, Outcome::Noop);
+        let to_end = move_block("Soon", "Renew passport", "Soon", Place::End, None, None);
+        let result = apply(Some(BACKLOG), &to_end, None);
+        assert!(
+            result
+                .text
+                .contains("## Soon\n\n- [ ] Call the dentist\n- [ ] Renew passport\n\n### Home")
+        );
+        // The group's end is above its categories, never inside one.
+        assert!(
+            !result
+                .text
+                .contains("Buy a smoke alarm\n- [ ] Renew passport")
+        );
+    }
+
+    #[test]
+    fn move_block_carries_children_and_lands_after_an_anchor() {
+        let gate = move_block(
+            "Home",
+            "Fix the gate",
+            "Soon",
+            after("Renew passport"),
+            None,
+            None,
+        );
+        let result = apply(Some(BACKLOG), &gate, None);
+        assert_eq!(result.outcome, Outcome::Applied);
+        assert_eq!(
+            result.text,
+            "# Backlog\n\n## Soon\n\n- [ ] Renew passport\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n- [ ] Call the dentist\n\n### Home\n\n- [ ] Buy a smoke alarm\n\n## Someday\n\n- [ ] Learn woodworking\n\n### Thock\n\n- [ ] Week widget\n\n## Completed\n\n- [x] Book the car ✅ 2026-10-01\n"
+        );
+        assert!(effect_present(&result.text, &gate));
+        assert_eq!(
+            apply(Some(&result.text), &gate, None).outcome,
+            Outcome::Noop
+        );
+
+        // Dropping after a task that has children lands below the children.
+        let below = move_block(
+            "Home",
+            "Buy a smoke alarm",
+            "Home",
+            after("Fix the gate"),
+            None,
+            None,
+        );
+        assert_eq!(apply(Some(BACKLOG), &below, None).outcome, Outcome::Noop);
+        let above = move_block("Home", "Buy a smoke alarm", "Home", Place::Top, None, None);
+        let result = apply(Some(BACKLOG), &above, None);
+        assert!(
+            result
+                .text
+                .contains("### Home\n\n- [ ] Buy a smoke alarm\n- [ ] Fix the gate\n  - the hinge first\n\n  - then the latch\n\n## Someday")
+        );
+    }
+
+    #[test]
+    fn move_block_between_sections_and_missing_anchors() {
+        let anchor_gone = move_block(
+            "Soon",
+            "Call the dentist",
+            "Thock",
+            after("Nowhere"),
+            None,
+            None,
+        );
+        let result = apply(Some(BACKLOG), &anchor_gone, None);
+        assert_eq!(result.outcome, Outcome::Applied);
+        assert!(
+            result
+                .text
+                .contains("### Thock\n\n- [ ] Week widget\n- [ ] Call the dentist\n\n## Completed")
+        );
+        assert!(
+            result
+                .text
+                .contains("## Soon\n\n- [ ] Renew passport\n\n### Home")
+        );
+        assert_eq!(
+            apply(Some(&result.text), &anchor_gone, None).outcome,
+            Outcome::Noop
+        );
+
+        let source_gone = move_block("Soon", "Not here", "Someday", Place::End, None, None);
+        let result = apply(Some(BACKLOG), &source_gone, None);
+        assert_eq!(result.outcome, Outcome::Noop);
+        assert_eq!(result.text, BACKLOG);
+
+        // `Someday › Home` is not Soon's Home: the category is made again
+        // under Someday, the desk's own rule for a chevron move.
+        let mut same_name = move_block(
+            "Home",
+            "Buy a smoke alarm",
+            "Home",
+            Place::End,
+            None,
+            Some("Someday"),
+        );
+        if let Operation::MoveBlock { to, .. } = &mut same_name.operation {
+            *to = Some(Heading {
+                text: "Home".into(),
+                level: 3,
+                ordinal: 0,
+            });
+        }
+        let result = apply(Some(BACKLOG), &same_name, None);
+        assert_eq!(result.outcome, Outcome::SectionAdded);
+        assert!(result.text.contains(
+            "### Thock\n\n- [ ] Week widget\n\n### Home\n- [ ] Buy a smoke alarm\n\n## Completed"
+        ));
+        assert!(result.text.contains("  - then the latch\n\n## Someday"));
+        assert!(effect_present(&result.text, &same_name));
+        assert_eq!(
+            apply(Some(&result.text), &same_name, None).outcome,
+            Outcome::Noop
+        );
+
+        let new_group = move_block(
+            "Home",
+            "Buy a smoke alarm",
+            "Garden",
+            Place::End,
+            None,
+            Some("Someday"),
+        );
+        let mut new_group = new_group;
+        if let Operation::MoveBlock { to, .. } = &mut new_group.operation {
+            *to = Some(Heading {
+                text: "Garden".into(),
+                level: 3,
+                ordinal: 0,
+            });
+        }
+        let result = apply(Some(BACKLOG), &new_group, None);
+        assert_eq!(result.outcome, Outcome::SectionAdded);
+        assert!(result.text.contains(
+            "### Thock\n\n- [ ] Week widget\n\n### Garden\n- [ ] Buy a smoke alarm\n\n## Completed"
+        ));
+        assert_eq!(
+            apply(Some(&result.text), &new_group, None).outcome,
+            Outcome::Noop
+        );
+    }
+
+    #[test]
+    fn tick_moves_to_completed_with_a_new_line() {
+        let tick = move_block(
+            "Home",
+            "Fix the gate",
+            "Completed",
+            Place::End,
+            Some("- [x] Fix the gate ✅ 2026-10-06"),
+            None,
+        );
+        let result = apply(Some(BACKLOG), &tick, None);
+        assert_eq!(result.outcome, Outcome::Applied);
+        assert!(
+            result
+                .text
+                .contains("### Home\n\n- [ ] Buy a smoke alarm\n\n## Someday")
+        );
+        assert!(
+            result
+                .text
+                .ends_with("## Completed\n\n- [x] Book the car ✅ 2026-10-01\n- [x] Fix the gate ✅ 2026-10-06\n  - the hinge first\n\n  - then the latch\n")
+        );
+        assert!(effect_present(&result.text, &tick));
+        assert_eq!(
+            apply(Some(&result.text), &tick, None).outcome,
+            Outcome::Noop
+        );
+    }
+
+    #[test]
+    fn remove_block_takes_the_children_and_one_blank_line() {
+        let remove = write(Operation::RemoveBlock {
+            heading: heading("Home"),
+            line_hash: line_hash("Fix the gate"),
+            ordinal: 0,
+        });
+        let result = apply(Some(BACKLOG), &remove, None);
+        assert_eq!(result.outcome, Outcome::Applied);
+        assert!(
+            result
+                .text
+                .contains("### Home\n\n- [ ] Buy a smoke alarm\n\n## Someday")
+        );
+        assert!(effect_present(&result.text, &remove));
+        assert_eq!(
+            apply(Some(&result.text), &remove, None).outcome,
+            Outcome::Noop
+        );
+
+        let only = write(Operation::RemoveBlock {
+            heading: heading("Thock"),
+            line_hash: line_hash("Week widget"),
+            ordinal: 0,
+        });
+        let result = apply(Some(BACKLOG), &only, None);
+        assert!(result.text.contains("### Thock\n\n## Completed"));
+
+        let missing = write(Operation::RemoveBlock {
+            heading: heading("Nowhere"),
+            line_hash: line_hash("Week widget"),
+            ordinal: 0,
+        });
+        assert!(effect_present(BACKLOG, &missing));
+        assert_eq!(apply(Some(BACKLOG), &missing, None).outcome, Outcome::Noop);
     }
 
     #[test]
