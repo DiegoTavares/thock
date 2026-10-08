@@ -5,6 +5,8 @@ import ThockKit
 /// store, one place to leave a note for the app about what to open.
 enum ThockEnvironment {
     static let appGroup = "group.com.thethock.ios"
+    /// Where *Report a problem* sends its email: the address on the support page.
+    static let supportEmail = "diego.exodo@gmail.com"
 
     static var container: URL {
         if let shared = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup) {
