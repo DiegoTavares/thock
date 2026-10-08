@@ -143,7 +143,10 @@ public struct NoteView: Equatable, Sendable {
         if preambleStart < preambleEnd {
             let blocks = Blocks.parse(lines: Array(lines[preambleStart..<preambleEnd]), firstLine: preambleStart, alreadyInsideNote: preambleStart > 0)
             if blocks.contains(where: { $0.kind != .blank && $0.kind != .rule }) {
-                cards.append(NoteCard(id: preambleStart, kind: .preamble, title: "", heading: nil, blocks: blocks))
+                // The preamble sits in the title's section, so an edit to it
+                // names the title; a note without one is written as a whole.
+                let heading = titleHeading.map { Self.reference($0, in: headings) }
+                cards.append(NoteCard(id: preambleStart, kind: .preamble, title: "", heading: heading, blocks: blocks))
             }
         }
         for (position, heading) in cardHeadings.enumerated() {
@@ -168,17 +171,60 @@ public struct NoteView: Equatable, Sendable {
     }
 
     /// The text the phone may replace in place (V37 §6, §8): a paragraph, a
-    /// bullet or a quote in one of the user's own prose sections. Checklist
-    /// lines have their own moves (`NoteCard.items`); a numbered item is
-    /// left alone because the editor would write it back as a bullet. The
-    /// preamble, the agent's sections and anything outside the subset stay
-    /// as the desk wrote them.
+    /// bullet, a numbered item or a quote the person wrote, wherever it sits:
+    /// a prose section, the lines above the first section, or a note written
+    /// among the planner's or the goals' tasks. Checklist lines have their
+    /// own moves (`NoteCard.items`). The agent's sections, the journal (which
+    /// has its own screen), the template's prompts and anything outside the
+    /// subset stay as the desk wrote them.
     public func isEditable(_ block: Block, in card: NoteCard) -> Bool {
-        guard card.kind == .prose, !Self.isPrompt(block) else { return false }
+        guard !Self.isPrompt(block) else { return false }
         switch block.kind {
-        case .paragraph, .bullet, .quote: return true
+        case .paragraph, .bullet, .numbered, .quote: break
         default: return false
         }
+        switch card.kind {
+        case .prose:
+            return true
+        case .planner:
+            // Only what the card draws as a note: a task's indented
+            // continuation belongs to the task and is not drawn on its own.
+            return planner.groups.contains { group in group.notes.contains { $0.line == block.line } }
+        case .preamble:
+            // Without a title there is no section to guard a rewrite of a
+            // wrapped paragraph with, only single lines.
+            return card.heading != nil || block.source.count == 1
+        case .journal, .agent:
+            return false
+        }
+    }
+
+    /// The section an edit of `block` is written through: the subsection a
+    /// planner note sits in, the card's own heading otherwise, `nil` for the
+    /// lines above the first heading of a note without a title.
+    public func sectionHeading(of block: Block, in card: NoteCard) -> HeadingRef? {
+        if card.kind == .planner, let group = planner.groups.first(where: { group in group.notes.contains { $0.line == block.line } }) {
+            return group.heading ?? card.heading
+        }
+        return card.heading
+    }
+
+    /// Only a prose section takes new paragraphs from its editor: the
+    /// planner takes lines from its own row, and the preamble has no end a
+    /// new paragraph could land at without sliding under a section.
+    public static func takesNewParagraphs(_ card: NoteCard) -> Bool {
+        card.kind == .prose
+    }
+
+    /// The editor has no numbered list, so a numbered item comes back as a
+    /// bullet; its own marker is put back so the edit changes only the words.
+    public static func restoringMarker(of original: Block, in lines: [String]) -> [String] {
+        guard case .numbered(let marker) = original.kind, let first = lines.first else { return lines }
+        let bullet = original.indent + "- "
+        guard first.hasPrefix(bullet), !first.hasPrefix(bullet + "[") else { return lines }
+        var restored = lines
+        restored[0] = original.indent + marker + " " + first.dropFirst(bullet.count)
+        return restored
     }
 
     /// The template's italic hint, left in the file for the desk and never

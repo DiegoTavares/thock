@@ -472,7 +472,7 @@ public struct PhoneWrites: Sendable {
     /// one-line paragraph is a single-line replacement; a wrapped one needs
     /// the section's lines rewritten around it, guarded by the section's
     /// hash, so a desk edit in between becomes a conflict, never a loss.
-    public func replaceParagraph(at line: Int, source: [String], with newText: String, heading: HeadingRef, path: String, note: String) -> PlannedWrite? {
+    public func replaceParagraph(at line: Int, source: [String], with newText: String, heading: HeadingRef?, path: String, note: String) -> PlannedWrite? {
         let newLines = newText.components(separatedBy: "\n")
         if source.count == 1, newLines.count == 1 {
             guard !SyncCore.lineIdentity(source[0]).isEmpty else { return nil }
@@ -483,8 +483,11 @@ public struct PhoneWrites: Sendable {
             write.newLine = newLines[0]
             return PlannedWrite(document: write)
         }
+        // A rewrite is guarded by its section's hash; the lines above a
+        // note's first heading have no section to name, so only a single
+        // line of them can change.
         let file = TextFile(note)
-        guard let found = file.resolve(heading) else { return nil }
+        guard let heading, let found = file.resolve(heading) else { return nil }
         let section = file.section(of: found)
         var body = file.lines[section.body].map(\.text)
         let start = line - section.start
@@ -498,7 +501,7 @@ public struct PhoneWrites: Sendable {
     }
 
     /// Replaces the paragraph drawn as `block` in a note's prose section.
-    public func replaceParagraph(_ block: Block, with newText: String, heading: HeadingRef, note: NoteID, text: String) -> PlannedWrite? {
+    public func replaceParagraph(_ block: Block, with newText: String, heading: HeadingRef?, note: NoteID, text: String) -> PlannedWrite? {
         replaceParagraph(at: block.line, source: block.source, with: newText, heading: heading, path: config.path(note), note: text)
     }
 
@@ -520,10 +523,15 @@ public struct PhoneWrites: Sendable {
         return PlannedWrite(document: write, seed: seed(for: note))
     }
 
-    func ordinal(of line: Int, hash: String, in note: String, heading: HeadingRef) -> Int {
+    func ordinal(of line: Int, hash: String, in note: String, heading: HeadingRef?) -> Int {
         let file = TextFile(note)
-        guard let found = file.resolve(heading) else { return 0 }
-        let section = file.section(of: found)
+        let section: SectionRange
+        if let heading {
+            guard let found = file.resolve(heading) else { return 0 }
+            section = file.section(of: found)
+        } else {
+            section = file.wholeFile()
+        }
         let mask = file.contentMask()
         let twins = section.body.filter { mask[$0] && SyncCore.lineHash(file.lines[$0].text) == hash }
         return twins.firstIndex(of: line) ?? 0
