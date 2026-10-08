@@ -135,7 +135,6 @@ The home screen *is* today's note, drawn as cards from the note's own sections:
 ┌──────────────────────────────┐
 │ TODAY · WEEK 40              │   date in Petrona
 │ Thursday, October 2          │
-│ [+ Idea] [¶ Journal] [⇗ Clip] [✦ Ask]   quick actions
 │ ─ JOURNAL ────────────────── │
 │ 08:10  Slept badly, but …    │   paragraphs, timestamps as the phone wrote them
 │ 13:02  Noticed I keep …      │
@@ -147,7 +146,8 @@ The home screen *is* today's note, drawn as cards from the note's own sections:
 │ ─ INBOX · 3 waiting ──────── │   opens the capture feed with receipts
 │ ─ PERSONAL ───────────────── │   any other section, read-only prose
 │                              │
-│ [ Write something…      ] (+)│   compose dock, always present
+│ ( Write an idea, a journal   │   compose dock, always present:
+│   line, a clip, or ask.     )│   each noun opens its capture
 └──────────────────────────────┘
 ```
 
@@ -160,8 +160,10 @@ The home screen *is* today's note, drawn as cards from the note's own sections:
   The week screen carries a day strip that jumps to any day's canvas, the weekly note's sections
   (`## Goals` ticks like the planner), and the agent's `# AI Week Review` in the agent's voice
   once it exists.
-- **The compose dock** opens the capture sheet (§6). The quick-action row opens the same sheet
-  with the destination preset (Idea → Inbox, Journal → today's Journal), the Clip sheet, or Ask.
+- **The compose dock** is one sentence whose nouns are the entry points: *idea* and *journal*
+  open the capture sheet (§6) with the destination preset (Idea → Inbox, Journal → today's
+  Journal), *clip* the Clip sheet, *ask* Ask. Tapping the rest of the sentence opens the capture
+  sheet with no preset.
 - **Launch behaviour** (decided, H1): every cold launch is today. No restoring the last screen.
   Entry points from outside the app (§9) open their sheet over today.
 
