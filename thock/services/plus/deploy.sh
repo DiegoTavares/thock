@@ -14,6 +14,7 @@ ACCOUNT="${ACCOUNT_NAME}@${PROJECT}.iam.gserviceaccount.com"
 # The bucket for encrypted vault snapshots (spec v34). The service signs V4
 # URLs for it through IAM with its own account.
 BLOB_BUCKET="${BLOB_BUCKET:-${PROJECT}-vault-blobs}"
+FEEDBACK_REPO="${FEEDBACK_REPO:-DiegoTavares/thock-feedback}"
 SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() { printf '%s\n' "$*" >&2; }
@@ -80,6 +81,15 @@ else
   log "no openrouter-management secret: the service will mint fake gateway keys"
 fi
 
+if [[ -n "${FEEDBACK_GITHUB_TOKEN:-}" ]]; then
+  put_secret feedback-github-token "$FEEDBACK_GITHUB_TOKEN"
+fi
+if has_secret feedback-github-token; then
+  SECRETS="$SECRETS,FEEDBACK_GITHUB_TOKEN=feedback-github-token:latest"
+else
+  log "no feedback-github-token secret: phone problem reports will be refused"
+fi
+
 # The vault feed is a long-lived SSE request, and Cloud Run cuts every request
 # at --timeout (5 minutes by default). Keep it in step with deploy-services.yml.
 gcloud run deploy "$SERVICE" \
@@ -92,7 +102,7 @@ gcloud run deploy "$SERVICE" \
   --cpu 1 --memory 256Mi \
   --timeout 3600 \
   --set-secrets "$SECRETS" \
-  --set-env-vars "BLOB_STORE=gcs,BLOB_BUCKET=$BLOB_BUCKET" \
+  --set-env-vars "BLOB_STORE=gcs,BLOB_BUCKET=$BLOB_BUCKET,FEEDBACK_REPO=$FEEDBACK_REPO" \
   --quiet
 
 gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format 'value(status.url)'

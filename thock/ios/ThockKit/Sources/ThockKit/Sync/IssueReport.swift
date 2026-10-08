@@ -1,12 +1,12 @@
 import Foundation
 
-/// What *Report a problem* puts in the email: the facts of this phone's
-/// connection, enough to say why notes are not arriving, and never a note.
-/// The person reads it in their mail app before it goes anywhere.
+/// What *Report a problem* sends along with the person's words: the facts of
+/// this phone's connection, enough to say why notes are not arriving, and
+/// never a note. The person sees the details before sending (V39).
 public struct IssueReport: Equatable, Sendable {
-    public static let subject = "A problem with Thock on my iPhone"
     /// Failures past this many are counted, not listed.
     static let failuresShown = 10
+    public static let maxScreenshots = 3
 
     public var appVersion: String
     public var build: String
@@ -36,14 +36,10 @@ public struct IssueReport: Equatable, Sendable {
         self.diagnostics = diagnostics
     }
 
-    /// The email's text: room to describe the problem, then the details.
-    public var body: String {
+    /// The facts, one per line, as the person sees them and as they reach
+    /// the issue.
+    public var details: String {
         var lines = [
-            "Tell us what happened, and what you expected instead:",
-            "",
-            "",
-            "",
-            "— Details Thock added —",
             "Thock for iPhone \(appVersion) (\(build)) · \(system)",
             "Connection: \(connection)",
             "Status: \(Self.word(for: state))" + (waitingForDesk > 0 ? " · \(waitingForDesk) \(waitingForDesk == 1 ? "change" : "changes") waiting for the desk" : ""),
@@ -69,12 +65,27 @@ public struct IssueReport: Equatable, Sendable {
         return lines.joined(separator: "\n")
     }
 
-    /// A `mailto:` link that opens the mail app on the report, or nil when
-    /// the address cannot be made into one.
-    public func mailURL(to address: String) -> URL? {
-        guard let recipient = Self.encode(address, keeping: "@"), let subject = Self.encode(Self.subject),
-              let body = Self.encode(body.replacingOccurrences(of: "\n", with: "\r\n")) else { return nil }
-        return URL(string: "mailto:\(recipient)?subject=\(subject)&body=\(body)")
+    /// The body of `POST /v1/vault/feedback` (V34 API §6, V39): the person's
+    /// words, these details, and the screenshots as base64, each typed by
+    /// its first bytes.
+    public func payload(description: String, screenshots: [Data]) -> [String: Any?] {
+        [
+            "description": description,
+            "details": details,
+            "app_version": appVersion,
+            "build": build,
+            "system": system,
+            "screenshots": screenshots.prefix(Self.maxScreenshots).map { image in
+                ["content_type": Self.imageType(of: image) ?? "application/octet-stream", "data": image.base64EncodedString()]
+            },
+        ]
+    }
+
+    /// `image/png` or `image/jpeg` from the signature, nil for anything else.
+    public static func imageType(of data: Data) -> String? {
+        if data.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) { return "image/png" }
+        if data.starts(with: [0xFF, 0xD8, 0xFF]) { return "image/jpeg" }
+        return nil
     }
 
     private var connection: String {
@@ -99,12 +110,4 @@ public struct IssueReport: Equatable, Sendable {
         formatter.formatOptions = [.withInternetDateTime]
         return formatter
     }()
-
-    /// Mail apps read `+` and `&` literally, so everything outside the
-    /// unreserved set is percent-encoded.
-    private static func encode(_ text: String, keeping extra: String = "") -> String? {
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~" + extra)
-        return text.addingPercentEncoding(withAllowedCharacters: allowed)
-    }
 }

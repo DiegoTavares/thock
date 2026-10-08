@@ -69,6 +69,7 @@ the status (`unauthorized`, `revoked`, `not_found`, …).
 | GET | `/v1/entitlement` | `Bearer <credential>` | plan, balance, model tiers, gateway key |
 | POST | `/v1/disconnect` | `Bearer <credential>` | revoke the keys (desk and phone) and the credential |
 | GET | `/v1/vault/agent` | `Bearer <phone credential>` | the phone's grant: balance, model tiers, gateway base URL and the phone's own key |
+| POST | `/v1/vault/feedback` | `Bearer <phone credential>` | a problem report (`description`, `details`, up to three PNG/JPEG `screenshots` as base64) → an issue on the feedback repository, `{"number"}` back; 5 per phone per hour |
 | GET | `/admin/plans` | `Bearer <ADMIN_TOKEN>` | `units_per_dollar` and every plan |
 | PUT | `/admin/plans/{id}` | admin | create or replace a plan (body: the plan JSON) |
 | PUT | `/admin/settings` | admin | `{"units_per_dollar": N}` |
@@ -193,3 +194,13 @@ OPENROUTER_MANAGEMENT_KEY='sk-or-...' ./deploy.sh        # add or rotate the gat
 ```
 
 Read the admin token back with `gcloud secrets versions access latest --secret thock-plus-admin`.
+
+Problem reports from the phone become issues on a private repository (`FEEDBACK_REPO`, by default
+`DiegoTavares/thock-feedback`; screenshots are committed there and embedded). The service needs a
+fine-grained token for that one repository with *Issues: write* and *Contents: write*:
+
+```sh
+FEEDBACK_GITHUB_TOKEN='github_pat_...' ./deploy.sh      # add or rotate the feedback token
+```
+
+Without it the route answers `503 feedback_unavailable` and the phone says reporting isn't set up.

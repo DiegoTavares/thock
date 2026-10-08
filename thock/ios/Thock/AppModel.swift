@@ -856,7 +856,16 @@ final class AppModel {
         return "Thock for iPhone \(version) (\(build))"
     }
 
-    /// The facts behind *Report a problem*, for the email the person sends.
+    /// Sends what the person wrote, with the connection facts and their
+    /// screenshots, to be filed for us to read (V39).
+    func sendReport(description: String, screenshots: [Data]) async throws -> Int {
+        guard let engine else {
+            throw APIError(status: 401, code: "unauthorized", error: "This phone isn't connected to your desk.")
+        }
+        return try await engine.sendReport(issueReport(), description: description, screenshots: screenshots)
+    }
+
+    /// The facts that go with a problem report.
     func issueReport() -> IssueReport {
         let info = Bundle.main.infoDictionary
         let device = UIDevice.current
