@@ -54,18 +54,28 @@ enum Theme {
     }
 
     /// Petrona at a weight on its variable axis, scaled with Dynamic Type.
-    static func serifUI(_ size: CGFloat, weight: CGFloat = 500, style: UIFont.TextStyle = .body) -> UIFont {
+    static func serifUI(
+        _ size: CGFloat,
+        weight: CGFloat = 500,
+        italic: Bool = false,
+        style: UIFont.TextStyle = .body
+    ) -> UIFont {
         registerFonts()
         let weightAxis = 2_003_265_652
         let descriptor = UIFontDescriptor(fontAttributes: [
-            .name: "Petrona",
+            .name: italic ? "Petrona-Italic" : "Petrona",
             UIFontDescriptor.AttributeName(rawValue: kCTFontVariationAttribute as String): [weightAxis: weight],
         ])
         return UIFontMetrics(forTextStyle: style).scaledFont(for: UIFont(descriptor: descriptor, size: size))
     }
 
-    static func serif(_ size: CGFloat, weight: CGFloat = 500, style: UIFont.TextStyle = .body) -> Font {
-        Font(serifUI(size, weight: weight, style: style))
+    static func serif(
+        _ size: CGFloat,
+        weight: CGFloat = 500,
+        italic: Bool = false,
+        style: UIFont.TextStyle = .body
+    ) -> Font {
+        Font(serifUI(size, weight: weight, italic: italic, style: style))
     }
 
     static func mono(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {

@@ -135,6 +135,8 @@ struct NoticeBar: View {
     }
 }
 
+/// The compose dock is one sentence whose nouns open their capture (V33 §5).
+/// Tapping anywhere else on it opens the plain capture sheet.
 struct ComposeDock: View {
     @Environment(AppModel.self) private var model
 
@@ -151,30 +153,130 @@ struct ComposeDock: View {
     var body: some View {
         VStack(spacing: 0) {
             Hairline()
-            Button {
-                model.sheet = .capture(entry: "dock", preset: nil)
-            } label: {
-                Text("Write something…")
-                    .font(.system(size: 16))
-                    .foregroundStyle(Theme.dim)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .frame(height: 44)
-                    .background(Theme.ground, in: Capsule())
-                    .overlay(Capsule().stroke(Theme.rule, lineWidth: 1))
-                    .contentShape(Capsule())
-                    .padding(.horizontal, 18)
-                    .padding(.top, 12)
-                    .padding(.bottom, bottomPadding)
+            WordFlow(spacing: 4.5, lineSpacing: 2) {
+                glue("Write an")
+                word("idea", then: ",") { model.open(.idea) }
+                glue("a")
+                word("journal") { model.open(.journal) }
+                glue("line, a")
+                word("clip", then: ",", size: 15) { model.open(.clip) }
+                glue("or")
+                word("ask", then: ".", size: 20, accent: true) { model.open(.ask) }
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Write something")
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 11)
+            .background(Theme.ground, in: RoundedRectangle(cornerRadius: 24))
+            .overlay(RoundedRectangle(cornerRadius: 24).stroke(Theme.rule, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 24))
+            .onTapGesture { model.sheet = .capture(entry: "dock", preset: nil) }
+            .accessibilityElement(children: .contain)
+            .padding(.horizontal, 18)
+            .padding(.top, 12)
+            .padding(.bottom, bottomPadding)
         }
         .background(Theme.surface.ignoresSafeArea(edges: .bottom))
     }
+
+    private func glue(_ text: String) -> some View {
+        ForEach(text.split(separator: " ").map(String.init), id: \.self) { piece in
+            Text(piece)
+                .font(Theme.serif(17))
+                .foregroundStyle(Theme.dim)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private func word(
+        _ title: String,
+        then punctuation: String = "",
+        size: CGFloat = 17,
+        accent: Bool = false,
+        perform: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 0) {
+            Button(action: perform) {
+                Text(title)
+                    .font(Theme.serif(size, weight: 600, italic: accent))
+                    .foregroundStyle(accent ? Theme.amber : Theme.ink)
+                    .underline(color: Theme.amber)
+                    // A word is a small target; grow what takes the tap, not the line.
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 4)
+                    .contentShape(Rectangle())
+                    .padding(.vertical, -10)
+                    .padding(.horizontal, -4)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(title.capitalized)
+            Text(punctuation)
+                .font(Theme.serif(17))
+                .foregroundStyle(Theme.dim)
+                .accessibilityHidden(true)
+        }
+    }
 }
 
-/// One day: the header, the quick actions on today, and a card per section.
+/// Lays its children out left to right like words in a line of text, on a
+/// shared baseline, wrapping to a new line when the next one doesn't fit.
+struct WordFlow: Layout {
+    var spacing: CGFloat
+    var lineSpacing: CGFloat
+
+    private struct Line {
+        var indices: [Int] = []
+        var width: CGFloat = 0
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        var height: CGFloat { ascent + descent }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let lines = lines(for: subviews, width: proposal.width ?? .infinity)
+        let height = lines.map(\.height).reduce(0, +) + lineSpacing * CGFloat(max(lines.count - 1, 0))
+        return CGSize(width: lines.map(\.width).max() ?? 0, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for line in lines(for: subviews, width: bounds.width) {
+            var x = bounds.minX
+            for index in line.indices {
+                let dimensions = subviews[index].dimensions(in: .unspecified)
+                let top = y + line.ascent - dimensions[.firstTextBaseline]
+                subviews[index].place(
+                    at: CGPoint(x: x, y: top),
+                    proposal: ProposedViewSize(width: dimensions.width, height: dimensions.height)
+                )
+                x += dimensions.width + spacing
+            }
+            y += line.height + lineSpacing
+        }
+    }
+
+    private func lines(for subviews: Subviews, width: CGFloat) -> [Line] {
+        var lines: [Line] = []
+        var line = Line()
+        for index in subviews.indices {
+            let dimensions = subviews[index].dimensions(in: .unspecified)
+            if !line.indices.isEmpty, line.width + spacing + dimensions.width > width {
+                lines.append(line)
+                line = Line()
+            }
+            let baseline = dimensions[.firstTextBaseline]
+            line.width += line.indices.isEmpty ? dimensions.width : spacing + dimensions.width
+            line.ascent = max(line.ascent, baseline)
+            line.descent = max(line.descent, dimensions.height - baseline)
+            line.indices.append(index)
+        }
+        if !line.indices.isEmpty {
+            lines.append(line)
+        }
+        return lines
+    }
+}
+
+/// One day: the header and a card per section.
 struct DayCanvas: View {
     @Environment(AppModel.self) private var model
     var day: VaultDay
@@ -207,10 +309,6 @@ struct DayCanvas: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 NoteHeader(eyebrow: eyebrow, title: day.formatted("dddd, MMMM D"))
-
-                if isToday {
-                    QuickActions()
-                }
 
                 if let view {
                     let inboxAfter = view.cards.last { $0.kind == .planner || $0.kind == .journal }?.id
@@ -363,40 +461,6 @@ struct DayStrip: View {
                 .accessibilityLabel("\(day.weekdayName) \(day.day)\(isToday ? ", today" : "")\(hasNote ? ", has a note" : "")")
             }
         }
-    }
-}
-
-struct QuickActions: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        HStack(spacing: 8) {
-            action("+", "Idea") { model.open(.idea) }
-            action("¶", "Journal") { model.open(.journal) }
-            action("⇗", "Clip") { model.open(.clip) }
-            action("✦", "Ask") { model.open(.ask) }
-        }
-        .disabled(model.isReadOnly)
-        .opacity(model.isReadOnly ? 0.5 : 1)
-    }
-
-    private func action(_ glyph: String, _ title: String, perform: @escaping () -> Void) -> some View {
-        Button(action: perform) {
-            VStack(spacing: 4) {
-                Text(glyph)
-                    .font(Theme.mono(17))
-                    .foregroundStyle(Theme.amber)
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Theme.ink)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 9)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Theme.rule, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
     }
 }
 
