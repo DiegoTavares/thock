@@ -51,6 +51,7 @@ var routeTable = map[string]routeAuth{
 	"POST /v1/vault/writes/ack":                 authVault,
 	"GET /v1/vault/feed":                        authVault,
 	"GET /v1/vault/agent":                       authVault,
+	"POST /v1/vault/feedback":                   authVault,
 	"PUT /v1/vault/blobs/{token}":               authBlobToken,
 	"GET /v1/vault/blobs/{token}":               authBlobToken,
 	"GET /admin/plans":                          authAdmin,
@@ -201,7 +202,7 @@ func TestRolesAreEnforcedOnEveryVaultRoute(t *testing.T) {
 		"POST /v1/vault/devices/{device_id}/revoke", "POST /v1/vault/files/{path...}",
 		"DELETE /v1/vault/files/{path...}", "GET /v1/vault/writes", "POST /v1/vault/writes/ack",
 	}
-	phoneOnlyRoutes := []string{"POST /v1/vault/writes", "PATCH /v1/vault/devices/me", "GET /v1/vault/agent"}
+	phoneOnlyRoutes := []string{"POST /v1/vault/writes", "PATCH /v1/vault/devices/me", "GET /v1/vault/agent", "POST /v1/vault/feedback"}
 	check := func(patterns []string, token string) {
 		for _, pattern := range patterns {
 			method, path := concretePath(pattern)
