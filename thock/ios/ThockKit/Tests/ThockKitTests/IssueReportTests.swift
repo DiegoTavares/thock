@@ -26,7 +26,7 @@ final class IssueReportTests: XCTestCase {
             "Notes here: 120 · at the desk's copy: 121",
             "Version 40 of 41 · writes not yet at the desk: 1",
             "Address: https://plus.thethock.com",
-            "Last check: 2026-10-02T19:14:00Z",
+            "Last check: 2026-10-02T21:14:00Z",
             "Problem: 503 unavailable: try later",
             "Could not take: daily/2026-10-02.md: did not open with this phone's key",
         ] {
