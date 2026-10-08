@@ -848,6 +848,38 @@ final class AppModel {
         await refreshSyncState()
     }
 
+    /// `Thock for iPhone 1.0 (10)`, as the settings sheet signs itself.
+    static var versionLabel: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "Thock for iPhone \(version) (\(build))"
+    }
+
+    /// The facts behind *Report a problem*, for the email the person sends.
+    func issueReport() -> IssueReport {
+        let info = Bundle.main.infoDictionary
+        let device = UIDevice.current
+        var system = utsname()
+        uname(&system)
+        let hardware = withUnsafeBytes(of: &system.machine) { bytes in
+            String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
+        }
+        return IssueReport(
+            appVersion: info?["CFBundleShortVersionString"] as? String ?? "?",
+            build: info?["CFBundleVersion"] as? String ?? "?",
+            system: "\(device.systemName) \(device.systemVersion) · \(hardware)",
+            phoneName: store?.meta("device_name"),
+            address: store?.meta("backend"),
+            isPractice: isPractice,
+            isConnected: store?.isConnected ?? false,
+            state: syncState,
+            waitingForDesk: waitingForDesk,
+            notesHere: store?.paths().count ?? 0,
+            diagnostics: diagnostics
+        )
+    }
+
     // MARK: The practice desk
 
     func setDeskAwake(_ awake: Bool) async {

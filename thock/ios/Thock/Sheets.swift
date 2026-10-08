@@ -236,14 +236,15 @@ struct InboxEditSheet: View {
     }
 }
 
-/// Ask is not in this release; the tab explains itself and offers nothing
-/// else (V33 §11, §18).
-/// The only settings the phone has: which desk it is connected to, how it
-/// looks, and, in the practice notebook, the pretend desk's controls.
+/// The only settings the phone has: how it is doing with the desk, a way to
+/// reach a person when it is not, how it looks, and the way out. The practice
+/// notebook adds the pretend desk's controls.
 struct YouSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     @State private var confirmingDisconnect = false
+    @State private var noMailApp = false
     @State private var busy = false
 
     private var status: String {
@@ -251,6 +252,7 @@ struct YouSheet: View {
         switch model.syncState {
         case .paused: return "Thock Plus has ended. This phone shows what it has and writes nothing new."
         case .disconnected: return "This phone is no longer connected to your desk."
+        case .working: return "Checking with your desk…"
         case .offline:
             return waiting == 0 ? "Can't reach your desk's copy right now. This phone keeps working on what it has."
                 : "Can't reach your desk's copy right now. \(waiting) \(waiting == 1 ? "change is" : "changes are") kept here and will be sent."
@@ -259,26 +261,19 @@ struct YouSheet: View {
         }
     }
 
-    /// The facts behind the status sentence, for when notes are not arriving.
-    private var details: String {
-        let d = model.diagnostics
-        var lines: [String] = []
-        lines.append("notes here: \(model.store?.paths().count ?? 0) · at the desk's copy: \(d.serverFileCount.map(String.init) ?? "?")")
-        lines.append("version \(d.cursor) of \(d.serverLatestVersion.map(String.init) ?? "?") · writes not yet at the desk: \(d.serverPendingWrites.map(String.init) ?? "?")")
-        lines.append("address: \(model.store?.meta("backend") ?? "?")")
-        if let last = d.lastRound {
-            lines.append("last check: " + last.formatted(date: .omitted, time: .standard))
+    private var lastChecked: String {
+        guard let last = model.diagnostics.lastRound else { return "Not checked yet" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = Calendar.current.isDateInToday(last) ? "HH:mm" : "EEE HH:mm"
+        return "Last checked " + formatter.string(from: last)
+    }
+
+    private var disconnectWarning: String {
+        if model.isPractice {
+            return "The practice notes are removed from this phone."
         }
-        if let error = d.lastError {
-            lines.append("problem: " + error)
-        }
-        for failure in d.failures.prefix(6) {
-            lines.append("could not take: " + failure)
-        }
-        if d.failures.count > 6 {
-            lines.append("and \(d.failures.count - 6) more")
-        }
-        return lines.joined(separator: "\n")
+        let lost = model.waitingForDesk > 0 ? "\(model.waitingForDesk) \(model.waitingForDesk == 1 ? "change hasn't" : "changes haven't") reached the desk yet and will be lost. " : ""
+        return lost + "Your desk keeps listing this phone until you disconnect it there as well. To use this phone again, connect it from your desk."
     }
 
     var body: some View {
@@ -287,25 +282,28 @@ struct YouSheet: View {
             SheetHeader(leading: "", title: "", trailing: "Done", onLeading: {}, onTrailing: { dismiss() })
                 .padding(.bottom, 4)
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 26) {
+                    VStack(alignment: .leading, spacing: 10) {
                         CardLabel(title: "This phone")
                         Text(model.isPractice ? "Practice notebook" : (model.store?.meta("device_name") ?? "Connected"))
                             .font(Theme.serif(24, style: .title2))
                             .foregroundStyle(Theme.ink)
+                        SyncBar(state: model.syncState, waiting: model.waitingForDesk)
+                            .padding(.top, 2)
                         Text(status)
                             .font(.system(size: 15))
                             .foregroundStyle(Theme.muted)
-                    }
-
-                    if !model.isPractice {
-                        VStack(alignment: .leading, spacing: 8) {
-                            CardLabel(title: "Details")
-                            Text(details)
-                                .font(Theme.mono(12))
-                                .foregroundStyle(Theme.muted)
-                                .textSelection(.enabled)
-                            deskButton("Check again") { await model.checkAgain() }
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(lastChecked)
+                                .font(.system(size: 13))
+                                .foregroundStyle(Theme.dim)
+                            Spacer(minLength: 12)
+                            Button("Check again") {
+                                Task { await run { await model.checkAgain() } }
+                            }
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Theme.amber)
+                            .disabled(model.syncState == .working || model.syncState == .notConnected)
                         }
                     }
 
@@ -342,6 +340,14 @@ struct YouSheet: View {
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
+                        CardLabel(title: "Help")
+                        deskButton("Report a problem") { reportProblem() }
+                        Text("Opens an email to us with a few details about this phone's connection, not your notes. Read it over before you send it.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.dim)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
                         Hairline()
                         Button(model.isPractice ? "Close the practice notebook" : "Disconnect this phone") {
                             confirmingDisconnect = true
@@ -353,6 +359,11 @@ struct YouSheet: View {
                             .font(.system(size: 13))
                             .foregroundStyle(Theme.dim)
                     }
+
+                    Text(AppModel.versionLabel)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.dim)
+                        .frame(maxWidth: .infinity)
                 }
                 .padding(.bottom, 24)
             }
@@ -364,7 +375,29 @@ struct YouSheet: View {
                 Task { await model.disconnect() }
             }
         } message: {
-            Text(model.waitingForDesk > 0 ? "\(model.waitingForDesk) changes haven't reached the desk yet and will be lost." : "You can connect again from your desk at any time.")
+            Text(disconnectWarning)
+        }
+        .alert("No mail app on this phone", isPresented: $noMailApp) {
+            Button("OK") {}
+        } message: {
+            Text("The report is on your clipboard. Paste it into an email to \(ThockEnvironment.supportEmail).")
+        }
+    }
+
+    /// Opens the mail app on a report; without one, the report goes to the
+    /// clipboard so it can still be sent some other way.
+    private func reportProblem() {
+        let report = model.issueReport()
+        guard let url = report.mailURL(to: ThockEnvironment.supportEmail) else {
+            UIPasteboard.general.string = report.body
+            noMailApp = true
+            return
+        }
+        openURL(url) { accepted in
+            if !accepted {
+                UIPasteboard.general.string = report.body
+                noMailApp = true
+            }
         }
     }
 
@@ -388,6 +421,51 @@ struct YouSheet: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.rule, lineWidth: 1))
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// The connection at a glance: a bar that sweeps while the phone checks with
+/// the desk and settles into one colour once it knows. The sentence under
+/// it says the same in words, so VoiceOver skips the bar.
+struct SyncBar: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var state: SyncState
+    var waiting: Int
+
+    private var tone: Color {
+        switch state {
+        case .working: return Theme.amber
+        case .upToDate: return waiting == 0 ? Theme.good : Theme.amber
+        case .offline, .disconnected: return Theme.warn
+        case .paused, .notConnected: return Theme.dim
+        }
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            ZStack(alignment: .leading) {
+                Capsule().fill(Theme.rule)
+                if state == .working, !reduceMotion {
+                    TimelineView(.animation) { context in
+                        let period = 1.4
+                        let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
+                        Capsule()
+                            .fill(tone)
+                            .frame(width: width * 0.3)
+                            .offset(x: width * 1.3 * phase - width * 0.3)
+                    }
+                    .clipShape(Capsule())
+                } else {
+                    Capsule()
+                        .fill(tone)
+                        .frame(width: state == .working ? width * 0.5 : width)
+                }
+            }
+        }
+        .frame(height: 6)
+        .animation(.snappy(duration: 0.25), value: state)
+        .accessibilityHidden(true)
     }
 }
 
