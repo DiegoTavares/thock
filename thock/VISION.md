@@ -409,7 +409,7 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   reorders the backlog; the desk pane only ever moved a task between Soon and Someday.
   Design reference: https://claude.ai/artifact/KoKfR3FuYfJM2zjH7rw2pw. Spec `specs/v38-phone-backlog.md`.
   _(on `main`; ships with the next phone build)_
-- [ ] **Images in the vault:** one folder, `images/`, and one link shape, `![alt](/images/<name>)`,
+- [x] **Images in the vault:** one folder, `images/`, and one link shape, `![alt](/images/<name>)`,
   a vault-root path that survives every move a line makes between notes. The desk draws the picture
   under its line on the conceal machinery (the syntax folds to the alt text, the image stays while
   the line is edited), `![` lists the folder the way `[[` lists notes, and **thock: insert image**
@@ -417,12 +417,14 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   snapshots down for the images folder only, a `put_file` write kind up, never overwriting. The phone
   attaches a photo while capturing or editing a waiting item, and the share sheet takes pictures
   beside links. Design reference: https://claude.ai/artifact/Y81PSwkFpv7zxHtzwi9MVE. Spec
-  `specs/v39-vault-images.md`. _(planned)_
-- [ ] **Inbox gestures on the phone:** swipe a waiting item right for Today or Backlog, left to
+  `specs/v39-vault-images.md`. _(shipped 2026-10-10: desk, sync and phone capture; the phone drawing
+  pictures in its own editor and pulling binary snapshots, and the desk taking a pasted or dropped
+  picture, are still to come)_
+- [x] **Inbox gestures on the phone:** swipe a waiting item right for Today or Backlog, left to
   archive, with undo. The note moves to `archives/inbox/` through one new write kind, `move_file`,
   the task line carries a wikilink back to it when there was a body, and the triage log gets the
   ritual's own line, so desk and phone receipts agree. Spec `specs/v40-phone-inbox-gestures.md`.
-  _(planned)_
+  _(shipped 2026-10-10)_
 
 ---
 
