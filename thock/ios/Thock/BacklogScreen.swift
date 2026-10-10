@@ -253,8 +253,8 @@ struct BacklogScreen: View {
             adding = group
         } label: {
             Text("+")
-                .font(Theme.mono(17))
-                .foregroundStyle(Theme.amber)
+                .font(Theme.mono(15))
+                .foregroundStyle(Theme.dim)
                 .frame(width: 28, height: 28)
         }
         .buttonStyle(.plain)
@@ -308,8 +308,8 @@ extension BacklogView {
     }
 }
 
-/// One open task: the circle ticks, the words edit, the handle is the drag's
-/// affordance, and a long press opens the menu with every move (V38 §5.2).
+/// One open task: the circle ticks, the words edit, a press-and-move anywhere
+/// on the row drags it, and a long press opens the menu with every move (V38 §5.2).
 struct BacklogRow: View {
     @Environment(AppModel.self) private var model
     var task: BacklogTask
@@ -354,12 +354,6 @@ struct BacklogRow: View {
                 Text("+\(task.childLines) \(task.childLines == 1 ? "line" : "lines")")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Theme.dim)
-            }
-            if editable {
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Theme.dim)
-                    .accessibilityHidden(true)
             }
         }
         .padding(.vertical, 7)

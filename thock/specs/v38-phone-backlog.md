@@ -21,7 +21,7 @@ and Someday. It goes past the desk in two places the phone needs and the desk ne
 be **moved anywhere** (up and down inside its group, into another category, into the other section),
 and a task can be **removed**, with a few seconds of undo.
 
-Moving is the point of the screen and it is a drag: press a row's handle, it lifts, carry it, let
+Moving is the point of the screen and it is a drag: press a row and move, it lifts, carry it, let
 go. The long-press menu covers the long trips (*Move to… Someday › Thock*) and the exact one-step
 case (*Move up*, *Move down*), so a move never needs a drag across the whole screen and every move
 has a path VoiceOver can take.
@@ -88,16 +88,16 @@ The file's own structure, in the file's order, by the rules the Today canvas use
 │ ‹ Today                   +  │
 │ Backlog                      │   Petrona
 │ 5 SOON · 14 SOMEDAY          │
-│ ─ SOON · 5 ──────────────  + │   the configured Soon heading, open count, add
-│ ○ Renew passport           ≡ │   circle ticks, text edits, handle drags
-│ ○ Call the dentist         ≡ │
+│ ─ SOON · 5 ──────────────  + │   the configured Soon heading, open count, a dim add
+│ ○ Renew passport             │   circle ticks, text edits, press-and-move drags
+│ ○ Call the dentist           │
 │   HOME · 3                 + │   a category: the planner's hashed group colour
-│   ○ Fix the gate  +2 lines ≡ │   children hinted, never shown
-│   ○ Buy a smoke alarm      ≡ │
+│   ○ Fix the gate  +2 lines   │   children hinted, never shown
+│   ○ Buy a smoke alarm        │
 │ ─ SOMEDAY · 14 ──────────  + │
-│ ○ Learn woodworking        ≡ │
+│ ○ Learn woodworking          │
 │   THOCK · 4                + │
-│   ○ Week widget            ≡ │
+│   ○ Week widget              │
 │ ─ DONE · 42 ───────────── ›  │   collapsed; expands in place, newest first, read-only
 └──────────────────────────────┘
 ```
@@ -113,7 +113,7 @@ The file's own structure, in the file's order, by the rules the Today canvas use
   Someday is hidden, as on the desk.
 - **Done** is one collapsed row with the count. Expanded, it lists Completed newest first, struck
   through, with the `✅` date as a small label; undated hand-written completions sort last. It is
-  read-only: no circle, no handle, no menu beyond nothing.
+  read-only: no circle, no menu beyond nothing.
 - **Empty states.** A missing file, a missing section or an empty section renders its label and an
   *Add a task* row. Nothing is an error, and looking writes nothing: the file is created from the
   desk's default only by the first add (the capture sheet's existing behaviour).
@@ -126,10 +126,9 @@ The file's own structure, in the file's order, by the rules the Today canvas use
 | --- | --- | --- |
 | The circle | tick (§6.1) | the menu |
 | The text | edit this line, in the planner's edit sheet | the menu |
-| The handle `≡` | nothing | the drag's affordance: press and move anywhere on the row drags it (§6.2) |
 | `+N lines` hint | nothing; it says the task has children that travel with it | |
 | A category label | collapse or expand | |
-| The `+` on a section or category | add a task at the end of that group, in the planner's add row | |
+| The `+` on a section or category | add a task at the end of that group, in the planner's add row. Drawn dim, so the rail stays quiet | |
 
 The menu is the planner row's nudge menu (V33 §7.1) with the backlog's items, in this order:
 **Tick**, **Edit this line**, **Move up**, **Move down**, **Move to…** (a submenu: Soon, Someday,
@@ -159,7 +158,8 @@ a tick show a toast without Undo, since each also wrote to today's note.
 
 ### 6.2 The drag
 
-- Press and move starts it, from the handle or anywhere on the row; the row lifts with the
+- Press and move starts it, from anywhere on the row; there is no handle, so the row's right
+  edge stays empty. The row lifts with the
   system's haptic, the list scrolls itself near the top and bottom edges, and the system's drop
   line shows where the row will land. Letting go is the write. Press and hold without moving opens
   the menu, so the two never compete.
@@ -257,9 +257,10 @@ Both kinds live in `crates/thock-sync-core` (`write.rs`, `apply.rs`) and in
 `thock/ios/ThockKit/Sources/ThockKit/SyncCore/` (`WriteDocument.swift`, `Apply.swift`), with the
 fixture corpus extended by `fixtures/v1/move_block/` and `fixtures/v1/remove_block/` that both
 runners pass. The phone's model and builders are `ThockKit/Vault/BacklogModel.swift`; the screen is
-`Thock/BacklogScreen.swift`. `WRITE_VERSION` stays 1: an older desk that meets an unknown kind already refuses the
-write and leaves it queued (V34 API §7.1), so a phone built before the desk is updated loses nothing
-and the Backlog screen reads *waiting for the desk* on its toast until the desk catches up.
+`Thock/BacklogScreen.swift`. `WRITE_VERSION` stays 1: an older desk that meets an unknown kind holds the write and
+everything queued behind it, and its status row says to update Thock (V34 API §10.4), so a phone built
+before the desk is updated loses nothing and the Backlog screen reads *waiting for the desk* on its toast
+until the desk catches up.
 
 ## 8. Tests
 
@@ -288,7 +289,7 @@ and the Backlog screen reads *waiting for the desk* on its toast until the desk 
 
 From the design document's decision cards, with Diego's answers:
 
-1. **Proposal A, Lift and drop.** Native drag from a handle; *Move up*, *Move down* and *Move to…*
+1. **Proposal A, Lift and drop.** Native drag from the row; *Move up*, *Move down* and *Move to…*
    in the long-press menu from the first build.
 2. **Entry: a Backlog row under the Inbox row on today's canvas.** It carries the counts; quick
    actions stay for capturing.
@@ -304,3 +305,10 @@ From the design document's decision cards, with Diego's answers:
    workspace.
 9. **Two new kinds, `move_block` and `remove_block`.** Teaching `remove_line` to take children
    would change the planner's behaviour on every vault.
+
+## 10. Decision log (2026-10-07)
+
+1. **No drag handle, dim add buttons.** The `≡` on every row and an amber `+` on every group made
+   the right edge busier than the tasks. The drag already starts anywhere on the row, so the handle
+   went; the group `+` stays but is drawn dim, leaving the nav bar's amber `+` as the one bright
+   control.
