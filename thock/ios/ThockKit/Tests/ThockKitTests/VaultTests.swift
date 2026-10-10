@@ -424,6 +424,45 @@ final class VaultTests: XCTestCase {
 
     """
 
+    func testALevelOneWeekGoalsHeadingIsTheChecklistNotTheAgent() throws {
+        let note = """
+        # Week 41
+
+        - Clear inbox
+
+        # Week Goals
+
+        - [ ] Release a new version
+        - [x] Add a new show
+
+        # AI Week Review
+
+        A good week.
+
+        """
+        let view = NoteView(text: note, config: config, kind: .weekly)
+        XCTAssertEqual(view.cards.map(\.kind), [.preamble, .planner, .agent])
+        XCTAssertEqual(view.planner.heading, HeadingRef(text: "Week Goals", level: 1))
+        XCTAssertEqual(view.planner.items.map(\.label), ["Release a new version", "Add a new show"])
+        XCTAssertEqual(view.planner.doneCount, 1)
+
+        let week = NoteID.week(VaultWeek(year: 2026, week: 41))
+        let builder = writes()
+        func apply(_ planned: PlannedWrite?) throws -> String {
+            SyncCore.apply(existing: note, write: try XCTUnwrap(planned).document).text
+        }
+        let release = try XCTUnwrap(view.planner.items.first)
+        var change = changedLines(note, try apply(builder.tick(release, note: week)))
+        XCTAssertEqual(change.removed, ["- [ ] Release a new version"])
+        XCTAssertEqual(change.added, ["- [x] Release a new version"])
+        change = changedLines(note, try apply(builder.editText(release, text: "Release 1.19", note: week)))
+        XCTAssertEqual(change.added, ["- [ ] Release 1.19"])
+        let added = try apply(builder.addLine("Plan the offsite", group: nil, planner: view.planner, note: week))
+        XCTAssertEqual(changedLines(note, added).added, ["- [ ] Plan the offsite"])
+        let reread = NoteView(text: added, config: config, kind: .weekly)
+        XCTAssertEqual(reread.planner.items.map(\.label), ["Release a new version", "Add a new show", "Plan the offsite"])
+    }
+
     func testTheWeekIsDrawnFromItsNoteWithGoalsAsItsChecklist() throws {
         let view = NoteView(text: weekly, config: config, kind: .weekly)
         XCTAssertEqual(view.cards.map(\.kind), [.preamble, .planner, .prose, .prose, .agent])

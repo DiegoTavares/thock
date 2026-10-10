@@ -135,7 +135,6 @@ The home screen *is* today's note, drawn as cards from the note's own sections:
 ┌──────────────────────────────┐
 │ TODAY · WEEK 40              │   date in Petrona
 │ Thursday, October 2          │
-│ [+ Idea] [¶ Journal] [⇗ Clip] [✦ Ask]   quick actions
 │ ─ JOURNAL ────────────────── │
 │ 08:10  Slept badly, but …    │   paragraphs, timestamps as the phone wrote them
 │ 13:02  Noticed I keep …      │
@@ -147,7 +146,8 @@ The home screen *is* today's note, drawn as cards from the note's own sections:
 │ ─ INBOX · 3 waiting ──────── │   opens the capture feed with receipts
 │ ─ PERSONAL ───────────────── │   any other section, read-only prose
 │                              │
-│ [ Write something…      ] (+)│   compose dock, always present
+│ ( Write an idea, a journal   │   compose dock, always present:
+│   line, a clip, or ask.     )│   each noun opens its capture
 └──────────────────────────────┘
 ```
 
@@ -160,8 +160,10 @@ The home screen *is* today's note, drawn as cards from the note's own sections:
   The week screen carries a day strip that jumps to any day's canvas, the weekly note's sections
   (`## Goals` ticks like the planner), and the agent's `# AI Week Review` in the agent's voice
   once it exists.
-- **The compose dock** opens the capture sheet (§6). The quick-action row opens the same sheet
-  with the destination preset (Idea → Inbox, Journal → today's Journal), the Clip sheet, or Ask.
+- **The compose dock** is one sentence whose nouns are the entry points: *idea* and *journal*
+  open the capture sheet (§6) with the destination preset (Idea → Inbox, Journal → today's
+  Journal), *clip* the Clip sheet, *ask* Ask. Tapping the rest of the sentence opens the capture
+  sheet with no preset.
 - **Launch behaviour** (decided, H1): every cold launch is today. No restoring the last screen.
   Entry points from outside the app (§9) open their sheet over today.
 
@@ -382,16 +384,20 @@ The phone writes **only**:
 
 | Where | How |
 | --- | --- |
-| `inbox/*.md` | create-if-missing; while it waits for triage, replace its level-1 heading line and that heading's section |
+| `inbox/*.md` | create-if-missing; while it waits for triage, replace its level-1 heading line and that heading's section; move it to `archives/inbox/` (V40) |
+| `archives/inbox/*.md` | the destination of that move; never written otherwise (V40) |
+| `archives/inbox/triage-log.md` | append one line in the ritual's format, for a move the phone made (V40) |
+| `images/*` | create-if-missing, never overwritten: a picture attached to a capture (V39) |
 | `reference/clips/*.md` | create-if-missing |
-| `daily/<today>.md` | create from template if missing; append under `## Journal`, `## Day planner`, `## Personal`, `# Asked on the go`; replace one planner line; replace one journal paragraph; replace one section's line range after confirmation |
+| `daily/<today>.md` | create from template if missing; append under `## Journal`, `## Day planner`, `## Personal`, `# Asked on the go`; replace one planner line; replace one journal paragraph; replace one section's line range after confirmation; append one task line under the Day planner heading for an inbox item (V40) |
 | `daily/<other day>.md` | the same single-line planner edits, from the day strip |
 | `weekly/<week>.md` | tick one `## Goals` line; replace one section after confirmation |
 | `backlog.md` | append one task under **Soon** |
 | `memory/inbox.md` | append one dated line, by the agent during Ask (V35 decision 5); Reflect files it at the desk |
 
-Nothing else, ever. Not the rest of `memory/`, not `routines/`, not `.thock/`, not templates, not the triage
-log (the phone only reads it). The desk owns every other write. Two appends to the same section
+Nothing else, ever. Not the rest of `memory/`, not `routines/`, not `.thock/`, not templates. The
+triage log takes one line per move the phone itself made and nothing else (V40; before that the
+phone only read it). The desk owns every other write. Two appends to the same section
 can always both be kept, which is what makes the deferred sync problem solvable rather than
 hopeful.
 

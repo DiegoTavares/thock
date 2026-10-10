@@ -396,7 +396,10 @@ mod tests {
         let older_version = r#"{"v":0,"client_id":"c","kind":"create","path":"p.md","content":""}"#;
         let error = parse_write(older_version).expect_err("older version");
         assert_eq!(error, WriteError::UnsupportedVersion(0));
-        assert!(!error.needs_newer_reader(), "no update can read a version 0");
+        assert!(
+            !error.needs_newer_reader(),
+            "no update can read a version 0"
+        );
 
         for garbage in [
             r#"{"v":1,"client_id":"c","kind":7,"path":"p.md"}"#,

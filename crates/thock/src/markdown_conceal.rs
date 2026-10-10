@@ -12,13 +12,18 @@
 use crate::markdown_syntax::{self, SpanKind};
 use crate::markdown_text;
 use crate::vault::{Vault, VaultStatus};
+use collections::{HashMap, HashSet};
 use editor::actions::GoToDefinition;
-use editor::display_map::{Crease, CreaseId};
+use editor::display_map::{
+    BlockContext, BlockId, BlockPlacement, BlockProperties, BlockStyle, Crease, CreaseId,
+    CustomBlockId,
+};
 use editor::{Editor, EditorEvent, EditorMode, FoldPlaceholder, HighlightKey};
 use gpui::{
-    App, AppContext as _, Context, Empty, Entity, HighlightStyle, Hsla, IntoElement as _,
-    ParentElement as _, SharedString, StrikethroughStyle, Styled as _, Subscription, Task,
-    TaskExt as _, WeakEntity, Window, div, px,
+    AnyElement, App, AppContext as _, Context, Empty, Entity, HighlightStyle, Hsla, ImageSource,
+    IntoElement as _, ParentElement as _, Resource, RetainAllImageCache, SharedString, SharedUri,
+    StrikethroughStyle, Styled as _, Subscription, Task, TaskExt as _, WeakEntity, Window, div,
+    img, px,
 };
 use multi_buffer::{
     Anchor, MultiBufferOffset, MultiBufferPoint, MultiBufferSnapshot, ToOffset as _, ToPoint as _,
@@ -33,7 +38,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use ui::{ActiveTheme as _, Color, Icon, IconName, IconSize};
 use util::paths::PathStyle;
-use util::rel_path::RelPath;
+use util::rel_path::{RelPath, RelPathBuf};
 use workspace::Workspace;
 
 gpui::actions!(
@@ -98,14 +103,35 @@ pub struct ConcealSettings {
     pub email_view: bool,
     /// The connected Google account, for the own-reply tint (V16 §6).
     pub account: Option<String>,
+    /// The vault's images folder, which a bare `images/x.png` resolves
+    /// against the root rather than the note (V39 §4.3).
+    pub images_dir: String,
+}
+
+/// One image line's picture: the line it sits under, what it points at, and
+/// the block drawn for it (V39 §5.5).
+struct ImageEntry {
+    /// The start of the line's `src`, which pins the block's row through
+    /// edits elsewhere in the note.
+    line: Anchor,
+    src: String,
+    /// The picture once `src` resolves to a file in the vault or a remote
+    /// URL; `None` when it points nowhere, which the folded tail says.
+    resource: Option<Resource>,
+    block: Option<CustomBlockId>,
 }
 
 pub struct MarkdownConcealAddon {
     enabled: bool,
     email_enabled: bool,
     account: Option<String>,
+    images_dir: String,
     spans: Vec<AnchorSpan>,
     email: Option<EmailAnchors>,
+    images: Vec<ImageEntry>,
+    /// Decoded pictures, kept for the editor's lifetime so scrolling past
+    /// the same image never decodes it twice.
+    image_cache: Entity<RetainAllImageCache>,
     crease_ids: Vec<CreaseId>,
     /// The collapsed-by-default state is imposed once per open (V16 §5.3);
     /// after that the user's toggles are law.
@@ -208,6 +234,7 @@ fn vault_markdown_settings(editor: &Editor, cx: &App) -> Option<ConcealSettings>
                 conceal: vault.config.markdown.conceal,
                 email_view,
                 account,
+                images_dir: vault.config.images.dir,
             })
         }
         _ => None,
@@ -299,8 +326,11 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         enabled: settings.conceal,
         email_enabled: settings.email_view,
         account: settings.account,
+        images_dir: settings.images_dir,
         spans: Vec::new(),
         email: None,
+        images: Vec::new(),
+        image_cache: RetainAllImageCache::new(cx),
         crease_ids: Vec::new(),
         default_folds_applied: false,
         self_applied: false,
@@ -312,16 +342,17 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
 }
 
 /// Makes `[[wikilinks]]` act like code references: go-to-definition with the
-/// newest cursor on one opens the linked note. Anywhere else the action
-/// propagates to the built-in handler, so nothing changes for it. A wikilink
+/// newest cursor on one opens the linked note, and on an image line opens
+/// the picture in the image viewer (V39 §5.6). Anywhere else the action
+/// propagates to the built-in handler, so nothing changes for it. A link
 /// whose target doesn't resolve does nothing — no file is created.
 fn go_to_wikilink(editor: &WeakEntity<Editor>, window: &mut Window, cx: &mut App) {
     let Some(editor) = editor.upgrade() else {
         cx.propagate();
         return;
     };
-    // Outer `None`: the cursor isn't on a wikilink — fall through to the
-    // built-in. Inner `None`: a wikilink that doesn't resolve — swallow.
+    // Outer `None`: the cursor isn't on a link — fall through to the
+    // built-in. Inner `None`: a link that doesn't resolve — swallow.
     let destination = editor.update(cx, |editor, cx| {
         let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
         let offset = editor
@@ -330,9 +361,13 @@ fn go_to_wikilink(editor: &WeakEntity<Editor>, window: &mut Window, cx: &mut App
             .head()
             .to_offset(&buffer_snapshot);
         let text = buffer_snapshot.text();
-        let reference = markdown_syntax::wikilink_at(&text, offset.0)?;
-        let target = text.get(reference.target)?;
-        Some(wikilink_destination(editor, target, cx))
+        if let Some(reference) = markdown_syntax::wikilink_at(&text, offset.0) {
+            let target = text.get(reference.target)?;
+            return Some(wikilink_destination(editor, target, cx));
+        }
+        let image = markdown_syntax::image_at(&text, offset.0)?;
+        let src = text.get(image.src)?;
+        Some(image_destination(editor, src, cx))
     });
     match destination {
         None => cx.propagate(),
@@ -361,6 +396,29 @@ fn wikilink_destination(
         target,
         worktree.files(false, 0).map(|entry| entry.path.as_ref()),
     )?;
+    let project_path = ProjectPath {
+        worktree_id: worktree.id(),
+        path: path.into(),
+    };
+    Some((editor.workspace()?, project_path))
+}
+
+/// The workspace and project path an image line's picture opens, when it
+/// is a file in the vault; a remote or missing picture opens nothing.
+fn image_destination(
+    editor: &Editor,
+    src: &str,
+    cx: &App,
+) -> Option<(Entity<Workspace>, ProjectPath)> {
+    let images_dir = editor.addon::<MarkdownConcealAddon>()?.images_dir.clone();
+    let buffer = editor.buffer().read(cx).as_singleton()?;
+    let file = project::File::from_dyn(buffer.read(cx).file())?;
+    let worktree = file.worktree.read(cx);
+    let note_dir = file.path.parent().unwrap_or(RelPath::empty());
+    let path = vault_image_path(src, note_dir, &images_dir)?;
+    if !worktree.entry_for_path(&path)?.is_file() {
+        return None;
+    }
     let project_path = ProjectPath {
         worktree_id: worktree.id(),
         path: path.into(),
@@ -411,6 +469,312 @@ fn toggle(editor: &mut Editor, cx: &mut Context<Editor>) {
     addon.enabled = !addon.enabled;
     apply_highlights(editor, cx);
     apply_folds(editor, cx);
+    apply_image_blocks(editor, cx);
+}
+
+/// Rows a picture's block starts at before its size is known, and the most
+/// it may take once it is (V39 §5.1).
+const IMAGE_PLACEHOLDER_ROWS: u32 = 6;
+const IMAGE_MAX_ROWS: u32 = 20;
+
+/// Rebuilds the image entries from the span plan, keeping a block whose line
+/// still shows the same `src`, and marks the tail of every image that points
+/// nowhere so its placeholder can say so. Resolution reads the worktree
+/// snapshot in memory, the way wikilinks resolve — no disk I/O.
+fn refresh_images(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
+        return;
+    };
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let note = editor.buffer().read(cx).as_singleton().and_then(|buffer| {
+        let file = project::File::from_dyn(buffer.read(cx).file())?;
+        Some((file.worktree.clone(), file.path.clone()))
+    });
+    let images_dir = addon.images_dir.clone();
+
+    let sources: Vec<(Anchor, String)> = addon
+        .spans
+        .iter()
+        .filter(|span| span.kind == SpanKind::ImageSource)
+        .map(|span| {
+            let src: String = buffer_snapshot.text_for_range(span.range.clone()).collect();
+            (span.range.start, src)
+        })
+        .collect();
+
+    let mut previous: Vec<ImageEntry> = Vec::new();
+    if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        previous = std::mem::take(&mut addon.images);
+    }
+    let previous_keys: Vec<(MultiBufferOffset, String)> = previous
+        .iter()
+        .map(|entry| (entry.line.to_offset(&buffer_snapshot), entry.src.clone()))
+        .collect();
+    let mut carried: Vec<Option<ImageEntry>> = previous.into_iter().map(Some).collect();
+
+    let images: Vec<ImageEntry> = sources
+        .into_iter()
+        .map(|(line, src)| {
+            let key = (line.to_offset(&buffer_snapshot), src.clone());
+            let kept = previous_keys
+                .iter()
+                .position(|previous| *previous == key)
+                .and_then(|index| carried.get_mut(index).and_then(Option::take));
+            match kept {
+                Some(entry) => entry,
+                None => {
+                    let resource = note.as_ref().and_then(|(worktree, note_path)| {
+                        image_resource(&src, note_path, &images_dir, worktree.read(cx))
+                    });
+                    ImageEntry {
+                        line,
+                        src,
+                        resource,
+                        block: None,
+                    }
+                }
+            }
+        })
+        .collect();
+    // Entries that found no line to live on keep their block only long
+    // enough for `apply_image_blocks` to remove it.
+    let orphaned: Vec<ImageEntry> = carried
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.block.is_some())
+        .map(|entry| ImageEntry {
+            resource: None,
+            ..entry
+        })
+        .collect();
+
+    let missing_rows: Vec<u32> = images
+        .iter()
+        .filter(|entry| entry.resource.is_none())
+        .map(|entry| entry.line.to_point(&buffer_snapshot).row)
+        .collect();
+    if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        for span in &mut addon.spans {
+            if let SpanKind::ImageTail(_) = span.kind {
+                let row = span.range.start.to_point(&buffer_snapshot).row;
+                span.kind = SpanKind::ImageTail(!missing_rows.contains(&row));
+            }
+        }
+        addon.images = images.into_iter().chain(orphaned).collect();
+    }
+}
+
+/// Puts a block under every resolved image line that lacks one and removes
+/// the blocks of lines that lost their picture, or every block when markdown
+/// source is showing. Blocks are never persisted, so unlike folds (§10.1)
+/// there is nothing to heal on reopen.
+fn apply_image_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
+        return;
+    };
+    let enabled = addon.enabled;
+    let cache = addon.image_cache.clone();
+    let editor_handle = cx.weak_entity();
+    let mut to_remove: HashSet<CustomBlockId> = HashSet::default();
+    let mut to_insert: Vec<(usize, BlockProperties<Anchor>)> = Vec::new();
+    for (index, entry) in addon.images.iter().enumerate() {
+        match (&entry.resource, entry.block, enabled) {
+            (Some(resource), None, true) => to_insert.push((
+                index,
+                image_block(
+                    entry.line,
+                    resource.clone(),
+                    editor_handle.clone(),
+                    cache.clone(),
+                ),
+            )),
+            (None, Some(id), _) | (Some(_), Some(id), false) => {
+                to_remove.insert(id);
+            }
+            _ => {}
+        }
+    }
+    if to_remove.is_empty() && to_insert.is_empty() {
+        return;
+    }
+    let inserted = editor.insert_blocks(
+        to_insert.iter().map(|(_, properties)| properties.clone()),
+        None,
+        cx,
+    );
+    if !to_remove.is_empty() {
+        editor.remove_blocks(to_remove.clone(), None, cx);
+    }
+    if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        for ((index, _), id) in to_insert.into_iter().zip(inserted) {
+            if let Some(entry) = addon.images.get_mut(index) {
+                entry.block = Some(id);
+            }
+        }
+        for entry in &mut addon.images {
+            if entry.block.is_some_and(|id| to_remove.contains(&id)) {
+                entry.block = None;
+            }
+        }
+        // An orphaned entry only existed to have its block removed.
+        addon
+            .images
+            .retain(|entry| entry.resource.is_some() || entry.block.is_some());
+    }
+    cx.notify();
+}
+
+fn image_block(
+    line: Anchor,
+    resource: Resource,
+    editor: WeakEntity<Editor>,
+    cache: Entity<RetainAllImageCache>,
+) -> BlockProperties<Anchor> {
+    BlockProperties {
+        placement: BlockPlacement::Below(line),
+        height: Some(IMAGE_PLACEHOLDER_ROWS),
+        style: BlockStyle::Flex,
+        priority: 0,
+        render: Arc::new(move |block| render_image_block(&resource, &editor, &cache, block)),
+    }
+}
+
+/// Draws a picture scaled to the text width and at most `IMAGE_MAX_ROWS`
+/// tall, aligned with the line's own text. The block's height is whole rows
+/// and is only known once the image has decoded, so the first paint asks the
+/// editor to resize it; a picture that cannot be decoded takes one row and
+/// says so.
+fn render_image_block(
+    resource: &Resource,
+    editor: &WeakEntity<Editor>,
+    cache: &Entity<RetainAllImageCache>,
+    block: &mut BlockContext,
+) -> AnyElement {
+    let line_height = block.line_height;
+    let anchor_x = block.anchor_x;
+    let available = (block.max_width - anchor_x).max(px(1.));
+    let current_rows = block.height;
+    let block_id = block.block_id;
+    let muted = block.app.theme().colors().text_muted;
+    let window: &mut Window = block.window;
+    let app: &mut App = block.app;
+    let loaded = cache.update(app, |cache, cx| cache.load(resource, window, cx));
+
+    let (content, rows): (AnyElement, u32) = match loaded {
+        None => (Empty.into_any_element(), current_rows),
+        Some(Err(_)) => (
+            div()
+                .text_color(muted)
+                .child("Image could not be shown")
+                .into_any_element(),
+            1,
+        ),
+        Some(Ok(image)) => {
+            let size = image.size(0);
+            let width = px(size.width.0.max(1) as f32);
+            let height = px(size.height.0.max(1) as f32);
+            let max_height = line_height * IMAGE_MAX_ROWS as f32;
+            let scale = (available / width).min(max_height / height).min(1.0);
+            let (width, height) = (width * scale, height * scale);
+            let rows = ((height / line_height).ceil() as u32).max(1);
+            (
+                img(ImageSource::Resource(resource.clone()))
+                    .image_cache(cache)
+                    .w(width)
+                    .h(height)
+                    .rounded_sm()
+                    .into_any_element(),
+                rows,
+            )
+        }
+    };
+
+    if rows != current_rows
+        && let BlockId::Custom(id) = block_id
+    {
+        let editor = editor.clone();
+        app.defer(move |cx| {
+            editor
+                .update(cx, |editor, cx| {
+                    editor.resize_blocks(HashMap::from_iter([(id, rows)]), None, cx)
+                })
+                .ok();
+        });
+    }
+
+    div()
+        .h(line_height * current_rows as f32)
+        .w_full()
+        .pl(anchor_x)
+        .flex()
+        .items_start()
+        .child(content)
+        .into_any_element()
+}
+
+/// The picture an image line's `src` names: a remote URL as is, a vault
+/// path only when the worktree has a file there.
+fn image_resource(
+    src: &str,
+    note_path: &RelPath,
+    images_dir: &str,
+    worktree: &worktree::Worktree,
+) -> Option<Resource> {
+    if src.starts_with("http://") || src.starts_with("https://") {
+        return Some(Resource::Uri(SharedUri::from(src.to_string())));
+    }
+    let note_dir = note_path.parent().unwrap_or(RelPath::empty());
+    let path = vault_image_path(src, note_dir, images_dir)?;
+    let entry = worktree.entry_for_path(&path)?;
+    if !entry.is_file() {
+        return None;
+    }
+    let absolute = worktree.abs_path().join(path.as_std_path());
+    Some(Resource::Path(Arc::from(absolute.as_path())))
+}
+
+/// Where an image's `src` points inside the vault (V39 §4.3): a leading
+/// slash or the images folder's own name means the vault root, anything else
+/// is relative to the note. Percent-encoding is undone, `..` is walked, and a
+/// path that climbs out of the vault, a remote URL or a `data:` URI is
+/// `None`.
+pub(crate) fn vault_image_path(
+    src: &str,
+    note_dir: &RelPath,
+    images_dir: &str,
+) -> Option<RelPathBuf> {
+    if src.contains("://") || src.starts_with("data:") {
+        return None;
+    }
+    let decoded = urlencoding::decode(src)
+        .map(Cow::into_owned)
+        .unwrap_or_else(|_| src.to_string());
+    let (base, rest) = if let Some(rest) = decoded.strip_prefix(['/', '\\']) {
+        ("", rest)
+    } else if !images_dir.is_empty() && decoded.split(['/', '\\']).next() == Some(images_dir) {
+        ("", decoded.as_str())
+    } else {
+        (note_dir.as_unix_str(), decoded.as_str())
+    };
+    let mut segments: Vec<&str> = base
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    for segment in rest.split(['/', '\\']) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            segment => segments.push(segment),
+        }
+    }
+    if segments.is_empty() {
+        return None;
+    }
+    RelPath::new(Path::new(&segments.join("/")), PathStyle::Unix)
+        .ok()
+        .map(Cow::into_owned)
 }
 
 /// Turns the email view on or off for this buffer (V16 §4). Off removes the
@@ -621,9 +985,11 @@ fn schedule_reparse(editor: &mut Editor, cx: &mut Context<Editor>) {
                     addon.spans = spans;
                     addon.email = email;
                 }
+                refresh_images(editor, cx);
                 update_email_creases(editor, cx);
                 apply_highlights(editor, cx);
                 apply_folds(editor, cx);
+                apply_image_blocks(editor, cx);
                 apply_default_email_folds(editor, cx);
             })
             .ok();
@@ -848,6 +1214,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
                 SpanKind::Bullet => bullet_placeholder(),
                 SpanKind::EmailMarker(own) => sender_dot_placeholder(own),
                 SpanKind::EmailLink => email_link_placeholder(),
+                SpanKind::ImageTail(false) => image_not_found_placeholder(),
                 _ => marker_placeholder(),
             };
             Crease::simple(range, placeholder)
@@ -908,9 +1275,14 @@ fn collapsed_text_for(kind: SpanKind) -> &'static str {
         SpanKind::Bullet => "•",
         SpanKind::EmailMarker(_) => "●",
         SpanKind::EmailLink => "Open in Gmail ↗",
+        SpanKind::ImageTail(false) => IMAGE_NOT_FOUND,
         _ => " ",
     }
 }
+
+/// What an image line shows after its alt text when no file is behind it
+/// (V39 §5.3). The leading space keeps it off the alt text.
+const IMAGE_NOT_FOUND: &str = " · not found";
 
 /// Whether a span is concealed behind a fold placeholder rather than merely
 /// coloured.
@@ -924,7 +1296,30 @@ fn is_folded(kind: SpanKind) -> bool {
             | SpanKind::EmailHidden
             | SpanKind::EmailLink
             | SpanKind::EmailMarker(_)
+            | SpanKind::ImageTail(_)
     )
+}
+
+/// Placeholder for the tail of an image line whose picture is missing: a
+/// muted note in place of the hidden path, so the line still says what it
+/// was meant to show and the source is one cursor move away.
+fn image_not_found_placeholder() -> FoldPlaceholder {
+    FoldPlaceholder {
+        render: Arc::new(|_, _, cx| {
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .text_color(cx.theme().colors().text_muted)
+                .child(IMAGE_NOT_FOUND)
+                .into_any_element()
+        }),
+        constrain_width: false,
+        merge_adjacent: false,
+        type_tag: Some(fold_type_tag()),
+        gutter_toggle: false,
+        collapsed_text: Some(IMAGE_NOT_FOUND.into()),
+    }
 }
 
 /// The buffer rows currently revealed, as inclusive `(first, last)` pairs:
@@ -1162,9 +1557,9 @@ fn sender_color(own: bool, cx: &App) -> Hsla {
 }
 
 /// The number of highlight slots: the quote tint, three heading colours,
-/// bold and italic, inline code, two link colours, the strikethrough, and the
-/// email view's sender/own/muted trio.
-const HIGHLIGHT_SLOTS: usize = 13;
+/// bold and italic, inline code, two link colours, the strikethrough, the
+/// email view's sender/own/muted trio, and the hidden slot.
+const HIGHLIGHT_SLOTS: usize = 14;
 
 /// A later slot's style merges over an earlier one's, so the order below is
 /// priority order: the quote tint sits under everything else a quoted line
@@ -1186,6 +1581,10 @@ const STRIKETHROUGH_SLOT: usize = 9;
 const EMAIL_SENDER_SLOT: usize = 10;
 const EMAIL_OWN_SENDER_SLOT: usize = 11;
 const EMAIL_MUTED_SLOT: usize = 12;
+/// Text painted in the editor's own background colour: present, one column
+/// wide, and unseen. Only an image line's `!` takes it, which cannot fold
+/// because the editor drops a block whose row begins inside a fold.
+const HIDDEN_SLOT: usize = 13;
 
 /// The highlight slot for a styled span, or `None` for one that folds away
 /// rather than taking a colour.
@@ -1198,19 +1597,23 @@ fn highlight_slot(kind: SpanKind) -> Option<usize> {
         SpanKind::Bold => Some(BOLD_SLOT),
         SpanKind::Italic => Some(ITALIC_SLOT),
         SpanKind::Code => Some(CODE_SLOT),
-        SpanKind::WikilinkLabel => Some(WIKILINK_SLOT),
+        // A picture in the vault is an internal reference, like a wikilink.
+        SpanKind::WikilinkLabel | SpanKind::ImageAlt => Some(WIKILINK_SLOT),
         SpanKind::LinkLabel => Some(LINK_SLOT),
         SpanKind::Strikethrough => Some(STRIKETHROUGH_SLOT),
         SpanKind::EmailSender(false) => Some(EMAIL_SENDER_SLOT),
         SpanKind::EmailSender(true) => Some(EMAIL_OWN_SENDER_SLOT),
         SpanKind::EmailDate | SpanKind::EmailQuote => Some(EMAIL_MUTED_SLOT),
+        SpanKind::ImageBang => Some(HIDDEN_SLOT),
         SpanKind::Marker
         | SpanKind::Rule
         | SpanKind::Bullet
         | SpanKind::Checkbox(_)
         | SpanKind::EmailHidden
         | SpanKind::EmailLink
-        | SpanKind::EmailMarker(_) => None,
+        | SpanKind::EmailMarker(_)
+        | SpanKind::ImageTail(_)
+        | SpanKind::ImageSource => None,
     }
 }
 
@@ -1262,6 +1665,7 @@ fn slot_color(slot: usize, cx: &App) -> Hsla {
         EMAIL_SENDER_SLOT => sender_color(false, cx),
         EMAIL_OWN_SENDER_SLOT => sender_color(true, cx),
         EMAIL_MUTED_SLOT => colors.text_muted,
+        HIDDEN_SLOT => colors.editor_background,
         _ => {
             let players = &cx.theme().players().0;
             // Slot 0 of the player palette is the local-user colour; heading
@@ -1356,6 +1760,7 @@ mod tests {
             conceal: true,
             email_view: true,
             account: Some("diego.exodo@gmail.com".to_string()),
+            images_dir: "images".to_string(),
         }
     }
 
@@ -1634,6 +2039,169 @@ mod tests {
         editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
         cx.run_until_parked();
         assert_eq!(display_text(&editor, &mut cx), note);
+    }
+
+    const IMAGE_NOTE: &str = "intro\n![whiteboard](/images/whiteboard.png)\nplain tail\n";
+
+    /// Like `setup`, with a picture in the vault's images folder.
+    async fn setup_with_image(
+        cx: &mut TestAppContext,
+        text: &str,
+    ) -> (Entity<Editor>, VisualTestContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            json!({
+                "note.md": text,
+                "daily": { "2026-10-10.md": text },
+                "images": { "whiteboard.png": "png bytes" },
+            }),
+        )
+        .await;
+        let project = Project::test(fs, [Path::new("/vault")], cx).await;
+        let buffer = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer("/vault/daily/2026-10-10.md", cx)
+            })
+            .await
+            .unwrap();
+        let window = cx
+            .add_window(|window, cx| Editor::for_buffer(buffer, Some(project.clone()), window, cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let editor = window.root(&mut cx).unwrap();
+        editor.update_in(&mut cx, |editor, _, cx| {
+            install(editor, test_settings(), cx)
+        });
+        settle(&mut cx);
+        (editor, cx)
+    }
+
+    fn image_block_count(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> usize {
+        editor.update(cx, |editor, cx| {
+            let snapshot = editor.display_map.update(cx, |map, cx| map.snapshot(cx));
+            let rows = snapshot.max_point().row().0 + 1;
+            snapshot
+                .blocks_in_range(DisplayRow(0)..DisplayRow(rows))
+                .filter(|(_, block)| matches!(block, editor::display_map::Block::Custom(_)))
+                .count()
+        })
+    }
+
+    #[gpui::test]
+    async fn an_image_line_shows_its_alt_over_a_picture_block(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup_with_image(cx, IMAGE_NOTE).await;
+        move_cursor_to(&editor, 2, &mut cx);
+        assert_eq!(image_block_count(&editor, &mut cx), 1);
+        let text = display_text(&editor, &mut cx);
+        assert!(text.contains(" whiteboard "), "{text:?}");
+        assert!(!text.contains("!["), "{text:?}");
+        assert!(!text.contains("not found"), "{text:?}");
+    }
+
+    #[gpui::test]
+    async fn the_picture_stays_while_the_cursor_reveals_the_image_line(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup_with_image(cx, IMAGE_NOTE).await;
+        move_cursor_to(&editor, 1, &mut cx);
+        let text = display_text(&editor, &mut cx);
+        assert!(
+            text.contains("![whiteboard](/images/whiteboard.png)"),
+            "{text:?}"
+        );
+        assert_eq!(image_block_count(&editor, &mut cx), 1);
+        move_cursor_to(&editor, 0, &mut cx);
+        assert_eq!(image_block_count(&editor, &mut cx), 1);
+    }
+
+    #[gpui::test]
+    async fn a_relative_source_resolves_from_the_notes_folder(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup_with_image(
+            cx,
+            "![up](../images/whiteboard.png)\n![here](whiteboard.png)\n",
+        )
+        .await;
+        move_cursor_to(&editor, 2, &mut cx);
+        assert_eq!(image_block_count(&editor, &mut cx), 1);
+        let text = display_text(&editor, &mut cx);
+        assert!(text.contains(" up "), "{text:?}");
+        assert!(text.contains(" here · not found"), "{text:?}");
+    }
+
+    #[gpui::test]
+    async fn a_missing_picture_says_so_and_takes_no_block(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup_with_image(cx, "![alt](/images/nope.png)\ntail\n").await;
+        move_cursor_to(&editor, 1, &mut cx);
+        assert_eq!(image_block_count(&editor, &mut cx), 0);
+        let text = display_text(&editor, &mut cx);
+        assert!(text.contains(" alt · not found"), "{text:?}");
+        move_cursor_to(&editor, 0, &mut cx);
+        let text = display_text(&editor, &mut cx);
+        assert!(text.contains("![alt](/images/nope.png)"), "{text:?}");
+    }
+
+    #[gpui::test]
+    async fn breaking_the_image_line_removes_its_block(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup_with_image(cx, IMAGE_NOTE).await;
+        assert_eq!(image_block_count(&editor, &mut cx), 1);
+        editor.update(&mut cx, |editor, cx| {
+            editor.buffer().update(cx, |buffer, cx| {
+                let end_of_image_line = MultiBufferPoint::new(1, 37);
+                buffer.edit([(end_of_image_line..end_of_image_line, " tail")], None, cx);
+            });
+        });
+        settle(&mut cx);
+        assert_eq!(image_block_count(&editor, &mut cx), 0);
+        editor.update(&mut cx, |editor, cx| {
+            editor.buffer().update(cx, |buffer, cx| {
+                let tail = MultiBufferPoint::new(1, 37)..MultiBufferPoint::new(1, 42);
+                buffer.edit([(tail, "")], None, cx);
+            });
+        });
+        settle(&mut cx);
+        assert_eq!(image_block_count(&editor, &mut cx), 1);
+    }
+
+    #[gpui::test]
+    async fn toggling_source_hides_and_restores_image_blocks(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup_with_image(cx, IMAGE_NOTE).await;
+        assert_eq!(image_block_count(&editor, &mut cx), 1);
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        cx.run_until_parked();
+        assert_eq!(image_block_count(&editor, &mut cx), 0);
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        cx.run_until_parked();
+        assert_eq!(image_block_count(&editor, &mut cx), 1);
+        editor.update(&mut cx, |editor, cx| {
+            assert_eq!(editor.buffer().read(cx).snapshot(cx).text(), IMAGE_NOTE);
+        });
+    }
+
+    #[test]
+    fn image_sources_resolve_from_the_root_or_the_note() {
+        let daily = RelPath::new(Path::new("daily"), PathStyle::Unix).unwrap();
+        let resolve = |src: &str| {
+            vault_image_path(src, &daily, "images").map(|path| path.as_unix_str().to_string())
+        };
+        assert_eq!(resolve("/images/a.png").as_deref(), Some("images/a.png"));
+        assert_eq!(resolve("images/a.png").as_deref(), Some("images/a.png"));
+        assert_eq!(resolve("../images/a.png").as_deref(), Some("images/a.png"));
+        assert_eq!(resolve("./a.png").as_deref(), Some("daily/a.png"));
+        assert_eq!(resolve("a.png").as_deref(), Some("daily/a.png"));
+        assert_eq!(
+            resolve("/images/a%20b.png").as_deref(),
+            Some("images/a b.png")
+        );
+        assert_eq!(resolve("../../escape.png"), None);
+        assert_eq!(resolve("https://a.example/cover.png"), None);
+        assert_eq!(resolve("data:image/png;base64,AAAA"), None);
+        assert_eq!(resolve("/"), None);
+        let root = RelPath::empty();
+        assert_eq!(
+            vault_image_path("pictures/a.png", root, "pictures")
+                .map(|path| path.as_unix_str().to_string())
+                .as_deref(),
+            Some("pictures/a.png")
+        );
     }
 
     #[gpui::test]
@@ -2091,6 +2659,7 @@ mod tests {
             json!({
                 "note.md": note,
                 "sub": { "other.md": "# Other\n" },
+                "images": { "pic.png": "png bytes" },
             }),
         )
         .await;
@@ -2167,6 +2736,37 @@ mod tests {
                 selections.select_ranges([on_link..on_link]);
             });
         });
+        cx.dispatch_action(GoToDefinition::default());
+        cx.run_until_parked();
+        assert_eq!(active_item_path(&workspace, &mut cx), "note.md");
+    }
+
+    #[gpui::test]
+    async fn go_to_definition_on_an_image_line_opens_the_picture(cx: &mut TestAppContext) {
+        let (workspace, editor, mut cx) =
+            setup_workspace(cx, "![pic](/images/pic.png)\n![gone](/images/gone.png)\n").await;
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                let on_image = MultiBufferPoint::new(0, 3);
+                selections.select_ranges([on_image..on_image]);
+            });
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(GoToDefinition::default());
+        cx.run_until_parked();
+        assert_eq!(active_item_path(&workspace, &mut cx), "images/pic.png");
+
+        // A picture that isn't there opens nothing and creates nothing.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.activate_item(&editor, true, true, window, cx);
+        });
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                let on_missing = MultiBufferPoint::new(1, 3);
+                selections.select_ranges([on_missing..on_missing]);
+            });
+        });
+        cx.run_until_parked();
         cx.dispatch_action(GoToDefinition::default());
         cx.run_until_parked();
         assert_eq!(active_item_path(&workspace, &mut cx), "note.md");
