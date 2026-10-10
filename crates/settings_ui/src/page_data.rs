@@ -1128,7 +1128,11 @@ fn appearance_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("markdown_preview_font_family"),
                     pick: |settings_content| {
-                        settings_content.theme.markdown_preview_font_family.as_ref()
+                        settings_content
+                            .theme
+                            .markdown_preview_font_family
+                            .as_ref()
+                            .or(settings_content.theme.ui_font_family.as_ref())
                     },
                     write: |settings_content, value, _| {
                         settings_content.theme.markdown_preview_font_family = value;
@@ -1148,6 +1152,7 @@ fn appearance_page() -> SettingsPage {
                             .theme
                             .markdown_preview_code_font_family
                             .as_ref()
+                            .or(settings_content.theme.buffer_font_family.as_ref())
                     },
                     write: |settings_content, value, _| {
                         settings_content.theme.markdown_preview_code_font_family = value;
