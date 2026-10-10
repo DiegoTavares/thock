@@ -52,6 +52,20 @@ pub enum SpanKind {
     EmailDate,
     /// A quoted-history line (`> …` or its `… wrote:` attribution).
     EmailQuote,
+    /// The `!` that opens an image line. Painted in the editor's background
+    /// colour rather than folded: the editor drops a block whose row begins
+    /// inside a fold, and the picture is a block under this row.
+    ImageBang,
+    /// An image line's alt text — or, when the alt is empty, the file's stem
+    /// inside its path — drawn as an internal link. The picture itself is a
+    /// block under the line (V39 §5).
+    ImageAlt,
+    /// The `](src)` tail of an image line, folded away. `false` once the
+    /// editor finds no file behind `src`, so the placeholder can say so.
+    ImageTail(bool),
+    /// The `src` of an image line, read by the editor to place the picture.
+    /// Neither folded nor coloured on its own.
+    ImageSource,
 }
 
 /// A byte range of the scanned text and how it should display.
@@ -262,6 +276,10 @@ fn atx_heading(line: &str) -> Option<(u8, usize, usize)> {
 }
 
 fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
+    if let Some(image) = image_line(line) {
+        push_image_spans(&image, line, line_start, spans);
+        return;
+    }
     let code = code_spans(line);
     let code_ranges: Vec<Range<usize>> = code.iter().map(|span| span.range.clone()).collect();
     let comments = html_comment_ranges(line, &code_ranges);
@@ -860,33 +878,153 @@ fn parse_inline_link(line: &str, open: usize) -> Option<InlineLink> {
     if text.is_empty() || text.contains('[') {
         return None;
     }
+    let (dest_start, close) = balanced_destination(line, text_end)?;
+    Some(InlineLink {
+        range: open..close + 1,
+        label: text_start..text_end,
+        wikilink_target: None,
+        destination: Some(dest_start..close),
+    })
+}
+
+/// The `(dest)` that must follow a link's closing `]` at `text_end`: the
+/// byte range between the parentheses, with nested parentheses balanced.
+fn balanced_destination(line: &str, text_end: usize) -> Option<(usize, usize)> {
     if !line[text_end + 1..].starts_with('(') {
         return None;
     }
     let dest_start = text_end + 2;
     let mut depth = 1usize;
-    let mut close = None;
     for (offset, character) in line[dest_start..].char_indices() {
         match character {
             '(' => depth += 1,
             ')' => {
                 depth -= 1;
                 if depth == 0 {
-                    close = Some(dest_start + offset);
-                    break;
+                    return Some((dest_start, dest_start + offset));
                 }
             }
             _ => {}
         }
     }
-    let close = close?;
-    let end = close + 1;
-    Some(InlineLink {
-        range: open..end,
-        label: text_start..text_end,
-        wikilink_target: None,
-        destination: Some(dest_start..close),
+    None
+}
+
+/// An `![alt](src)` that is a whole line's content, all ranges line-relative
+/// (V39 §5.5). An image inside a paragraph or a list item is not one: the
+/// picture would land under the wrong line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageLink {
+    /// The full construct, `!` included.
+    pub range: Range<usize>,
+    /// The alt text between the brackets; may be empty.
+    pub alt: Range<usize>,
+    /// The destination, without a trailing `"title"`.
+    pub src: Range<usize>,
+}
+
+/// The image link that is the whole content of `line`, surrounding whitespace
+/// aside, or `None`.
+pub fn image_line(line: &str) -> Option<ImageLink> {
+    let content = line.trim();
+    let start = line.len() - line.trim_start().len();
+    if !content.starts_with("![") || content[2..].starts_with('[') {
+        return None;
+    }
+    let image = parse_image(line, start)?;
+    (image.range.end == start + content.len()).then_some(image)
+}
+
+/// Parses `![alt](src)` or `![alt](src "title")` at `bang`.
+fn parse_image(line: &str, bang: usize) -> Option<ImageLink> {
+    let alt_start = bang + 2;
+    let alt_end = line[alt_start..].find(']')? + alt_start;
+    if line[alt_start..alt_end].contains('[') {
+        return None;
+    }
+    let (dest_start, close) = balanced_destination(line, alt_end)?;
+    let dest = &line[dest_start..close];
+    let src_start = dest_start + (dest.len() - dest.trim_start().len());
+    let src = dest.trim_start();
+    let src_len = src.find(char::is_whitespace).unwrap_or(src.len());
+    if src_len == 0 {
+        return None;
+    }
+    Some(ImageLink {
+        range: bang..close + 1,
+        alt: alt_start..alt_end,
+        src: src_start..src_start + src_len,
     })
+}
+
+/// The spans of an image line: the syntax folds away around the alt text,
+/// and the destination is marked for the editor to find. An empty alt shows
+/// the file's stem instead, lifted out of the path so the line still names
+/// its picture; a path with no stem either leaves the line literal.
+fn push_image_spans(
+    image: &ImageLink,
+    line: &str,
+    line_start: usize,
+    spans: &mut Vec<ConcealSpan>,
+) {
+    let shown = if image.alt.is_empty() {
+        let src = &line[image.src.clone()];
+        let name_start = src.rfind('/').map_or(0, |slash| slash + 1);
+        let name = &src[name_start..];
+        let stem_len = name.rfind('.').unwrap_or(name.len());
+        if stem_len == 0 {
+            return;
+        }
+        image.src.start + name_start..image.src.start + name_start + stem_len
+    } else {
+        image.alt.clone()
+    };
+    spans.push(ConcealSpan::new(
+        line_start + image.range.start..line_start + image.range.start + 1,
+        SpanKind::ImageBang,
+    ));
+    spans.push(ConcealSpan::new(
+        line_start + image.range.start + 1..line_start + shown.start,
+        SpanKind::Marker,
+    ));
+    spans.push(ConcealSpan::new(
+        line_start + shown.start..line_start + shown.end,
+        SpanKind::ImageAlt,
+    ));
+    spans.push(ConcealSpan::new(
+        line_start + shown.end..line_start + image.range.end,
+        SpanKind::ImageTail(true),
+    ));
+    spans.push(ConcealSpan::new(
+        line_start + image.src.start..line_start + image.src.end,
+        SpanKind::ImageSource,
+    ));
+}
+
+/// An image line located under a cursor: the construct's byte range in the
+/// document and its destination's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageReference {
+    pub range: Range<usize>,
+    pub src: Range<usize>,
+}
+
+/// The image line that contains byte `offset`, honouring the same block
+/// exclusions as `conceal_spans`: nothing inside fences or front matter.
+pub fn image_at(text: &str, offset: usize) -> Option<ImageReference> {
+    let mut found = None;
+    each_content_line(text, |line_start, line| {
+        if found.is_some() || offset < line_start || offset > line_start + line.len() {
+            return;
+        }
+        if let Some(image) = image_line(line) {
+            found = Some(ImageReference {
+                range: line_start + image.range.start..line_start + image.range.end,
+                src: line_start + image.src.start..line_start + image.src.end,
+            });
+        }
+    });
+    found
 }
 
 /// The parsed shape of a synced email note (spec V16): a full replacement
@@ -1262,8 +1400,90 @@ mod tests {
         assert_eq!(spans("[text]("), vec![]);
         assert_eq!(spans("[text]"), vec![]);
         assert_eq!(spans("[](url)"), vec![]);
-        assert_eq!(spans("![alt](src.png)"), vec![]);
         assert_eq!(spans("\\[not](a-link)"), vec![]);
+    }
+
+    #[test]
+    fn an_image_line_folds_its_syntax_around_the_alt() {
+        assert_eq!(
+            slices("![whiteboard](/images/2026-10-10-0931-whiteboard.jpg)"),
+            vec![
+                ("!", SpanKind::ImageBang),
+                ("[", SpanKind::Marker),
+                ("whiteboard", SpanKind::ImageAlt),
+                (
+                    "](/images/2026-10-10-0931-whiteboard.jpg)",
+                    SpanKind::ImageTail(true)
+                ),
+                (
+                    "/images/2026-10-10-0931-whiteboard.jpg",
+                    SpanKind::ImageSource
+                ),
+            ]
+        );
+        // Surrounding whitespace and a title are still an image line.
+        assert_eq!(
+            slices("  ![a](x.png \"The title\")  "),
+            vec![
+                ("!", SpanKind::ImageBang),
+                ("[", SpanKind::Marker),
+                ("a", SpanKind::ImageAlt),
+                ("](x.png \"The title\")", SpanKind::ImageTail(true)),
+                ("x.png", SpanKind::ImageSource),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_alt_shows_the_files_stem() {
+        assert_eq!(
+            slices("![](/images/receipt.png)"),
+            vec![
+                ("!", SpanKind::ImageBang),
+                ("[](/images/", SpanKind::Marker),
+                ("receipt", SpanKind::ImageAlt),
+                (".png)", SpanKind::ImageTail(true)),
+                ("/images/receipt.png", SpanKind::ImageSource),
+            ]
+        );
+        assert_eq!(
+            slices("![](https://a.example/cover)"),
+            vec![
+                ("!", SpanKind::ImageBang),
+                ("[](https://a.example/", SpanKind::Marker),
+                ("cover", SpanKind::ImageAlt),
+                (")", SpanKind::ImageTail(true)),
+                ("https://a.example/cover", SpanKind::ImageSource),
+            ]
+        );
+        assert_eq!(spans("![](.png)"), vec![]);
+        assert_eq!(spans("![]()"), vec![]);
+    }
+
+    #[test]
+    fn an_image_that_is_not_the_whole_line_stays_literal() {
+        assert_eq!(spans("see ![alt](src.png) here"), vec![]);
+        assert_eq!(spans("![alt](src.png) trailing"), vec![]);
+        assert_eq!(slices("- ![alt](src.png)"), vec![("-", SpanKind::Bullet)]);
+        assert_eq!(
+            slices("> ![alt](src.png)"),
+            vec![("> ![alt](src.png)", SpanKind::Quote)]
+        );
+        assert_eq!(spans("![alt](src.png"), vec![]);
+        assert_eq!(spans("![[embed.png]]"), vec![]);
+        assert_eq!(spans("```\n![alt](src.png)\n```\n"), vec![]);
+        assert_eq!(spans("---\ncover: ![alt](src.png)\n---\n"), vec![]);
+    }
+
+    #[test]
+    fn image_at_finds_the_image_line_under_an_offset() {
+        let text = "intro\n![alt](/images/a.png)\n![b](c.png) tail\n";
+        let image = image_at(text, 8).expect("on the image line");
+        assert_eq!(&text[image.range], "![alt](/images/a.png)");
+        assert_eq!(&text[image.src], "/images/a.png");
+        assert_eq!(image_at(text, 2), None);
+        assert_eq!(image_at(text, 30), None);
+        assert_eq!(image_at("```\n![a](b.png)\n```\n", 6), None);
     }
 
     #[test]
