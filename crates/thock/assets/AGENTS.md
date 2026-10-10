@@ -67,6 +67,9 @@ in that language, within the limits the section names.
   mid-session; the other pages hold the detail, one topic each.
 - `inbox/` — captured items awaiting triage (when the Inbox Routine is
   installed).
+- `images/` — every picture a note links. Write a link as
+  `![alt](/images/<name>)`, a vault-root path with a leading slash, so the
+  line keeps working when it moves to another note.
 - Readwise notes (when the Reading Routine is installed): one note per book,
   with `source: readwise` frontmatter, under the folders
   `.thock/readwise.toml` maps (`reference/readwise/books/` by default). They

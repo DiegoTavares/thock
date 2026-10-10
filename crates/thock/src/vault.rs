@@ -31,6 +31,9 @@ file = "backlog.md"          # the Soon / Someday / Completed holding pen
 # conceal = true             # hide markup while the cursor is off the line
 # email_view = true          # render synced email notes as conversations
 
+# [images]
+# dir = "images"             # where every picture a note links is kept
+
 # [memory]
 # index_lines = 120          # how long memory/index.md may grow
 # stale_after_days = 90      # unmentioned this long → proposed for forgetting
@@ -169,6 +172,8 @@ struct VaultConfigContent {
     backlog: BacklogConfigContent,
     #[serde(skip_serializing_if = "MarkdownConfigContent::is_unset")]
     markdown: MarkdownConfigContent,
+    #[serde(skip_serializing_if = "ImagesConfigContent::is_unset")]
+    images: ImagesConfigContent,
     #[serde(skip_serializing_if = "LanguageConfigContent::is_unset")]
     language: LanguageConfigContent,
     #[serde(skip_serializing_if = "MemoryConfigContent::is_unset")]
@@ -394,6 +399,43 @@ struct MarkdownConfigContent {
     conceal: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     email_view: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct ImagesConfigContent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dir: Option<String>,
+}
+
+impl ImagesConfigContent {
+    fn resolve(self) -> ImagesConfig {
+        ImagesConfig {
+            dir: self
+                .dir
+                .filter(|dir| !dir.trim().is_empty())
+                .unwrap_or_else(|| ImagesConfig::default().dir),
+        }
+    }
+
+    fn is_unset(&self) -> bool {
+        self.dir.is_none()
+    }
+}
+
+/// The `[images]` table: the folder every picture a note links lives in
+/// (spec V39 §4.1). Links are written as `![alt](/<dir>/<name>)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImagesConfig {
+    pub dir: String,
+}
+
+impl Default for ImagesConfig {
+    fn default() -> Self {
+        Self {
+            dir: "images".to_string(),
+        }
+    }
 }
 
 impl MarkdownConfigContent {
@@ -757,6 +799,7 @@ pub struct VaultConfig {
     pub agent: AgentConfig,
     pub backlog: BacklogConfig,
     pub markdown: MarkdownConfig,
+    pub images: ImagesConfig,
     pub language: Option<LanguageConfig>,
     pub memory: MemoryConfig,
 }
@@ -780,6 +823,7 @@ impl VaultConfigContent {
             agent: self.agent.resolve(),
             backlog: self.backlog.resolve(),
             markdown: self.markdown.resolve(),
+            images: self.images.resolve(),
             language: self.language.resolve(),
             memory: self.memory.resolve(),
         }
@@ -1296,6 +1340,33 @@ mod tests {
         // An absent section means the defaults: concealed, email view on.
         assert!(VaultConfig::default().markdown.conceal);
         assert!(VaultConfig::default().markdown.email_view);
+    }
+
+    #[test]
+    fn images_config_names_the_folder_and_defaults_to_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(VAULT_MARKER_DIR);
+        fs::create_dir_all(&marker).unwrap();
+        fs::write(
+            marker.join(VAULT_CONFIG_FILE),
+            "schema = 1\n[images]\ndir = \"pictures\"\n",
+        )
+        .unwrap();
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => assert_eq!(vault.config.images.dir, "pictures"),
+            other => panic!("expected valid vault, got {other:?}"),
+        }
+        assert_eq!(VaultConfig::default().images.dir, "images");
+        // A blank folder name is the default too, never the vault root.
+        fs::write(
+            marker.join(VAULT_CONFIG_FILE),
+            "schema = 1\n[images]\ndir = \"  \"\n",
+        )
+        .unwrap();
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => assert_eq!(vault.config.images.dir, "images"),
+            other => panic!("expected valid vault, got {other:?}"),
+        }
     }
 
     #[test]

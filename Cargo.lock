@@ -18733,9 +18733,11 @@ dependencies = [
  "toml_edit 0.22.27",
  "ui",
  "url",
+ "urlencoding",
  "util",
  "which 6.0.3",
  "workspace",
+ "worktree",
  "zed_actions",
  "zed_credentials_provider",
 ]

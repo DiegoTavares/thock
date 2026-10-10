@@ -384,16 +384,20 @@ The phone writes **only**:
 
 | Where | How |
 | --- | --- |
-| `inbox/*.md` | create-if-missing; while it waits for triage, replace its level-1 heading line and that heading's section |
+| `inbox/*.md` | create-if-missing; while it waits for triage, replace its level-1 heading line and that heading's section; move it to `archives/inbox/` (V40) |
+| `archives/inbox/*.md` | the destination of that move; never written otherwise (V40) |
+| `archives/inbox/triage-log.md` | append one line in the ritual's format, for a move the phone made (V40) |
+| `images/*` | create-if-missing, never overwritten: a picture attached to a capture (V39) |
 | `reference/clips/*.md` | create-if-missing |
-| `daily/<today>.md` | create from template if missing; append under `## Journal`, `## Day planner`, `## Personal`, `# Asked on the go`; replace one planner line; replace one journal paragraph; replace one section's line range after confirmation |
+| `daily/<today>.md` | create from template if missing; append under `## Journal`, `## Day planner`, `## Personal`, `# Asked on the go`; replace one planner line; replace one journal paragraph; replace one section's line range after confirmation; append one task line under the Day planner heading for an inbox item (V40) |
 | `daily/<other day>.md` | the same single-line planner edits, from the day strip |
 | `weekly/<week>.md` | tick one `## Goals` line; replace one section after confirmation |
 | `backlog.md` | append one task under **Soon** |
 | `memory/inbox.md` | append one dated line, by the agent during Ask (V35 decision 5); Reflect files it at the desk |
 
-Nothing else, ever. Not the rest of `memory/`, not `routines/`, not `.thock/`, not templates, not the triage
-log (the phone only reads it). The desk owns every other write. Two appends to the same section
+Nothing else, ever. Not the rest of `memory/`, not `routines/`, not `.thock/`, not templates. The
+triage log takes one line per move the phone itself made and nothing else (V40; before that the
+phone only read it). The desk owns every other write. Two appends to the same section
 can always both be kept, which is what makes the deferred sync problem solvable rather than
 hopeful.
 
