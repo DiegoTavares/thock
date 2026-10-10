@@ -138,7 +138,7 @@ The feed emits `vault {"status":"lapsed"}` once when the lapse is recorded.
 
 | What | Limit |
 | --- | --- |
-| Plaintext file | 2 MB (2 097 152 bytes). Larger files are not synced; the desk lists them. |
+| Plaintext file | 2 MB (2 097 152 bytes), text or picture alike. Larger files are not synced; the desk lists them. |
 | Blob (envelope) | plaintext + 32 bytes |
 | Write payload (envelope, decoded) | 2 MB |
 | Path | 1 024 bytes of UTF-8 |
@@ -157,7 +157,10 @@ A path is the file's location relative to the vault root, as the desk sees it on
 
 - `/` separated, no leading or trailing `/`, no empty segment, no `.` or `..` segment;
 - UTF-8, NFC-normalised, at most 1 024 bytes;
-- extension (case-insensitive) in `md`, `txt`, `toml`, `json`, `csv`;
+- extension (case-insensitive) in `md`, `txt`, `toml`, `json`, `csv`; or, for a picture that syncs as
+  bytes (V39 §6.1), in `png`, `jpg`, `jpeg`, `gif`, `webp`. The server accepts a picture anywhere; the
+  desk is the party that keeps pictures to the vault's images folder (`is_syncable_image_path`), both
+  for what it uploads and for the `put_file` writes it applies;
 - not under `.thock/history/`, `.thock/cache/`, `.thock/sync/` or `.git/`.
 
 The server validates all of this on every route that names a path and answers `422 path_not_allowed`
@@ -570,6 +573,14 @@ line starts at column 0.
 | `replace_section` | `heading`, `base_hash`, `lines` | replace the section's body with `lines` |
 | `move_block` | `heading`, `line_hash`, `ordinal`, `to` (object or null), `place` (`"end"` default, `"top"`, or `{"after": {"line_hash", "ordinal"}}`), `new_line` (string or null), `create_under` (object or null) | move one block (the line plus its indented continuation) from the group under `heading` into the group under `to` (V38 §7) |
 | `remove_block` | `heading`, `line_hash`, `ordinal` | remove one block |
+| `put_file` | `content_base64` (string), `content_hash` (SHA-256 of the decoded bytes, hex) | create a picture at `path` from its bytes; never overwrites (V39 §6.2) |
+| `move_file` | `to` (string) | rename the file at `path` to `to`; never overwrites, never resurrects (V40 §6) |
+
+The two file-level kinds change files, not the text inside one: the applier of §8 hands a note back
+untouched with `noop` and `effect_present` is false, and the store on each end does the work. The
+desk applies `put_file` only under the images folder and `move_file` only into `archives/inbox/`;
+anything else is refused and acked (§10.4). `to` is the key `move_block` uses for its destination
+heading; a reader picks the shape by `kind`.
 
 A **group** is a heading's own lines: under it, above its first subsection. The block kinds find
 their line there, never inside a subsection, so a task under `## Soon` and one under `### Home`
@@ -743,7 +754,9 @@ port the rules to Swift against the same fixtures; the fixtures are what decide 
 `before: null` means no file. A runner applies `write` to `before`, asserts `after` and `outcome`, then
 applies `write` to `after` and asserts the text is unchanged with outcome `noop`. Areas: `append`,
 `create`, `replace_line`, `remove_line`, `replace_section`, `move_block`, `remove_block`, `headings`,
-`line_endings`, `roundtrip` (`write` is `null`; parse and re-serialise must be byte-identical).
+`line_endings`, `roundtrip` (`write` is `null`; parse and re-serialise must be byte-identical), and
+`put_file`, `move_file` (the file-level kinds: the document shape, and that the text applier is a
+`noop`; what they do to files is each store's own tests).
 
 Hash vectors: `fixtures/v1/hashes.json`, a list of `{"line": "…", "line_hash": "…"}` and
 `{"text": "…", "heading_key": "…"}`. Envelope vectors: `fixtures/v1/envelope.json`, a list of
@@ -887,6 +900,9 @@ retries reuse `client_id`; a lapsed vault goes read-only without losing the loca
 
 ## 13. Changelog
 
+- **2026-10-10** — V39 and V40: pictures sync as bytes (§3.5, §4.1, `png jpg jpeg gif webp`, from the
+  images folder on the desk's side), and two file-level write kinds, `put_file` and `move_file` (§7.3,
+  §9.2). `WRITE_VERSION` stays 1: an older desk holds either kind (§10.4).
 - **2026-10-07** — §10.4 says what the desk does with a write it cannot apply: unreadable writes are
   skipped and acked, a `kind` or `v` from a newer phone holds the queue until the desk is updated.
   Before this an older desk acked and dropped every `move_block`, and the phone snapped back.

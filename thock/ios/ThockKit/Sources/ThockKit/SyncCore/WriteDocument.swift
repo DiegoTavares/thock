@@ -30,6 +30,9 @@ public enum WriteKind: String, Codable, Sendable {
     /// Renames a whole file (V40 §6). The only kind that touches two paths:
     /// `path` is the source and `toPath` the destination.
     case moveFile = "move_file"
+    /// Creates a picture in the images folder from its bytes (V39 §6.2).
+    /// The phone sends these; it never applies one to its text store.
+    case putFile = "put_file"
 }
 
 /// Where a `move_block` lands inside its destination group (V38 §7.1).
@@ -120,6 +123,9 @@ public struct WriteDocument: Equatable, Sendable {
     /// `move_file`: where the file goes. Shares the `to` key with
     /// `move_block`, which reads it as a heading.
     public var toPath: String?
+    /// `put_file`: the picture's bytes and the SHA-256 of them, hex.
+    public var contentBase64: String?
+    public var contentHash: String?
 
     public init(clientID: String, kind: WriteKind, path: String, madeAt: String, deviceID: String) {
         self.clientID = clientID
@@ -188,6 +194,10 @@ public struct WriteDocument: Equatable, Sendable {
         case .moveFile:
             guard let toPath, !toPath.trimmingCharacters(in: .whitespaces).isEmpty else { throw WriteError.malformed("move_file without a destination") }
             guard toPath != path else { throw WriteError.malformed("move_file onto itself") }
+        case .putFile:
+            guard let contentBase64, !contentBase64.trimmingCharacters(in: .whitespaces).isEmpty,
+                  let contentHash, !contentHash.trimmingCharacters(in: .whitespaces).isEmpty
+            else { throw WriteError.malformed("put_file without bytes or a hash") }
         }
     }
 }
@@ -213,6 +223,8 @@ extension WriteDocument: Codable {
         case to
         case place
         case createUnder = "create_under"
+        case contentBase64 = "content_base64"
+        case contentHash = "content_hash"
     }
 
     public init(from decoder: Decoder) throws {
@@ -245,6 +257,8 @@ extension WriteDocument: Codable {
         }
         place = try container.decodeIfPresent(Place.self, forKey: .place) ?? .end
         createUnder = try container.decodeIfPresent(HeadingRef.self, forKey: .createUnder)
+        contentBase64 = try container.decodeIfPresent(String.self, forKey: .contentBase64)
+        contentHash = try container.decodeIfPresent(String.self, forKey: .contentHash)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -292,6 +306,9 @@ extension WriteDocument: Codable {
             try container.encode(ordinal, forKey: .ordinal)
         case .moveFile:
             try container.encode(toPath, forKey: .to)
+        case .putFile:
+            try container.encode(contentBase64, forKey: .contentBase64)
+            try container.encode(contentHash, forKey: .contentHash)
         }
     }
 }

@@ -37,7 +37,11 @@ const (
 )
 
 var (
-	syncExtensions   = map[string]bool{"md": true, "txt": true, "toml": true, "json": true, "csv": true}
+	// Text that syncs (contract §4.1), and the pictures that sync as bytes
+	// (V39 §6.1). The server stores what it cannot read; the desk is the one
+	// that keeps pictures to the vault's images folder.
+	syncExtensions = map[string]bool{"md": true, "txt": true, "toml": true, "json": true, "csv": true,
+		"png": true, "jpg": true, "jpeg": true, "gif": true, "webp": true}
 	excludedPrefixes = []string{".thock/history/", ".thock/cache/", ".thock/sync/", ".git/"}
 	hex32            = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	hex64            = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -69,7 +73,7 @@ func validateSyncPath(path string) error {
 	dot := strings.LastIndexByte(path, '.')
 	slash := strings.LastIndexByte(path, '/')
 	if dot <= slash || !syncExtensions[strings.ToLower(path[dot+1:])] {
-		return errors.New("only .md, .txt, .toml, .json and .csv files sync")
+		return errors.New("only .md, .txt, .toml, .json, .csv and .png, .jpg, .jpeg, .gif, .webp files sync")
 	}
 	for _, prefix := range excludedPrefixes {
 		if strings.HasPrefix(path, prefix) {

@@ -261,11 +261,13 @@ anywhere else stays local and the boundary is still legible in one sentence.
 ### 6.4 Where it lives
 
 `crates/thock-sync-core` (`write.rs`, `apply.rs`) and `ThockKit/SyncCore` (`WriteDocument.swift`,
-`Apply.swift`), with `fixtures/v1/put_file/` that both runners pass. Fixture cases for binary bytes
-carry `before_base64` and `after_base64` in place of `before` and `after`; both runners decode
-them. `is_syncable_path` gains the folder-and-extension branch and `fixtures/v1/paths.json` gains
-cases for it, so the Go backend's port is checked by the same vectors. `WRITE_VERSION` stays 1: an
-older desk holds the kind (V34 API §10.4).
+`Apply.swift`), with `fixtures/v1/put_file/` that both runners pass. The fixtures pin the document
+shape and that the text applier hands a note back untouched; what the kind does to files is each
+store's own tests, since the corpus speaks text. A new `is_syncable_image_path(path, images_dir)`
+beside `is_syncable_path` carries the folder-and-extension rule, with vectors under `images` in
+`fixtures/v1/paths.json`. The backend accepts the five extensions anywhere (it stores what it cannot
+read); the desk is the party that keeps pictures to the folder, both for what it uploads and for the
+`put_file` writes it applies. `WRITE_VERSION` stays 1: an older desk holds the kind (V34 API §10.4).
 
 The V34 API amendments (§3.5 the binary size note, §4.1 the path rule, §7.3 the kind, §9.2 the
 area and the base64 fields, §13 the changelog) land with the sync-core change, not with this spec,

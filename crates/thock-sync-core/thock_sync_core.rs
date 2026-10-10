@@ -18,6 +18,9 @@ use unicode_normalization::is_nfc;
 
 /// Extensions that sync (spec §4.1), compared case-insensitively.
 pub const SYNCABLE_EXTENSIONS: [&str; 5] = ["md", "txt", "toml", "json", "csv"];
+/// The picture formats that sync as binary snapshots, from the vault's
+/// images folder only (V39 §6.1).
+pub const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 /// Folders whose contents never sync, whatever their extension.
 pub const EXCLUDED_PREFIXES: [&str; 4] =
     [".thock/history/", ".thock/cache/", ".thock/sync/", ".git/"];
@@ -28,41 +31,95 @@ pub const MAX_PATH_BYTES: usize = 1024;
 /// (spec §4.1): relative, `/`-separated, NFC, allow-listed extension, and not
 /// under a folder that sync ignores.
 pub fn is_syncable_path(path: &str) -> bool {
-    if path.is_empty() || path.len() > MAX_PATH_BYTES || !is_nfc(path) {
+    well_formed_extension(path).is_some_and(|extension| {
+        SYNCABLE_EXTENSIONS
+            .iter()
+            .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+    })
+}
+
+/// Whether `path` is a picture that syncs as bytes (V39 §6.1): the same
+/// path rules, an image extension, and the first segment is the vault's
+/// images folder. Folder and extension both, so the text boundary V34 drew
+/// stays explainable in one sentence.
+pub fn is_syncable_image_path(path: &str, images_dir: &str) -> bool {
+    let images_dir = images_dir.trim_matches('/');
+    if images_dir.is_empty() {
         return false;
     }
-    if path.starts_with('/') || path.ends_with('/') || path.contains('\\') {
+    let Some(extension) = well_formed_extension(path) else {
         return false;
+    };
+    path.strip_prefix(images_dir)
+        .is_some_and(|rest| rest.starts_with('/'))
+        && IMAGE_EXTENSIONS
+            .iter()
+            .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+}
+
+/// The extension of a path that passes every rule of spec §4.1 but the
+/// allow-list, or `None`.
+fn well_formed_extension(path: &str) -> Option<&str> {
+    if path.is_empty() || path.len() > MAX_PATH_BYTES || !is_nfc(path) {
+        return None;
+    }
+    if path.starts_with('/') || path.ends_with('/') || path.contains('\\') {
+        return None;
     }
     if path
         .split('/')
         .any(|segment| segment.is_empty() || segment == "." || segment == "..")
     {
-        return false;
+        return None;
     }
     if path.chars().any(char::is_control) {
-        return false;
+        return None;
     }
     if EXCLUDED_PREFIXES
         .iter()
         .any(|prefix| path.starts_with(prefix))
     {
-        return false;
+        return None;
     }
-    let Some((stem, extension)) = path.rsplit_once('.') else {
-        return false;
-    };
+    let (stem, extension) = path.rsplit_once('.')?;
     if stem.is_empty() || stem.ends_with('/') {
-        return false;
+        return None;
     }
-    SYNCABLE_EXTENSIONS
-        .iter()
-        .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+    Some(extension)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pictures_sync_from_the_images_folder_only() {
+        for path in [
+            "images/2026-10-10-0931-whiteboard.jpg",
+            "images/receipt.PNG",
+            "images/a b.webp",
+            "images/nested/cover.gif",
+        ] {
+            assert!(is_syncable_image_path(path, "images"), "{path}");
+            assert!(!is_syncable_path(path), "{path} is not text");
+        }
+        for path in [
+            "photo.png",
+            "daily/photo.png",
+            "images.png",
+            "imagesx/photo.png",
+            "images/note.md",
+            "images/scan.pdf",
+            "images/.png",
+            "images/../photo.png",
+            "/images/photo.png",
+        ] {
+            assert!(!is_syncable_image_path(path, "images"), "{path}");
+        }
+        assert!(is_syncable_image_path("pictures/a.png", "pictures"));
+        assert!(!is_syncable_image_path("images/a.png", "pictures"));
+        assert!(!is_syncable_image_path("images/a.png", ""));
+    }
 
     #[test]
     fn syncable_paths() {
