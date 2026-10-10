@@ -23,17 +23,22 @@ struct InAppClipSheet: View {
 /// The feed behind the Inbox row: what this phone sent to the inbox and what
 /// became of it (V33 §6.3), plus whatever else waits there. Captures sent to
 /// Today or the backlog never pass through the inbox, so they are not listed.
-/// A note still waiting can be opened and edited.
+/// A note still waiting can be opened and edited, or swiped: right for
+/// Today or the backlog, left to archive (V40 §4).
 struct ReceiptsScreen: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var editing: InboxEdit?
 
+    private static let rowInsets = EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20)
+
     var body: some View {
         let _ = model.revision
-        let receipts = (model.store?.receipts() ?? []).filter { $0.record.inboxPath != nil }
+        let receipts = (model.store?.receipts() ?? []).filter { receipt in
+            receipt.record.inboxPath.map { !model.isBeingTriaged($0) } ?? false
+        }
         let mine = Set(receipts.compactMap(\.record.inboxPath))
-        let others = (model.store?.waitingInboxNotes() ?? []).filter { !mine.contains($0.path) }
+        let others = (model.store?.waitingInboxNotes() ?? []).filter { !mine.contains($0.path) && !model.isBeingTriaged($0.path) }
         VStack(alignment: .leading, spacing: 0) {
             SheetHeader(leading: "", title: "", trailing: "Done", onLeading: {}, onTrailing: { dismiss() })
                 .padding(.bottom, 4)
@@ -46,27 +51,40 @@ struct ReceiptsScreen: View {
                     .font(Theme.serif(28, style: .title1))
                     .foregroundStyle(Theme.ink)
             }
+            .padding(.horizontal, 20)
             .padding(.bottom, 14)
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if receipts.isEmpty, others.isEmpty {
-                        Text("Nothing in the inbox. The field at the bottom of today is the fastest way in.")
-                            .font(.system(size: 16))
-                            .foregroundStyle(Theme.dim)
-                            .padding(.top, 8)
-                    }
-                    ForEach(receipts, id: \.record.id) { receipt in
-                        ReceiptRow(title: receipt.record.title, detail: detail(for: receipt.record, state: receipt.state), dot: dot(for: receipt.state), muted: receipt.state == .gone,
-                                   onEdit: receipt.state == .waiting ? receipt.record.inboxPath.flatMap(edit(_:)) : nil)
-                    }
-                    ForEach(others, id: \.path) { note in
-                        ReceiptRow(title: note.title, detail: Text(sourceName(note.source) + " · ") + Text("waiting for the desk").foregroundStyle(Theme.muted), dot: Theme.dim, muted: false,
-                                   onEdit: edit(note.path))
-                    }
+            List {
+                if receipts.isEmpty, others.isEmpty {
+                    Text("Nothing in the inbox. The field at the bottom of today is the fastest way in.")
+                        .font(.system(size: 16))
+                        .foregroundStyle(Theme.dim)
+                        .padding(.top, 8)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(Self.rowInsets)
+                }
+                ForEach(receipts, id: \.record.id) { receipt in
+                    let waiting = receipt.state == .waiting ? receipt.record.inboxPath : nil
+                    ReceiptRow(title: receipt.record.title, detail: detail(for: receipt.record, state: receipt.state), dot: dot(for: receipt.state), muted: receipt.state == .gone,
+                               onEdit: waiting.flatMap(edit(_:)))
+                        .modifier(InboxGestures(path: waiting, enabled: !model.isReadOnly, onEdit: waiting.flatMap(edit(_:))))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(Self.rowInsets)
+                }
+                ForEach(others, id: \.path) { note in
+                    ReceiptRow(title: note.title, detail: Text(sourceName(note.source) + " · ") + Text("waiting for the desk").foregroundStyle(Theme.muted), dot: Theme.dim, muted: false,
+                               onEdit: edit(note.path))
+                        .modifier(InboxGestures(path: note.path, enabled: !model.isReadOnly, onEdit: edit(note.path)))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(Self.rowInsets)
                 }
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 1)
         }
-        .padding(.horizontal, 20)
         .sheet(item: $editing) { edit in
             InboxEditSheet(edit: edit)
                 .presentationBackground(Theme.surface)
@@ -86,7 +104,7 @@ struct ReceiptsScreen: View {
 
     private func dot(for state: ReceiptState) -> Color {
         switch state {
-        case .filed, .addedToToday, .addedToBacklog: return Theme.good
+        case .filed, .addedToToday, .addedToBacklog, .archived: return Theme.good
         default: return Theme.dim
         }
     }
@@ -129,6 +147,8 @@ struct ReceiptsScreen: View {
             return Text("\(kind) · \(when(record.madeAt)) · ") + Text("added to Today").foregroundStyle(emphasis)
         case .addedToBacklog:
             return Text("\(kind) · \(when(record.madeAt)) · ") + Text("added to Backlog · Soon").foregroundStyle(emphasis)
+        case .archived(let day):
+            return Text("Archived" + when(day))
         case .gone:
             return Text("\(kind) · \(when(record.madeAt)) · no longer in the inbox")
         }
@@ -175,6 +195,43 @@ struct ReceiptRow: View {
                 .accessibilityHint("Opens it to edit")
         } else {
             row
+        }
+    }
+}
+
+/// The three decisions a waiting row takes without the ritual (V40 §4):
+/// swipe right for Today (a full swipe) or the backlog, left to archive, and
+/// the same three in the long-press menu beside Edit, so every gesture has a
+/// path VoiceOver can take. A row with nothing waiting gets none.
+private struct InboxGestures: ViewModifier {
+    @Environment(AppModel.self) private var model
+    var path: String?
+    var enabled: Bool
+    var onEdit: (() -> Void)?
+
+    func body(content: Content) -> some View {
+        if let path, enabled {
+            content
+                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                    Button("Today") { model.inboxGesture(.today, path: path) }
+                        .tint(Theme.amber)
+                    Button("Backlog") { model.inboxGesture(.backlog, path: path) }
+                        .tint(Theme.good)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button("Archive") { model.inboxGesture(.archive, path: path) }
+                        .tint(Theme.dim)
+                }
+                .contextMenu {
+                    Button("Add to today") { model.inboxGesture(.today, path: path) }
+                    Button("Add to the backlog") { model.inboxGesture(.backlog, path: path) }
+                    Button("Archive") { model.inboxGesture(.archive, path: path) }
+                    if let onEdit {
+                        Button("Edit", action: onEdit)
+                    }
+                }
+        } else {
+            content
         }
     }
 }

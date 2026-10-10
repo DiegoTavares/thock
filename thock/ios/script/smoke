@@ -98,6 +98,12 @@ section_has() {
         awk -v heading="$2" -v line="$3" 'index($0, heading) == 1 { inside = 1; next } inside && /^#/ { inside = 0 } inside && index($0, line) { found = 1 } END { exit !found }'
 }
 
+path_exists() {
+    local database
+    database="$(shared_container)/vault.sqlite"
+    [[ -f "$database" ]] && sqlite3 -readonly "$database" "SELECT path FROM files WHERE path LIKE '$1'" | grep -q .
+}
+
 dump_exists() {
     [[ -s "$(xcrun simctl get_app_container "$udid" "$bundle" data)/tmp/editor-dump.md" ]]
 }
@@ -123,6 +129,7 @@ xcrun simctl uninstall "$udid" "$bundle" 2>/dev/null || true
 xcrun simctl install "$udid" "$app"
 
 token="Smoke$(date +%s)"
+triage_log="archives/inbox/triage-log.md"
 
 step "practice notebook: capture, inbox, journal"
 xcrun simctl launch --terminate-running-process "$udid" "$bundle" -thock-practice \
@@ -149,6 +156,20 @@ wait_for "the balcony light in today's note" file_has "daily/$today.md" "- [ ] F
 ! file_has backlog.md "Fix the balcony light" || fail "a task moved to today is still in the backlog"
 wait_for "the ticked task at the practice desk" desk_has "- [x] Dentist, call back about Friday ✅ $today"
 wait_for "the balcony light at the practice desk" desk_has "- [ ] Fix the balcony light"
+
+step "inbox: swipe to today, archive"
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+xcrun simctl launch "$udid" "$bundle" \
+    -thock-script "inbox-today:Ask Ana;inbox-archive:Ship It" >/dev/null
+wait_for "the inbox item as a task in today's note" file_has "daily/$today.md" "- [ ] Ask Ana for the article on burnout [["
+wait_for "the note in the archive on the phone" path_exists "archives/inbox/%ask-ana%"
+! path_exists "inbox/%ask-ana%" || fail "a note sent to today is still in the inbox"
+wait_for "the archived note on the phone" path_exists "archives/inbox/%ship-it%"
+! path_exists "inbox/%ship-it%" || fail "an archived note is still in the inbox"
+wait_for "the triage log line" file_has "$triage_log" "Ask Ana for the article on burnout → Today"
+wait_for "the archive line in the triage log" file_has "$triage_log" "Ship It: a practical guide → Archived"
+wait_for "the task at the practice desk" desk_has "- [ ] Ask Ana for the article on burnout [["
+wait_for "the archived note at the practice desk" desk_has "archives/inbox/$today-0912-ask-ana-for-the-article-on-burnout.md"
 
 step "capture editor: typing"
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true

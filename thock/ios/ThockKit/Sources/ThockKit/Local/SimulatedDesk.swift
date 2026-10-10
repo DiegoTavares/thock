@@ -165,6 +165,16 @@ public actor SimulatedDesk {
                       let write = try? WriteDocument.parse(String(decoding: plaintext, as: UTF8.self)),
                       write.clientID == clientID, write.path == path
                 else { continue }
+                if write.kind == .moveFile {
+                    // The desk's rename (V40 §6.1): never over a file that
+                    // is there, never from one that is not.
+                    if let to = write.toPath, let source = state.disk[path], state.disk[to] == nil {
+                        state.disk[to] = source
+                        state.disk[path] = nil
+                        applied.append((seq, to))
+                    }
+                    continue
+                }
                 let result = SyncCore.apply(existing: state.disk[path], write: write, seed: write.createFromTemplate ? seed(for: path) : nil)
                 if !(state.disk[path] == nil && result.outcome == .noop) {
                     state.disk[path] = result.text
