@@ -18,6 +18,11 @@ extension SyncCore {
     /// phone runs it the moment a write is made, the desk runs it when the
     /// write arrives, and both end with the same text.
     public static func apply(existing: String?, write: WriteDocument, seed: String? = nil) -> Applied {
+        // A move changes no text: the store renames the file (V40 §6), and a
+        // rebase onto a snapshot of either path leaves it alone.
+        if write.kind == .moveFile {
+            return Applied(text: existing ?? "", outcome: .noop)
+        }
         if let existing, effectPresent(content: existing, write: write) {
             return Applied(text: existing, outcome: .noop)
         }
@@ -87,7 +92,7 @@ extension SyncCore {
             }
             // Against a missing file the corpus still creates the heading:
             // every write yields a file, even one with nothing to remove.
-        case .moveBlock, .removeBlock:
+        case .moveBlock, .removeBlock, .moveFile:
             break
         case .replaceSection:
             let current = sectionHash(lines: file.lines[section.body].map(\.text))
@@ -193,6 +198,9 @@ extension SyncCore {
         case .removeBlock:
             guard let section = resolveSection(write.heading, in: file).map(own) else { return true }
             return targetLine(in: file, section: section, hash: write.lineHash ?? "", ordinal: 0) == nil
+        case .moveFile:
+            // Presence is a question about two paths; the store answers it.
+            return false
         }
     }
 

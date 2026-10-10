@@ -27,6 +27,9 @@ public enum WriteKind: String, Codable, Sendable {
     case replaceSection = "replace_section"
     case moveBlock = "move_block"
     case removeBlock = "remove_block"
+    /// Renames a whole file (V40 §6). The only kind that touches two paths:
+    /// `path` is the source and `toPath` the destination.
+    case moveFile = "move_file"
 }
 
 /// Where a `move_block` lands inside its destination group (V38 §7.1).
@@ -114,6 +117,9 @@ public struct WriteDocument: Equatable, Sendable {
     public var to: HeadingRef?
     public var place: Place = .end
     public var createUnder: HeadingRef?
+    /// `move_file`: where the file goes. Shares the `to` key with
+    /// `move_block`, which reads it as a heading.
+    public var toPath: String?
 
     public init(clientID: String, kind: WriteKind, path: String, madeAt: String, deviceID: String) {
         self.clientID = clientID
@@ -179,6 +185,9 @@ public struct WriteDocument: Equatable, Sendable {
             guard lineHash != nil else { throw WriteError.malformed("move_block incomplete") }
         case .removeBlock:
             guard lineHash != nil else { throw WriteError.malformed("remove_block incomplete") }
+        case .moveFile:
+            guard let toPath, !toPath.trimmingCharacters(in: .whitespaces).isEmpty else { throw WriteError.malformed("move_file without a destination") }
+            guard toPath != path else { throw WriteError.malformed("move_file onto itself") }
         }
     }
 }
@@ -229,7 +238,11 @@ extension WriteDocument: Codable {
         ordinal = try container.decodeIfPresent(Int.self, forKey: .ordinal) ?? 0
         newLine = try container.decodeIfPresent(String.self, forKey: .newLine)
         baseHash = try container.decodeIfPresent(String.self, forKey: .baseHash)
-        to = try container.decodeIfPresent(HeadingRef.self, forKey: .to)
+        if kind == .moveFile {
+            toPath = try container.decodeIfPresent(String.self, forKey: .to)
+        } else {
+            to = try container.decodeIfPresent(HeadingRef.self, forKey: .to)
+        }
         place = try container.decodeIfPresent(Place.self, forKey: .place) ?? .end
         createUnder = try container.decodeIfPresent(HeadingRef.self, forKey: .createUnder)
     }
@@ -277,6 +290,8 @@ extension WriteDocument: Codable {
             try container.encode(heading, forKey: .heading)
             try container.encode(lineHash, forKey: .lineHash)
             try container.encode(ordinal, forKey: .ordinal)
+        case .moveFile:
+            try container.encode(toPath, forKey: .to)
         }
     }
 }

@@ -177,6 +177,10 @@ public final class VaultStore: @unchecked Sendable {
             do {
                 for planned in writes {
                     let document = planned.document
+                    if document.kind == .moveFile {
+                        outcomes.append(try renameFile(document))
+                        continue
+                    }
                     let existing = content(document.path)
                     let applied = SyncCore.apply(existing: existing, write: document, seed: seedText(planned.seed))
                     outcomes.append(applied.outcome)
@@ -199,6 +203,23 @@ public final class VaultStore: @unchecked Sendable {
         }
         changed()
         return outcomes
+    }
+
+    /// A `move_file` on the local copy (V40 §6.1): the note takes its new
+    /// path at once, so the screen is right before the desk wakes. A source
+    /// that is already gone, or a destination already taken, changes nothing
+    /// and queues nothing; the desk would answer the same.
+    private func renameFile(_ document: WriteDocument) throws -> Outcome {
+        guard let to = document.toPath, let source = content(document.path), content(to) == nil else {
+            return .noop
+        }
+        let version = version(document.path)
+        try database.execute("INSERT INTO files (path, version, content) VALUES (?, 0, ?)", [.text(to), .text(source)])
+        try database.execute("DELETE FROM files WHERE path = ?", [.text(document.path)])
+        try database.execute(
+            "INSERT INTO pending_writes (client_id, path, base_version, json, seed) VALUES (?, ?, ?, ?, NULL)",
+            [.text(document.clientID), .text(document.path), .int(Int64(version)), .text(document.json())])
+        return .applied
     }
 
     public func pending(path: String? = nil) -> [PendingWrite] {

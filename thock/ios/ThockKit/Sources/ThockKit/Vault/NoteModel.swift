@@ -335,6 +335,8 @@ public enum ReceiptState: Equatable, Sendable {
     case discarded(day: VaultDay?)
     case addedToToday
     case addedToBacklog
+    /// Swiped away on the phone: the note is in `archives/inbox/` (V40 §8).
+    case archived(day: VaultDay?)
     case gone
 }
 

@@ -19,6 +19,13 @@ public struct PlannedWrite: Equatable, Sendable {
     public var seed: SeedInfo?
 }
 
+/// The three decisions the inbox screen makes without a ritual (V40 §4).
+public enum InboxGesture: String, Sendable {
+    case today
+    case backlog
+    case archive
+}
+
 public enum CaptureDestination: String, Codable, CaseIterable, Sendable {
     case today
     case inbox
@@ -384,6 +391,72 @@ public struct PhoneWrites: Sendable {
         return (writes, title)
     }
 
+    // MARK: Inbox gestures (V40)
+
+    /// Where an inbox note goes once the phone is done with it: the same
+    /// name, under the archive folder beside the triage log.
+    public static func archivePath(for inboxPath: String) -> String {
+        "archives/inbox/" + (inboxPath.split(separator: "/").last.map(String.init) ?? inboxPath)
+    }
+
+    /// Whether a note says more than its title: any non-blank line after
+    /// the front matter and the first line of content (V40 §5).
+    static func inboxHasBody(_ note: String) -> Bool {
+        let lines = TextFile(note).lines.map(\.text)
+        var index = 0
+        if lines.first?.trimmingTrailingWhitespace() == "---" {
+            index = 1
+            while index < lines.count {
+                let trimmed = lines[index].trimmingTrailingWhitespace()
+                index += 1
+                if trimmed == "---" || trimmed == "..." { break }
+            }
+        }
+        var content = lines[min(index, lines.count)...].filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        if !content.isEmpty { content.removeFirst() }
+        return !content.isEmpty
+    }
+
+    /// One of the inbox screen's three gestures (V40 §5), as writes in the
+    /// order the desk must drain them: the task line first, then the note
+    /// into the archive, then the triage log's line.
+    public func inboxGesture(_ gesture: InboxGesture, path: String, note: String, todayNote: String?, template: String?) -> [PlannedWrite] {
+        let inbox = InboxNote(path: path, content: note)
+        let title = Slug.sanitizedTitle(inbox.title)
+        let stem = (path.split(separator: "/").last.map(String.init) ?? path).replacingOccurrences(of: ".md", with: "")
+        let task = "- [ ] " + title + (Self.inboxHasBody(note) ? " [[\(stem)]]" : "")
+        var writes: [PlannedWrite] = []
+        let destination: String
+        switch gesture {
+        case .today:
+            let view = NoteView(text: todayNote ?? template.map { Template.expand($0, day: today, time: clock, title: today.formatted(config.daily.filename)) } ?? "", config: config)
+            var append = document(.append, path: config.dailyPath(today))
+            append.heading = view.planner.heading
+            append.lines = [task]
+            append.placement = .beforeChildren
+            append.createFromTemplate = true
+            writes.append(PlannedWrite(document: append, seed: dailySeed(today)))
+            destination = "Today · " + view.planner.heading.text
+        case .backlog:
+            var append = document(.append, path: config.backlogFile)
+            append.heading = HeadingRef(text: config.soonHeading, level: 2)
+            append.lines = [task]
+            append.placement = .beforeChildren
+            writes.append(PlannedWrite(document: append))
+            destination = "Backlog · " + config.soonHeading
+        case .archive:
+            destination = "Archived"
+        }
+        var move = document(.moveFile, path: path)
+        move.toPath = Self.archivePath(for: path)
+        writes.append(PlannedWrite(document: move))
+        // The ritual's own line (V13 §9.5), so both ends' receipts agree.
+        var log = document(.append, path: VaultConfig.triageLogPath)
+        log.lines = ["- \(today.iso) · \(title) → \(destination)" + (inbox.digest.map { " <!--inbox:\($0)-->" } ?? "")]
+        writes.append(PlannedWrite(document: log))
+        return writes
+    }
+
     // MARK: Ask
 
     public static let memoryInboxPath = "memory/inbox.md"
@@ -665,8 +738,12 @@ public enum Receipts {
         case .inbox: break
         }
         if let line = log.last(where: { $0.digest == record.digest }) {
-            if SyncCore.headingKey(line.destination).hasPrefix("discard") {
+            let key = SyncCore.headingKey(line.destination)
+            if key.hasPrefix("discard") {
                 return .discarded(day: line.day)
+            }
+            if key.hasPrefix("archiv") {
+                return .archived(day: line.day)
             }
             return .filed(destination: line.destination, day: line.day)
         }

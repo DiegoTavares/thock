@@ -133,6 +133,15 @@ public struct VaultSession: Sendable {
         return true
     }
 
+    /// One of the inbox screen's gestures (V40 §5): the task line where it
+    /// belongs, the note into `archives/inbox/`, one line in the triage log.
+    /// A note that is already gone writes nothing.
+    public func triageInbox(path: String, gesture: InboxGesture, now: Date = Date()) throws {
+        guard let note = store.content(path) else { return }
+        let builder = writes(now: now)
+        try record(builder.inboxGesture(gesture, path: path, note: note, todayNote: noteText(builder.today), template: store.content(config.daily.template)))
+    }
+
     @discardableResult
     public func clip(_ clip: PhoneWrites.Clip, now: Date = Date()) throws -> CaptureRecord {
         let result = writes(now: now).clip(clip, taken: store.exists)
