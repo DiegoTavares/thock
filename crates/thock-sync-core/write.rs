@@ -125,6 +125,18 @@ pub enum Operation {
     },
 }
 
+/// Every `kind` this build applies. A write naming another kind comes from a
+/// newer phone and must wait for a newer desk, not be dropped.
+pub const KNOWN_KINDS: [&str; 7] = [
+    "create",
+    "append",
+    "replace_line",
+    "remove_line",
+    "replace_section",
+    "move_block",
+    "remove_block",
+];
+
 impl Operation {
     pub fn kind(&self) -> &'static str {
         match self {
@@ -208,6 +220,8 @@ pub enum WriteError {
     Json(String),
     #[error("the write is version {0}; this build reads version {WRITE_VERSION}")]
     UnsupportedVersion(u32),
+    #[error("the write is a `{0}`, which this build doesn't know")]
+    UnsupportedKind(String),
     #[error("the write has no client id")]
     MissingClientId,
     #[error("the write names no path")]
@@ -218,11 +232,40 @@ pub enum WriteError {
     EmptyHeading,
 }
 
+impl WriteError {
+    /// The write is well formed but from a newer Thock than this build: a
+    /// reader must hold it rather than discard it (spec §10.4).
+    pub fn needs_newer_reader(&self) -> bool {
+        match self {
+            // An older version than this build ever read is garbage: no update
+            // would make it readable, so holding the queue on it never clears.
+            Self::UnsupportedVersion(version) => *version > WRITE_VERSION,
+            Self::UnsupportedKind(_) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Parses and validates a write document (spec §7). Unknown fields are
-/// ignored so a newer phone can talk to an older desk.
+/// ignored so a newer phone can talk to an older desk; an unknown `kind` or
+/// `v` is reported as such, so the desk can tell "update me" from garbage.
 pub fn parse_write(json: &str) -> Result<Write, WriteError> {
-    let write: Write =
+    let value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| WriteError::Json(error.to_string()))?;
+    if let Some(version) = value.get("v").and_then(serde_json::Value::as_u64)
+        && version != u64::from(WRITE_VERSION)
+    {
+        return Err(WriteError::UnsupportedVersion(
+            u32::try_from(version).unwrap_or(u32::MAX),
+        ));
+    }
+    if let Some(kind) = value.get("kind").and_then(serde_json::Value::as_str)
+        && !KNOWN_KINDS.contains(&kind)
+    {
+        return Err(WriteError::UnsupportedKind(kind.to_string()));
+    }
+    let write: Write =
+        serde_json::from_value(value).map_err(|error| WriteError::Json(error.to_string()))?;
     validate(&write)?;
     Ok(write)
 }
@@ -336,6 +379,38 @@ mod tests {
             ),
             Err(WriteError::Json(_))
         ));
+    }
+
+    #[test]
+    fn a_newer_phones_write_is_unsupported_not_garbage() {
+        let future_kind = r#"{"v":1,"client_id":"c","kind":"swap_blocks","path":"backlog.md","first":"a","second":"b"}"#;
+        let error = parse_write(future_kind).expect_err("unknown kind");
+        assert_eq!(error, WriteError::UnsupportedKind("swap_blocks".into()));
+        assert!(error.needs_newer_reader());
+
+        let future_version = r#"{"v":2,"client_id":"c","kind":"teleport","path":"p.md"}"#;
+        let error = parse_write(future_version).expect_err("unknown version");
+        assert_eq!(error, WriteError::UnsupportedVersion(2));
+        assert!(error.needs_newer_reader());
+
+        let older_version = r#"{"v":0,"client_id":"c","kind":"create","path":"p.md","content":""}"#;
+        let error = parse_write(older_version).expect_err("older version");
+        assert_eq!(error, WriteError::UnsupportedVersion(0));
+        assert!(
+            !error.needs_newer_reader(),
+            "no update can read a version 0"
+        );
+
+        for garbage in [
+            r#"{"v":1,"client_id":"c","kind":7,"path":"p.md"}"#,
+            r#"{"v":"1","client_id":"c","kind":"create","path":"p.md","content":""}"#,
+            r#"{"v":1,"client_id":"c","path":"p.md"}"#,
+        ] {
+            let error = parse_write(garbage).expect_err(garbage);
+            assert!(matches!(error, WriteError::Json(_)), "{garbage}: {error}");
+            assert!(!error.needs_newer_reader());
+        }
+        assert!(!WriteError::MissingPath.needs_newer_reader());
     }
 
     #[test]
