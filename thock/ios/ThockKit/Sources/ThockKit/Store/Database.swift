@@ -11,7 +11,13 @@ final class Database {
     enum Value: Equatable {
         case text(String)
         case int(Int64)
+        case blob(Data)
         case null
+
+        var data: Data? {
+            if case .blob(let value) = self { return value }
+            return nil
+        }
 
         var string: String? {
             if case .text(let value) = self { return value }
@@ -58,6 +64,10 @@ final class Database {
             switch value {
             case .text(let text): sqlite3_bind_text(statement, position, text, -1, Self.transient)
             case .int(let number): sqlite3_bind_int64(statement, position, number)
+            case .blob(let data):
+                data.withUnsafeBytes { bytes in
+                    _ = sqlite3_bind_blob(statement, position, bytes.baseAddress, Int32(data.count), Self.transient)
+                }
             case .null: sqlite3_bind_null(statement, position)
             }
         }
@@ -73,6 +83,13 @@ final class Database {
                 switch sqlite3_column_type(statement, column) {
                 case SQLITE_INTEGER: row.append(.int(sqlite3_column_int64(statement, column)))
                 case SQLITE_NULL: row.append(.null)
+                case SQLITE_BLOB:
+                    let count = Int(sqlite3_column_bytes(statement, column))
+                    if let bytes = sqlite3_column_blob(statement, column), count > 0 {
+                        row.append(.blob(Data(bytes: bytes, count: count)))
+                    } else {
+                        row.append(.blob(Data()))
+                    }
                 default: row.append(.text(sqlite3_column_text(statement, column).map { String(cString: $0) } ?? ""))
                 }
             }

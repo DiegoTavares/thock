@@ -250,6 +250,7 @@ struct InboxEditSheet: View {
     var edit: InboxEdit
 
     @State private var blocks: [Block] = []
+    @State private var images: [ImageAttachment] = []
     @State private var handle = EditorHandle()
     @State private var finished = false
 
@@ -272,6 +273,7 @@ struct InboxEditSheet: View {
                 model.session?.noteTitles(matching: query) ?? []
             } onChange: { blocks = $0 }
             .frame(maxHeight: .infinity)
+            AttachmentStrip(images: $images)
             Text("The first line is its title. It stays in your inbox for triage.")
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.dim)
@@ -285,10 +287,11 @@ struct InboxEditSheet: View {
     private func save() {
         guard !finished else { return }
         finished = true
-        guard !isEmpty, EditorDocument(blocks: blocks).lines().joined(separator: "\n") != edit.text else { return }
+        guard !isEmpty, images.isEmpty || !blocks.isEmpty else { return }
+        guard !images.isEmpty || EditorDocument(blocks: blocks).lines().joined(separator: "\n") != edit.text else { return }
         var changed = false
-        if model.perform({ changed = try $0.editInbox(path: edit.path, blocks: blocks) }), changed {
-            model.show("Capture updated")
+        if model.perform({ changed = try $0.editInbox(path: edit.path, blocks: blocks, images: images) }), changed {
+            model.show(images.isEmpty ? "Capture updated" : "Capture updated, \(images.count == 1 ? "picture" : "pictures") attached")
         }
     }
 }

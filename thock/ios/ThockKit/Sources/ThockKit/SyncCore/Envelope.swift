@@ -62,20 +62,37 @@ extension SyncCore {
     }
 
     static let syncableExtensions: Set<String> = ["md", "txt", "toml", "json", "csv"]
+    /// The pictures that sync as bytes, from the images folder only (V39 §6.1).
+    public static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp"]
     static let excludedPrefixes = [".thock/history/", ".thock/cache/", ".thock/sync/", ".git/"]
 
     /// The path rules of V34 API §4.1.
     public static func isSyncablePath(_ path: String) -> Bool {
-        guard !path.isEmpty, path.utf8.count <= 1024 else { return false }
+        guard let fileExtension = wellFormedExtension(path) else { return false }
+        return syncableExtensions.contains(fileExtension)
+    }
+
+    /// Whether `path` is a picture that syncs as bytes (V39 §6.1): the same
+    /// path rules, an image extension, and the first segment is the vault's
+    /// images folder.
+    public static func isSyncableImagePath(_ path: String, imagesDir: String) -> Bool {
+        let folder = imagesDir.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !folder.isEmpty, path.hasPrefix(folder + "/"), let fileExtension = wellFormedExtension(path) else { return false }
+        return imageExtensions.contains(fileExtension)
+    }
+
+    /// The extension of a path that passes every rule of §4.1 but the
+    /// allow-list, lowercased, or `nil`.
+    static func wellFormedExtension(_ path: String) -> String? {
+        guard !path.isEmpty, path.utf8.count <= 1024 else { return nil }
         // `String ==` compares by canonical equivalence, so NFC is checked on the scalars.
-        guard path.unicodeScalars.elementsEqual(path.precomposedStringWithCanonicalMapping.unicodeScalars) else { return false }
-        guard !path.contains("\\"), !path.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else { return false }
+        guard path.unicodeScalars.elementsEqual(path.precomposedStringWithCanonicalMapping.unicodeScalars) else { return nil }
+        guard !path.contains("\\"), !path.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else { return nil }
         let segments = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard !segments.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else { return false }
-        guard let last = segments.last, let dot = last.lastIndex(of: "."), dot != last.startIndex else { return false }
-        let fileExtension = last[last.index(after: dot)...].lowercased()
-        guard syncableExtensions.contains(fileExtension) else { return false }
-        return !excludedPrefixes.contains { path.hasPrefix($0) }
+        guard !segments.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else { return nil }
+        guard let last = segments.last, let dot = last.lastIndex(of: "."), dot != last.startIndex else { return nil }
+        guard !excludedPrefixes.contains(where: { path.hasPrefix($0) }) else { return nil }
+        return last[last.index(after: dot)...].lowercased()
     }
 }
 

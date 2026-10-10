@@ -319,6 +319,9 @@ public actor SyncEngine {
                     continue
                 }
                 listed.insert(row.path)
+                // Pictures are bytes the phone does not draw yet (V39 §7.5):
+                // listed, so a full pull keeps nothing stale, never fetched.
+                if SyncCore.isSyncableImagePath(row.path, imagesDir: store.config.imagesDir) { continue }
                 guard let hash = row.contentHash, let blobID = row.blobID else { continue }
                 if store.contentHash(row.path) == hash {
                     continue

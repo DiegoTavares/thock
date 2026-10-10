@@ -1,6 +1,7 @@
 # Thock V39 - Images in the vault: one folder, rendered on the desk, captured on the phone
 
-**Status:** Planned (2026-10-10)
+**Status:** Implemented (2026-10-10): the desk editor, the sync, and the phone's capture, edit and
+share paths. Still to come: the phone drawing pictures in its editor, and pulling binary snapshots.
 **Owner:** Diego · **Date:** 2026-10-10
 **Design reference:** the design notes with the editor mockups, the sync sequence and the decision
 cards this spec resolves: <https://claude.ai/artifact/Y81PSwkFpv7zxHtzwi9MVE>.
