@@ -169,7 +169,8 @@ wait_for "the archived note on the phone" path_exists "archives/inbox/%ship-it%"
 wait_for "the triage log line" file_has "$triage_log" "Ask Ana for the article on burnout → Today"
 wait_for "the archive line in the triage log" file_has "$triage_log" "Ship It: a practical guide → Archived"
 wait_for "the task at the practice desk" desk_has "- [ ] Ask Ana for the article on burnout [["
-wait_for "the archived note at the practice desk" desk_has "archives/inbox/$today-0912-ask-ana-for-the-article-on-burnout.md"
+# The practice desk writes JSON with escaped slashes, so a path reads `a\/b`.
+wait_for "the archived note at the practice desk" desk_has "archives\\/inbox\\/$today-0912-ask-ana-for-the-article-on-burnout.md"
 
 step "capture editor: typing"
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
