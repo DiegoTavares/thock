@@ -1,6 +1,7 @@
 # Thock V40 - Inbox gestures on the phone: swipe to today, to the backlog, or away
 
-**Status:** Planned (2026-10-10)
+**Status:** Implemented on the phone (2026-10-10); the desk's `move_file` and the shared fixtures
+land with the sync-core change
 **Owner:** Diego · **Date:** 2026-10-10
 **Design reference:** the design notes with the gesture-to-writes diagram and the decision cards
 this spec resolves: <https://claude.ai/artifact/Y81PSwkFpv7zxHtzwi9MVE>.
@@ -115,8 +116,9 @@ them together:
   "to":   "archives/inbox/2026-10-10-0931-call-ana.md" }
 ```
 
-`path` is the source, as on every write; `to` is the destination. Both must be syncable paths
-(V34 API §4.1). The desk also checks that `to` is under a folder the phone may move into, which in
+`path` is the source, as on every write; `to` is the destination, a string. The key is the one
+`move_block` uses for its destination heading; a reader picks the shape by `kind`. Both paths must
+be syncable (V34 API §4.1). The desk also checks that `to` is under a folder the phone may move into, which in
 V40 is exactly `archives/inbox/`; any other destination is refused and logged, never applied.
 
 ### 6.1 Rules
