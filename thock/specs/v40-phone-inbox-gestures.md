@@ -147,9 +147,9 @@ V40 is exactly `archives/inbox/`; any other destination is refused and logged, n
 ### 6.2 Where it lives
 
 `crates/thock-sync-core` (`write.rs`, `apply.rs`) and `ThockKit/SyncCore` (`WriteDocument.swift`,
-`Apply.swift`), with `fixtures/v1/move_file/` that both runners pass. Fixture cases for a kind that
-touches two paths carry `before` and `after` as objects keyed by path; both runners gain that
-branch, shared with V39's `put_file`. `WRITE_VERSION` stays 1: an older desk holds the kind and
+`Apply.swift`), with `fixtures/v1/move_file/` that both runners pass. The fixtures pin the document
+shape and that the text applier hands a note back untouched; the rename itself is each store's own
+tests, since the corpus speaks text. `WRITE_VERSION` stays 1: an older desk holds the kind and
 everything behind it (V34 API §10.4), so a phone updated before the desk loses nothing and the toast
 reads *waiting for the desk*.
 

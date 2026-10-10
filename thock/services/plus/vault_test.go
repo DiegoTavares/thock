@@ -459,9 +459,9 @@ func TestWritesQueueIdempotentlyAndAckPrunes(t *testing.T) {
 	if status != 400 || body["code"] != "bad_request" {
 		t.Fatalf("bad client id: %d %v", status, body)
 	}
-	status, body = h.write("0f7e0b1a-3333-4333-8333-333333333333", "photo.png", 0, `x`)
+	status, body = h.write("0f7e0b1a-3333-4333-8333-333333333333", "scan.pdf", 0, `x`)
 	if status != 422 || body["code"] != "path_not_allowed" {
-		t.Fatalf("write to a non-text path: %d %v", status, body)
+		t.Fatalf("write to a path that doesn't sync: %d %v", status, body)
 	}
 
 	// The desk drains in seq order and the phone may not read the queue.
@@ -605,7 +605,7 @@ func TestQuotaRefusesAboveTheHardCap(t *testing.T) {
 }
 
 func TestPathsOutsideTheAllowListAreRefused(t *testing.T) {
-	bad := []string{"", "/daily/x.md", "daily/x.md/", "daily//x.md", "./x.md", "daily/../x.md", "photo.png", "notes/README",
+	bad := []string{"", "/daily/x.md", "daily/x.md/", "daily//x.md", "./x.md", "daily/../x.md", "scan.pdf", "notes/README",
 		".thock/history/HEAD.md", ".thock/cache/x.json", ".thock/sync/state.json", ".git/config.md", strings.Repeat("a", 1025) + ".md",
 		"café.md"}
 	for _, path := range bad {
@@ -613,7 +613,8 @@ func TestPathsOutsideTheAllowListAreRefused(t *testing.T) {
 			t.Errorf("%q should be refused", path)
 		}
 	}
-	good := []string{"daily/2026-10-02.md", "backlog.md", ".thock/config.toml", "routines/finance/routine.toml", "reference/Clips/A B.MD", "data.csv", "x.json", "café.md"}
+	good := []string{"daily/2026-10-02.md", "backlog.md", ".thock/config.toml", "routines/finance/routine.toml", "reference/Clips/A B.MD", "data.csv", "x.json", "café.md",
+		"images/2026-10-10-0931-whiteboard.jpg", "images/receipt.PNG", "photo.webp"}
 	for _, path := range good {
 		if err := validateSyncPath(path); err != nil {
 			t.Errorf("%q should be allowed: %v", path, err)
@@ -621,9 +622,9 @@ func TestPathsOutsideTheAllowListAreRefused(t *testing.T) {
 	}
 
 	h := newSyncHarness(t)
-	status, body := h.call("POST", "/v1/vault/files/photo.png", h.desk, map[string]any{"expected_version": 0, "blob_id": strings.Repeat("ab", 16), "size_bytes": 10, "content_hash": strings.Repeat("cd", 32)})
+	status, body := h.call("POST", "/v1/vault/files/scan.pdf", h.desk, map[string]any{"expected_version": 0, "blob_id": strings.Repeat("ab", 16), "size_bytes": 10, "content_hash": strings.Repeat("cd", 32)})
 	if status != 422 || body["code"] != "path_not_allowed" {
-		t.Fatalf("png: %d %v", status, body)
+		t.Fatalf("pdf: %d %v", status, body)
 	}
 	status, body = h.call("POST", "/v1/vault/files/.thock/history/x.md", h.desk, map[string]any{"expected_version": 0, "blob_id": strings.Repeat("ab", 16), "size_bytes": 10, "content_hash": strings.Repeat("cd", 32)})
 	if status != 422 || body["code"] != "path_not_allowed" {

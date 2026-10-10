@@ -1,0 +1,19 @@
+{
+  "name": "a picture at a path with no file creates no text",
+  "before": null,
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-pf1",
+    "path": "images/2026-10-10-0931-whiteboard.png",
+    "made_at": "2026-10-10T09:31:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "put_file",
+    "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+    "content_hash": "a1ddfd0a68dd3a8ad88a7d0d3dcc7bb4ca9eda0b5f9d5db9ab33af1a7fa1f4f6"
+  },
+  "after": "",
+  "outcome": "noop",
+  "effect_present_before": false,
+  "effect_present_after": false
+}

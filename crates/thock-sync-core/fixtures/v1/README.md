@@ -18,6 +18,10 @@ effect_present_before  effect_present(before, write)   (skip when before is null
 effect_present_after   effect_present(after, write)
 ```
 
+The `put_file` and `move_file` areas pin the two file-level kinds (V39 §6, V40 §6): the document
+shape, and that the text applier hands the note back untouched with `noop`. What they do to files
+(create a picture, rename a note) is each store's own, tested there.
+
 A runner, per case: assert `effect_present(before)`; `apply(before, write, seed)` must equal `after`
 and `outcome`; assert `effect_present(after)`; then apply the same write to `after` and require the
 text unchanged with outcome `noop`. For `write: null`, use an `append` with `heading: null` and no

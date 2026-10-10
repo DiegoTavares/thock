@@ -165,6 +165,9 @@ public actor SimulatedDesk {
                       let write = try? WriteDocument.parse(String(decoding: plaintext, as: UTF8.self)),
                       write.clientID == clientID, write.path == path
                 else { continue }
+                // The practice desk keeps text only; a picture is acked and
+                // not kept.
+                if write.kind == .putFile { continue }
                 if write.kind == .moveFile {
                     // The desk's rename (V40 §6.1): never over a file that
                     // is there, never from one that is not.

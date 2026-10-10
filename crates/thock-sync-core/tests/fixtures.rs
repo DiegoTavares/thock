@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use thock_sync_core::{
     Applied, Context, Heading, Operation, Outcome, Place, Placement, Write, apply, content_hash,
-    effect_present, heading_key, is_syncable_path, key_check, line_hash, open, parse_write,
-    seal_with_nonce, section_hash,
+    effect_present, heading_key, is_syncable_image_path, is_syncable_path, key_check, line_hash,
+    open, parse_write, seal_with_nonce, section_hash,
 };
 
 fn fixtures_root() -> PathBuf {
@@ -36,7 +36,7 @@ struct Case {
     effect_present_after: bool,
 }
 
-const AREAS: [&str; 10] = [
+const AREAS: [&str; 12] = [
     "append",
     "create",
     "replace_line",
@@ -44,6 +44,8 @@ const AREAS: [&str; 10] = [
     "replace_section",
     "move_block",
     "remove_block",
+    "put_file",
+    "move_file",
     "headings",
     "line_endings",
     "roundtrip",
@@ -292,6 +294,15 @@ fn envelope_vectors_match() {
 struct PathVectors {
     syncable: Vec<String>,
     refused: Vec<String>,
+    /// The picture rule (V39 §6.1): folder and extension.
+    images: Option<ImageVectors>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ImageVectors {
+    folder: String,
+    syncable: Vec<String>,
+    refused: Vec<String>,
 }
 
 #[test]
@@ -304,6 +315,21 @@ fn path_vectors_match() {
     }
     for path in &vectors.refused {
         assert!(!is_syncable_path(path), "{path:?} should be refused");
+    }
+    let images = vectors.images.expect("paths.json has image vectors");
+    assert!(!images.syncable.is_empty() && !images.refused.is_empty());
+    for path in &images.syncable {
+        assert!(
+            is_syncable_image_path(path, &images.folder),
+            "{path:?} should sync as a picture"
+        );
+        assert!(!is_syncable_path(path), "{path:?} is not text");
+    }
+    for path in &images.refused {
+        assert!(
+            !is_syncable_image_path(path, &images.folder),
+            "{path:?} should be refused as a picture"
+        );
     }
 }
 
