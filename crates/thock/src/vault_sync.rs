@@ -749,6 +749,10 @@ enum ApplyFailure {
     /// The vault file could not be read or written. The write is not acked,
     /// so it is applied on a later pass instead of being lost.
     Vault(anyhow::Error),
+    /// The write is from a newer Thock than this desk (a `kind` or `v` it
+    /// doesn't know). It is held, with everything queued behind it, until
+    /// the desk is updated; acking would throw the phone's change away.
+    Unsupported(anyhow::Error),
 }
 
 /// A file the desk is not sending, and why, for the status row.
@@ -1600,6 +1604,18 @@ async fn run_job(
                                 )));
                                 break;
                             }
+                            Err(ApplyFailure::Unsupported(error)) => {
+                                log::warn!(
+                                    "Thock: holding write {} for {} until this desk is updated: {error:#}",
+                                    row.seq,
+                                    row.path
+                                );
+                                blocked = Some(error.context(format!(
+                                    "a change from your phone to {} needs a newer Thock on this desk. Update Thock to apply it",
+                                    row.path
+                                )));
+                                break;
+                            }
                         }
                         last = Some(last.map_or(row.seq, |seq: u64| seq.max(row.seq)));
                     }
@@ -1918,7 +1934,7 @@ async fn apply_write(
     key: &[u8; 32],
     row: &WriteRow,
 ) -> Result<Option<String>, ApplyFailure> {
-    let write = open_write(key, row).map_err(ApplyFailure::Refused)?;
+    let write = open_write(key, row)?;
     let abs = vault.root.join(&write.path);
     let existing = if fs.is_file(&abs).await {
         let bytes = fs.load_bytes(&abs).await.map_err(ApplyFailure::Vault)?;
@@ -1935,10 +1951,11 @@ async fn apply_write(
         .map_err(ApplyFailure::Vault)
 }
 
-fn open_write(key: &[u8; 32], row: &WriteRow) -> Result<Write> {
+fn open_write(key: &[u8; 32], row: &WriteRow) -> Result<Write, ApplyFailure> {
     let envelope = base64::engine::general_purpose::STANDARD
         .decode(row.payload.trim())
-        .context("the write's payload isn't valid base64")?;
+        .context("the write's payload isn't valid base64")
+        .map_err(ApplyFailure::Refused)?;
     let plaintext = thock_sync_core::open(
         key,
         SealContext::Write {
@@ -1946,15 +1963,26 @@ fn open_write(key: &[u8; 32], row: &WriteRow) -> Result<Write> {
         },
         &envelope,
     )
-    .map_err(|error| anyhow!("the write couldn't be decrypted: {error}"))?;
-    let json = std::str::from_utf8(&plaintext).context("the write isn't UTF-8")?;
-    let write = thock_sync_core::parse_write(json)
-        .map_err(|error| anyhow!("the write isn't readable: {error}"))?;
+    .map_err(|error| ApplyFailure::Refused(anyhow!("the write couldn't be decrypted: {error}")))?;
+    let json = std::str::from_utf8(&plaintext)
+        .context("the write isn't UTF-8")
+        .map_err(ApplyFailure::Refused)?;
+    let write = thock_sync_core::parse_write(json).map_err(|error| {
+        if error.needs_newer_reader() {
+            ApplyFailure::Unsupported(anyhow!("{error}"))
+        } else {
+            ApplyFailure::Refused(anyhow!("the write isn't readable: {error}"))
+        }
+    })?;
     if write.path != row.path || write.client_id != row.client_id {
-        bail!("the write names a different path or id than its row");
+        return Err(ApplyFailure::Refused(anyhow!(
+            "the write names a different path or id than its row"
+        )));
     }
     if !is_syncable_path(&write.path) {
-        bail!("the write targets a path that doesn't sync");
+        return Err(ApplyFailure::Refused(anyhow!(
+            "the write targets a path that doesn't sync"
+        )));
     }
     Ok(write)
 }
@@ -2411,6 +2439,58 @@ mod tests {
         service.read_with(cx, |service, _| {
             assert!(matches!(service.status(), PhoneSyncState::UpToDate { .. }));
             assert_eq!(service.state.acked_through_seq, 2);
+        });
+    }
+
+    #[gpui::test]
+    async fn a_write_from_a_newer_phone_is_held_not_acked_and_garbage_is_skipped(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "backlog.md": "## Soon\n- [ ] Call Ana\n",
+            }),
+        )
+        .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        {
+            let mut server = server.lock().unwrap();
+            server.phone_paired = true;
+            // Garbage is skipped and acked; a kind this desk doesn't know
+            // stops the queue, so the append behind it waits too.
+            server.queue_write("backlog.md", "g1", "not even json");
+            server.queue_write(
+                "backlog.md",
+                "f1",
+                r#"{"v":1,"client_id":"f1","kind":"swap_blocks","path":"backlog.md"}"#,
+            );
+            server.queue_write(
+                "backlog.md",
+                "a1",
+                &write_json("a1", "backlog.md", "Soon", "- [ ] Buy a card"),
+            );
+        }
+        let service = start_service(&fs, server.clone(), cx).await;
+
+        let note = fs.load(Path::new("/vault/backlog.md")).await.unwrap();
+        assert_eq!(note, "## Soon\n- [ ] Call Ana\n");
+        {
+            let server = server.lock().unwrap();
+            assert_eq!(server.acked_through, 1, "{:?}", server.requests);
+        }
+        service.read_with(cx, |service, _| {
+            match service.status() {
+                PhoneSyncState::Failing { error } => {
+                    assert!(error.contains("Update Thock"), "{error}");
+                }
+                other => panic!("expected a failing status, got {other:?}"),
+            }
+            assert_eq!(service.state.acked_through_seq, 1);
+            assert!(service.pending.drain, "the held write is retried");
         });
     }
 

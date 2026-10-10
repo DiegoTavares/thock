@@ -810,6 +810,14 @@ on open, and on every `write` event:
   POST /v1/vault/writes/ack {through_seq: last seq}
 ```
 
+What the desk does with a write it cannot apply:
+
+| The write | Outcome |
+| --- | --- |
+| won't decrypt, isn't UTF-8 or JSON, names another path or id than its row, or targets a path that doesn't sync | skipped and acked: retrying cannot help, and the user is told |
+| has a `v` or `kind` this desk doesn't know (a newer phone) | held, with every write queued behind it: the drain stops before it and nothing from it on is acked. The status row says to update Thock; acking would throw the phone's change away |
+| hits a vault file that can't be read or written | held the same way and retried |
+
 A crash before the ack re-runs the batch next time; rule 1 of §8.2 makes that a no-op.
 
 ### 10.5 Phone pull and rebase
@@ -879,6 +887,9 @@ retries reuse `client_id`; a lapsed vault goes read-only without losing the loca
 
 ## 13. Changelog
 
+- **2026-10-07** — §10.4 says what the desk does with a write it cannot apply: unreadable writes are
+  skipped and acked, a `kind` or `v` from a newer phone holds the queue until the desk is updated.
+  Before this an older desk acked and dropped every `move_block`, and the phone snapped back.
 - **2026-10-02** — from the phone port, second round: §8.1 says which lines keep an unterminated
   ending (an in-place `replace_line`) and which always end with a terminator (`append`,
   `replace_section`). The Swift port passes all 296 cases and every vector.
