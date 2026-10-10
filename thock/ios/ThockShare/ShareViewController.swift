@@ -21,6 +21,7 @@ final class ShareViewController: UIViewController {
         let store = try? ThockEnvironment.openStore()
         let content: AnyView
         if let store, store.isConnected, !store.isReadOnly, !draft.url.isEmpty {
+            // A share with a link and a picture stays a link clip (V39 §7.3).
             content = AnyView(ClipSheet(draft: draft) { [weak self] in
                 self?.finish()
             } onSave: { [weak self] clip in
@@ -32,8 +33,20 @@ final class ShareViewController: UIViewController {
                     self?.show(message: "That didn't save. Try again.")
                 }
             })
-        } else if draft.url.isEmpty {
-            content = AnyView(ShareNotice(text: "There is no link here to keep.") { [weak self] in self?.finish() })
+        } else if let store, store.isConnected, !store.isReadOnly, !draft.images.isEmpty {
+            content = AnyView(PhotoSheet(images: draft.images) { [weak self] in
+                self?.finish()
+            } onSave: { [weak self] text in
+                do {
+                    try VaultSession(store: store).photoCapture(images: draft.images, text: text)
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    self?.finish()
+                } catch {
+                    self?.show(message: "That didn't save. Try again.")
+                }
+            })
+        } else if draft.url.isEmpty, draft.images.isEmpty {
+            content = AnyView(ShareNotice(text: "There is no link or picture here to keep.") { [weak self] in self?.finish() })
         } else if store?.isReadOnly == true {
             content = AnyView(ShareNotice(text: "This phone is read-only until Thock Plus is renewed.") { [weak self] in self?.finish() })
         } else {
@@ -82,6 +95,14 @@ final class ShareViewController: UIViewController {
                           let url = try? await provider.loadItem(forTypeIdentifier: UTType.url.identifier) as? URL
                 {
                     draft.url = url.absoluteString
+                } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier), draft.images.count < 4,
+                          let data = await loadImageData(from: provider)
+                {
+                    // Downsized through ImageIO as it is read, so the
+                    // extension's memory ceiling is never in question.
+                    if let attachment = ImageDownsizer.prepare(data, name: provider.suggestedName.map { ($0 as NSString).deletingPathExtension } ?? "photo") {
+                        draft.images.append(attachment)
+                    }
                 } else if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier),
                           let text = try? await provider.loadItem(forTypeIdentifier: UTType.plainText.identifier) as? String
                 {
@@ -95,6 +116,35 @@ final class ShareViewController: UIViewController {
             }
         }
         return draft
+    }
+}
+
+extension ShareViewController {
+    /// A picture's bytes, however the sharing app hands them over: as data,
+    /// a file, or an image object.
+    fileprivate func loadImageData(from provider: NSItemProvider) async -> Data? {
+        if let data = try? await provider.loadDataRepresentationAsync(for: UTType.image.identifier) {
+            return data
+        }
+        guard let item = try? await provider.loadItem(forTypeIdentifier: UTType.image.identifier) else { return nil }
+        if let url = item as? URL, url.isFileURL { return try? Data(contentsOf: url) }
+        if let data = item as? Data { return data }
+        if let image = item as? UIImage { return image.jpegData(compressionQuality: 0.92) }
+        return nil
+    }
+}
+
+private extension NSItemProvider {
+    func loadDataRepresentationAsync(for identifier: String) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            _ = loadDataRepresentation(forTypeIdentifier: identifier) { data, error in
+                if let data {
+                    continuation.resume(returning: data)
+                } else {
+                    continuation.resume(throwing: error ?? CocoaError(.fileReadUnknown))
+                }
+            }
+        }
     }
 }
 

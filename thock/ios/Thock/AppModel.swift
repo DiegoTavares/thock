@@ -525,6 +525,16 @@ final class AppModel {
             switch parts.first {
             case "capture" where parts.count == 3:
                 saveCapture(blocks: Blocks.parse(parts[2].replacingOccurrences(of: "\\n", with: "\n")), destination: CaptureDestination(rawValue: parts[1]) ?? .inbox, entry: "script")
+            case "capture-photo" where parts.count == 3:
+                // `capture-photo:<inbox|today|backlog>:<text>`: a capture with
+                // one drawn picture attached (V39 §7.1).
+                let image = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 48)).image { context in
+                    UIColor.orange.setFill()
+                    context.fill(CGRect(x: 0, y: 0, width: 64, height: 48))
+                }
+                if let data = image.pngData(), let attachment = ImageDownsizer.prepare(data, name: "smoke") {
+                    saveCapture(blocks: Blocks.parse(parts[2].replacingOccurrences(of: "\\n", with: "\n")), destination: CaptureDestination(rawValue: parts[1]) ?? .inbox, images: [attachment], entry: "script")
+                }
             case "journal" where parts.count >= 2:
                 perform { try $0.journalAppend(blocks: Blocks.parse(parts[1])) }
             case "tick" where parts.count >= 2:
@@ -726,9 +736,9 @@ final class AppModel {
         ThockEnvironment.defaults.set(chip.rawValue, forKey: "chip.\(entry)")
     }
 
-    func saveCapture(blocks: [Block], destination: CaptureDestination, entry: String) {
+    func saveCapture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], entry: String) {
         var saved: CaptureRecord?
-        let ok = perform { saved = try $0.capture(blocks: blocks, destination: destination) }
+        let ok = perform { saved = try $0.capture(blocks: blocks, destination: destination, images: images) }
         guard ok, saved != nil else { return }
         remember(chip: destination, for: entry)
         UINotificationFeedbackGenerator().notificationOccurred(.success)

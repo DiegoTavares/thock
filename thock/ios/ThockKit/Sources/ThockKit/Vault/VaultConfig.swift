@@ -174,6 +174,8 @@ public struct VaultConfig: Equatable, Sendable {
     /// level-1 `# Week Goals` reads as the agent's voice and cannot be ticked.
     public var goalsHeadings = ["Goals", "Week goals"]
     public var inboxDir = "inbox"
+    /// Where every picture a note links lives (V39 §4.1): `[images] dir`.
+    public var imagesDir = "images"
     /// The language the Set Language ritual recorded (V19), in the person's
     /// own words and as a tag. Either may be missing.
     public var languageName: String?
@@ -200,6 +202,9 @@ public struct VaultConfig: Equatable, Sendable {
         weekly.filename = text("weekly.filename") ?? weekly.filename
         weekly.template = text("weekly.template") ?? weekly.template
         backlogFile = text("backlog.file") ?? backlogFile
+        if let dir = folder("images.dir"), !dir.isEmpty {
+            imagesDir = dir
+        }
 
         var headings: [String: MiniTOML.Value] = [:]
         if case .table(let inline)? = values["backlog.headings"] {
