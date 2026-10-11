@@ -196,9 +196,12 @@ pub struct InboxView {
     /// Decisions made while one was still writing, in order; `space`
     /// `space` `space` must not drop the middle one.
     queued: std::collections::VecDeque<(FilingPlan, &'static str)>,
-    /// Stems being filed or waiting to be, still on screen until the folder
-    /// event lands; the selection skips them.
+    /// Stems being filed or waiting to be. They leave the list at the
+    /// keystroke so a decision feels immediate, and come back if it fails.
     filing: HashSet<String>,
+    /// Stems filed whose note the service still lists because the folder
+    /// event hasn't landed yet; hidden until it does.
+    departed: HashSet<String>,
     status: Option<SharedString>,
     filed_today: usize,
     plus_banner_dismissed: bool,
@@ -334,6 +337,7 @@ impl InboxView {
             in_flight: false,
             queued: std::collections::VecDeque::new(),
             filing: HashSet::new(),
+            departed: HashSet::new(),
             status: None,
             filed_today: 0,
             plus_banner_dismissed: false,
@@ -395,6 +399,10 @@ impl InboxView {
         let all_stems: HashSet<String> =
             items.iter().map(|entry| entry.item.stem.clone()).collect();
         self.marked.retain(|stem| all_stems.contains(stem));
+        self.departed.retain(|stem| all_stems.contains(stem));
+        let leaving = |entry: &InboxEntry| {
+            self.filing.contains(&entry.item.stem) || self.departed.contains(&entry.item.stem)
+        };
         let matches = |entry: &InboxEntry| {
             if self.filter.is_empty() {
                 return true;
@@ -411,7 +419,7 @@ impl InboxView {
         };
         let (new, carried): (Vec<InboxEntry>, Vec<InboxEntry>) = items
             .into_iter()
-            .filter(matches)
+            .filter(|entry| matches(entry) && !leaving(entry))
             .partition(|entry| entry.is_new);
         self.new_count = new.len();
         self.visible = new.into_iter().chain(carried).collect();
@@ -983,6 +991,10 @@ impl InboxView {
                 for (entry, _) in &plan {
                     this.filing.remove(&entry.item.stem);
                 }
+                for item in filed.iter().filter(|item| item.moved) {
+                    this.departed.insert(item.stem.clone());
+                }
+                this.refresh_visible(cx);
                 if !filed.is_empty() {
                     this.filed_today += filed.len();
                     for item in &filed {
@@ -991,7 +1003,6 @@ impl InboxView {
                     this.record_decisions(&filed, &filed_suggestions, via, cx);
                     this.show_undo_toast(&filed, window, cx);
                     this.last_decision = Some(Decision { items: filed });
-                    this.refresh_visible(cx);
                 } else if this.queued.is_empty() {
                     // Nothing left and nothing waiting: the row the keystroke
                     // meant is still there, so the selection goes back to it.
@@ -1042,9 +1053,8 @@ impl InboxView {
         if landing.is_some() {
             self.selected = landing.clone();
             self.pending_selection = landing;
-            self.selected_position = self.selected_index();
-            cx.notify();
         }
+        self.refresh_visible(cx);
     }
 
     /// Runs the next waiting plan, minus rows that have left or were just
@@ -1053,11 +1063,18 @@ impl InboxView {
         let Some((plan, via)) = self.queued.pop_front() else {
             return;
         };
-        let visible: HashSet<&str> = self
-            .visible
-            .iter()
-            .map(|entry| entry.item.stem.as_str())
-            .collect();
+        let listed: HashSet<String> = self
+            .service
+            .as_ref()
+            .map(|service| {
+                service
+                    .read(cx)
+                    .items()
+                    .iter()
+                    .map(|entry| entry.item.stem.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let just_filed: HashSet<&str> = self
             .last_decision
             .iter()
@@ -1065,7 +1082,8 @@ impl InboxView {
             .map(|item| item.stem.as_str())
             .collect();
         let (plan, dropped): (FilingPlan, FilingPlan) = plan.into_iter().partition(|(entry, _)| {
-            visible.contains(entry.item.stem.as_str())
+            listed.contains(&entry.item.stem)
+                && !self.departed.contains(&entry.item.stem)
                 && !just_filed.contains(entry.item.stem.as_str())
         });
         for (entry, _) in dropped {
@@ -1159,6 +1177,9 @@ impl InboxView {
         let fs = self.fs(cx);
         let service = self.service.clone();
         let first_stem = decision.items.first().map(|item| item.stem.clone());
+        for item in &decision.items {
+            self.departed.remove(&item.stem);
+        }
         cx.spawn_in(window, async move |this, cx| {
             let mut failure = None;
             for item in decision.items.iter().rev() {
@@ -1540,8 +1561,11 @@ impl InboxView {
                             .truncate(),
                     )
                     .child(
+                        // A fixed height whether or not a chip shows, since
+                        // the list gives every row the first row's height.
                         h_flex()
                             .w_full()
+                            .h_5()
                             .justify_between()
                             .gap_2()
                             .child(second)
@@ -2437,7 +2461,7 @@ mod tests {
                     "2026-10-10-0931-call-ana.md": CALL_ANA,
                     "idea.md": IDEA,
                 },
-                "daily": { "2026-10-10.md": TODAY_NOTE },
+                "daily": { (today_note_name()): TODAY_NOTE },
                 "backlog.md": DEFAULT_BACKLOG,
                 "routines": { "inbox": { "triage-policy.md": "## Proposals\n\n| a | b |\n| --- | --- |\n| A link | Backlog · Someday |\n" } },
             }),
@@ -2483,7 +2507,7 @@ mod tests {
         // Open a note first so `escape` has somewhere to return to.
         let project_path = project
             .read_with(&cx, |project, cx| {
-                project.find_project_path(root.join("daily/2026-10-10.md"), cx)
+                project.find_project_path(root.join(today_note_path()), cx)
             })
             .unwrap();
         workspace
@@ -2507,6 +2531,16 @@ mod tests {
             cx,
             _vault_dir: vault_dir,
         }
+    }
+
+    /// Filing to Today writes the note for the real date, so the fixture's
+    /// daily note is named for it too.
+    fn today_note_name() -> String {
+        format!("{}.md", Local::now().format("%Y-%m-%d"))
+    }
+
+    fn today_note_path() -> String {
+        format!("daily/{}", today_note_name())
     }
 
     fn titles(setup: &Setup) -> Vec<String> {
@@ -2648,7 +2682,7 @@ mod tests {
         setup.cx.simulate_keystrokes("t");
         setup.cx.run_until_parked();
 
-        let today = load(&setup, "daily/2026-10-10.md").await.unwrap();
+        let today = load(&setup, &today_note_path()).await.unwrap();
         assert!(
             today.contains("- [ ] 09:00 - 09:30 Standup\n- [ ] Call Ana\n\n## Personal"),
             "{today}"
@@ -2785,10 +2819,7 @@ mod tests {
         assert!(load(&setup, "archives/inbox/idea.md").await.is_some());
         // No task line anywhere.
         assert_eq!(load(&setup, "backlog.md").await.unwrap(), DEFAULT_BACKLOG);
-        assert_eq!(
-            load(&setup, "daily/2026-10-10.md").await.unwrap(),
-            TODAY_NOTE
-        );
+        assert_eq!(load(&setup, &today_note_path()).await.unwrap(), TODAY_NOTE);
         setup
             .view
             .read_with(&setup.cx, |view, _| assert!(view.marked.is_empty()));
@@ -3070,7 +3101,7 @@ mod tests {
         setup.cx.simulate_keystrokes("t");
         setup.cx.run_until_parked();
         assert_eq!(
-            load(&setup, "daily/2026-10-10.md").await.as_deref(),
+            load(&setup, &today_note_path()).await.as_deref(),
             Some(TODAY_NOTE)
         );
     }
@@ -3091,7 +3122,7 @@ mod tests {
             .read_with(&setup.cx, |view, _| assert!(!view.keys_sheet));
         assert_eq!(titles(&setup).len(), 4);
         assert_eq!(
-            load(&setup, "daily/2026-10-10.md").await.as_deref(),
+            load(&setup, &today_note_path()).await.as_deref(),
             Some(TODAY_NOTE)
         );
         // Now the verb works again.
@@ -3165,6 +3196,40 @@ mod tests {
             log.contains("Ship it — a practical guide → Archived"),
             "{log}"
         );
+    }
+
+    #[gpui::test]
+    async fn a_decision_leaves_the_list_at_the_keystroke(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        assert_eq!(titles(&setup).len(), 4);
+        // Hold the folder events back, so only the view can take the row away.
+        setup.fs.pause_events();
+        setup.view.update_in(&mut setup.cx, |view, window, cx| {
+            view.archive(&ArchiveInboxItem, window, cx)
+        });
+        assert!(!titles(&setup).contains(&"Call Ana".to_string()));
+        assert_eq!(selected(&setup).as_deref(), Some("Re: Q4 planning doc"));
+
+        // The write lands before the folder event: the row stays gone.
+        setup.cx.run_until_parked();
+        assert!(
+            load(&setup, "archives/inbox/2026-10-10-0931-call-ana.md")
+                .await
+                .is_some()
+        );
+        assert!(!titles(&setup).contains(&"Call Ana".to_string()));
+        setup.fs.unpause_events_and_flush();
+        setup.cx.run_until_parked();
+        assert_eq!(titles(&setup).len(), 3);
+        setup.view.read_with(&setup.cx, |view, _| {
+            assert!(view.departed.is_empty());
+        });
+
+        // Undo brings it back.
+        setup.cx.simulate_keystrokes("u");
+        setup.cx.run_until_parked();
+        assert_eq!(titles(&setup).len(), 4);
+        assert_eq!(selected(&setup).as_deref(), Some("Call Ana"));
     }
 
     #[test]

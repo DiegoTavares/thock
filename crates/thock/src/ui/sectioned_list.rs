@@ -124,11 +124,15 @@ impl SectionedLayout {
 
 /// The `uniform_list` for a delegate, rendering headers and items through
 /// it. The caller tracks scrolling with its own `UniformListScrollHandle`.
+///
+/// Every row gets the height of the first item, so items must render at one
+/// fixed height and headers must be no taller than an item.
 pub fn sectioned_list<V: SectionedListDelegate + 'static>(
     id: impl Into<ElementId>,
     layout: Rc<SectionedLayout>,
     cx: &mut Context<V>,
 ) -> UniformList {
+    let measured_row = layout.items().next().map(|(row, _, _)| row);
     uniform_list(
         id,
         layout.len(),
@@ -144,6 +148,9 @@ pub fn sectioned_list<V: SectionedListDelegate + 'static>(
                 .collect()
         }),
     )
+    // `uniform_list` sizes every row like the one it measures; a header is
+    // shorter than an item, so measuring row 0 would squeeze the items.
+    .with_width_from_item(measured_row)
 }
 
 #[cfg(test)]
