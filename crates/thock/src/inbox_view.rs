@@ -11,11 +11,11 @@ use chrono::{Local, Utc};
 use editor::{Editor, EditorEvent};
 use fs::Fs;
 use gpui::{
-    Action, Anchor, AnyElement, App, AppContext as _, Canvas, ClickEvent, Context, DismissEvent,
-    Entity, EventEmitter, FocusHandle, Focusable, FontWeight, ImageSource, KeyContext,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Resource, ScrollHandle, SharedString,
-    Subscription, Task, TaskExt as _, UniformListScrollHandle, WeakEntity, Window, actions,
-    anchored, canvas, deferred, div, point, prelude::*, px, relative, transparent_black,
+    Action, Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, DismissEvent, Entity,
+    EventEmitter, FocusHandle, Focusable, FontWeight, ImageSource, KeyContext, KeyDownEvent,
+    MouseButton, MouseDownEvent, Pixels, Point, Resource, ScrollHandle, SharedString, Subscription,
+    Task, TaskExt as _, UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred,
+    div, point, prelude::*, px, relative, transparent_black,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use menu::{Cancel, Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
@@ -65,14 +65,7 @@ const PANE_HEADER_HEIGHT: Pixels = px(52.);
 const ROW_HEIGHT: Pixels = px(60.);
 const FOOTER_HEIGHT: Pixels = px(36.);
 const BAR_BUTTON_HEIGHT: Pixels = px(56.);
-const BAR_BUTTON_MIN_WIDTH: Pixels = px(168.);
-/// Open and Undo share one width, so the two read as a pair.
-const QUIET_BUTTON_MIN_WIDTH: Pixels = px(112.);
 const READER_MAX_WIDTH: Pixels = px(680.);
-/// Below this reader width the destination bar wraps to two rows of two:
-/// four buttons at their minimum width, Open, Undo and the reader's sides
-/// no longer fit on one line.
-const BAR_WRAP_WIDTH: Pixels = px(1024.);
 
 actions!(
     thock,
@@ -203,9 +196,6 @@ pub struct InboxView {
     reader_scroll: ScrollHandle,
     /// The rendered note, rebuilt when the selected bytes change.
     markdown: Option<(String, Entity<Markdown>)>,
-    /// The reader's width as last laid out; decides whether the
-    /// destination bar wraps.
-    reader_width: Pixels,
     list_fraction: f32,
     layout_save: Option<Task<()>>,
     last_decision: Option<Decision>,
@@ -348,7 +338,6 @@ impl InboxView {
             scroll: UniformListScrollHandle::new(),
             reader_scroll: ScrollHandle::new(),
             markdown: None,
-            reader_width: px(0.),
             list_fraction: DEFAULT_LIST_FRACTION,
             layout_save: None,
             last_decision: None,
@@ -1372,10 +1361,6 @@ impl InboxView {
         FooterStats::Stats(parts.join(" · "))
     }
 
-    fn bar_wraps(&self) -> bool {
-        self.reader_width > px(0.) && self.reader_width < BAR_WRAP_WIDTH
-    }
-
     fn render_list_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let filtering =
             self.filter_editor.focus_handle(cx).is_focused(window) || !self.filter.is_empty();
@@ -1955,41 +1940,12 @@ impl InboxView {
         markdown
     }
 
-    /// Records the reader's width as laid out, and re-renders when that
-    /// changes whether the destination bar wraps.
-    fn reader_measure(&self, cx: &mut Context<Self>) -> Canvas<()> {
-        let this = cx.weak_entity();
-        canvas(
-            move |bounds, window, cx| {
-                let rewrap = this
-                    .update(cx, |this, _| {
-                        let wrapped = this.bar_wraps();
-                        this.reader_width = bounds.size.width;
-                        this.bar_wraps() != wrapped
-                    })
-                    .unwrap_or(false);
-                // A notify while the window draws is dropped, so the
-                // re-render waits for the frame to finish.
-                if rewrap {
-                    window.defer(cx, move |_, cx| {
-                        this.update(cx, |_, cx| cx.notify()).log_err();
-                    });
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full()
-    }
-
     fn render_reader(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let measure = self.reader_measure(cx);
         if self.keys_sheet {
             return div()
                 .relative()
                 .size_full()
                 .child(self.render_keys_sheet(cx))
-                .child(measure)
                 .into_any_element();
         }
         let Some(entry) = self.selected_entry().cloned() else {
@@ -2003,7 +1959,6 @@ impl InboxView {
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 )
-                .child(measure)
                 .into_any_element();
         };
         let markdown = self.markdown_for(&entry, cx);
@@ -2051,7 +2006,6 @@ impl InboxView {
                         ),
                     ),
             )
-            .child(measure)
             .into_any_element()
     }
 
@@ -2116,10 +2070,11 @@ impl InboxView {
         div()
             .debug_selector(move || format!("INBOX_BAR-{name}"))
             .h(BAR_BUTTON_HEIGHT)
-            .when(fills, |this| this.flex_1().min_w(BAR_BUTTON_MIN_WIDTH))
-            .when(!fills, |this| {
-                this.flex_none().min_w(QUIET_BUTTON_MIN_WIDTH)
-            })
+            // The four destinations share what is left after Open and Undo
+            // equally and shrink with the reader, so the bar is always one
+            // row.
+            .when(fills, |this| this.flex_1().min_w_0())
+            .when(!fills, |this| this.flex_none())
             .rounded_lg()
             .border_1()
             .border_color(border)
@@ -2139,18 +2094,21 @@ impl InboxView {
         let suggested = matches!(look, BarLook::Filled | BarLook::Outlined);
         let colors = cx.theme().colors();
         let (track, fill) = (colors.text_muted.opacity(0.18), colors.text_accent);
+        let name = destination.key();
+        // Two lines, so a narrow reader keeps every button on one row: the
+        // keys and the label, then the probability bar and its percentage.
+        // The keys and the percentage keep their size; only the label gives
+        // way.
         let content = v_flex()
             .w_full()
             .h_full()
             .justify_center()
             .gap_2()
-            .px(px(14.))
+            .px(px(10.))
             .child(
-                // The keys and the percentage keep their size; when the
-                // button is narrow only the label gives way.
                 h_flex()
                     .w_full()
-                    .gap_2()
+                    .gap_1p5()
                     .when(suggested, |this| {
                         this.child(div().flex_none().child(KeyBinding::for_action_in(
                             &AcceptInboxSuggestion,
@@ -2174,10 +2132,30 @@ impl InboxView {
                                 })
                                 .truncate(),
                         ),
-                    )
-                    .when_some(probability, |this, probability| {
-                        let name = destination.key();
-                        this.child(
+                    ),
+            )
+            .when_some(probability, |this, probability| {
+                this.child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            div()
+                                .debug_selector(move || format!("INBOX_PROBABILITY-{name}"))
+                                .flex_1()
+                                .min_w_0()
+                                .h(px(3.))
+                                .rounded_full()
+                                .bg(track)
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .rounded_full()
+                                        .w(relative(probability.clamp(0.0, 1.0) as f32))
+                                        .bg(fill),
+                                ),
+                        )
+                        .child(
                             div()
                                 .debug_selector(move || format!("INBOX_PERCENT-{name}"))
                                 .flex_none()
@@ -2189,24 +2167,6 @@ impl InboxView {
                                     .size(LabelSize::Small)
                                     .color(Color::Muted),
                                 ),
-                        )
-                    }),
-            )
-            .when_some(probability, |this, probability| {
-                let name = destination.key();
-                this.child(
-                    div()
-                        .debug_selector(move || format!("INBOX_PROBABILITY-{name}"))
-                        .w_full()
-                        .h(px(3.))
-                        .rounded_full()
-                        .bg(track)
-                        .child(
-                            div()
-                                .h_full()
-                                .rounded_full()
-                                .w(relative(probability.clamp(0.0, 1.0) as f32))
-                                .bg(fill),
                         ),
                 )
             });
@@ -2231,66 +2191,43 @@ impl InboxView {
             .w_full()
             .h_full()
             .justify_center()
-            .gap_2()
-            .px(px(14.))
+            .gap_1p5()
+            .px(px(12.))
             .child(KeyBinding::for_action_in(action, &self.focus_handle, cx))
             .child(Label::new(label).color(Color::Muted));
         self.bar_button(name, BarLook::Quiet, action.boxed_clone(), content, cx)
     }
 
     /// The destination bar (§4.2): one button per destination in a fixed
-    /// order, then Open and Undo. Wraps to two rows of two when the reader
-    /// is too narrow for one.
+    /// order, then Open and Undo, always on one row.
     fn render_destination_bar(&self, entry: &InboxEntry, cx: &App) -> AnyElement {
         let state = self.bar_state(entry, cx);
-        let mut buttons =
-            Destination::ALL
-                .into_iter()
-                .enumerate()
-                .map(|(position, destination)| {
-                    let look = match state.suggested {
-                        Some((suggested, Tier::Filled)) if suggested == destination => {
-                            BarLook::Filled
-                        }
-                        Some((suggested, _)) if suggested == destination => BarLook::Outlined,
-                        _ => BarLook::Plain,
-                    };
-                    let probability = state
-                        .probabilities
-                        .and_then(|probabilities| probabilities.get(position).copied());
-                    self.destination_button(destination, look, probability, cx)
-                });
+        let buttons = Destination::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(position, destination)| {
+                let look = match state.suggested {
+                    Some((suggested, Tier::Filled)) if suggested == destination => BarLook::Filled,
+                    Some((suggested, _)) if suggested == destination => BarLook::Outlined,
+                    _ => BarLook::Plain,
+                };
+                let probability = state
+                    .probabilities
+                    .and_then(|probabilities| probabilities.get(position).copied());
+                self.destination_button(destination, look, probability, cx)
+            });
         let open = self.quiet_button("open", &OpenInboxItem, "Open", cx);
         let undo = self.quiet_button("undo", &UndoInboxMove, "Undo", cx);
         let rule = cx.theme().colors().border_variant;
         let divider = |height: Pixels| div().flex_none().w(px(1.)).h(height).mx_1().bg(rule);
-        if self.bar_wraps() {
-            let first_row = h_flex().w_full().gap_2().children(buttons.by_ref().take(2));
-            let second_row = h_flex().w_full().gap_2().children(buttons);
-            h_flex()
-                .w_full()
-                .gap_2()
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_2()
-                        .child(first_row)
-                        .child(second_row),
-                )
-                .child(divider(BAR_BUTTON_HEIGHT * 2. - px(4.)))
-                .child(v_flex().flex_none().gap_2().child(open).child(undo))
-                .into_any_element()
-        } else {
-            h_flex()
-                .w_full()
-                .gap_2()
-                .children(buttons)
-                .child(divider(BAR_BUTTON_HEIGHT - px(12.)))
-                .child(open)
-                .child(undo)
-                .into_any_element()
-        }
+        h_flex()
+            .w_full()
+            .gap_2()
+            .children(buttons)
+            .child(divider(BAR_BUTTON_HEIGHT - px(12.)))
+            .child(open)
+            .child(undo)
+            .into_any_element()
     }
 
     fn render_keys_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -3964,9 +3901,13 @@ mod tests {
                 .into_iter()
                 .map(|selector| drawn(&mut setup, selector))
                 .collect();
-            let (open, undo) = (layout[4], layout[5]);
-            assert_eq!(open.size.width, undo.size.width, "{title}");
-            assert!(open.size.width >= QUIET_BUTTON_MIN_WIDTH, "{title}");
+            let destinations = &layout[..4];
+            assert!(
+                destinations
+                    .iter()
+                    .all(|button| (button.size.width - destinations[0].size.width).abs() <= px(1.)),
+                "{title}: the four destinations share the width equally: {destinations:?}"
+            );
             match &first_layout {
                 Some(first) => assert_eq!(&layout, first, "{title}"),
                 None => first_layout = Some(layout),
@@ -4194,35 +4135,56 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_destination_bar_wraps_on_a_narrow_reader(cx: &mut TestAppContext) {
-        let mut setup = setup(cx, Options::default()).await;
-        setup.cx.simulate_resize(gpui::size(px(2400.), px(900.)));
-        setup.cx.run_until_parked();
-        let today = drawn(&mut setup, "INBOX_BAR-today");
-        let someday = drawn(&mut setup, "INBOX_BAR-someday");
-        assert_eq!(today.top(), someday.top(), "one row when there is room");
-        assert!(today.size.width >= BAR_BUTTON_MIN_WIDTH);
-        assert_eq!(today.size.height, BAR_BUTTON_HEIGHT);
-
-        // The frame after a resize measures the reader and re-renders on its
-        // own, without anything else touching the view.
-        setup.cx.simulate_resize(gpui::size(px(900.), px(900.)));
-        setup.cx.run_until_parked();
-        let mut bounds = |selector: &'static str| {
-            setup
-                .cx
-                .debug_bounds(selector)
-                .unwrap_or_else(|| panic!("{selector} is drawn"))
-        };
-        let today = bounds("INBOX_BAR-today");
-        let soon = bounds("INBOX_BAR-soon");
-        let someday = bounds("INBOX_BAR-someday");
-        let archive = bounds("INBOX_BAR-archive");
-        assert_eq!(today.top(), soon.top());
-        assert_eq!(someday.top(), archive.top());
-        assert!(someday.top() >= today.bottom(), "two rows of two");
-        assert_eq!(someday.left(), today.left());
-        assert!(today.size.width >= BAR_BUTTON_MIN_WIDTH);
+    async fn the_destination_bar_stays_on_one_row_as_the_reader_narrows(cx: &mut TestAppContext) {
+        let mut setup = setup(
+            cx,
+            Options {
+                grant: true,
+                cached: vec![(SHIP_IT, "someday", 0.91)],
+                ..Options::default()
+            },
+        )
+        .await;
+        // The suggested Someday is the widest button: `space or shift-s`.
+        select(&mut setup, "Ship it — a practical guide");
+        for width in [2400., 1600., 1300.] {
+            setup.cx.simulate_resize(gpui::size(px(width), px(900.)));
+            setup.cx.run_until_parked();
+            let buttons: Vec<gpui::Bounds<Pixels>> = BAR_BUTTONS
+                .into_iter()
+                .map(|selector| drawn(&mut setup, selector))
+                .collect();
+            let first = buttons[0];
+            for button in &buttons {
+                assert_eq!(button.top(), first.top(), "{width}: one row");
+                assert_eq!(button.size.height, BAR_BUTTON_HEIGHT, "{width}");
+            }
+            let undo = buttons[5];
+            assert!(
+                undo.right() <= px(width),
+                "{width}: Undo fits in the window, {undo:?}"
+            );
+            for (button, percent) in [
+                ("INBOX_BAR-today", "INBOX_PERCENT-today"),
+                ("INBOX_BAR-soon", "INBOX_PERCENT-soon"),
+                ("INBOX_BAR-someday", "INBOX_PERCENT-someday"),
+                ("INBOX_BAR-archive", "INBOX_PERCENT-archive"),
+            ] {
+                let button = drawn(&mut setup, button);
+                let percent = drawn(&mut setup, percent);
+                assert!(
+                    percent.right() + px(8.) <= button.right(),
+                    "{width}: {percent:?} inside {button:?}"
+                );
+            }
+            // The `space` keycap is drawn whole inside the suggested button.
+            let someday = drawn(&mut setup, "INBOX_BAR-someday");
+            let space = drawn(&mut setup, "KEY_BINDING-space");
+            assert!(
+                space.left() >= someday.left() && space.right() <= someday.right(),
+                "{width}: {space:?} inside {someday:?}"
+            );
+        }
     }
 
     #[test]

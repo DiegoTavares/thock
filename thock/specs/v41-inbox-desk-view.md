@@ -142,13 +142,15 @@ notes. Each button holds its keycap, its label, the suggestion's probability for
 drawing that probability, so the stats and the action are one object. The suggested destination
 is drawn in the accent colour (filled or outlined by tier, §7.4) and also carries the `space`
 keycap, written `space or s`, so the two keys do not read as one chord. After a divider, **Open**
-and **Undo** as quieter buttons of one shared width. `space` only ever takes a suggestion: with
+and **Undo** as quieter buttons sized to their content. `space` only ever takes a suggestion: with
 none, it does nothing and its keycap is on no button, since opening the note is `o`'s job. Without
-a suggestion, or with suggestions off, the four buttons show no percentages and no bars. A
-button's keycaps and percentage keep their size; when it is narrow only the label truncates. Keycaps are
+a suggestion, or with suggestions off, the four buttons show no percentages and no bars. Keycaps are
 `ui::KeyBinding::for_action_in`, so a rebinding shows up without a code change. The buttons are
-clickable and dispatch the same actions. Below about 1024px of reader width (four buttons at
-their minimum, Open, Undo and the reader's sides) the bar wraps to two rows of two.
+clickable and dispatch the same actions. The bar is always one row: the four destinations share
+what Open and Undo leave equally and shrink with the reader, a side panel opening included. Each
+destination button has two lines — its keycaps and label, then its probability bar with the
+percentage at its end — so it stays narrow. Keycaps and the percentage keep their size; when a
+button is narrow only the label truncates.
 
 **Reader.** The note's title, the destination bar, a rule, then the body rendered with
 `markdown::MarkdownElement` and `MarkdownStyle::themed`, as the chat panel renders the agent's
@@ -171,8 +173,8 @@ edge or the split.
 | Pane headers | 52px tall | 20px sides in the list, 40px in the reader |
 | List rows | 60px tall, radius 8 | 12px left, 16px right, 4px title to meta |
 | List footer | 36px tall | 20px sides |
-| Destination buttons | 56px tall, radius 8, at least 168px wide | 8px between, 14px inside |
-| Open, Undo | 56px tall, radius 8, at least 112px wide | content centred |
+| Destination buttons | 56px tall, radius 8, equal shares of the row | 8px between, 10px inside |
+| Open, Undo | 56px tall, radius 8, sized to content | 12px inside |
 | Reader | | 28px top, 40px sides, 18px title to bar |
 
 | Text | Style |
@@ -529,7 +531,8 @@ step four.
   move and with it off they do not.
 - **Layout (rev 2):** the destination bar's buttons are in the fixed order whatever the
   suggestion; the suggested button carries the `space` keycap, and with no suggestion no button
-  does; a percentage is never clipped by its button; clicking a destination button files like its key; every list row lays out at the same
+  does; a percentage is never clipped by its button; the bar stays one row as the reader narrows,
+  every button inside the reader; clicking a destination button files like its key; every list row lays out at the same
   height as the measured one, headers and the divider no taller; the list header's section counts
   follow the selection and a filter.
 - **Service:** suggestions are requested only while a view is open, only for uncached hashes, at
