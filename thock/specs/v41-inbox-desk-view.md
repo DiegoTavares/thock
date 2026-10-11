@@ -1,10 +1,13 @@
 # Thock V41 - The Inbox at the desk: a keyboard-first view with a suggested destination
 
 **Status:** Implemented (2026-10-10); the Jev request is exercised against a fake endpoint in tests
-and awaits its first run against OpenRouter from a Plus vault
+and awaits its first run against OpenRouter from a Plus vault. **Rev 2 (2026-10-11):** §4.2's layout
+is redesigned around a destination bar above the note
 **Owner:** Diego · **Date:** 2026-10-10
 **Design reference:** the design notes with the Jev study, the gpui-kit evaluation, the component
 map and the decision cards this spec resolves: <https://claude.ai/artifact/FoeWmrEjqsMiTKvZKCvfBp>.
+Rev 2's layout review, the three directions it compared and the spacing and type spec:
+<https://claude.ai/artifact/WzKxqCHRiqRtL64eHCoFLf>.
 **Companion docs:** `v13-inbox-routine.md` §4, §6, §9 (what an inbox item is, the note format, the
 ritual and its log), `v32-sync-status-indicator.md` §5 (the Inbox row this re-points),
 `v39-vault-images.md` §4 (how a picture line resolves), `v40-phone-inbox-gestures.md` §5 and §6
@@ -22,7 +25,7 @@ person knows most of them before the agent finishes talking.
 
 V41 adds an **Inbox view** that opens in the centre pane like a note: the waiting items on the
 left, the selected item rendered on the right, and one key per decision — **Today**, **Soon**,
-**Someday**, **Archive** — along the bottom. The writes are V40's, so a desk decision and a phone
+**Someday**, **Archive** — as a bar of buttons right above the note. The writes are V40's, so a desk decision and a phone
 swipe leave the same traces. For Thock Plus vaults, each row carries a **suggested destination**
 from Jev, TypeSafe's decision model on OpenRouter, and `space` takes it. A suggestion only ever
 pre-selects a key; nothing is filed without a keystroke.
@@ -74,65 +77,120 @@ from the list returns to the item that was active before.
 The key context is `ThockInboxView` plus `menu`, so the `menu::` bindings apply; `filtering` is
 set while the filter box has focus and `reader` while the reader has it.
 
-### 4.2 Three regions
+### 4.2 Two panes
 
 ```
-┌ Inbox · 7 ┐ daily/2026-10-10.md   backlog.md
-──────────────────────────────────────────────────────────────────────────
- Inbox   7 waiting · suggestions on · 3 filed today · $0.0002      / ?
-────────────────────────────────┬─────────────────────────────────────────
- NEW · 4                        │ google-tasks · captured 2026-10-09 18:42
-▸ Ship it — a practical guide…  │
-  gtasks               → Someday│ Ship it — a practical guide to shipping
-  Re: Q4 planning doc           │
-  gmail  Marta       → Soon 71% │ https://example.com/ship-it
-  Call Ana about the keys       │
-  phone                 → Today │ (no content)
- CARRIED OVER · 3               │
-  idea: routines could carry…   │
-  phone  3 days            —    │
-────────────────────────────────┴─────────────────────────────────────────
- Someday ████████▌ 82%   Soon ▉ 9%   Today ▌ 5%   Archive ▌ 4%
- [space] Someday  [t] Today  [s] Soon  [S] Someday  [e] Archive  [o] Open  [u] Undo
+ Inbox  [New 4] Carried over 2       ⌕ │ ✉ Jordan Reyes  jordan@…  · Oct 11 10:48  Open in Gmail ↗  ⌨
+───────────────────────────────────────┼────────────────────────────────────────────────────────────
+ ╭───────────────────────────────────╮ │
+ │ Renew the studio VPN certificate  │ │ Add a priority flag for lighting jobs
+ │ Gmail · IT desk · 2h       (Soon) │ │
+ ╰───────────────────────────────────╯ │ ┌────────┐┏━━━━━━━━━━┓┌──────────┐┌─────────┐ ┌──────┐┌──────┐
+   Ticket 4821: render nodes ignore…   │ │t Today ││␣ s Soon  ┃│⇧s Someday││e Archive│ │o Open││u Undo│
+   Gmail · Helpdesk · 3h               │ │     1% ││      54% ┃│      22% ││      2% │ └──────┘└──────┘
+ ▐ Add a priority flag for lighting… ▌ │ │▏       ││██████▌   ┃│███▍      ││▏        │
+ ▐ Gmail · Jordan Reyes · 5h  (Soon) ▌ │ └────────┘┗━━━━━━━━━━┛└──────────┘└─────────┘
+   Investigate inkdrop.app             │ ─────────────────────────────────────────────────────
+   Google Tasks · yesterday   (Today)  │ The retry cap was added to keep render times
+   Carried over ─────────────────────  │ predictable, since these tools already multithread
+   Ideas for thock                     │ well.
+   Phone · 3 days           (Someday)  │
+───────────────────────────────────────┤ My understanding is that the new scheduler …
+ ↑↓ move  x mark  / filter  ? keys     │
+           suggestions on · $0.0001    │
 ```
 
-**Header.** The count, whether suggestions are on, what this session filed and what it cost
-(§7.5), and the two affordances a mouse user needs to find the rest: the filter box (`/`) and the
-keys sheet (`?`). A vault without a gateway grant shows a dismissible banner in place of the cost:
-*Suggestions come with Thock Plus.*
+The view is two panes split by a draggable handle, and each pane has a header row of the same
+height, so the split line, the two headers and the two edges read as one grid. There is no
+view-wide header or bottom bar: everything sits in the pane it describes. What the selected note
+is, where it can go and how likely each place is all live in the reader, in the line of sight of
+the note itself.
 
-**List.** Two lines per item: the title; then the source as a chip, the sender when there is one,
-the age for carried-over items, a picture glyph when the note has an image line, and the
-suggestion chip right-aligned. Two sections, **New** and **Carried over**, split by the ritual's own
-rule (`triage-inbox.md` §1: `captured:` or file mtime against `.thock/state/inbox/last-triage`),
-so the two surfaces agree on what is old. The list is a `uniform_list`; the selection is kept by
-stem and survives refresh, re-parse and vault file events. When the selected row is filed or
-disappears underneath, the selection moves to the next row, so `space` `space` `space` walks the
-list.
+**List header.** *Inbox* as the view's title, then the two sections as counts — **New 4** and
+**Carried over 2** — with the section that holds the selection highlighted, then the filter button
+(`/`), which becomes the filter box while filtering. Clicking a section scrolls to it; the counts
+are not filters. A section with no rows hides its count.
 
-**Reader.** The selected note's body rendered with `markdown::MarkdownElement` and
-`MarkdownStyle::themed`, as the chat panel renders the agent's replies. Frontmatter is not shown;
-its fields become the meta line above the body (source, sender, captured, due, link). Image lines
-resolve by V39 §4's rule before rendering so `![alt](/images/x.png)` draws the vault's picture. The
-reader is read-only. The split between list and reader is draggable (§9) and remembered per vault
-in `.thock/state/inbox/layout.json` (`{"list_width": 0.38}`), defaulting to 38% of the pane.
+**List.** Two lines per item: the title, then a muted meta line — source, sender when there is
+one, age, a picture glyph when the note has an image line — and the suggestion chip on the right,
+centred on the row. The source is plain text in the meta line, not a chip. The chip names the
+destination only (§7.4); a row without a confident suggestion shows nothing there, not a dash.
+Rows are inset from the pane edge and the selection is a rounded band, with a faint accent ring
+while the list has focus. Every row has one fixed height, because `uniform_list` sizes every row
+like the one it measures (§9). The two sections, **New** and **Carried over**, split by the
+ritual's own rule (`triage-inbox.md` §1: `captured:` or file mtime against
+`.thock/state/inbox/last-triage`), so the two surfaces agree on what is old. **New** has no header
+row of its own, since the list header names it; **Carried over** starts with a quiet divider row.
+The selection is kept by stem and survives refresh, re-parse and vault file events. When the
+selected row is filed or disappears underneath, the selection moves to the next row, so `space`
+`space` `space` walks the list. A filed row leaves the list at the keystroke, not when its writes
+land (§6.1).
 
-**Action bar.** The probability meter for the selected item (§7.4) and the keycaps, rendered with
-`ui::KeyBinding::for_action_in` so a rebinding shows up without a code change. The first keycap
-always reads what `space` will do for the selected item — the suggested destination, or *Open*
-when there is none — so the default is never a surprise.
+**List footer.** On the left, hints for the keys that act on the list — move, mark, filter, keys
+sheet — rendered from the bindings. On the right, the session's quiet stats: whether suggestions
+are on, `3 filed today` and what they cost (§7.5), or `3 marked` while marks exist (§4.3). A vault
+without a gateway grant shows *Suggestions come with Thock Plus* there instead, dismissible.
+
+**Reader header.** The meta line for the selected note, at the list header's height: a source
+glyph, the sender's name and address, when it was captured, and its due date when it has one.
+On the right, the link as words — *Open in Gmail ↗*, *Open link ↗* — never the raw URL, then the
+keys-sheet button (`?`).
+
+**Destination bar.** Under the note's title and above its body, one button per destination in a
+fixed order — **Today**, **Soon**, **Someday**, **Archive** — so a key's place never moves between
+notes. Each button holds its keycap, its label, the suggestion's probability for it and a thin bar
+drawing that probability, so the stats and the action are one object. The suggested destination
+is drawn in the accent colour (filled or outlined by tier, §7.4) and also carries the `space`
+keycap. After a divider, **Open** and **Undo** as quieter buttons; when there is no suggestion,
+`space` sits on **Open**, so what `space` does is always written on exactly one button. Without a
+suggestion, or with suggestions off, the four buttons show no percentages and no bars. Keycaps are
+`ui::KeyBinding::for_action_in`, so a rebinding shows up without a code change. The buttons are
+clickable and dispatch the same actions. Below about 640px of reader width the bar wraps to two
+rows of two.
+
+**Reader.** The note's title, the destination bar, a rule, then the body rendered with
+`markdown::MarkdownElement` and `MarkdownStyle::themed`, as the chat panel renders the agent's
+replies. Frontmatter is not shown; its fields are the reader header. Image lines resolve by V39
+§4's rule before rendering so `![alt](/images/x.png)` draws the vault's picture. The body stops at
+680px per line and scrolls under the title and bar. The reader is read-only. The keys sheet
+replaces the reader while it is open. The split is draggable (§9) and remembered per vault in
+`.thock/state/inbox/layout.json` (`{"list_width": 0.32}`), defaulting to 32% of the pane.
+
+**Notices.** The paused-suggestions line, a failed write and *Already archived* render as one strip
+under both pane headers, full width, and leave when resolved.
+
+**Spacing and type.** Spacing is on a 4px grid, and each pane has one left edge 20px in: an 8px
+pane inset plus a 12px row padding, shared by header, rows and footer. Nothing touches the window
+edge or the split.
+
+| Element | Size | Spacing |
+| --- | --- | --- |
+| Pane headers | 52px tall | 20px sides in the list, 40px in the reader |
+| List rows | 60px tall, radius 8 | 12px left, 16px right, 4px title to meta |
+| List footer | 36px tall | 20px sides |
+| Destination buttons | 56px tall, radius 8, at least 140px wide | 8px between, 14px inside |
+| Reader | | 28px top, 40px sides, 18px title to bar |
+
+| Text | Style |
+| --- | --- |
+| Reader title | `HeadlineSize::XLarge`, semibold |
+| View title *Inbox* | `LabelSize::Large`, semibold |
+| Reader body | 15px, line height 1.65, at most 680px wide |
+| Row title, button labels, section counts | `LabelSize::Default` |
+| Meta lines, hints, stats, percentages | `LabelSize::Small`, muted |
+| Keycaps | `ui::KeyBinding`, one size everywhere |
 
 ### 4.3 Marks
 
-`x` marks the selected row; marked rows show a check in the gutter and the header reads `3
-marked`. While any row is marked, the four verbs apply to every marked row in list order, and
+`x` marks the selected row; marked rows show a check in the gutter and the list footer reads
+`3 marked`. While any row is marked, the four verbs apply to every marked row in list order, and
 `space` applies each row's own suggestion (rows without one are skipped and stay marked). Marks
 clear when the list refreshes from disk. `escape` clears marks before it leaves the view.
 
 ## 5. Keys and focus
 
-Focus lives in the list. Every verb is a named `thock::` action; the action bar, the row menu and
-the keys sheet render from the bindings.
+Focus lives in the list. Every verb is a named `thock::` action; the destination bar, the list
+footer's hints, the row menu and the keys sheet render from the bindings.
 
 | Key | Action | Does |
 | --- | --- | --- |
@@ -159,8 +217,9 @@ under `ThockInboxView`, `ThockInboxView && !filtering && !reader` and `ThockInbo
 and the vim letters in `assets/keymaps/vim.json` under `ThockInboxView && !filtering`, mirroring
 the Backlog panel's blocks. `ctrl-alt-i` joins the global Thock toggles.
 
-Rows are also clickable (select), double-clickable (open) and right-clickable (menu), and the
-header's filter and keys controls are buttons, so the view is complete for a mouse user too.
+Rows are also clickable (select), double-clickable (open) and right-clickable (menu), the
+destination bar's buttons file, and the filter and keys controls are buttons, so the view is
+complete for a mouse user too.
 
 ## 6. The writes
 
@@ -287,15 +346,16 @@ Retry*, while any item is in that state. Never a modal, never a blocked key.
 `parse_response` yields `Suggestion { destination, confidence, probabilities, cost }`. The tier
 changes what the row shows, never what the view does on its own:
 
-| Confidence | Chip | `space` |
-| --- | --- | --- |
-| ≥ 0.85 | filled, `→ Soon` | files to the suggestion |
-| 0.50 – 0.85 | outlined, `→ Soon · 62%` | files to the suggestion |
-| < 0.50, or `choice == "unsure"` | none; the row's second line ends with `—` | opens the note |
+| Confidence | Row chip | Destination bar | `space` |
+| --- | --- | --- | --- |
+| ≥ 0.85 | filled, `Soon` | the button filled in the accent colour | files to the suggestion |
+| 0.50 – 0.85 | outlined, `Soon` | the button outlined in the accent colour | files to the suggestion |
+| < 0.50, or `choice == "unsure"` | none | no button highlighted; `space` on **Open** | opens the note |
 
-The meter in the action bar draws all four filing options for the selected item as
-`ui::ProgressBar`s (`unsure` is folded into the label *no suggestion*), so an outlined chip's
-uncertainty is visible as a spread, not just a number. TypeSafe's own three-tier guidance is
+The row chip names the destination only; the numbers live in the destination bar (§4.2), where
+every button shows its option's probability and bar whenever a suggestion exists, at any tier.
+An outlined suggestion's uncertainty is visible there as a spread, not just a number, and an
+`unsure` answer still shows its spread with no button highlighted. TypeSafe's own three-tier guidance is
 0.9 / 0.5; this view sits lower on the top tier because a person is looking at every row.
 
 ### 7.5 The cache and the cost
@@ -381,16 +441,16 @@ own `ui` and `markdown` crates for everything that exists, and a port of what th
 | --- | --- |
 | Tab, singleton, pane host | `workspace::Item`, `add_item_to_active_pane`, `items_of_type` |
 | List, sections, virtualisation | `gpui::uniform_list`, `ui::ListItem`, `ui::ListHeader` |
-| Source chip, suggestion chip | `ui::Chip` (filled vs outlined by tier) |
-| Probability meter | `ui::ProgressBar` per option |
-| Keycaps | `ui::KeyBinding::for_action_in` |
+| Suggestion chip | `ui::Chip` (filled vs outlined by tier) |
+| Destination bar | a `ui::ButtonLike` per destination holding a `KeyBinding`, a `Label`, the percentage and a 3px bar drawn as two `div`s; `ui::Button` for Open and Undo |
+| Keycaps, list footer hints | `ui::KeyBinding::for_action_in` |
 | Reader | `markdown::MarkdownElement`, `MarkdownStyle::themed`, V39 image resolution |
 | Row menu | `ui::ContextMenu` with `.action()` entries |
 | Filter box | `editor::Editor::single_line` |
 | Toast with Undo | `workspace::Toast` with an action |
 | Empty state, Plus banner, paused line | `ui::Callout`, `ui::Banner` |
 | **List / reader split** | **ported:** `crates/thock/src/ui/split.rs`, a horizontal two-pane element with a draggable handle, min widths and a `Resized` event, modelled on gpui-kit's `h_resizable` |
-| **Sectioned list delegate** | **ported shape:** `crates/thock/src/ui/sectioned_list.rs`, a `SectionedListDelegate` trait (`sections`, `items_in`, `render_item`, `render_header`) over `uniform_list`, so the Inbox and a future Backlog refresh share one list spine |
+| **Sectioned list delegate** | **ported shape:** `crates/thock/src/ui/sectioned_list.rs`, a `SectionedListDelegate` trait (`sections`, `items_in`, `render_item`, `render_header`) over `uniform_list`, so the Inbox and a future Backlog refresh share one list spine. `uniform_list` gives every row the height of the one it measures, so the delegate measures the first item, items render at one fixed height, and a header or divider row is never taller than an item. A section may opt out of its header row (the Inbox's **New**, which the list header names) |
 
 Ported files carry the Apache-2.0 notice and the gpui-kit source path they derive from. Nothing
 else from gpui-kit is vendored, and nothing is added to the workspace's dependencies.
@@ -462,6 +522,11 @@ step four.
   `escape` returns; a file event removing the selected item moves the selection without a panic;
   with no gateway grant, no chip is rendered and `space` opens the note; with vim mode on, `j`/`k`
   move and with it off they do not.
+- **Layout (rev 2):** the destination bar's buttons are in the fixed order whatever the
+  suggestion; the suggested button carries the `space` keycap, and with no suggestion **Open**
+  does; clicking a destination button files like its key; every list row lays out at the same
+  height as the measured one, headers and the divider no taller; the list header's section counts
+  follow the selection and a filter.
 - **Service:** suggestions are requested only while a view is open, only for uncached hashes, at
   most four at a time; a 402 pauses without retry; the cache file is appended after each answer and
   loaded on start; the decision record is written after the writes, with `via`.
@@ -495,3 +560,12 @@ step four.
 8. **Centre pane, not a dock.** Rev 1 of the design notes compared a right-dock panel, a column in
    the Backlog and a one-at-a-time review; a triage session deserves the whole pane, and a list
    beside a reader is the shape that makes a suggestion checkable and a keystroke fast.
+9. **Rev 2: the decision lives above the note** (2026-10-11). Rev 1 put the probability meter and
+   the keycaps in a bar along the bottom, under the list, as two strips of small text far from
+   the note they describe; the section header floated alone and nothing shared an edge. Of the
+   three directions compared (the meter and keys moved under the title; a destination bar; a
+   right-hand rail), the destination bar won: each destination is one button holding its key, its
+   probability and its label, so the stats and the action are one object, in the line of sight.
+   The rail reads best on a wide screen but must collapse into the bar on a narrow one, so it is
+   the bar plus a mode. Buttons keep a fixed order rather than sorting by probability, so muscle
+   memory survives a change of suggestion.
