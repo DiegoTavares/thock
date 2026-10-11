@@ -98,7 +98,9 @@ proposes a destination for each item (a Soon or Someday task, an append to today
 a folder, or "leave it") and files only what the user confirms, logging every move to an append-only triage
 log. Capture is dumb, instant and thumb-sized; triage is deliberate, assisted, and at the desk — nothing
 decides anything on the phone. A watched drop directory outside the vault (iCloud Drive / Syncthing) is the
-deferred third transport. Spec: `specs/v13-inbox-routine.md`.
+deferred third transport. Spec: `specs/v13-inbox-routine.md`. _(2026-10-10)_ The ritual is the slow path;
+the **Inbox view** (`specs/v41-inbox-desk-view.md`) is the fast one: the queue in the centre pane with the
+item open beside it, one key per decision, and for Plus vaults a suggested destination that `space` takes.
 
 ## 6. Relationship to Zed — kept / removed / added
 
@@ -364,6 +366,20 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   user has to act — a failure, a lost sign-in, a fixable hold, inbox items waiting. One pure
   `ConnectorStatus` per service feeds both the popover and the inline rows, replacing four
   hand-rolled copies of the same row grammar. Spec `specs/v32-sync-status-indicator.md`. _(shipped)_
+- [ ] **The Inbox at the desk — one key per decision:** a keyboard-first **Inbox view** that opens in the
+  centre pane like a note: the waiting items on the left in *New* and *Carried over*, the selected note
+  rendered on the right (pictures included), and `t` / `s` / `shift-s` / `e` for Today, Soon, Someday and
+  Archive along the bottom, with `u` to undo. The writes are V40's, so a desk decision and a phone swipe
+  leave the same task line, `move_file` and triage-log line. For Plus vaults each row carries a
+  **suggested destination** from Jev, TypeSafe's decision model on OpenRouter, called from the desk with
+  the gateway key it already holds: one `choice` over today / soon / someday / archive / unsure with the
+  item and the vault's `triage-policy.md` as state, a filled chip above 0.85 confidence and an outlined one
+  above 0.5, and `space` takes it. A suggestion only ever pre-selects a key; nothing is filed without a
+  keystroke, and `.thock/state/inbox/decisions.jsonl` records suggestion against choice so the thresholds
+  can be tuned on real decisions. Built from Zed's `ui` and `markdown` crates plus two components ported
+  from gpui-kit into `crates/thock/src/ui/` (a resizable split and a sectioned-list delegate) rather than
+  the kit as a dependency. The Triage Inbox ritual stays for the folder decisions. Spec
+  `specs/v41-inbox-desk-view.md`. _(planned)_
 - [ ] **Money + safety:** Polar products referencing backend plans by id (credits with hard stop, top-up packs, license-key credential), OS sandbox on every hosted session (write = vault, network = gateway allowlist), per-session ceilings, anomaly alerts. _(planned)_
 
 ### Milestone 6 — Thock on iPhone
