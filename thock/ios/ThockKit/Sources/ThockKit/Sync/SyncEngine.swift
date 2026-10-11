@@ -142,6 +142,17 @@ public actor SyncEngine {
         await sync()
     }
 
+    /// Sends a problem report to the service, which files it for a person
+    /// to read (V41). Returns the report's number.
+    public func sendReport(_ report: IssueReport, description: String, screenshots: [Data]) async throws -> Int {
+        guard let credential else {
+            throw APIError(status: 401, code: "unauthorized", error: "This phone isn't connected to your desk.")
+        }
+        struct Filed: Decodable { var number: Int }
+        let filed = try await call("POST", "/v1/vault/feedback", body: report.payload(description: description, screenshots: screenshots), credential: credential, as: Filed.self)
+        return filed.number
+    }
+
     /// Forgets the vault on this phone. The desk's copy is untouched.
     public func disconnect() {
         stop()

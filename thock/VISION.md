@@ -425,6 +425,12 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   the task line carries a wikilink back to it when there was a body, and the triage log gets the
   ritual's own line, so desk and phone receipts agree. Spec `specs/v40-phone-inbox-gestures.md`.
   _(shipped 2026-10-10)_
+- [x] **Report a problem from the phone:** the settings sheet shows how the phone is doing with
+  the desk (a glyph, a headline, when it last checked), Looks, and a *Report a problem* form: what
+  happened, up to three screenshots, and the connection facts shown before they go. The Plus
+  service files each report as an issue on a private repository, so a stuck person reaches us
+  without a mail app. Spec `specs/v41-phone-problem-reports.md`. _(shipped 2026-10-07 on `main`;
+  the backend needs the feedback repository and token from §7 of the spec)_
 
 ---
 

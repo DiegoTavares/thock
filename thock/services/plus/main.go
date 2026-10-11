@@ -52,6 +52,11 @@ type server struct {
 	// under it.
 	publicURL string
 
+	// Problem reports from the phone (feedback.go); nil until a repository
+	// and a token are configured.
+	issues          issueTracker
+	feedbackLimiter *feedbackLimiter
+
 	// Serializes the sync-and-enforce path so two concurrent polls can't
 	// both disable (or both re-enable) a key, and so the phone key is minted
 	// and revoked between passes, never during one. Per process, which is why
@@ -106,6 +111,11 @@ func main() {
 		gw = newFakeGateway()
 	}
 	s := newServer(store, gw, adminToken)
+	if repo, token := os.Getenv("FEEDBACK_REPO"), os.Getenv("FEEDBACK_GITHUB_TOKEN"); repo != "" && token != "" {
+		s.issues = newGitHubTracker(repo, token, "https://api.github.com")
+	} else {
+		log.Print("FEEDBACK_REPO or FEEDBACK_GITHUB_TOKEN is not set; phone problem reports are refused")
+	}
 	if publicURL := os.Getenv("PUBLIC_URL"); publicURL != "" {
 		s.publicURL = strings.TrimRight(publicURL, "/")
 	} else {
@@ -159,6 +169,7 @@ func newServer(store *store, gw gateway, adminToken string) *server {
 		feed:            newFeedHub(),
 		pusher:          &loggingPusher{},
 		publicURL:       "http://localhost:8080",
+		feedbackLimiter: newFeedbackLimiter(feedbackPerHour),
 	}
 	s.coalescer = newPushCoalescer(s.sendPush, func() time.Time { return s.now() })
 	s.feed.onPhoneAbsent = s.coalescer.nudge
@@ -188,6 +199,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/vault/writes/ack", s.withVault(deskOnly, s.handleWritesAck))
 	mux.HandleFunc("GET /v1/vault/feed", s.withVault(bothRead, s.handleFeed))
 	mux.HandleFunc("GET /v1/vault/agent", s.withVault(phoneOnly, s.handleAgentGrant))
+	mux.HandleFunc("POST /v1/vault/feedback", s.withVault(feedbackRoute, s.handleFeedback))
 	if local, ok := s.blobs.(*localBlobStore); ok {
 		mux.HandleFunc("PUT /v1/vault/blobs/{token}", local.serve)
 		mux.HandleFunc("GET /v1/vault/blobs/{token}", local.serve)

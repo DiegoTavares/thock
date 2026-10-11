@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 import ThockKit
 
@@ -302,9 +303,8 @@ struct InboxEditSheet: View {
 struct YouSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openURL) private var openURL
     @State private var confirmingDisconnect = false
-    @State private var noMailApp = false
+    @State private var reporting = false
     @State private var busy = false
 
     private var status: String {
@@ -312,12 +312,12 @@ struct YouSheet: View {
         switch model.syncState {
         case .paused: return "Thock Plus has ended. This phone shows what it has and writes nothing new."
         case .disconnected: return "This phone is no longer connected to your desk."
-        case .working: return "Checking with your desk…"
+        case .working: return "Sending what's new and fetching what changed."
         case .offline:
-            return waiting == 0 ? "Can't reach your desk's copy right now. This phone keeps working on what it has."
-                : "Can't reach your desk's copy right now. \(waiting) \(waiting == 1 ? "change is" : "changes are") kept here and will be sent."
+            return waiting == 0 ? "This phone keeps working on what it has."
+                : "\(waiting) \(waiting == 1 ? "change is" : "changes are") kept here and will be sent."
         default:
-            return waiting == 0 ? "Everything written here has reached your desk." : "\(waiting) \(waiting == 1 ? "change is" : "changes are") waiting for the desk."
+            return waiting == 0 ? "Everything written here has reached your desk." : "They reach your notes when your desk is open."
         }
     }
 
@@ -348,11 +348,8 @@ struct YouSheet: View {
                         Text(model.isPractice ? "Practice notebook" : (model.store?.meta("device_name") ?? "Connected"))
                             .font(Theme.serif(24, style: .title2))
                             .foregroundStyle(Theme.ink)
-                        SyncBar(state: model.syncState, waiting: model.waitingForDesk)
+                        ConnectionStatus(state: model.syncState, waiting: model.waitingForDesk, sentence: status)
                             .padding(.top, 2)
-                        Text(status)
-                            .font(.system(size: 15))
-                            .foregroundStyle(Theme.muted)
                         HStack(alignment: .firstTextBaseline) {
                             Text(lastChecked)
                                 .font(.system(size: 13))
@@ -399,12 +396,14 @@ struct YouSheet: View {
                         .foregroundStyle(Theme.ink)
                     }
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        CardLabel(title: "Help")
-                        deskButton("Report a problem") { reportProblem() }
-                        Text("Opens an email to us with a few details about this phone's connection, not your notes. Read it over before you send it.")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Theme.dim)
+                    if !model.isPractice, model.store?.isConnected == true {
+                        VStack(alignment: .leading, spacing: 8) {
+                            CardLabel(title: "Help")
+                            deskButton("Report a problem") { reporting = true }
+                            Text("Tell us what went wrong, with a screenshot if it helps. A few details about this phone's connection go with it, never your notes.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Theme.dim)
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
@@ -437,27 +436,13 @@ struct YouSheet: View {
         } message: {
             Text(disconnectWarning)
         }
-        .alert("No mail app on this phone", isPresented: $noMailApp) {
-            Button("OK") {}
-        } message: {
-            Text("The report is on your clipboard. Paste it into an email to \(ThockEnvironment.supportEmail).")
-        }
-    }
-
-    /// Opens the mail app on a report; without one, the report goes to the
-    /// clipboard so it can still be sent some other way.
-    private func reportProblem() {
-        let report = model.issueReport()
-        guard let url = report.mailURL(to: ThockEnvironment.supportEmail) else {
-            UIPasteboard.general.string = report.body
-            noMailApp = true
-            return
-        }
-        openURL(url) { accepted in
-            if !accepted {
-                UIPasteboard.general.string = report.body
-                noMailApp = true
-            }
+        .sheet(isPresented: $reporting) {
+            ReportProblemSheet()
+                .presentationBackground(Theme.surface)
+                .presentationCornerRadius(26)
+                .presentationDragIndicator(.hidden)
+                .preferredColorScheme(model.appearance.scheme)
+                .tint(Theme.amber)
         }
     }
 
@@ -484,48 +469,207 @@ struct YouSheet: View {
     }
 }
 
-/// The connection at a glance: a bar that sweeps while the phone checks with
-/// the desk and settles into one colour once it knows. The sentence under
-/// it says the same in words, so VoiceOver skips the bar.
-struct SyncBar: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+/// The connection at a glance: a glyph in the state's colour, a headline,
+/// and the sentence that says what it means. Same dot language as the Inbox
+/// receipts.
+struct ConnectionStatus: View {
     var state: SyncState
     var waiting: Int
+    var sentence: String
 
-    private var tone: Color {
+    private var glyph: (name: String, tone: Color, headline: String) {
         switch state {
-        case .working: return Theme.amber
-        case .upToDate: return waiting == 0 ? Theme.good : Theme.amber
-        case .offline, .disconnected: return Theme.warn
-        case .paused, .notConnected: return Theme.dim
+        case .notConnected: return ("circle.dashed", Theme.dim, "Not connected")
+        case .working: return ("arrow.triangle.2.circlepath.circle", Theme.amber, "Checking with your desk")
+        case .upToDate where waiting > 0: return ("circle.lefthalf.filled", Theme.amber, "\(waiting) waiting for the desk")
+        case .upToDate: return ("checkmark.circle.fill", Theme.good, "Up to date")
+        case .offline: return ("exclamationmark.circle", Theme.warn, "Can't reach your desk")
+        case .paused: return ("pause.circle", Theme.dim, "Thock Plus has ended")
+        case .disconnected: return ("xmark.circle", Theme.warn, "Disconnected by your desk")
         }
     }
 
     var body: some View {
-        GeometryReader { proxy in
-            let width = proxy.size.width
-            ZStack(alignment: .leading) {
-                Capsule().fill(Theme.rule)
-                if state == .working, !reduceMotion {
-                    TimelineView(.animation) { context in
-                        let period = 1.4
-                        let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
-                        Capsule()
-                            .fill(tone)
-                            .frame(width: width * 0.3)
-                            .offset(x: width * 1.3 * phase - width * 0.3)
-                    }
-                    .clipShape(Capsule())
-                } else {
-                    Capsule()
-                        .fill(tone)
-                        .frame(width: state == .working ? width * 0.5 : width)
-                }
+        let glyph = glyph
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: glyph.name)
+                .font(.system(size: 20, weight: .medium))
+                .foregroundStyle(glyph.tone)
+                .frame(width: 24)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(glyph.headline)
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(Theme.ink)
+                Text(sentence)
+                    .font(.system(size: 14))
+                    .foregroundStyle(Theme.muted)
             }
         }
-        .frame(height: 6)
-        .animation(.snappy(duration: 0.25), value: state)
-        .accessibilityHidden(true)
+        .animation(.snappy(duration: 0.2), value: state)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// A picture on its way into a report: shown as a thumbnail, sent as JPEG.
+struct Screenshot: Identifiable {
+    let id = UUID()
+    var image: UIImage
+    var data: Data
+
+    /// Keeps a picture small enough to send: at most 1600 pixels on its
+    /// longest side, as JPEG. Nil for data that isn't a picture.
+    static func prepare(_ raw: Data) -> Screenshot? {
+        guard let image = UIImage(data: raw), image.size.width > 0, image.size.height > 0 else { return nil }
+        let pixels = CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
+        let factor = min(1, 1600 / max(pixels.width, pixels.height))
+        let size = CGSize(width: (pixels.width * factor).rounded(), height: (pixels.height * factor).rounded())
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let scaled = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        guard let jpeg = scaled.jpegData(compressionQuality: 0.8) else { return nil }
+        return Screenshot(image: scaled, data: jpeg)
+    }
+}
+
+/// Report a problem (V41): what happened in the person's words, screenshots
+/// if they help, and the facts that go with it, shown before anything is
+/// sent. Send files it for us to read; nothing leaves the phone otherwise.
+struct ReportProblemSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @State private var picks: [PhotosPickerItem] = []
+    @State private var screenshots: [Screenshot] = []
+    @State private var sending = false
+    @State private var showingDetails = false
+    @State private var failure: String?
+    @FocusState private var focused: Bool
+
+    private var description: String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SheetHeader(leading: "Cancel", title: "Report a problem", trailing: sending ? "Sending…" : "Send", trailingEnabled: !sending && !description.isEmpty) {
+                dismiss()
+            } onTrailing: {
+                send()
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    TextField("What happened? What did you expect instead?", text: $text, axis: .vertical)
+                        .font(.system(size: 17))
+                        .foregroundStyle(Theme.ink)
+                        .lineLimit(4...12)
+                        .focused($focused)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        CardLabel(title: "Screenshots", note: screenshots.isEmpty ? nil : "\(screenshots.count) of \(IssueReport.maxScreenshots)")
+                        HStack(spacing: 10) {
+                            ForEach(screenshots) { shot in
+                                thumbnail(shot)
+                            }
+                            if screenshots.count < IssueReport.maxScreenshots {
+                                PhotosPicker(selection: $picks, maxSelectionCount: IssueReport.maxScreenshots - screenshots.count, matching: .images) {
+                                    Image(systemName: "plus")
+                                        .font(.system(size: 20, weight: .medium))
+                                        .foregroundStyle(Theme.amber)
+                                        .frame(width: 72, height: 72)
+                                        .background(Theme.ground, in: RoundedRectangle(cornerRadius: 12))
+                                        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.rule, style: StrokeStyle(lineWidth: 1, dash: [5, 4])))
+                                }
+                                .accessibilityLabel("Add a screenshot")
+                            }
+                        }
+                        Text("Optional. A picture of what went wrong says a lot.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.dim)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        CardLabel(title: "Sent with it")
+                        Text("A few details about this phone's connection, never your notes.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.dim)
+                        Button(showingDetails ? "Hide the details" : "Show the details") {
+                            showingDetails.toggle()
+                        }
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.amber)
+                        if showingDetails {
+                            Text(model.issueReport().details)
+                                .font(Theme.mono(12))
+                                .foregroundStyle(Theme.muted)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                .padding(.bottom, 24)
+            }
+            .disabled(sending)
+        }
+        .padding(.horizontal, 20)
+        .onAppear { focused = true }
+        .onChange(of: picks) { _, items in
+            guard !items.isEmpty else { return }
+            Task { await add(items) }
+        }
+        .alert("Couldn't send the report", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+            Button("OK") {}
+        } message: {
+            Text(failure ?? "")
+        }
+    }
+
+    private func thumbnail(_ shot: Screenshot) -> some View {
+        Image(uiImage: shot.image)
+            .resizable()
+            .scaledToFill()
+            .frame(width: 72, height: 72)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(alignment: .topTrailing) {
+                Button {
+                    screenshots.removeAll { $0.id == shot.id }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(Theme.ink, Theme.surface)
+                        .padding(4)
+                }
+                .accessibilityLabel("Remove this screenshot")
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Screenshot")
+    }
+
+    private func add(_ items: [PhotosPickerItem]) async {
+        for item in items where screenshots.count < IssueReport.maxScreenshots {
+            guard let raw = try? await item.loadTransferable(type: Data.self), let shot = Screenshot.prepare(raw) else {
+                failure = "That picture couldn't be read."
+                continue
+            }
+            screenshots.append(shot)
+        }
+        picks = []
+    }
+
+    private func send() {
+        sending = true
+        Task {
+            do {
+                _ = try await model.sendReport(description: description, screenshots: screenshots.map(\.data))
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                model.show("Sent. Thank you.")
+                model.sheet = nil
+            } catch {
+                failure = AppModel.sentence(for: error)
+            }
+            sending = false
+        }
     }
 }
 
