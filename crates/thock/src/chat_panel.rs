@@ -716,7 +716,14 @@ impl ChatPanel {
                 }
             },
         }
+        self.publish_entitlement(cx);
         cx.notify();
+    }
+
+    /// Shares the entitlement with the surfaces that ride the same grant
+    /// (V41 §7.3) whenever the connection changes.
+    fn publish_entitlement(&self, cx: &mut App) {
+        plus::set_current_entitlement(self.entitlement().cloned(), cx);
     }
 
     /// Re-reads the balance; called after every turn so the footer keeps up
@@ -1789,6 +1796,7 @@ impl ChatPanel {
                     entitlement: connected.entitlement,
                     warned_low: false,
                 };
+                this.publish_entitlement(cx);
                 this.view = PanelView::Chat;
                 this.set_mode(ConnectionMode::Hosted, cx);
                 this.continue_pending_launch(cx);
@@ -1806,6 +1814,7 @@ impl ChatPanel {
         self.session = None;
         self.reset_transcript_state();
         self.connection = PlusConnection::Disconnected;
+        self.publish_entitlement(cx);
         cx.notify();
         let http = cx.http_client();
         cx.spawn(async move |this, cx| {

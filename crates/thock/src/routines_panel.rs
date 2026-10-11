@@ -197,6 +197,9 @@ fn link_icon(link: &RoutineLink) -> RowIcon {
         .and_then(manifest_icon)
         .unwrap_or_else(|| match link.kind {
             LinkKind::Browser => RowIcon::Path("icons/file_icons/html.svg"),
+            LinkKind::Editor | LinkKind::Preview if link.action.is_some() => {
+                RowIcon::Named(IconName::ArrowRight)
+            }
             LinkKind::Editor | LinkKind::Preview => {
                 if link.open.ends_with(".md") {
                     RowIcon::Named(IconName::Notepad)
@@ -1105,6 +1108,27 @@ impl RoutinesPanel {
         let VaultStatus::Valid(vault) = &self.vault_status else {
             return;
         };
+        if let Some(action) = &link.action {
+            // A view, not a file (V41 §10): the workspace's handler runs it.
+            match cx.build_action(action, None) {
+                Ok(action) => {
+                    let workspace = self.workspace.clone();
+                    window.defer(cx, move |window, cx| {
+                        if let Some(workspace) = workspace.upgrade() {
+                            workspace.read(cx).focus_handle(cx).dispatch_action(
+                                action.as_ref(),
+                                window,
+                                cx,
+                            );
+                        }
+                    });
+                }
+                Err(error) => {
+                    self.show_error_deferred(format!("Couldn't run {}: {error}", link.name), cx);
+                }
+            }
+            return;
+        }
         let vault = vault.clone();
         let now = Local::now();
         let resolved = match routines::resolve_link(&vault, &link.open, now.date_naive()) {
@@ -3060,6 +3084,7 @@ mod tests {
             id: "row".into(),
             name: "Row".into(),
             open: open.into(),
+            action: None,
             kind,
             icon: icon.map(str::to_string),
             group: None,
@@ -3120,6 +3145,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             open: format!("daily/{id}.md"),
+            action: None,
             kind: LinkKind::Editor,
             icon: None,
             group: group.map(str::to_string),

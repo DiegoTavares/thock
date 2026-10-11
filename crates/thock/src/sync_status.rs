@@ -28,7 +28,9 @@ use crate::calendar_service::{
     HoldReason, SyncCalendarNow, SyncState,
 };
 use crate::gmail_service::{self, GmailService, SyncGmailNow};
-use crate::inbox_service::{self, InboxService, SyncInboxNow, TriageInbox};
+use crate::inbox_service::{self, InboxService, SyncInboxNow};
+use crate::inbox_suggest::format_cost;
+use crate::inbox_view::OpenInbox;
 use crate::readwise_service::{self, ConnectReadwise, ReadwiseService, SyncReadwiseNow};
 use crate::vault_sync::{
     self, ConnectPhone, PhoneSyncState, SkippedFile, SyncVaultNow, VaultSyncService,
@@ -116,7 +118,7 @@ pub enum ActionKind {
     ConnectPhone,
     AddPlannerHeading,
     ChoosePlannerHeading,
-    TriageInbox,
+    OpenInbox,
 }
 
 impl ActionKind {
@@ -132,7 +134,7 @@ impl ActionKind {
             Self::ConnectPhone => ConnectPhone.boxed_clone(),
             Self::AddPlannerHeading => AddPlannerHeading.boxed_clone(),
             Self::ChoosePlannerHeading => ChoosePlannerHeading.boxed_clone(),
-            Self::TriageInbox => TriageInbox.boxed_clone(),
+            Self::OpenInbox => OpenInbox.boxed_clone(),
         }
     }
 
@@ -308,9 +310,9 @@ pub fn status_for_gmail(state: &SyncState) -> Option<ConnectorStatus> {
     })
 }
 
-/// The Inbox row (V13 §10.4). Items waiting are the way into triage. When
-/// Gmail already offers the Google connect button, this row only points at
-/// it, so the button shows once.
+/// The Inbox row (V13 §10.4, V41 §10). Items waiting open the Inbox view;
+/// the ritual is its `shift-r`. When Gmail already offers the Google connect
+/// button, this row only points at it, so the button shows once.
 pub fn status_for_inbox(
     state: &SyncState,
     queue_depth: usize,
@@ -337,7 +339,7 @@ pub fn status_for_inbox(
         SyncState::Synced { .. } => {
             ConnectorStatus::new(connector, format!("{queue_depth} waiting"))
                 .attention(Attention::Waiting)
-                .action(ActionKind::TriageInbox, "Triage")
+                .action(ActionKind::OpenInbox, "Open")
                 .action(sync_now, "Sync now")
         }
         SyncState::Holding { reason } => ConnectorStatus::new(connector, reason.summary())
@@ -491,7 +493,33 @@ pub fn inbox_status(
 ) -> Option<ConnectorStatus> {
     let gmail_offers_connect =
         gmail.is_some_and(|gmail| matches!(gmail.state(), SyncState::NeverConnected));
-    status_for_inbox(service.state(), service.queue_depth(), gmail_offers_connect)
+    let status = status_for_inbox(service.state(), service.queue_depth(), gmail_offers_connect)?;
+    Some(with_suggestion_report(
+        status,
+        service.month_cost(),
+        service.decision_report().summary(),
+    ))
+}
+
+/// What the suggestions cost this month, on the row, and how often they were
+/// taken, in its tooltip (V41 §7.5, §7.6). Nothing changes without a record.
+fn with_suggestion_report(
+    mut status: ConnectorStatus,
+    month_cost: f64,
+    report: Option<String>,
+) -> ConnectorStatus {
+    if month_cost > 0.0 {
+        status.summary = format!(
+            "{} · {} this month",
+            status.summary,
+            format_cost(month_cost)
+        )
+        .into();
+    }
+    if let Some(report) = report {
+        status.detail = Some(format!("Inbox suggestion report: {report}").into());
+    }
+    status
 }
 
 pub fn readwise_status(service: &ReadwiseService) -> Option<ConnectorStatus> {
@@ -1261,15 +1289,27 @@ mod tests {
     }
 
     #[test]
-    fn inbox_items_waiting_lead_to_triage() {
+    fn inbox_items_waiting_open_the_view() {
         let inbox = status_for_inbox(&synced(), 3, false).unwrap();
         assert_eq!(inbox.summary.as_ref(), "3 waiting");
         assert_eq!(inbox.attention, Attention::Waiting);
-        assert_eq!(
-            inbox.primary_action().unwrap().kind,
-            ActionKind::TriageInbox
+        assert_eq!(inbox.primary_action().unwrap().kind, ActionKind::OpenInbox);
+        assert_eq!(labels(&inbox), ["Open", "Sync now"]);
+        assert_eq!(inbox.detail, None);
+
+        let with_report = with_suggestion_report(
+            inbox.clone(),
+            0.0123,
+            Some("suggestion taken 83% of the time, 212 decisions".to_string()),
         );
-        assert_eq!(labels(&inbox), ["Triage", "Sync now"]);
+        assert_eq!(with_report.summary.as_ref(), "3 waiting · $0.01 this month");
+        assert_eq!(
+            with_report.detail.as_deref(),
+            Some("Inbox suggestion report: suggestion taken 83% of the time, 212 decisions")
+        );
+        assert_eq!(labels(&with_report), ["Open", "Sync now"]);
+        let quiet = with_suggestion_report(inbox, 0.0, None);
+        assert_eq!(quiet.summary.as_ref(), "3 waiting");
     }
 
     #[test]

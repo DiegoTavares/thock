@@ -1,0 +1,22 @@
+{
+  "model": "typesafe/jev-1.13",
+  "answers": {
+    "destination": {
+      "type": "choice",
+      "choice": "someday",
+      "probabilities": {
+        "today": 0.05,
+        "soon": 0.03,
+        "someday": 0.91,
+        "archive": 0.01,
+        "unsure": 0.0
+      },
+      "confidence": 0.91
+    }
+  },
+  "usage": {
+    "prompt_tokens": 550,
+    "completion_tokens": 0,
+    "cost": 0.0000231
+  }
+}

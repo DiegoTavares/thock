@@ -228,7 +228,11 @@ fn validate_routine_id(id: &str) -> Result<()> {
 struct RoutineLinkContent {
     id: Option<String>,
     name: String,
+    #[serde(default)]
     open: String,
+    /// A named action to dispatch instead of opening a file (V41 §10), such
+    /// as `thock::OpenInbox`.
+    action: Option<String>,
     kind: Option<String>,
     icon: Option<String>,
     group: Option<String>,
@@ -241,6 +245,13 @@ struct RoutineLinkContent {
 impl RoutineLinkContent {
     fn resolve(self, warnings: &mut Vec<String>) -> RoutineLink {
         collect_unknown_keys(warnings, "link.", &self.unknown);
+        let action = self.action.filter(|action| !action.trim().is_empty());
+        if action.is_none() && self.open.trim().is_empty() {
+            warnings.push(format!(
+                "link {:?} has neither `open` nor `action`; it will do nothing",
+                self.name
+            ));
+        }
         let kind = match self.kind.as_deref() {
             None | Some("editor") => LinkKind::Editor,
             Some("preview") => LinkKind::Preview,
@@ -261,6 +272,7 @@ impl RoutineLinkContent {
                 .unwrap_or_else(|| slugify(&self.name)),
             name: self.name,
             open: self.open,
+            action,
             kind,
             icon: self.icon.filter(|icon| !icon.is_empty()),
             group: self.group.filter(|group| !group.is_empty()),
@@ -313,6 +325,7 @@ impl RoutineSurfaceContent {
             id: slugify(&self.name),
             name: self.name,
             open: self.open,
+            action: None,
             kind: LinkKind::Browser,
             icon: None,
             group: None,
@@ -479,8 +492,12 @@ pub struct RoutineLink {
     /// the slugified name.
     pub id: String,
     pub name: String,
-    /// Vault-relative path, possibly containing date templates (§6).
+    /// Vault-relative path, possibly containing date templates (§6). Empty
+    /// when the link dispatches an `action` instead.
     pub open: String,
+    /// A named action the row dispatches instead of opening `open` (V41
+    /// §10), for a Routine whose destination is a Thock view.
+    pub action: Option<String>,
     pub kind: LinkKind,
     /// Named icon overriding the row default; `None` or an unknown name
     /// falls back to the default for the link's kind (the panel owns the
@@ -588,6 +605,8 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
         id: &'a str,
         name: &'a str,
         open: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<&'a str>,
         kind: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         icon: Option<&'a str>,
@@ -679,6 +698,7 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
                 id: &link.id,
                 name: &link.name,
                 open: &link.open,
+                action: link.action.as_deref(),
                 kind: link.kind.as_str(),
                 icon: link.icon.as_deref(),
                 group: link.group.as_deref(),
@@ -2294,11 +2314,19 @@ mod tests {
         assert_eq!(manifest.icon.as_deref(), Some("envelope"));
         assert_eq!(manifest.doc, "routines/inbox/Inbox.md");
         assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
-        // The rail row runs triage (a verb); the log hides in a group; there
-        // is deliberately no row that opens inbox/ (V13 §12 #2).
-        assert_eq!(manifest.links.len(), 1);
-        assert_eq!(manifest.links[0].open, "archives/inbox/triage-log.md");
-        assert_eq!(manifest.links[0].group.as_deref(), Some("History"));
+        // The Inbox row opens the view (V41 §10); the log hides in a group;
+        // there is still no row that opens the raw inbox/ folder.
+        assert_eq!(manifest.links.len(), 2);
+        assert_eq!(manifest.links[0].name, "Inbox");
+        assert_eq!(
+            manifest.links[0].action.as_deref(),
+            Some("thock::OpenInbox")
+        );
+        assert_eq!(manifest.links[0].open, "");
+        assert_eq!(manifest.links[0].group.as_deref(), Some("Today"));
+        assert_eq!(manifest.links[1].open, "archives/inbox/triage-log.md");
+        assert_eq!(manifest.links[1].action, None);
+        assert_eq!(manifest.links[1].group.as_deref(), Some("History"));
         let skills: Vec<(&str, bool)> = manifest
             .skills
             .iter()

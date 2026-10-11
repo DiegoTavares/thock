@@ -1,8 +1,10 @@
 //! BYO-agent rails (V5 spec §6.1–6.2): the launch command for the user's own
 //! CLI agent, where it is stored, and how a kickoff prompt becomes argv.
 //!
-//! Thock never speaks to a model. Everything here reduces to: what
-//! command, what working directory, and what first argument.
+//! Thock never speaks to a chat model itself (the Inbox view's one typed
+//! decision request, V41 §7.3, is the exception that proves the rule).
+//! Everything here reduces to: what command, what working directory, and
+//! what first argument.
 
 use anyhow::{Context as _, Result};
 use std::fs;

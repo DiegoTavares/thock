@@ -1,6 +1,7 @@
 # Thock V41 - The Inbox at the desk: a keyboard-first view with a suggested destination
 
-**Status:** Planned (2026-10-10)
+**Status:** Implemented (2026-10-10); the Jev request is exercised against a fake endpoint in tests
+and awaits its first run against OpenRouter from a Plus vault
 **Owner:** Diego · **Date:** 2026-10-10
 **Design reference:** the design notes with the Jev study, the gpui-kit evaluation, the component
 map and the decision cards this spec resolves: <https://claude.ai/artifact/FoeWmrEjqsMiTKvZKCvfBp>.
@@ -412,8 +413,10 @@ else from gpui-kit is vendored, and nothing is added to the workspace's dependen
   `thock::OpenInbox` (group *Today*), replacing the comment that said there is deliberately no row
   that opens `inbox/`. The routine doc (`doc.md`, materialised as `routines/inbox/Inbox.md`) gains a
   paragraph on the view and its keys.
-- **Registration.** One `InboxView` registration call in `crates/zed/src/zed.rs` next to the panel
-  loads, the only line outside `crates/thock/` beyond the keymaps.
+- **Registration.** `inbox_view::init(cx)` from `thock::init`, which `crates/zed/src/main.rs`
+  already calls, so nothing outside `crates/thock/` changes beyond the keymaps. The Routine link
+  that opens the view needed one small addition to the manifest format: a `[[link]]` may name an
+  `action` instead of a path to `open`.
 
 ## 11. Implementation notes
 
@@ -432,7 +435,7 @@ else from gpui-kit is vendored, and nothing is added to the workspace's dependen
   already shared, so the phone's fixtures pin the desk's output.
 
 **Outside `crates/thock/`:** the keymap blocks in `assets/keymaps/default-linux.json`,
-`default-macos.json` and `vim.json`; one registration line in `crates/zed/src/zed.rs`.
+`default-macos.json` and `vim.json`, and nothing else.
 
 **Order of work:** `InboxItem` and `items()` → the view with keys, writes and undo, no suggestions
 → the split → `inbox_suggest.rs`, the chips and the meter. The view is useful at step two; Jev is

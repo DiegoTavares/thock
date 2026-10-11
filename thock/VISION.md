@@ -366,7 +366,7 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   user has to act — a failure, a lost sign-in, a fixable hold, inbox items waiting. One pure
   `ConnectorStatus` per service feeds both the popover and the inline rows, replacing four
   hand-rolled copies of the same row grammar. Spec `specs/v32-sync-status-indicator.md`. _(shipped)_
-- [ ] **The Inbox at the desk — one key per decision:** a keyboard-first **Inbox view** that opens in the
+- [x] **The Inbox at the desk — one key per decision:** a keyboard-first **Inbox view** that opens in the
   centre pane like a note: the waiting items on the left in *New* and *Carried over*, the selected note
   rendered on the right (pictures included), and `t` / `s` / `shift-s` / `e` for Today, Soon, Someday and
   Archive along the bottom, with `u` to undo. The writes are V40's, so a desk decision and a phone swipe
@@ -379,7 +379,8 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   can be tuned on real decisions. Built from Zed's `ui` and `markdown` crates plus two components ported
   from gpui-kit into `crates/thock/src/ui/` (a resizable split and a sectioned-list delegate) rather than
   the kit as a dependency. The Triage Inbox ritual stays for the folder decisions. Spec
-  `specs/v41-inbox-desk-view.md`. _(planned)_
+  `specs/v41-inbox-desk-view.md`. _(shipped; the Jev call is live code against the documented
+  endpoint, untested against the real service until a Plus vault runs it)_
 - [ ] **Money + safety:** Polar products referencing backend plans by id (credits with hard stop, top-up packs, license-key credential), OS sandbox on every hosted session (write = vault, network = gateway allowlist), per-session ceilings, anomaly alerts. _(planned)_
 
 ### Milestone 6 — Thock on iPhone
