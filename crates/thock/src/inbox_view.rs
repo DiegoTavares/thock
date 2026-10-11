@@ -68,7 +68,7 @@ const BAR_BUTTON_HEIGHT: Pixels = px(56.);
 const BAR_BUTTON_MIN_WIDTH: Pixels = px(140.);
 /// Open and Undo share one width, wide enough for Open with the `space`
 /// keycap, so the bar keeps its geometry when `space` moves onto Open.
-const QUIET_BUTTON_MIN_WIDTH: Pixels = px(168.);
+const QUIET_BUTTON_MIN_WIDTH: Pixels = px(200.);
 const READER_MAX_WIDTH: Pixels = px(680.);
 /// Below this reader width the destination bar wraps to two rows of two:
 /// four buttons at their minimum width, Open, Undo and the reader's sides
@@ -1811,18 +1811,67 @@ impl InboxView {
             .into_any_element()
     }
 
-    fn render_list_footer(&self, cx: &mut Context<Self>) -> AnyElement {
-        let hint = |actions: &[&dyn Action], label: &'static str, cx: &App| {
+    /// The keycap the footer shows for moving one row: `k`/`j` under vim,
+    /// else the arrows. The highest-precedence binding would be the shared
+    /// menu's `ctrl-p`/`ctrl-n`, and vim binds the row keys to its own
+    /// actions, so both are searched by name.
+    fn move_keycap(
+        &self,
+        action_names: [&str; 2],
+        preferred: [&str; 2],
+        fallback: &dyn Action,
+        window: &Window,
+        cx: &App,
+    ) -> KeyBinding {
+        let bindings: Vec<(bool, gpui::KeyBinding)> = action_names
+            .into_iter()
+            .filter_map(|name| cx.build_action(name, None).ok())
+            .flat_map(|action| {
+                let vim = action.name().starts_with("vim::");
+                window
+                    .bindings_for_action_in(action.as_ref(), &self.focus_handle)
+                    .into_iter()
+                    .map(move |binding| (vim, binding))
+            })
+            .collect();
+        preferred
+            .into_iter()
+            .find_map(|key| {
+                bindings.iter().find(|(_, binding)| {
+                    matches!(binding.keystrokes(), [keystroke]
+                        if keystroke.key() == key && !keystroke.modifiers().modified())
+                })
+            })
+            .map(|(vim, binding)| KeyBinding::from_keystrokes(binding.keystrokes().into(), *vim))
+            .unwrap_or_else(|| KeyBinding::for_action_in(fallback, &self.focus_handle, cx))
+    }
+
+    fn render_list_footer(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let hint = |keycaps: Vec<KeyBinding>, label: &'static str| {
             h_flex()
                 .flex_none()
                 .gap_1()
-                .children(
-                    actions
-                        .iter()
-                        .map(|action| KeyBinding::for_action_in(*action, &self.focus_handle, cx)),
-                )
+                .children(keycaps)
                 .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
         };
+        let keycap =
+            |action: &dyn Action| vec![KeyBinding::for_action_in(action, &self.focus_handle, cx)];
+        let move_keys = vec![
+            self.move_keycap(
+                ["vim::MenuSelectPrevious", "menu::SelectPrevious"],
+                ["k", "up"],
+                &SelectPrevious,
+                window,
+                cx,
+            ),
+            self.move_keycap(
+                ["vim::MenuSelectNext", "menu::SelectNext"],
+                ["j", "down"],
+                &SelectNext,
+                window,
+                cx,
+            ),
+        ];
         let stats = match self.footer_stats(cx) {
             FooterStats::Marked(count) => Some(
                 Label::new(format!("{count} marked"))
@@ -1871,10 +1920,10 @@ impl InboxView {
                     .min_w_0()
                     .overflow_hidden()
                     .gap_3p5()
-                    .child(hint(&[&SelectPrevious, &SelectNext], "move", cx))
-                    .child(hint(&[&MarkInboxItem], "mark", cx))
-                    .child(hint(&[&FilterInbox], "filter", cx))
-                    .child(hint(&[&ShowInboxKeys], "keys", cx)),
+                    .child(hint(move_keys, "move"))
+                    .child(hint(keycap(&MarkInboxItem), "mark"))
+                    .child(hint(keycap(&FilterInbox), "filter"))
+                    .child(hint(keycap(&ShowInboxKeys), "keys")),
             )
             .child(div().flex_1())
             .children(stats.map(|stats| div().flex_none().child(stats)))
@@ -1894,7 +1943,8 @@ impl InboxView {
         {
             return markdown.clone();
         }
-        let source: SharedString = entry.item.body.trim_start().to_string().into();
+        let body = without_leading_title(&entry.item.body, &entry.item.title);
+        let source: SharedString = body.to_string().into();
         let markdown = cx.new(|cx| Markdown::new(source, None, None, cx));
         self.markdown = Some((entry.hash.clone(), markdown.clone()));
         self.reader_scroll.set_offset(point(px(0.), px(0.)));
@@ -2101,6 +2151,7 @@ impl InboxView {
                             &self.focus_handle,
                             cx,
                         ))
+                        .child(keycap_or())
                     })
                     .child(KeyBinding::for_action_in(
                         destination_action(destination).as_ref(),
@@ -2170,6 +2221,7 @@ impl InboxView {
                     &self.focus_handle,
                     cx,
                 ))
+                .child(keycap_or())
             })
             .child(KeyBinding::for_action_in(action, &self.focus_handle, cx))
             .child(Label::new(label).color(Color::Muted));
@@ -2396,7 +2448,7 @@ impl gpui::Render for InboxView {
         let reader_header = self.render_reader_header(cx);
         let notices = self.render_notices(cx);
         let list = self.render_list(cx);
-        let footer = self.render_list_footer(cx);
+        let footer = self.render_list_footer(window, cx);
         let reader = self.render_reader(window, cx);
         let keys_sheet = self.keys_sheet;
         let border = cx.theme().colors().border;
@@ -2501,6 +2553,27 @@ where
 {
     fn into_resize_handler(self) -> Box<dyn Fn(f32, &mut Window, &mut App)> {
         Box::new(move |fraction, window, cx| self(&fraction, window, cx))
+    }
+}
+
+/// Sits between two keycaps that do the same thing, so `space` `s` does not
+/// read as one chord.
+fn keycap_or() -> Label {
+    Label::new("or").size(LabelSize::Small).color(Color::Muted)
+}
+
+/// The body without a first heading that repeats the title, since the
+/// reader already shows the title above the destination bar. A heading that
+/// says something else is the note's own and stays.
+fn without_leading_title<'a>(body: &'a str, title: &str) -> &'a str {
+    let body = body.trim_start();
+    let (first, rest) = body.split_once('\n').unwrap_or((body, ""));
+    let heading = first.trim_start_matches('#');
+    let is_heading = heading.len() < first.len() && heading.starts_with([' ', '\t']);
+    if is_heading && heading.trim().eq_ignore_ascii_case(title.trim()) {
+        rest.trim_start()
+    } else {
+        body
     }
 }
 
@@ -3945,6 +4018,38 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn the_reader_does_not_repeat_the_title(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        // Call Ana's body is just `# Call Ana`, which the title above the
+        // bar already says.
+        select(&mut setup, "Call Ana");
+        draw(&mut setup);
+        setup.view.read_with(&setup.cx, |view, cx| {
+            let (_, markdown) = view.markdown.as_ref().unwrap();
+            assert_eq!(markdown.read(cx).source().as_ref(), "");
+        });
+    }
+
+    #[gpui::test]
+    async fn the_footer_shows_the_row_keys_for_moving(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        // The hint reads the bindings from the last frame, so draw twice.
+        draw(&mut setup);
+        draw(&mut setup);
+        assert!(setup.cx.debug_bounds("KEY_BINDING-up").is_some());
+        assert!(setup.cx.debug_bounds("KEY_BINDING-down").is_some());
+        assert_eq!(setup.cx.debug_bounds("KEY_BINDING-p"), None);
+        assert_eq!(setup.cx.debug_bounds("KEY_BINDING-n"), None);
+        drop(setup);
+
+        let mut setup = setup_vim(cx).await;
+        draw(&mut setup);
+        draw(&mut setup);
+        assert!(setup.cx.debug_bounds("KEY_BINDING-k").is_some());
+        assert!(setup.cx.debug_bounds("KEY_BINDING-j").is_some());
+    }
+
+    #[gpui::test]
     async fn clicking_a_destination_button_files_like_its_key(cx: &mut TestAppContext) {
         let mut setup = setup(cx, Options::default()).await;
         let backlog_before = load(&setup, "backlog.md").await.unwrap();
@@ -4099,6 +4204,32 @@ mod tests {
         assert!(someday.top() >= today.bottom(), "two rows of two");
         assert_eq!(someday.left(), today.left());
         assert!(today.size.width >= BAR_BUTTON_MIN_WIDTH);
+    }
+
+    #[test]
+    fn a_leading_heading_that_repeats_the_title_goes() {
+        assert_eq!(
+            without_leading_title("# Call Ana\n\nAbout the keys.\n", "Call Ana"),
+            "About the keys.\n"
+        );
+        assert_eq!(
+            without_leading_title("\n## call ana  \nbody", "Call Ana"),
+            "body"
+        );
+        assert_eq!(without_leading_title("# Call Ana", "Call Ana"), "");
+        // A different heading, a plain first line and a hashtag stay.
+        assert_eq!(
+            without_leading_title("# Agenda\nCall Ana", "Call Ana"),
+            "# Agenda\nCall Ana"
+        );
+        assert_eq!(
+            without_leading_title("Call Ana\nbody", "Call Ana"),
+            "Call Ana\nbody"
+        );
+        assert_eq!(
+            without_leading_title("#Call Ana\nbody", "Call Ana"),
+            "#Call Ana\nbody"
+        );
     }
 
     #[test]

@@ -150,7 +150,8 @@ rows of two.
 
 **Reader.** The note's title, the destination bar, a rule, then the body rendered with
 `markdown::MarkdownElement` and `MarkdownStyle::themed`, as the chat panel renders the agent's
-replies. Frontmatter is not shown; its fields are the reader header. Image lines resolve by V39
+replies. Frontmatter is not shown; its fields are the reader header. A first heading that repeats the title is not
+shown either, since the title already sits above the bar. Image lines resolve by V39
 §4's rule before rendering so `![alt](/images/x.png)` draws the vault's picture. The body stops at
 680px per line and scrolls under the title and bar. The reader is read-only. The keys sheet
 replaces the reader while it is open. The split is draggable (§9) and remembered per vault in
