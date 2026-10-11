@@ -2,4 +2,4 @@ module github.com/DiegoTavares/thock/services/releases
 
 go 1.22
 
-toolchain go1.26.8
+toolchain go1.26.9

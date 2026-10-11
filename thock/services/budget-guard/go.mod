@@ -2,7 +2,7 @@ module github.com/DiegoTavares/thock/services/budget-guard
 
 go 1.26.0
 
-toolchain go1.26.8
+toolchain go1.26.9
 
 require golang.org/x/oauth2 v0.37.0
 
