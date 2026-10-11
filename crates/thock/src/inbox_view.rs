@@ -66,6 +66,9 @@ const ROW_HEIGHT: Pixels = px(60.);
 const FOOTER_HEIGHT: Pixels = px(36.);
 const BAR_BUTTON_HEIGHT: Pixels = px(56.);
 const BAR_BUTTON_MIN_WIDTH: Pixels = px(140.);
+/// Open and Undo share one width, wide enough for Open with the `space`
+/// keycap, so the bar keeps its geometry when `space` moves onto Open.
+const QUIET_BUTTON_MIN_WIDTH: Pixels = px(168.);
 const READER_MAX_WIDTH: Pixels = px(680.);
 /// Below this reader width the destination bar wraps to two rows of two:
 /// four buttons at their minimum width, Open, Undo and the reader's sides
@@ -2053,14 +2056,16 @@ impl InboxView {
             .style(ButtonStyle::Transparent)
             .size(ButtonSize::None)
             .height(relative(1.))
-            .when(fills, |this| this.full_width())
+            .full_width()
             .on_click(move |_, window, cx| focus.dispatch_action(action.as_ref(), window, cx))
             .child(content);
         div()
             .debug_selector(move || format!("INBOX_BAR-{name}"))
             .h(BAR_BUTTON_HEIGHT)
             .when(fills, |this| this.flex_1().min_w(BAR_BUTTON_MIN_WIDTH))
-            .when(!fills, |this| this.flex_none())
+            .when(!fills, |this| {
+                this.flex_none().min_w(QUIET_BUTTON_MIN_WIDTH)
+            })
             .rounded_lg()
             .border_1()
             .border_color(border)
@@ -2154,7 +2159,9 @@ impl InboxView {
         cx: &App,
     ) -> gpui::Div {
         let content = h_flex()
+            .w_full()
             .h_full()
+            .justify_center()
             .gap_2()
             .px(px(14.))
             .when(with_space, |this| {
@@ -3857,6 +3864,7 @@ mod tests {
         )
         .await;
         setup.cx.run_until_parked();
+        let mut first_layout: Option<Vec<gpui::Bounds<Pixels>>> = None;
         // Unsure (Call Ana), outlined Soon (Q4), filled Someday (Ship it).
         for (title, suggested, space_on) in [
             ("Call Ana", None, "INBOX_BAR-open"),
@@ -3873,6 +3881,19 @@ mod tests {
         ] {
             select(&mut setup, title);
             assert_eq!(bar_order(&mut setup), BAR_BUTTONS, "{title}");
+            // Moving between notes never resizes a button, wherever `space`
+            // sits.
+            let layout: Vec<gpui::Bounds<Pixels>> = BAR_BUTTONS
+                .into_iter()
+                .map(|selector| drawn(&mut setup, selector))
+                .collect();
+            let (open, undo) = (layout[4], layout[5]);
+            assert_eq!(open.size.width, undo.size.width, "{title}");
+            assert!(open.size.width >= QUIET_BUTTON_MIN_WIDTH, "{title}");
+            match &first_layout {
+                Some(first) => assert_eq!(&layout, first, "{title}"),
+                None => first_layout = Some(layout),
+            }
             setup.view.read_with(&setup.cx, |view, cx| {
                 let state = view.bar_state(view.selected_entry().unwrap(), cx);
                 assert_eq!(state.suggested, suggested, "{title}");
