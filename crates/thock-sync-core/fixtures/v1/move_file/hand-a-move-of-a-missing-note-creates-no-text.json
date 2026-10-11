@@ -1,0 +1,18 @@
+{
+  "name": "a move of a note that is gone creates no text",
+  "before": null,
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-mf1",
+    "path": "inbox/2026-10-10-0931-call-ana.md",
+    "made_at": "2026-10-10T09:31:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "move_file",
+    "to": "archives/inbox/2026-10-10-0931-call-ana.md"
+  },
+  "after": "",
+  "outcome": "noop",
+  "effect_present_before": false,
+  "effect_present_after": false
+}

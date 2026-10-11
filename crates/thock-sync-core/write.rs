@@ -123,7 +123,33 @@ pub enum Operation {
         #[serde(default)]
         ordinal: usize,
     },
+    /// Creates a picture in the images folder from its bytes (V39 §6.2).
+    /// Never overwrites: a file already at `path` is left as it is.
+    PutFile {
+        content_base64: String,
+        /// SHA-256 of the decoded bytes, hex.
+        content_hash: String,
+    },
+    /// Renames a whole file (V40 §6). The only kind that touches two paths:
+    /// `path` is the source and `to` the destination.
+    MoveFile {
+        to: String,
+    },
 }
+
+/// Every `kind` this build applies. A write naming another kind comes from a
+/// newer phone and must wait for a newer desk, not be dropped.
+pub const KNOWN_KINDS: [&str; 9] = [
+    "create",
+    "append",
+    "replace_line",
+    "remove_line",
+    "replace_section",
+    "move_block",
+    "remove_block",
+    "put_file",
+    "move_file",
+];
 
 impl Operation {
     pub fn kind(&self) -> &'static str {
@@ -135,12 +161,21 @@ impl Operation {
             Self::ReplaceSection { .. } => "replace_section",
             Self::MoveBlock { .. } => "move_block",
             Self::RemoveBlock { .. } => "remove_block",
+            Self::PutFile { .. } => "put_file",
+            Self::MoveFile { .. } => "move_file",
         }
+    }
+
+    /// Whether the write changes files rather than the text inside one: the
+    /// applier leaves text alone and the store does the work (V39 §6.3,
+    /// V40 §6.1).
+    pub fn is_file_level(&self) -> bool {
+        matches!(self, Self::PutFile { .. } | Self::MoveFile { .. })
     }
 
     pub fn heading(&self) -> Option<&Heading> {
         match self {
-            Self::Create { .. } => None,
+            Self::Create { .. } | Self::PutFile { .. } | Self::MoveFile { .. } => None,
             Self::Append { heading, .. }
             | Self::ReplaceLine { heading, .. }
             | Self::RemoveLine { heading, .. }
@@ -208,6 +243,8 @@ pub enum WriteError {
     Json(String),
     #[error("the write is version {0}; this build reads version {WRITE_VERSION}")]
     UnsupportedVersion(u32),
+    #[error("the write is a `{0}`, which this build doesn't know")]
+    UnsupportedKind(String),
     #[error("the write has no client id")]
     MissingClientId,
     #[error("the write names no path")]
@@ -216,13 +253,46 @@ pub enum WriteError {
     LineBreakInLine,
     #[error("the heading text is empty")]
     EmptyHeading,
+    #[error("the move names no destination, or its own path")]
+    BadDestination,
+    #[error("the picture has no bytes or no hash")]
+    MissingBytes,
+}
+
+impl WriteError {
+    /// The write is well formed but from a newer Thock than this build: a
+    /// reader must hold it rather than discard it (spec §10.4).
+    pub fn needs_newer_reader(&self) -> bool {
+        match self {
+            // An older version than this build ever read is garbage: no update
+            // would make it readable, so holding the queue on it never clears.
+            Self::UnsupportedVersion(version) => *version > WRITE_VERSION,
+            Self::UnsupportedKind(_) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Parses and validates a write document (spec §7). Unknown fields are
-/// ignored so a newer phone can talk to an older desk.
+/// ignored so a newer phone can talk to an older desk; an unknown `kind` or
+/// `v` is reported as such, so the desk can tell "update me" from garbage.
 pub fn parse_write(json: &str) -> Result<Write, WriteError> {
-    let write: Write =
+    let value: serde_json::Value =
         serde_json::from_str(json).map_err(|error| WriteError::Json(error.to_string()))?;
+    if let Some(version) = value.get("v").and_then(serde_json::Value::as_u64)
+        && version != u64::from(WRITE_VERSION)
+    {
+        return Err(WriteError::UnsupportedVersion(
+            u32::try_from(version).unwrap_or(u32::MAX),
+        ));
+    }
+    if let Some(kind) = value.get("kind").and_then(serde_json::Value::as_str)
+        && !KNOWN_KINDS.contains(&kind)
+    {
+        return Err(WriteError::UnsupportedKind(kind.to_string()));
+    }
+    let write: Write =
+        serde_json::from_value(value).map_err(|error| WriteError::Json(error.to_string()))?;
     validate(&write)?;
     Ok(write)
 }
@@ -253,10 +323,25 @@ pub(crate) fn validate(write: &Write) -> Result<(), WriteError> {
         }
         Operation::ReplaceLine { new_line, .. } => has_break(new_line),
         Operation::MoveBlock { new_line, .. } => new_line.as_ref().is_some_and(has_break),
-        Operation::RemoveLine { .. } | Operation::RemoveBlock { .. } => false,
+        Operation::RemoveLine { .. }
+        | Operation::RemoveBlock { .. }
+        | Operation::PutFile { .. }
+        | Operation::MoveFile { .. } => false,
     };
     if broken {
         return Err(WriteError::LineBreakInLine);
+    }
+    match &write.operation {
+        Operation::MoveFile { to } if to.trim().is_empty() || to == &write.path => {
+            return Err(WriteError::BadDestination);
+        }
+        Operation::PutFile {
+            content_base64,
+            content_hash,
+        } if content_base64.trim().is_empty() || content_hash.trim().is_empty() => {
+            return Err(WriteError::MissingBytes);
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -333,6 +418,94 @@ mod tests {
         assert!(matches!(
             parse_write(
                 r#"{"v":1,"client_id":"c","kind":"replace_section","heading":null,"base_hash":"x","lines":[],"path":"p.md"}"#
+            ),
+            Err(WriteError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn a_newer_phones_write_is_unsupported_not_garbage() {
+        let future_kind = r#"{"v":1,"client_id":"c","kind":"swap_blocks","path":"backlog.md","first":"a","second":"b"}"#;
+        let error = parse_write(future_kind).expect_err("unknown kind");
+        assert_eq!(error, WriteError::UnsupportedKind("swap_blocks".into()));
+        assert!(error.needs_newer_reader());
+
+        let future_version = r#"{"v":2,"client_id":"c","kind":"teleport","path":"p.md"}"#;
+        let error = parse_write(future_version).expect_err("unknown version");
+        assert_eq!(error, WriteError::UnsupportedVersion(2));
+        assert!(error.needs_newer_reader());
+
+        let older_version = r#"{"v":0,"client_id":"c","kind":"create","path":"p.md","content":""}"#;
+        let error = parse_write(older_version).expect_err("older version");
+        assert_eq!(error, WriteError::UnsupportedVersion(0));
+        assert!(
+            !error.needs_newer_reader(),
+            "no update can read a version 0"
+        );
+
+        for garbage in [
+            r#"{"v":1,"client_id":"c","kind":7,"path":"p.md"}"#,
+            r#"{"v":"1","client_id":"c","kind":"create","path":"p.md","content":""}"#,
+            r#"{"v":1,"client_id":"c","path":"p.md"}"#,
+        ] {
+            let error = parse_write(garbage).expect_err(garbage);
+            assert!(matches!(error, WriteError::Json(_)), "{garbage}: {error}");
+            assert!(!error.needs_newer_reader());
+        }
+        assert!(!WriteError::MissingPath.needs_newer_reader());
+    }
+
+    #[test]
+    fn parses_the_file_kinds() {
+        let put = r#"{"v":1,"client_id":"c","kind":"put_file","path":"images/2026-10-10-0931-whiteboard.jpg","content_base64":"/9j/4AAQ","content_hash":"ab12"}"#;
+        let write = parse_write(put).expect("parses");
+        assert!(write.operation.is_file_level());
+        assert_eq!(write.operation.heading(), None);
+        match &write.operation {
+            Operation::PutFile {
+                content_base64,
+                content_hash,
+            } => {
+                assert_eq!(content_base64, "/9j/4AAQ");
+                assert_eq!(content_hash, "ab12");
+            }
+            other => panic!("wrong kind {}", other.kind()),
+        }
+        assert_eq!(parse_write(&write.to_json()), Ok(write));
+
+        let moved = r#"{"v":1,"client_id":"c","kind":"move_file","path":"inbox/a.md","to":"archives/inbox/a.md"}"#;
+        let write = parse_write(moved).expect("parses");
+        assert!(write.operation.is_file_level());
+        assert_eq!(
+            write.operation,
+            Operation::MoveFile {
+                to: "archives/inbox/a.md".into()
+            }
+        );
+        assert_eq!(parse_write(&write.to_json()), Ok(write));
+
+        assert_eq!(
+            parse_write(
+                r#"{"v":1,"client_id":"c","kind":"move_file","path":"inbox/a.md","to":"inbox/a.md"}"#
+            ),
+            Err(WriteError::BadDestination)
+        );
+        assert_eq!(
+            parse_write(
+                r#"{"v":1,"client_id":"c","kind":"move_file","path":"inbox/a.md","to":" "}"#
+            ),
+            Err(WriteError::BadDestination)
+        );
+        assert_eq!(
+            parse_write(
+                r#"{"v":1,"client_id":"c","kind":"put_file","path":"images/a.png","content_base64":"","content_hash":"ab"}"#
+            ),
+            Err(WriteError::MissingBytes)
+        );
+        // A move_block still reads `to` as a heading.
+        assert!(matches!(
+            parse_write(
+                r#"{"v":1,"client_id":"c","kind":"move_file","path":"inbox/a.md","to":{"text":"Soon"}}"#
             ),
             Err(WriteError::Json(_))
         ));

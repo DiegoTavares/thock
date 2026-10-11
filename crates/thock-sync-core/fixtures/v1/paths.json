@@ -7,7 +7,7 @@
     "reference/clips/A Title.MD",
     "a b/c.TXT",
     "data.csv",
-    "notes/caf\u00e9.md"
+    "notes/café.md"
   ],
   "refused": [
     "",
@@ -28,7 +28,30 @@
     ".git/config.json",
     "a\\b.md",
     "bad\u0007.md",
-    "notes/cafe\u0301.md",
-    "notes/Cafe\u0301.md"
-  ]
+    "notes/café.md",
+    "notes/Café.md"
+  ],
+  "images": {
+    "folder": "images",
+    "syncable": [
+      "images/2026-10-10-0931-whiteboard.jpg",
+      "images/receipt.PNG",
+      "images/a b.webp",
+      "images/nested/cover.gif",
+      "images/café.jpeg"
+    ],
+    "refused": [
+      "photo.png",
+      "daily/photo.png",
+      "images.png",
+      "imagesx/photo.png",
+      "images/note.md",
+      "images/scan.pdf",
+      "images/.png",
+      "images/../photo.png",
+      "/images/photo.png",
+      "images/photo.png/",
+      ".thock/history/images/x.png"
+    ]
+  }
 }

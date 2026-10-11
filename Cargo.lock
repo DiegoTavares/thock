@@ -18733,9 +18733,11 @@ dependencies = [
  "toml_edit 0.22.27",
  "ui",
  "url",
+ "urlencoding",
  "util",
  "which 6.0.3",
  "workspace",
+ "worktree",
  "zed_actions",
  "zed_credentials_provider",
 ]
@@ -23169,7 +23171,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "acp_thread",
  "acp_tools",

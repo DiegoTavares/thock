@@ -105,15 +105,30 @@ public struct VaultSession: Sendable {
     }
 
     @discardableResult
-    public func capture(blocks: [Block], destination: CaptureDestination, now: Date = Date()) throws -> CaptureRecord? {
+    public func capture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], now: Date = Date()) throws -> CaptureRecord? {
         let builder = writes(now: now)
         let template = store.content(config.daily.template)
-        guard let captured = builder.capture(blocks: blocks, destination: destination, todayNote: noteText(builder.today), template: template, taken: store.exists) else {
+        guard let captured = builder.capture(blocks: blocks, destination: destination, images: images, todayNote: noteText(builder.today), template: template, taken: taken) else {
             return nil
         }
         try record(captured.writes)
         store.addCapture(captured.record)
         return captured.record
+    }
+
+    /// Pictures shared with no link (V39 §7.3): one inbox note.
+    @discardableResult
+    public func photoCapture(images: [ImageAttachment], text: String, now: Date = Date()) throws -> CaptureRecord? {
+        guard let captured = writes(now: now).photoCapture(images: images, text: text, taken: taken) else { return nil }
+        try record(captured.writes)
+        store.addCapture(captured.record)
+        return captured.record
+    }
+
+    /// Whether a path is already in use on this phone: a note in the store,
+    /// or a picture it captured.
+    private func taken(_ path: String) -> Bool {
+        store.exists(path) || store.hasBlob(path)
     }
 
     /// The waiting inbox note at `path` as the capture editor opens it, or
@@ -125,12 +140,21 @@ public struct VaultSession: Sendable {
     /// Rewrites a waiting inbox note from the capture editor. Returns false
     /// when there was nothing to write.
     @discardableResult
-    public func editInbox(path: String, blocks: [Block], now: Date = Date()) throws -> Bool {
-        guard let note = store.content(path), let edit = writes(now: now).inboxEdit(path: path, note: note, blocks: blocks) else { return false }
+    public func editInbox(path: String, blocks: [Block], images: [ImageAttachment] = [], now: Date = Date()) throws -> Bool {
+        guard let note = store.content(path), let edit = writes(now: now).inboxEdit(path: path, note: note, blocks: blocks, images: images, taken: taken) else { return false }
         guard !edit.writes.isEmpty else { return false }
         try record(edit.writes)
         store.renameCapture(inboxPath: path, title: edit.title)
         return true
+    }
+
+    /// One of the inbox screen's gestures (V40 §5): the task line where it
+    /// belongs, the note into `archives/inbox/`, one line in the triage log.
+    /// A note that is already gone writes nothing.
+    public func triageInbox(path: String, gesture: InboxGesture, now: Date = Date()) throws {
+        guard let note = store.content(path) else { return }
+        let builder = writes(now: now)
+        try record(builder.inboxGesture(gesture, path: path, note: note, todayNote: noteText(builder.today), template: store.content(config.daily.template)))
     }
 
     @discardableResult

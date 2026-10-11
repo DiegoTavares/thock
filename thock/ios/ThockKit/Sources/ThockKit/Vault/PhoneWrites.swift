@@ -19,6 +19,13 @@ public struct PlannedWrite: Equatable, Sendable {
     public var seed: SeedInfo?
 }
 
+/// The three decisions the inbox screen makes without a ritual (V40 §4).
+public enum InboxGesture: String, Sendable {
+    case today
+    case backlog
+    case archive
+}
+
 public enum CaptureDestination: String, Codable, CaseIterable, Sendable {
     case today
     case inbox
@@ -40,6 +47,8 @@ public struct CaptureRecord: Equatable, Identifiable, Sendable {
     public var destination: CaptureDestination
     public var madeAt: Date
     public var inboxPath: String?
+    /// How many pictures the capture carried (V39 §7.5).
+    public var imageCount: Int = 0
 }
 
 public struct TaskLineParts: Equatable, Sendable {
@@ -218,50 +227,130 @@ public struct PhoneWrites: Sendable {
         return (PlannedWrite(document: write), record)
     }
 
+    // MARK: Pictures (V39 §7)
+
+    /// The link a note carries for a picture: alt text first, a vault-root
+    /// path with a leading slash, so the line keeps working when it moves.
+    public static func imageLine(path: String, alt: String) -> String {
+        "![\(alt)](/\(path))"
+    }
+
+    /// Where a picture is filed (V39 §4.1): `images/<day>-<HHmm>-<slug>.<ext>`,
+    /// suffixed when the phone already holds that name.
+    public func imagePath(for attachment: ImageAttachment, taken: (String) -> Bool) -> String {
+        let parts = calendar.dateComponents([.hour, .minute], from: now)
+        let stamp = today.iso + "-" + String(format: "%02d%02d", parts.hour ?? 0, parts.minute ?? 0)
+        let base = VaultConfig.join(config.imagesDir, "\(stamp)-\(String(Slug.make(attachment.name, fallback: "photo").prefix(40)))")
+        let first = "\(base).\(attachment.fileExtension)"
+        if !taken(first) { return first }
+        for index in 2...99 {
+            let candidate = "\(base)-\(index).\(attachment.fileExtension)"
+            if !taken(candidate) { return candidate }
+        }
+        return "\(base)-\(captureDigest().prefix(6)).\(attachment.fileExtension)"
+    }
+
+    /// The `put_file` that carries a picture's bytes (V39 §6.2).
+    public func putFile(path: String, bytes: Data) -> PlannedWrite {
+        var write = document(.putFile, path: path)
+        write.contentBase64 = bytes.base64EncodedString()
+        write.contentHash = SyncCore.sha256Hex(bytes)
+        return PlannedWrite(document: write)
+    }
+
+    /// The pictures' writes and the lines that link them, paths chosen so
+    /// no two in one capture collide.
+    func placeImages(_ images: [ImageAttachment], taken: (String) -> Bool) -> (writes: [PlannedWrite], lines: [String]) {
+        var chosen: Set<String> = []
+        var writes: [PlannedWrite] = []
+        var lines: [String] = []
+        for image in images {
+            let path = imagePath(for: image) { chosen.contains($0) || taken($0) }
+            chosen.insert(path)
+            writes.append(putFile(path: path, bytes: image.bytes))
+            lines.append(Self.imageLine(path: path, alt: Slug.make(image.name, fallback: "photo")))
+        }
+        return (writes, lines)
+    }
+
+    /// Pictures shared to Thock with no link (V39 §7.3): one inbox note whose
+    /// title is the text's first line or `Photo`, the pictures under it.
+    public func photoCapture(images: [ImageAttachment], text: String, taken: (String) -> Bool) -> (writes: [PlannedWrite], record: CaptureRecord)? {
+        guard !images.isEmpty else { return nil }
+        let placed = placeImages(images, taken: taken)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var textLines = trimmed.isEmpty ? [] : trimmed.components(separatedBy: "\n")
+        let title = textLines.isEmpty ? (images.count == 1 ? "Photo" : "\(images.count) photos") : Inline.plainText(textLines.removeFirst())
+        var body = textLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        body += (body.isEmpty ? "" : "\n\n") + placed.lines.joined(separator: "\n")
+        let (note, captured) = inboxNote(InboxFields(title: title, body: body), captureKind: .idea, taken: taken)
+        var record = captured
+        record.imageCount = images.count
+        return (placed.writes + [note], record)
+    }
+
     /// A capture, routed by its destination chip (V33 §6.2). `blocks` is what
     /// the editor produced; `todayNote` is today's note as the phone has it.
-    public func capture(blocks: [Block], destination: CaptureDestination, todayNote: String?, template: String?, taken: (String) -> Bool) -> (writes: [PlannedWrite], record: CaptureRecord)? {
-        let content = blocks.filter { $0.kind != .blank }
-        guard let first = content.first, !content.allSatisfy({ $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.kind != .rule }) else { return nil }
+    /// Pictures (V39 §7.1) are written first, then linked at the end of the
+    /// capture: as the task's continuation when the capture is one task,
+    /// otherwise as lines of their own.
+    public func capture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], todayNote: String?, template: String?, taken: (String) -> Bool) -> (writes: [PlannedWrite], record: CaptureRecord)? {
+        var content = blocks.filter { $0.kind != .blank }
+        if content.allSatisfy({ $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.kind != .rule }) {
+            guard !images.isEmpty else { return nil }
+            // Pictures alone: the capture is the picture, named as such.
+            content = [Block(id: 0, kind: .paragraph, text: images.count == 1 ? "Photo" : "\(images.count) photos", touched: true)]
+        }
+        guard let first = content.first else { return nil }
+        let placed = placeImages(images, taken: taken)
         let firstLines = first.text.components(separatedBy: "\n")
         let title = Inline.plainText(firstLines[0])
         let single = content.count == 1 && firstLines.count == 1
 
         switch destination {
         case .inbox:
-            let body = Self.inboxBody(content).joined(separator: "\n")
-            let (write, record) = inboxNote(InboxFields(title: title, body: body), captureKind: .idea, taken: taken)
-            return ([write], record)
+            var body = Self.inboxBody(content).joined(separator: "\n")
+            if !placed.lines.isEmpty {
+                body += (body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n\n") + placed.lines.joined(separator: "\n")
+            }
+            let (write, captured) = inboxNote(InboxFields(title: title, body: body), captureKind: .idea, taken: taken)
+            var record = captured
+            record.imageCount = images.count
+            return (placed.writes + [write], record)
 
         case .today:
             let path = config.dailyPath(today)
-            let record = CaptureRecord(digest: captureDigest(), title: title, kind: .idea, destination: .today, madeAt: now, inboxPath: nil)
+            var record = CaptureRecord(digest: captureDigest(), title: title, kind: .idea, destination: .today, madeAt: now, inboxPath: nil)
+            record.imageCount = images.count
             let view = NoteView(text: todayNote ?? template.map { Template.expand($0, day: today, time: clock, title: today.formatted(config.daily.filename)) } ?? "", config: config)
             if single {
                 var write = document(.append, path: path)
                 write.heading = view.planner.heading
                 switch first.kind {
                 case .task:
-                    write.lines = first.markdownLines()
+                    write.lines = first.markdownLines() + placed.lines.map { "  " + $0 }
                 case .paragraph, .heading:
                     // Only a capture that asked for a checkbox becomes a task;
                     // anything else is a note, set apart from the tasks above it.
-                    write.lines = [first.text]
+                    write.lines = [first.text] + placed.lines
                     write.blankLineBefore = true
                 default:
-                    write.lines = first.markdownLines()
+                    write.lines = first.markdownLines() + placed.lines
                     write.blankLineBefore = true
                 }
                 write.placement = .beforeChildren
                 write.createFromTemplate = true
-                return ([PlannedWrite(document: write, seed: dailySeed(today))], record)
+                return (placed.writes + [PlannedWrite(document: write, seed: dailySeed(today))], record)
             }
             var write = document(.append, path: path)
             write.heading = proseHeading(in: view)
             write.lines = EditorDocument(blocks: content.map { var block = $0; block.touched = true; return block }).lines()
+            if !placed.lines.isEmpty {
+                write.lines += [""] + placed.lines
+            }
             write.blankLineBefore = true
             write.createFromTemplate = true
-            return ([PlannedWrite(document: write, seed: dailySeed(today))], record)
+            return (placed.writes + [PlannedWrite(document: write, seed: dailySeed(today))], record)
 
         case .backlog:
             var write = document(.append, path: config.backlogFile)
@@ -276,10 +365,12 @@ public struct PhoneWrites: Sendable {
                 block.touched = true
                 lines += block.markdownLines().map { "  " + $0 }
             }
+            lines += placed.lines.map { "  " + $0 }
             write.lines = lines
             write.placement = .beforeChildren
-            let record = CaptureRecord(digest: captureDigest(), title: title, kind: .idea, destination: .backlog, madeAt: now, inboxPath: nil)
-            return ([PlannedWrite(document: write)], record)
+            var record = CaptureRecord(digest: captureDigest(), title: title, kind: .idea, destination: .backlog, madeAt: now, inboxPath: nil)
+            record.imageCount = images.count
+            return (placed.writes + [PlannedWrite(document: write)], record)
         }
     }
 
@@ -331,7 +422,7 @@ public struct PhoneWrites: Sendable {
     /// body is guarded by its hash, so an edit made at the desk meanwhile is
     /// kept beside this one rather than lost. `blocks` are the editor's, so
     /// a block the person left alone is copied through as it was.
-    public func inboxEdit(path: String, note: String, blocks: [Block]) -> (writes: [PlannedWrite], title: String)? {
+    public func inboxEdit(path: String, note: String, blocks: [Block], images: [ImageAttachment] = [], taken: (String) -> Bool = { _ in false }) -> (writes: [PlannedWrite], title: String)? {
         let file = TextFile(note)
         let headings = file.headings()
         guard let heading = headings.first(where: { $0.level == 1 }) else { return nil }
@@ -358,9 +449,16 @@ public struct PhoneWrites: Sendable {
         while newBody.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
             newBody.removeLast()
         }
+        // New pictures join the body after what was written (V39 §7.2).
+        let placed = placeImages(images, taken: taken)
+        if !placed.lines.isEmpty {
+            if !newBody.isEmpty { newBody.append("") }
+            newBody += placed.lines
+        }
         if !newBody.isEmpty {
             newBody.insert("", at: 0)
         }
+        writes += placed.writes
         if newBody != oldBody {
             var write = document(.replaceSection, path: path)
             write.heading = NoteView.reference(heading, in: headings)
@@ -382,6 +480,72 @@ public struct PhoneWrites: Sendable {
             writes.append(PlannedWrite(document: write))
         }
         return (writes, title)
+    }
+
+    // MARK: Inbox gestures (V40)
+
+    /// Where an inbox note goes once the phone is done with it: the same
+    /// name, under the archive folder beside the triage log.
+    public static func archivePath(for inboxPath: String) -> String {
+        "archives/inbox/" + (inboxPath.split(separator: "/").last.map(String.init) ?? inboxPath)
+    }
+
+    /// Whether a note says more than its title: any non-blank line after
+    /// the front matter and the first line of content (V40 §5).
+    static func inboxHasBody(_ note: String) -> Bool {
+        let lines = TextFile(note).lines.map(\.text)
+        var index = 0
+        if lines.first?.trimmingTrailingWhitespace() == "---" {
+            index = 1
+            while index < lines.count {
+                let trimmed = lines[index].trimmingTrailingWhitespace()
+                index += 1
+                if trimmed == "---" || trimmed == "..." { break }
+            }
+        }
+        var content = lines[min(index, lines.count)...].filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        if !content.isEmpty { content.removeFirst() }
+        return !content.isEmpty
+    }
+
+    /// One of the inbox screen's three gestures (V40 §5), as writes in the
+    /// order the desk must drain them: the task line first, then the note
+    /// into the archive, then the triage log's line.
+    public func inboxGesture(_ gesture: InboxGesture, path: String, note: String, todayNote: String?, template: String?) -> [PlannedWrite] {
+        let inbox = InboxNote(path: path, content: note)
+        let title = Slug.sanitizedTitle(inbox.title)
+        let stem = (path.split(separator: "/").last.map(String.init) ?? path).replacingOccurrences(of: ".md", with: "")
+        let task = "- [ ] " + title + (Self.inboxHasBody(note) ? " [[\(stem)]]" : "")
+        var writes: [PlannedWrite] = []
+        let destination: String
+        switch gesture {
+        case .today:
+            let view = NoteView(text: todayNote ?? template.map { Template.expand($0, day: today, time: clock, title: today.formatted(config.daily.filename)) } ?? "", config: config)
+            var append = document(.append, path: config.dailyPath(today))
+            append.heading = view.planner.heading
+            append.lines = [task]
+            append.placement = .beforeChildren
+            append.createFromTemplate = true
+            writes.append(PlannedWrite(document: append, seed: dailySeed(today)))
+            destination = "Today · " + view.planner.heading.text
+        case .backlog:
+            var append = document(.append, path: config.backlogFile)
+            append.heading = HeadingRef(text: config.soonHeading, level: 2)
+            append.lines = [task]
+            append.placement = .beforeChildren
+            writes.append(PlannedWrite(document: append))
+            destination = "Backlog · " + config.soonHeading
+        case .archive:
+            destination = "Archived"
+        }
+        var move = document(.moveFile, path: path)
+        move.toPath = Self.archivePath(for: path)
+        writes.append(PlannedWrite(document: move))
+        // The ritual's own line (V13 §9.5), so both ends' receipts agree.
+        var log = document(.append, path: VaultConfig.triageLogPath)
+        log.lines = ["- \(today.iso) · \(title) → \(destination)" + (inbox.digest.map { " <!--inbox:\($0)-->" } ?? "")]
+        writes.append(PlannedWrite(document: log))
+        return writes
     }
 
     // MARK: Ask
@@ -665,8 +829,12 @@ public enum Receipts {
         case .inbox: break
         }
         if let line = log.last(where: { $0.digest == record.digest }) {
-            if SyncCore.headingKey(line.destination).hasPrefix("discard") {
+            let key = SyncCore.headingKey(line.destination)
+            if key.hasPrefix("discard") {
                 return .discarded(day: line.day)
+            }
+            if key.hasPrefix("archiv") {
+                return .archived(day: line.day)
             }
             return .filed(destination: line.destination, day: line.day)
         }

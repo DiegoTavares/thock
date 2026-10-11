@@ -2,7 +2,7 @@ import Foundation
 
 /// What *Report a problem* sends along with the person's words: the facts of
 /// this phone's connection, enough to say why notes are not arriving, and
-/// never a note. The person sees the details before sending (V39).
+/// never a note. The person sees the details before sending (V41).
 public struct IssueReport: Equatable, Sendable {
     /// Failures past this many are counted, not listed.
     static let failuresShown = 10
@@ -65,7 +65,7 @@ public struct IssueReport: Equatable, Sendable {
         return lines.joined(separator: "\n")
     }
 
-    /// The body of `POST /v1/vault/feedback` (V34 API §6, V39): the person's
+    /// The body of `POST /v1/vault/feedback` (V34 API §6, V41): the person's
     /// words, these details, and the screenshots as base64, each typed by
     /// its first bytes.
     public func payload(description: String, screenshots: [Data]) -> [String: Any?] {

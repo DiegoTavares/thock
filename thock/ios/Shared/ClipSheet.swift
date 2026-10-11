@@ -8,6 +8,53 @@ struct ClipDraft: Equatable {
     var quote: String?
     /// The page as the browser had it, when the share came from Safari.
     var html: String?
+    /// Pictures shared with the item, already downsized (V39 §7.3).
+    var images: [ImageAttachment] = []
+}
+
+/// Pictures shared with no link (V39 §7.3): the thumbnails, a line for a
+/// title, and Save. The first line of the text is the note's title.
+struct PhotoSheet: View {
+    var images: [ImageAttachment]
+    var onCancel: () -> Void
+    var onSave: (String) -> Void
+
+    @State private var text = ""
+    @State private var saving = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SheetHeader(leading: "Cancel", title: "Save to Thock", trailing: saving ? "Saving…" : "Save", trailingEnabled: !saving, onLeading: onCancel) {
+                guard !saving else { return }
+                saving = true
+                onSave(text)
+            }
+            HStack(spacing: 10) {
+                ForEach(Array(images.enumerated()), id: \.offset) { _, image in
+                    if let thumbnail = UIImage(data: image.bytes) {
+                        Image(uiImage: thumbnail)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 64, height: 64)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            TextField("A title, and a line if you like", text: $text, axis: .vertical)
+                .font(.system(size: 18))
+                .foregroundStyle(Theme.ink)
+                .lineLimit(1...4)
+                .focused($focused)
+            (Text("\(images.count == 1 ? "The picture lands" : "The pictures land") in your inbox, under ") + Text("images").font(Theme.mono(12)).foregroundStyle(Theme.amber) + Text("."))
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.dim)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .onAppear { focused = true }
+    }
 }
 
 enum ClipFetcher {

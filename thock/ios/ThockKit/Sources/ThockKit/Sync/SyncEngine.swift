@@ -143,7 +143,7 @@ public actor SyncEngine {
     }
 
     /// Sends a problem report to the service, which files it for a person
-    /// to read (V39). Returns the report's number.
+    /// to read (V41). Returns the report's number.
     public func sendReport(_ report: IssueReport, description: String, screenshots: [Data]) async throws -> Int {
         guard let credential else {
             throw APIError(status: 401, code: "unauthorized", error: "This phone isn't connected to your desk.")
@@ -330,6 +330,9 @@ public actor SyncEngine {
                     continue
                 }
                 listed.insert(row.path)
+                // Pictures are bytes the phone does not draw yet (V39 §7.5):
+                // listed, so a full pull keeps nothing stale, never fetched.
+                if SyncCore.isSyncableImagePath(row.path, imagesDir: store.config.imagesDir) { continue }
                 guard let hash = row.contentHash, let blobID = row.blobID else { continue }
                 if store.contentHash(row.path) == hash {
                     continue

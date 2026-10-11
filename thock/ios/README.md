@@ -58,7 +58,7 @@ tapping:
 | `-thock-looks <dark\|light\|system>` | set the appearance |
 | `-thock-gate` | ask for Face ID in the practice notebook too |
 | `-thock-type "<keys>"` | type into the first editor (`\n` return, `\b` backspace, `{B}` `{I}` `{List}` `{Task}` `{Pick}`), and write the Markdown it would save to the app's `tmp/editor-dump.md` |
-| `-thock-script "<steps>"` | run steps separated by `;`: `capture:<inbox\|today\|backlog>:<text>`, `journal:<text>`, `tick:<label prefix>`, `soon:<label prefix>`, `backlog-move:<label prefix>:<soon\|someday\|today\|top>`, `backlog-tick:<label prefix>`, `backlog-remove:<label prefix>`, `asked:<question>:<answer>` (a finished turn in the Ask thread), `asleep`, `awake`, `triage`, `plan`, `lapse`, `renew` |
+| `-thock-script "<steps>"` | run steps separated by `;`: `capture:<inbox\|today\|backlog>:<text>`, `journal:<text>`, `tick:<label prefix>`, `soon:<label prefix>`, `backlog-move:<label prefix>:<soon\|someday\|today\|top>`, `backlog-tick:<label prefix>`, `backlog-remove:<label prefix>`, `inbox-<today\|backlog\|archive>:<title prefix>`, `capture-photo:<inbox\|today\|backlog>:<text>` (a capture with a drawn picture), `asked:<question>:<answer>` (a finished turn in the Ask thread), `asleep`, `awake`, `triage`, `plan`, `lapse`, `renew` |
 
 ## Testing
 
@@ -70,7 +70,7 @@ thock/ios/script/smoke    # the app on a simulator (~45 s cold, ~11 s with THOCK
 | Layer | Covers |
 | --- | --- |
 | `script/test` (`swift test` in `ThockKit/`) | The contract fixtures, hashes and envelope vectors; pairing links, path rules, envelope tampering; the store's queue, rebase, prune and captures; the editor's block and inline round-trips; the phone's writes; sync against the in-process server and over loopback HTTP. |
-| `script/smoke` | Builds the `Thock` scheme for an available iPhone simulator, installs it fresh and launches it with `-thock-practice -thock-script …`: a today capture, an inbox capture and a journal entry must reach the phone's store and the practice desk; then the backlog's moves (to Someday, a tick, to today) must land in `backlog.md` and today's note on both. Then `-thock-open idea -thock-type …` must save the expected Markdown. |
+| `script/smoke` | Builds the `Thock` scheme for an available iPhone simulator, installs it fresh and launches it with `-thock-practice -thock-script …`: a today capture, an inbox capture and a journal entry must reach the phone's store and the practice desk; then the backlog's moves (to Someday, a tick, to today) must land in `backlog.md` and today's note on both. Then the inbox swipes (to today, archive) must move the notes to `archives/inbox/` with their triage-log lines on both. Then a capture with a picture must keep the bytes in the phone's `blobs`, link them from the note on both, and be acked. Then `-thock-open idea -thock-type …` must save the expected Markdown. |
 
 `script/smoke` picks a booted iPhone, else the one on the newest iOS runtime; `THOCK_SIMULATOR=<udid or
 name>` chooses. It needs Xcode and a simulator runtime but no signing identity: simulator builds sign to

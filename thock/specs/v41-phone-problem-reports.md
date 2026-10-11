@@ -1,4 +1,4 @@
-# Thock V39 - Report a problem from the phone, and the settings sheet it lives in
+# Thock V41 - Report a problem from the phone, and the settings sheet it lives in
 
 **Status:** Implemented (2026-10-07); ships with the next phone build and the next backend deploy
 **Owner:** Diego · **Date:** 2026-10-07
@@ -11,7 +11,7 @@ service this adds a route to), `services/plus/README.md` (the API table and the 
 ## 1. Summary
 
 The sheet behind the ellipsis on the phone was a diagnostics log: a paragraph of counters, a
-raw address, the last error verbatim. V39 makes it the phone's one settings screen, with four
+raw address, the last error verbatim. V41 makes it the phone's one settings screen, with four
 things on it, and gives the person a way to reach us that does not depend on a mail app:
 
 1. **How this phone is doing with the desk**: a glyph in the state's colour, a headline and a

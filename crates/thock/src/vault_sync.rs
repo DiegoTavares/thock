@@ -12,7 +12,7 @@
 use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
 use chrono::Local;
-use fs::{Fs, RemoveOptions};
+use fs::{Fs, RemoveOptions, RenameOptions};
 use futures::{AsyncReadExt as _, StreamExt as _};
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, SharedString,
@@ -27,7 +27,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use thock_sync_core::{Context as SealContext, Operation, Outcome, Write, apply, is_syncable_path};
+use thock_sync_core::{
+    Context as SealContext, Operation, Outcome, Write, apply, is_syncable_image_path,
+    is_syncable_path,
+};
 use ui::IconName;
 use workspace::Workspace;
 
@@ -50,6 +53,9 @@ const FEED_RECONNECT_CEILING: Duration = Duration::from_secs(60);
 /// Directories the catch-up scan never enters: the history repository, the
 /// caches and this service's own state.
 const SKIPPED_DIRS: &[&str] = &[".git", ".thock/history", ".thock/cache", ".thock/sync"];
+
+/// Where the phone may move a file to (V40 §6): the inbox archive only.
+const PHONE_MOVE_DESTINATIONS: [&str; 1] = ["archives/inbox/"];
 
 gpui::actions!(
     thock,
@@ -749,6 +755,10 @@ enum ApplyFailure {
     /// The vault file could not be read or written. The write is not acked,
     /// so it is applied on a later pass instead of being lost.
     Vault(anyhow::Error),
+    /// The write is from a newer Thock than this desk (a `kind` or `v` it
+    /// doesn't know). It is held, with everything queued behind it, until
+    /// the desk is updated; acking would throw the phone's change away.
+    Unsupported(anyhow::Error),
 }
 
 /// A file the desk is not sending, and why, for the status row.
@@ -1527,7 +1537,8 @@ async fn run_job(
             let fs = fs.clone();
             let root = vault.root.clone();
             let known = state.files.clone();
-            cx.background_spawn(async move { scan_vault(&fs, &root, &known).await })
+            let images_dir = vault.config.images.dir.clone();
+            cx.background_spawn(async move { scan_vault(&fs, &root, &known, &images_dir).await })
         };
         match scan.await {
             Ok(result) => {
@@ -1567,6 +1578,7 @@ async fn run_job(
                 let key = session.key;
                 cx.background_spawn(async move {
                     let mut changed = BTreeSet::new();
+                    let mut vacated = BTreeSet::new();
                     let mut applied = 0;
                     let mut refused = Vec::new();
                     let mut blocked = None;
@@ -1575,11 +1587,15 @@ async fn run_job(
                     // handled, so a blocked write and those after it stay queued.
                     for row in &writes {
                         match apply_write(&fs, &vault, &key, row).await {
-                            Ok(Some(path)) => {
-                                changed.insert(path);
-                                applied += 1;
+                            Ok(result) => {
+                                if let Some(path) = result.changed {
+                                    changed.insert(path);
+                                    applied += 1;
+                                }
+                                if let Some(path) = result.removed {
+                                    vacated.insert(path);
+                                }
                             }
-                            Ok(None) => {}
                             Err(ApplyFailure::Refused(error)) => {
                                 log::warn!(
                                     "Thock: skipping write {} for {}: {error:#}",
@@ -1600,14 +1616,27 @@ async fn run_job(
                                 )));
                                 break;
                             }
+                            Err(ApplyFailure::Unsupported(error)) => {
+                                log::warn!(
+                                    "Thock: holding write {} for {} until this desk is updated: {error:#}",
+                                    row.seq,
+                                    row.path
+                                );
+                                blocked = Some(error.context(format!(
+                                    "a change from your phone to {} needs a newer Thock on this desk. Update Thock to apply it",
+                                    row.path
+                                )));
+                                break;
+                            }
                         }
                         last = Some(last.map_or(row.seq, |seq: u64| seq.max(row.seq)));
                     }
-                    (changed, applied, last, refused, blocked)
+                    (changed, vacated, applied, last, refused, blocked)
                 })
             };
-            let (changed, count, last, refused, blocked) = apply_all.await;
+            let (changed, vacated, count, last, refused, blocked) = apply_all.await;
             dirty.extend(changed);
+            removed.extend(vacated);
             applied = count;
             last_seq = last;
             refused_writes = refused;
@@ -1621,6 +1650,7 @@ async fn run_job(
         let key = session.key;
         let fs = fs.clone();
         let root = vault.root.clone();
+        let images_dir = vault.config.images.dir.clone();
         let quota = info
             .as_ref()
             .map(|info| (info.quota_bytes, info.used_bytes))
@@ -1637,7 +1667,9 @@ async fn run_job(
                     // will follow, or the next catch-up tombstones it.
                     Err(_) => continue,
                 };
-                if let Some(reason) = unsendable_reason(&bytes) {
+                if let Some(reason) =
+                    unsendable_reason(&bytes, is_syncable_image_path(path, &images_dir))
+                {
                     skipped.push(SkippedFile {
                         path: path.clone(),
                         reason,
@@ -1734,6 +1766,7 @@ async fn scan_vault(
     fs: &Arc<dyn Fs>,
     root: &Path,
     known: &BTreeMap<String, FileRecord>,
+    images_dir: &str,
 ) -> Result<ScanResult> {
     let mut changed = BTreeSet::new();
     let mut skipped = Vec::new();
@@ -1771,7 +1804,8 @@ async fn scan_vault(
                 }
                 continue;
             }
-            if metadata.is_symlink || !is_syncable_path(&rel) {
+            let is_image = is_syncable_image_path(&rel, images_dir);
+            if metadata.is_symlink || (!is_image && !is_syncable_path(&rel)) {
                 continue;
             }
             // Still present, so never tombstoned: a file that grew too large
@@ -1787,7 +1821,7 @@ async fn scan_vault(
             let Ok(bytes) = fs.load_bytes(&abs).await else {
                 continue;
             };
-            if let Some(reason) = unsendable_reason(&bytes) {
+            if let Some(reason) = unsendable_reason(&bytes, is_image) {
                 skipped.push(SkippedFile { path: rel, reason });
                 continue;
             }
@@ -1826,11 +1860,14 @@ fn relative_path(root: &Path, abs: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
-fn unsendable_reason(bytes: &[u8]) -> Option<SharedString> {
+/// Why a file stays on the desk: over the size limit, or not text where
+/// text is expected. A picture in the images folder is bytes by nature
+/// (V39 §6.1) and skips the second check.
+fn unsendable_reason(bytes: &[u8], is_image: bool) -> Option<SharedString> {
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Some("too large to send (over 2 MB)".into());
     }
-    if std::str::from_utf8(bytes).is_err() {
+    if !is_image && std::str::from_utf8(bytes).is_err() {
         return Some("not a text file".into());
     }
     None
@@ -1912,13 +1949,29 @@ async fn upload_file(
 
 /// Applies one queued write to the file on disk. Returns the path when the
 /// file changed, `None` for a no-op or a write that had to be skipped.
+/// What applying a write did on disk: the file to upload, and the path a
+/// move left empty, to tombstone.
+#[derive(Default)]
+struct AppliedWrite {
+    changed: Option<String>,
+    removed: Option<String>,
+}
+
 async fn apply_write(
     fs: &Arc<dyn Fs>,
     vault: &Vault,
     key: &[u8; 32],
     row: &WriteRow,
-) -> Result<Option<String>, ApplyFailure> {
-    let write = open_write(key, row).map_err(ApplyFailure::Refused)?;
+) -> Result<AppliedWrite, ApplyFailure> {
+    let write = open_write(key, row, &vault.config.images.dir)?;
+    match &write.operation {
+        Operation::PutFile {
+            content_base64,
+            content_hash,
+        } => return apply_put_file(fs, vault, &write, content_base64, content_hash).await,
+        Operation::MoveFile { to } => return apply_move_file(fs, vault, &write, to).await,
+        _ => {}
+    }
     let abs = vault.root.join(&write.path);
     let existing = if fs.is_file(&abs).await {
         let bytes = fs.load_bytes(&abs).await.map_err(ApplyFailure::Vault)?;
@@ -1930,15 +1983,115 @@ async fn apply_write(
     } else {
         None
     };
-    apply_opened_write(fs, vault, &write, existing)
+    let changed = apply_opened_write(fs, vault, &write, existing)
         .await
-        .map_err(ApplyFailure::Vault)
+        .map_err(ApplyFailure::Vault)?;
+    Ok(AppliedWrite {
+        changed,
+        removed: None,
+    })
 }
 
-fn open_write(key: &[u8; 32], row: &WriteRow) -> Result<Write> {
+/// A picture from the phone (V39 §6.3): decoded, checked against its hash,
+/// and written only where nothing is. A file already there, whatever its
+/// bytes, is left alone; pictures are immutable and a new one is a new name.
+async fn apply_put_file(
+    fs: &Arc<dyn Fs>,
+    vault: &Vault,
+    write: &Write,
+    content_base64: &str,
+    content_hash: &str,
+) -> Result<AppliedWrite, ApplyFailure> {
+    if !is_syncable_image_path(&write.path, &vault.config.images.dir) {
+        return Err(ApplyFailure::Refused(anyhow!(
+            "a picture can only land in the images folder"
+        )));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(content_base64.trim())
+        .context("the picture isn't valid base64")
+        .map_err(ApplyFailure::Refused)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(ApplyFailure::Refused(anyhow!("the picture is over 2 MB")));
+    }
+    if plaintext_hash(&bytes) != content_hash {
+        return Err(ApplyFailure::Refused(anyhow!(
+            "the picture's bytes don't match its hash"
+        )));
+    }
+    let abs = vault.root.join(&write.path);
+    if fs.is_file(&abs).await {
+        let existing = fs.load_bytes(&abs).await.map_err(ApplyFailure::Vault)?;
+        if plaintext_hash(&existing) != content_hash {
+            log::warn!(
+                "Thock: {} is already there with other bytes; the phone's picture is not written",
+                write.path
+            );
+        }
+        return Ok(AppliedWrite::default());
+    }
+    if let Some(parent) = abs.parent() {
+        fs.create_dir(parent).await.map_err(ApplyFailure::Vault)?;
+    }
+    fs.write(&abs, &bytes).await.map_err(ApplyFailure::Vault)?;
+    Ok(AppliedWrite {
+        changed: Some(write.path.clone()),
+        removed: None,
+    })
+}
+
+/// A rename from the phone (V40 §6.1): into the inbox archive only, never
+/// over a file that is there, never from one that is not. A source the desk
+/// already filed is a no-op, so a move never resurrects a note.
+async fn apply_move_file(
+    fs: &Arc<dyn Fs>,
+    vault: &Vault,
+    write: &Write,
+    to: &str,
+) -> Result<AppliedWrite, ApplyFailure> {
+    if !is_syncable_path(to)
+        || !PHONE_MOVE_DESTINATIONS
+            .iter()
+            .any(|folder| to.starts_with(folder))
+    {
+        return Err(ApplyFailure::Refused(anyhow!(
+            "the move's destination isn't one the phone may write"
+        )));
+    }
+    let from = vault.root.join(&write.path);
+    let destination = vault.root.join(to);
+    if !fs.is_file(&from).await {
+        return Ok(AppliedWrite::default());
+    }
+    if fs.is_file(&destination).await {
+        log::warn!(
+            "Thock: {to} is already there; {} stays where it is for the desk to file",
+            write.path
+        );
+        return Ok(AppliedWrite::default());
+    }
+    fs.rename(
+        &from,
+        &destination,
+        RenameOptions {
+            overwrite: false,
+            ignore_if_exists: false,
+            create_parents: true,
+        },
+    )
+    .await
+    .map_err(ApplyFailure::Vault)?;
+    Ok(AppliedWrite {
+        changed: Some(to.to_string()),
+        removed: Some(write.path.clone()),
+    })
+}
+
+fn open_write(key: &[u8; 32], row: &WriteRow, images_dir: &str) -> Result<Write, ApplyFailure> {
     let envelope = base64::engine::general_purpose::STANDARD
         .decode(row.payload.trim())
-        .context("the write's payload isn't valid base64")?;
+        .context("the write's payload isn't valid base64")
+        .map_err(ApplyFailure::Refused)?;
     let plaintext = thock_sync_core::open(
         key,
         SealContext::Write {
@@ -1946,15 +2099,26 @@ fn open_write(key: &[u8; 32], row: &WriteRow) -> Result<Write> {
         },
         &envelope,
     )
-    .map_err(|error| anyhow!("the write couldn't be decrypted: {error}"))?;
-    let json = std::str::from_utf8(&plaintext).context("the write isn't UTF-8")?;
-    let write = thock_sync_core::parse_write(json)
-        .map_err(|error| anyhow!("the write isn't readable: {error}"))?;
+    .map_err(|error| ApplyFailure::Refused(anyhow!("the write couldn't be decrypted: {error}")))?;
+    let json = std::str::from_utf8(&plaintext)
+        .context("the write isn't UTF-8")
+        .map_err(ApplyFailure::Refused)?;
+    let write = thock_sync_core::parse_write(json).map_err(|error| {
+        if error.needs_newer_reader() {
+            ApplyFailure::Unsupported(anyhow!("{error}"))
+        } else {
+            ApplyFailure::Refused(anyhow!("the write isn't readable: {error}"))
+        }
+    })?;
     if write.path != row.path || write.client_id != row.client_id {
-        bail!("the write names a different path or id than its row");
+        return Err(ApplyFailure::Refused(anyhow!(
+            "the write names a different path or id than its row"
+        )));
     }
-    if !is_syncable_path(&write.path) {
-        bail!("the write targets a path that doesn't sync");
+    if !is_syncable_path(&write.path) && !is_syncable_image_path(&write.path, images_dir) {
+        return Err(ApplyFailure::Refused(anyhow!(
+            "the write targets a path that doesn't sync"
+        )));
     }
     Ok(write)
 }
@@ -2098,6 +2262,10 @@ mod tests {
         }
 
         fn plaintext(&self, path: &str) -> Option<String> {
+            String::from_utf8(self.plaintext_bytes(path)?).ok()
+        }
+
+        fn plaintext_bytes(&self, path: &str) -> Option<Vec<u8>> {
             let file = self.files.get(path)?;
             let envelope = self.blobs.get(&file.blob_id)?;
             let bytes = thock_sync_core::open(
@@ -2109,7 +2277,7 @@ mod tests {
                 envelope,
             )
             .ok()?;
-            String::from_utf8(bytes).ok()
+            Some(bytes)
         }
 
         fn vault_json(&self) -> serde_json::Value {
@@ -2411,6 +2579,391 @@ mod tests {
         service.read_with(cx, |service, _| {
             assert!(matches!(service.status(), PhoneSyncState::UpToDate { .. }));
             assert_eq!(service.state.acked_through_seq, 2);
+        });
+    }
+
+    #[gpui::test]
+    async fn a_write_from_a_newer_phone_is_held_not_acked_and_garbage_is_skipped(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "backlog.md": "## Soon\n- [ ] Call Ana\n",
+            }),
+        )
+        .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        {
+            let mut server = server.lock().unwrap();
+            server.phone_paired = true;
+            // Garbage is skipped and acked; a kind this desk doesn't know
+            // stops the queue, so the append behind it waits too.
+            server.queue_write("backlog.md", "g1", "not even json");
+            server.queue_write(
+                "backlog.md",
+                "f1",
+                r#"{"v":1,"client_id":"f1","kind":"swap_blocks","path":"backlog.md"}"#,
+            );
+            server.queue_write(
+                "backlog.md",
+                "a1",
+                &write_json("a1", "backlog.md", "Soon", "- [ ] Buy a card"),
+            );
+        }
+        let service = start_service(&fs, server.clone(), cx).await;
+
+        let note = fs.load(Path::new("/vault/backlog.md")).await.unwrap();
+        assert_eq!(note, "## Soon\n- [ ] Call Ana\n");
+        {
+            let server = server.lock().unwrap();
+            assert_eq!(server.acked_through, 1, "{:?}", server.requests);
+        }
+        service.read_with(cx, |service, _| {
+            match service.status() {
+                PhoneSyncState::Failing { error } => {
+                    assert!(error.contains("Update Thock"), "{error}");
+                }
+                other => panic!("expected a failing status, got {other:?}"),
+            }
+            assert_eq!(service.state.acked_through_seq, 1);
+            assert!(service.pending.drain, "the held write is retried");
+        });
+    }
+
+    const PNG: [u8; 12] = [
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0xff,
+    ];
+
+    fn put_file_json(client_id: &str, path: &str, bytes: &[u8], hash: Option<&str>) -> String {
+        Write::new(
+            client_id,
+            path,
+            Operation::PutFile {
+                content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                content_hash: hash.map_or_else(|| plaintext_hash(bytes), str::to_string),
+            },
+        )
+        .to_json()
+    }
+
+    fn move_file_json(client_id: &str, path: &str, to: &str) -> String {
+        Write::new(client_id, path, Operation::MoveFile { to: to.to_string() }).to_json()
+    }
+
+    #[gpui::test]
+    async fn a_picture_from_the_phone_lands_in_images_and_uploads_as_bytes(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "inbox": {"a.md": "# A\n"},
+            }),
+        )
+        .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        {
+            let mut server = server.lock().unwrap();
+            server.phone_paired = true;
+            server.queue_write(
+                "images/2026-10-10-0931-photo.png",
+                "p1",
+                &put_file_json("p1", "images/2026-10-10-0931-photo.png", &PNG, None),
+            );
+        }
+        let service = start_service(&fs, server.clone(), cx).await;
+
+        let on_disk = fs
+            .load_bytes(Path::new("/vault/images/2026-10-10-0931-photo.png"))
+            .await
+            .unwrap();
+        assert_eq!(on_disk, PNG);
+        {
+            let server = server.lock().unwrap();
+            assert_eq!(server.acked_through, 1, "{:?}", server.requests);
+            assert_eq!(
+                server.plaintext_bytes("images/2026-10-10-0931-photo.png"),
+                Some(PNG.to_vec()),
+                "the picture is uploaded as a binary snapshot"
+            );
+        }
+        service.read_with(cx, |service, _| {
+            assert!(
+                service
+                    .state
+                    .files
+                    .contains_key("images/2026-10-10-0931-photo.png")
+            );
+            assert!(service.skipped.is_empty(), "{:?}", service.skipped);
+        });
+    }
+
+    #[gpui::test]
+    async fn a_picture_that_is_wrong_or_misplaced_changes_nothing_and_is_acked(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "images": {"taken.png": "already here"},
+            }),
+        )
+        .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        {
+            let mut server = server.lock().unwrap();
+            server.phone_paired = true;
+            // Wrong hash, wrong folder, and a name already taken: none lands,
+            // all three are acked so the queue moves on.
+            server.queue_write(
+                "images/bad.png",
+                "p1",
+                &put_file_json("p1", "images/bad.png", &PNG, Some("00")),
+            );
+            server.queue_write(
+                "daily/stray.png",
+                "p2",
+                &put_file_json("p2", "daily/stray.png", &PNG, None),
+            );
+            server.queue_write(
+                "images/taken.png",
+                "p3",
+                &put_file_json("p3", "images/taken.png", &PNG, None),
+            );
+        }
+        start_service(&fs, server.clone(), cx).await;
+
+        assert!(!fs.is_file(Path::new("/vault/images/bad.png")).await);
+        assert!(!fs.is_file(Path::new("/vault/daily/stray.png")).await);
+        assert_eq!(
+            fs.load(Path::new("/vault/images/taken.png")).await.unwrap(),
+            "already here"
+        );
+        let server = server.lock().unwrap();
+        assert_eq!(server.acked_through, 3, "{:?}", server.requests);
+        assert!(!server.files.contains_key("images/bad.png"));
+        assert!(!server.files.contains_key("daily/stray.png"));
+    }
+
+    #[gpui::test]
+    async fn a_move_from_the_phone_renames_the_note_and_tombstones_the_source(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "inbox": {"2026-10-10-0931-call-ana.md": "# Call Ana\n\nAbout rest.\n"},
+            }),
+        )
+        .await;
+        // The desk and the server both know the note before the phone moves
+        // it, as they would after any earlier upload.
+        let note_path = "inbox/2026-10-10-0931-call-ana.md";
+        let mut known = LocalState::default();
+        known.cursor = 1;
+        known.files.insert(
+            note_path.to_string(),
+            FileRecord {
+                version: 1,
+                blob_id: "b1".to_string(),
+                plaintext_hash: plaintext_hash(b"# Call Ana\n\nAbout rest.\n"),
+            },
+        );
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        {
+            let mut server = server.lock().unwrap();
+            server.phone_paired = true;
+            server.next_version = 1;
+            server.files.insert(
+                note_path.to_string(),
+                StubFile {
+                    version: 1,
+                    blob_id: "b1".to_string(),
+                    deleted: false,
+                },
+            );
+            server.queue_write(
+                note_path,
+                "m1",
+                &move_file_json(
+                    "m1",
+                    note_path,
+                    "archives/inbox/2026-10-10-0931-call-ana.md",
+                ),
+            );
+        }
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+        let service = cx.new(|cx| VaultSyncService::new(project.clone(), cx));
+        service.update(cx, |service, cx| {
+            service.state = known;
+            service.configure_for_test(test_vault(), stub_api(server.clone()), KEY, cx)
+        });
+        cx.run_until_parked();
+
+        assert!(
+            !fs.is_file(Path::new("/vault/inbox/2026-10-10-0931-call-ana.md"))
+                .await
+        );
+        assert_eq!(
+            fs.load(Path::new(
+                "/vault/archives/inbox/2026-10-10-0931-call-ana.md"
+            ))
+            .await
+            .unwrap(),
+            "# Call Ana\n\nAbout rest.\n"
+        );
+        {
+            let server = server.lock().unwrap();
+            assert_eq!(server.acked_through, 1, "{:?}", server.requests);
+            assert_eq!(
+                server
+                    .plaintext("archives/inbox/2026-10-10-0931-call-ana.md")
+                    .as_deref(),
+                Some("# Call Ana\n\nAbout rest.\n")
+            );
+            assert!(
+                server
+                    .files
+                    .get("inbox/2026-10-10-0931-call-ana.md")
+                    .is_some_and(|file| file.deleted),
+                "the source is tombstoned: {:?}",
+                server.requests
+            );
+        }
+        service.read_with(cx, |service, _| {
+            assert!(
+                !service
+                    .state
+                    .files
+                    .contains_key("inbox/2026-10-10-0931-call-ana.md")
+            );
+            assert!(
+                service
+                    .state
+                    .files
+                    .contains_key("archives/inbox/2026-10-10-0931-call-ana.md")
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_move_that_cannot_land_changes_nothing_and_is_acked(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "inbox": {"a.md": "# A\n", "b.md": "# B\n"},
+                "archives": {"inbox": {"b.md": "# Older B\n"}},
+            }),
+        )
+        .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        {
+            let mut server = server.lock().unwrap();
+            server.phone_paired = true;
+            // Outside the archive, onto a file that is there, and from a
+            // note the desk already filed.
+            server.queue_write(
+                "inbox/a.md",
+                "m1",
+                &move_file_json("m1", "inbox/a.md", "daily/a.md"),
+            );
+            server.queue_write(
+                "inbox/b.md",
+                "m2",
+                &move_file_json("m2", "inbox/b.md", "archives/inbox/b.md"),
+            );
+            server.queue_write(
+                "inbox/gone.md",
+                "m3",
+                &move_file_json("m3", "inbox/gone.md", "archives/inbox/gone.md"),
+            );
+        }
+        start_service(&fs, server.clone(), cx).await;
+
+        assert_eq!(
+            fs.load(Path::new("/vault/inbox/a.md")).await.unwrap(),
+            "# A\n"
+        );
+        assert!(!fs.is_file(Path::new("/vault/daily/a.md")).await);
+        assert_eq!(
+            fs.load(Path::new("/vault/inbox/b.md")).await.unwrap(),
+            "# B\n"
+        );
+        assert_eq!(
+            fs.load(Path::new("/vault/archives/inbox/b.md"))
+                .await
+                .unwrap(),
+            "# Older B\n"
+        );
+        assert!(!fs.is_file(Path::new("/vault/archives/inbox/gone.md")).await);
+        let server = server.lock().unwrap();
+        assert_eq!(server.acked_through, 3, "{:?}", server.requests);
+    }
+
+    #[gpui::test]
+    async fn pictures_sync_from_the_images_folder_only(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "backlog.md": "## Soon\n",
+                "images": {},
+                "daily": {},
+            }),
+        )
+        .await;
+        fs.write(Path::new("/vault/images/a.png"), &PNG)
+            .await
+            .unwrap();
+        fs.write(Path::new("/vault/daily/b.png"), &PNG)
+            .await
+            .unwrap();
+        fs.write(Path::new("/vault/images/notes.txt"), &PNG)
+            .await
+            .unwrap();
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        let service = start_service(&fs, server.clone(), cx).await;
+
+        {
+            let server = server.lock().unwrap();
+            assert_eq!(server.plaintext_bytes("images/a.png"), Some(PNG.to_vec()));
+            assert!(
+                !server.files.contains_key("daily/b.png"),
+                "{:?}",
+                server.requests
+            );
+            assert!(!server.files.contains_key("images/notes.txt"));
+        }
+        service.read_with(cx, |service, _| {
+            // A text file that isn't text is still reported; a picture outside
+            // the folder is simply not a sync file.
+            assert_eq!(
+                service
+                    .skipped
+                    .iter()
+                    .map(|file| file.path.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["images/notes.txt"]
+            );
         });
     }
 

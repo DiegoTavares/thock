@@ -81,6 +81,19 @@ public final class VaultStore: @unchecked Sendable {
                 inbox_path TEXT
             )
             """)
+        // The pictures this phone captured (V39 §7.4): not snapshots, so a
+        // full pull leaves them alone; kept for the receipts' thumbnails.
+        try database.execute("""
+            CREATE TABLE IF NOT EXISTS blobs (
+                path TEXT PRIMARY KEY,
+                bytes BLOB NOT NULL,
+                content_hash TEXT NOT NULL
+            )
+            """)
+        let captureColumns = (try? database.query("PRAGMA table_info(captures)"))?.compactMap { $0.count > 1 ? $0[1].string : nil } ?? []
+        if !captureColumns.contains("images") {
+            try database.execute("ALTER TABLE captures ADD COLUMN images INTEGER NOT NULL DEFAULT 0")
+        }
         try database.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         try database.execute("""
             CREATE TABLE IF NOT EXISTS ask_turns (
@@ -177,6 +190,14 @@ public final class VaultStore: @unchecked Sendable {
             do {
                 for planned in writes {
                     let document = planned.document
+                    if document.kind == .moveFile {
+                        outcomes.append(try renameFile(document))
+                        continue
+                    }
+                    if document.kind == .putFile {
+                        outcomes.append(try storeBlob(document))
+                        continue
+                    }
                     let existing = content(document.path)
                     let applied = SyncCore.apply(existing: existing, write: document, seed: seedText(planned.seed))
                     outcomes.append(applied.outcome)
@@ -199,6 +220,50 @@ public final class VaultStore: @unchecked Sendable {
         }
         changed()
         return outcomes
+    }
+
+    /// A `move_file` on the local copy (V40 §6.1): the note takes its new
+    /// path at once, so the screen is right before the desk wakes. A source
+    /// that is already gone, or a destination already taken, changes nothing
+    /// and queues nothing; the desk would answer the same.
+    private func renameFile(_ document: WriteDocument) throws -> Outcome {
+        guard let to = document.toPath, let source = content(document.path), content(to) == nil else {
+            return .noop
+        }
+        let version = version(document.path)
+        try database.execute("INSERT INTO files (path, version, content) VALUES (?, 0, ?)", [.text(to), .text(source)])
+        try database.execute("DELETE FROM files WHERE path = ?", [.text(document.path)])
+        try database.execute(
+            "INSERT INTO pending_writes (client_id, path, base_version, json, seed) VALUES (?, ?, ?, ?, NULL)",
+            [.text(document.clientID), .text(document.path), .int(Int64(version)), .text(document.json())])
+        return .applied
+    }
+
+    /// A `put_file` on the phone (V39 §7.4): the bytes are kept beside the
+    /// notes and the write queued once. A path already held changes nothing
+    /// and queues nothing; pictures are immutable.
+    private func storeBlob(_ document: WriteDocument) throws -> Outcome {
+        guard let encoded = document.contentBase64, let bytes = Data(base64Encoded: encoded), let hash = document.contentHash,
+              !hasBlob(document.path)
+        else { return .noop }
+        try database.execute("INSERT INTO blobs (path, bytes, content_hash) VALUES (?, ?, ?)", [.text(document.path), .blob(bytes), .text(hash)])
+        try database.execute(
+            "INSERT INTO pending_writes (client_id, path, base_version, json, seed) VALUES (?, ?, 0, ?, NULL)",
+            [.text(document.clientID), .text(document.path), .text(document.json())])
+        return .applied
+    }
+
+    /// The bytes of a picture this phone captured, or `nil`.
+    public func blob(_ path: String) -> Data? {
+        locked {
+            (try? database.query("SELECT bytes FROM blobs WHERE path = ?", [.text(path)]))?.first?.first?.data
+        }
+    }
+
+    public func hasBlob(_ path: String) -> Bool {
+        locked {
+            ((try? database.query("SELECT 1 FROM blobs WHERE path = ?", [.text(path)]))?.isEmpty == false)
+        }
     }
 
     public func pending(path: String? = nil) -> [PendingWrite] {
@@ -374,9 +439,9 @@ public final class VaultStore: @unchecked Sendable {
     public func addCapture(_ record: CaptureRecord) {
         locked {
             try? database.execute(
-                "INSERT INTO captures (digest, title, kind, destination, made_at, inbox_path) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO captures (digest, title, kind, destination, made_at, inbox_path, images) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [.text(record.digest), .text(record.title), .text(record.kind.rawValue), .text(record.destination.rawValue),
-                 .int(Int64(record.madeAt.timeIntervalSince1970 * 1000)), record.inboxPath.map { .text($0) } ?? .null])
+                 .int(Int64(record.madeAt.timeIntervalSince1970 * 1000)), record.inboxPath.map { .text($0) } ?? .null, .int(Int64(record.imageCount))])
         }
         changed()
     }
@@ -390,7 +455,7 @@ public final class VaultStore: @unchecked Sendable {
 
     public func captures() -> [CaptureRecord] {
         locked {
-            let rows = (try? database.query("SELECT id, digest, title, kind, destination, made_at, inbox_path FROM captures ORDER BY made_at DESC, id DESC")) ?? []
+            let rows = (try? database.query("SELECT id, digest, title, kind, destination, made_at, inbox_path, images FROM captures ORDER BY made_at DESC, id DESC")) ?? []
             return rows.compactMap { row in
                 guard let digest = row[1].string, let title = row[2].string,
                       let kind = row[3].string.flatMap(CaptureKind.init(rawValue:)),
@@ -398,7 +463,7 @@ public final class VaultStore: @unchecked Sendable {
                 else { return nil }
                 let seconds = Double(row[5].int ?? 0) / 1000
                 return CaptureRecord(id: row[0].int ?? 0, digest: digest, title: title, kind: kind, destination: destination,
-                                     madeAt: Date(timeIntervalSince1970: seconds), inboxPath: row[6].string)
+                                     madeAt: Date(timeIntervalSince1970: seconds), inboxPath: row[6].string, imageCount: Int(row[7].int ?? 0))
             }
         }
     }

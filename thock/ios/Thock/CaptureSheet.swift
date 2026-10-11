@@ -12,11 +12,12 @@ struct CaptureSheet: View {
 
     @State private var destination: CaptureDestination = .today
     @State private var blocks: [Block] = []
+    @State private var images: [ImageAttachment] = []
     @State private var handle = EditorHandle()
     @State private var finished = false
 
     private var isEmpty: Bool {
-        blocks.allSatisfy { $0.kind == .blank }
+        blocks.allSatisfy { $0.kind == .blank } && images.isEmpty
     }
 
     private var hint: String {
@@ -40,6 +41,8 @@ struct CaptureSheet: View {
                 model.session?.noteTitles(matching: query) ?? []
             } onChange: { blocks = $0 }
             .frame(maxHeight: .infinity)
+
+            AttachmentStrip(images: $images)
 
             HStack(spacing: 8) {
                 ForEach(CaptureDestination.allCases, id: \.self) { option in
@@ -84,7 +87,7 @@ struct CaptureSheet: View {
         guard !finished else { return }
         finished = true
         guard !isEmpty else { return }
-        model.saveCapture(blocks: blocks, destination: destination, entry: entry)
+        model.saveCapture(blocks: blocks, destination: destination, images: images, entry: entry)
     }
 }
 

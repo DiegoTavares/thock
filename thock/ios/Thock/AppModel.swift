@@ -118,6 +118,7 @@ final class AppModel {
     private var toastTask: Task<Void, Never>?
     private var pendingRemoval: (item: PlannerItem, note: NoteID)?
     private var pendingBacklogRemoval: BacklogTask?
+    private var pendingInboxGesture: (path: String, gesture: InboxGesture)?
     private var isAuthenticating = false
     /// Set on launch and on every return from the background.
     private var needsGreeting = true
@@ -514,7 +515,7 @@ final class AppModel {
     }
 
     #if DEBUG
-    /// `-thock-script "capture:today:Call the notary;tick:Read 20;asleep;triage"`
+    /// `-thock-script "capture:today:Call the notary;tick:Read 20;inbox-today:Ask Ana;asleep;triage"`
     /// does what taps would, in order, for checking the app end to end
     /// without driving the screen.
     private func run(script: String) async {
@@ -524,6 +525,16 @@ final class AppModel {
             switch parts.first {
             case "capture" where parts.count == 3:
                 saveCapture(blocks: Blocks.parse(parts[2].replacingOccurrences(of: "\\n", with: "\n")), destination: CaptureDestination(rawValue: parts[1]) ?? .inbox, entry: "script")
+            case "capture-photo" where parts.count == 3:
+                // `capture-photo:<inbox|today|backlog>:<text>`: a capture with
+                // one drawn picture attached (V39 §7.1).
+                let image = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 48)).image { context in
+                    UIColor.orange.setFill()
+                    context.fill(CGRect(x: 0, y: 0, width: 64, height: 48))
+                }
+                if let data = image.pngData(), let attachment = ImageDownsizer.prepare(data, name: "smoke") {
+                    saveCapture(blocks: Blocks.parse(parts[2].replacingOccurrences(of: "\\n", with: "\n")), destination: CaptureDestination(rawValue: parts[1]) ?? .inbox, images: [attachment], entry: "script")
+                }
             case "journal" where parts.count >= 2:
                 perform { try $0.journalAppend(blocks: Blocks.parse(parts[1])) }
             case "tick" where parts.count >= 2:
@@ -554,6 +565,14 @@ final class AppModel {
             case "backlog-remove" where parts.count >= 2:
                 if let task = session?.backlog().openSections.flatMap(\.tasks).first(where: { $0.label.hasPrefix(parts[1]) }) {
                     backlogRemove(task)
+                    commitPendingRemoval()
+                }
+            case "inbox-today", "inbox-backlog", "inbox-archive":
+                // `inbox-<today|backlog|archive>:<title prefix>`: the inbox
+                // screen's swipes (V40 §4), written at once.
+                if parts.count >= 2, let gesture = InboxGesture(rawValue: String(parts[0].dropFirst("inbox-".count))),
+                   let note = store?.waitingInboxNotes().first(where: { $0.title.hasPrefix(parts[1]) }) {
+                    inboxGesture(gesture, path: note.path)
                     commitPendingRemoval()
                 }
             case "asked" where parts.count == 3:
@@ -717,9 +736,9 @@ final class AppModel {
         ThockEnvironment.defaults.set(chip.rawValue, forKey: "chip.\(entry)")
     }
 
-    func saveCapture(blocks: [Block], destination: CaptureDestination, entry: String) {
+    func saveCapture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], entry: String) {
         var saved: CaptureRecord?
-        let ok = perform { saved = try $0.capture(blocks: blocks, destination: destination) }
+        let ok = perform { saved = try $0.capture(blocks: blocks, destination: destination, images: images) }
         guard ok, saved != nil else { return }
         remember(chip: destination, for: entry)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -762,6 +781,37 @@ final class AppModel {
             pendingBacklogRemoval = nil
             perform { try $0.removeBacklog(task) }
         }
+        if let pending = pendingInboxGesture {
+            pendingInboxGesture = nil
+            perform { try $0.triageInbox(path: pending.path, gesture: pending.gesture) }
+        }
+    }
+
+    // MARK: The inbox's gestures (V40 §4)
+
+    /// A swipe on a waiting inbox item. The row leaves at once and the writes
+    /// wait a few seconds for an undo, like a removal: a gesture that was
+    /// undone must leave no trace on the wire.
+    func inboxGesture(_ gesture: InboxGesture, path: String) {
+        commitPendingRemoval()
+        pendingInboxGesture = (path, gesture)
+        revision += 1
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        let text: String
+        switch gesture {
+        case .today: text = "Added to today"
+        case .backlog: text = "Added to the backlog"
+        case .archive: text = "Archived"
+        }
+        show(text) { [weak self] in
+            self?.pendingInboxGesture = nil
+            self?.revision += 1
+            withAnimation(.snappy) { self?.toast = nil }
+        }
+    }
+
+    func isBeingTriaged(_ path: String) -> Bool {
+        pendingInboxGesture?.path == path
     }
 
     // MARK: The backlog's moves (V38 §6)
@@ -857,7 +907,7 @@ final class AppModel {
     }
 
     /// Sends what the person wrote, with the connection facts and their
-    /// screenshots, to be filed for us to read (V39).
+    /// screenshots, to be filed for us to read (V41).
     func sendReport(description: String, screenshots: [Data]) async throws -> Int {
         guard let engine else {
             throw APIError(status: 401, code: "unauthorized", error: "This phone isn't connected to your desk.")

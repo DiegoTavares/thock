@@ -61,9 +61,11 @@ toml.workspace = true
 toml_edit.workspace = true
 ui.workspace = true
 url.workspace = true
+urlencoding.workspace = true
 util.workspace = true
 which.workspace = true
 workspace.workspace = true
+worktree.workspace = true
 zed_actions.workspace = true
 zed_credentials_provider.workspace = true
 

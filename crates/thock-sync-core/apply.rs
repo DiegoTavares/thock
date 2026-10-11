@@ -29,6 +29,15 @@ pub struct Applied {
 /// `seed` is the already-expanded template used when an `append` asks for
 /// `create_from_template` on a missing file (spec §8.2 rule 2).
 pub fn apply(existing: Option<&str>, write: &Write, seed: Option<&str>) -> Applied {
+    // A file-level write changes no text: the store creates or renames the
+    // file (V39 §6.3, V40 §6.1), and a rebase onto a snapshot of either
+    // path leaves it alone.
+    if write.operation.is_file_level() {
+        return Applied {
+            text: existing.unwrap_or_default().to_string(),
+            outcome: Outcome::Noop,
+        };
+    }
     if let Some(text) = existing
         && effect_present(text, write)
     {
@@ -63,6 +72,9 @@ pub fn apply(existing: Option<&str>, write: &Write, seed: Option<&str>) -> Appli
     };
 
     let applied = match &write.operation {
+        Operation::PutFile { .. } | Operation::MoveFile { .. } => {
+            return unchanged(document, outcome);
+        }
         Operation::Create { content } => {
             let lines = content_lines(content);
             let section = document.whole();
@@ -228,6 +240,8 @@ pub fn apply(existing: Option<&str>, write: &Write, seed: Option<&str>) -> Appli
 pub fn effect_present(content: &str, write: &Write) -> bool {
     let document = Document::split(content);
     match &write.operation {
+        // Presence is a question about files, which the store answers.
+        Operation::PutFile { .. } | Operation::MoveFile { .. } => false,
         Operation::Create { content: wanted } => {
             if normalize_endings(content) == normalize_endings(wanted) {
                 return true;
