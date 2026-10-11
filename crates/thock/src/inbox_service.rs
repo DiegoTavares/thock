@@ -245,6 +245,9 @@ struct Suggestions {
     /// later snapshot never loses to an earlier one.
     write_queue: std::collections::VecDeque<(&'static str, String)>,
     writing: bool,
+    /// Decisions made before the log finished loading; appended once it
+    /// has, so the file is never rewritten from a partial copy.
+    pending_decisions: Vec<DecisionRecord>,
 }
 
 /// What moving an inbox note into the archive did (V40 §6.1).
@@ -545,7 +548,15 @@ impl InboxService {
         };
 
         let account = resolve_google_settings(&vault.root, INBOX_CONFIG_FILE).account;
+        if self.vault.as_ref() != Some(&vault) {
+            // A different vault has its own cache and log.
+            self.suggestions = Suggestions::default();
+        }
         self.vault = Some(vault);
+        // The cache and decision log feed the sync popover's Inbox row and
+        // every decision the view records, grant or not, so they load as
+        // soon as there is a vault to read them from.
+        self.load_suggestion_state(cx);
         match config {
             None => self.clear_sync(SyncState::NoConfig),
             Some(config) if account.is_none() => {
@@ -873,6 +884,7 @@ impl InboxService {
     /// An Inbox view opened: suggestions are asked while at least one is.
     pub fn view_opened(&mut self, cx: &mut Context<Self>) {
         self.open_views += 1;
+        self.load_suggestion_state(cx);
         self.pump_suggestions(cx);
     }
 
@@ -1060,9 +1072,9 @@ impl InboxService {
     }
 
     /// Loads the cache and the decision log once; `pump_suggestions` runs
-    /// again when they are in.
+    /// again when they are in, and decisions recorded meanwhile land.
     fn load_suggestion_state(&mut self, cx: &mut Context<Self>) {
-        if self.suggestions.loading.is_some() {
+        if self.suggestions.loaded || self.suggestions.loading.is_some() {
             return;
         }
         let Some(vault) = self.vault.clone() else {
@@ -1089,6 +1101,9 @@ impl InboxService {
                 service.suggestions.decisions_text = decisions_text;
                 service.suggestions.loaded = true;
                 service.suggestions.loading = None;
+                for record in std::mem::take(&mut service.suggestions.pending_decisions) {
+                    service.record_decision(&record, cx);
+                }
                 cx.emit(InboxEvent::SuggestionsChanged);
                 cx.notify();
                 service.pump_suggestions(cx);
@@ -1100,6 +1115,11 @@ impl InboxService {
     /// Appends a filing to `.thock/state/inbox/decisions.jsonl` (§7.6),
     /// after the writes landed.
     pub fn record_decision(&mut self, record: &DecisionRecord, cx: &mut Context<Self>) {
+        if !self.suggestions.loaded {
+            self.suggestions.pending_decisions.push(record.clone());
+            self.load_suggestion_state(cx);
+            return;
+        }
         let Ok(line) = serde_json::to_string(record) else {
             return;
         };
@@ -1110,6 +1130,16 @@ impl InboxService {
 
     /// Marks the decision for `stem` made at `at` undone (§6.2).
     pub fn mark_decision_undone(&mut self, stem: &str, at: &str, cx: &mut Context<Self>) {
+        if let Some(pending) = self
+            .suggestions
+            .pending_decisions
+            .iter_mut()
+            .rev()
+            .find(|record| record.stem == stem && record.at == at)
+        {
+            pending.undone = true;
+            return;
+        }
         let mut lines: Vec<String> = self
             .suggestions
             .decisions_text
@@ -1196,6 +1226,8 @@ impl InboxService {
     #[cfg(test)]
     pub(crate) fn set_vault_for_test(&mut self, vault: Vault, cx: &mut Context<Self>) {
         self.vault = Some(vault);
+        self.suggestions.loaded = false;
+        self.load_suggestion_state(cx);
         self.refresh_items(cx);
     }
 }
@@ -2113,6 +2145,75 @@ mod tests {
                     taken: 0
                 }
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn decisions_append_to_the_existing_log_without_a_grant(cx: &mut TestAppContext) {
+        let (fs, _service) = service_with_notes(cx, 1).await;
+        let earlier = r#"{"stem":"old","suggested":null,"confidence":null,"chosen":"today","via":"t","at":"2026-10-01T09:00:00Z"}"#;
+        fs.create_dir(Path::new("/vault/.thock/state/inbox"))
+            .await
+            .unwrap();
+        fs.insert_file(
+            Path::new("/vault/.thock/state/inbox/decisions.jsonl"),
+            format!("{earlier}\n").into_bytes(),
+        )
+        .await;
+        fs.insert_file(
+            Path::new("/vault/.thock/state/inbox/suggestions.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::to_string(&SuggestionRecord::new(
+                    "h",
+                    "s",
+                    &crate::inbox_suggest::parse_response(&jev_answer("soon", 0.9)).unwrap(),
+                    "2026-10-01T09:00:00Z",
+                ))
+                .unwrap()
+            )
+            .into_bytes(),
+        )
+        .await;
+        // A fresh service, no grant at all, and a decision recorded before
+        // the log has been read from disk.
+        cx.update(|cx| plus::set_current_entitlement(None, cx));
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        let fresh = cx.new(|cx| InboxService::new(project, cx));
+        fresh.update(cx, |service, cx| {
+            service.set_vault_for_test(test_vault(), cx);
+            service.view_opened(cx);
+            service.record_decision(
+                &DecisionRecord {
+                    stem: "new".to_string(),
+                    suggested: None,
+                    confidence: None,
+                    chosen: "archive".to_string(),
+                    via: "e".to_string(),
+                    at: "2026-10-10T09:00:00Z".to_string(),
+                    undone: false,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let log = fs
+            .load(Path::new("/vault/.thock/state/inbox/decisions.jsonl"))
+            .await
+            .unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 2, "{log}");
+        assert_eq!(lines[0], earlier);
+        assert!(lines[1].contains(r#""stem":"new""#), "{log}");
+        // The popover's figures read the files whether or not there is a grant.
+        fresh.read_with(cx, |service, _| {
+            assert_eq!(
+                service.decision_report().decisions,
+                0,
+                "neither had a suggestion"
+            );
+            assert!(service.month_cost() >= 0.0);
+            assert!(service.suggestion_for("h").is_some());
         });
     }
 

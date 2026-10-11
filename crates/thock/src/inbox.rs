@@ -467,12 +467,7 @@ fn split_frontmatter(content: &str) -> (Vec<(String, String)>, &str) {
 /// The identity of a note's bytes for the suggestion cache (V41 §7.5): an
 /// edited item is asked again, the same bytes never cost twice.
 pub fn note_hash(content: &str) -> String {
-    Sha256::digest(content.as_bytes())
-        .iter()
-        .fold(String::with_capacity(64), |mut out, byte| {
-            let _ = write!(out, "{byte:02x}");
-            out
-        })
+    hex::encode(Sha256::digest(content.as_bytes()))
 }
 
 /// Reads `.thock/state/inbox/last-triage`: one ISO timestamp, with or

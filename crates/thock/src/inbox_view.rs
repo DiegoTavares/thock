@@ -27,9 +27,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
-use thock_sync_core::{
-    Operation, Write, apply, archive_path, inbox_task_line, line_hash, triage_log_line,
-};
+use thock_sync_core::{Operation, Write, apply, archive_path, inbox_task_line, triage_log_line};
 use ui::{
     ActiveTheme as _, Button, ButtonCommon as _, Chip, Clickable as _, Color, ContextMenu, Icon,
     IconButton, IconName, IconSize, KeyBinding, Label, LabelCommon as _, LabelSize, ListHeader,
@@ -136,8 +134,12 @@ struct TaskWrite {
 #[derive(Debug, Clone, PartialEq)]
 struct FiledItem {
     stem: String,
+    destination: Destination,
     inbox_path: PathBuf,
     archive_path: PathBuf,
+    /// Whether the move happened; a note the phone archived meanwhile is
+    /// never moved back by undo.
+    moved: bool,
     task: Option<TaskWrite>,
     log_line: String,
     at: String,
@@ -145,7 +147,6 @@ struct FiledItem {
 
 #[derive(Debug, Clone, PartialEq)]
 struct Decision {
-    destination: Destination,
     items: Vec<FiledItem>,
 }
 
@@ -153,9 +154,17 @@ struct Decision {
 #[derive(Debug, Clone, PartialEq)]
 enum FilingNote {
     Filed,
+    /// A file at both paths: nothing written, the row stays (§6.1).
     AlreadyArchived,
+    /// Nothing at the source: the ritual or the phone got there first.
     AlreadyGone,
 }
+
+/// The rows a keystroke asked to file, each with its destination.
+type FilingPlan = Vec<(InboxEntry, Destination)>;
+
+/// The one toast a decision shows; undo dismisses it by this id.
+struct InboxDecisionToast;
 
 pub struct InboxView {
     workspace: WeakEntity<Workspace>,
@@ -184,6 +193,12 @@ pub struct InboxView {
     layout_save: Option<Task<()>>,
     last_decision: Option<Decision>,
     in_flight: bool,
+    /// Decisions made while one was still writing, in order; `space`
+    /// `space` `space` must not drop the middle one.
+    queued: std::collections::VecDeque<(FilingPlan, &'static str)>,
+    /// Stems being filed or waiting to be, still on screen until the folder
+    /// event lands; the selection skips them.
+    filing: HashSet<String>,
     status: Option<SharedString>,
     filed_today: usize,
     plus_banner_dismissed: bool,
@@ -279,7 +294,7 @@ impl InboxView {
             subscriptions.push(cx.subscribe(
                 service,
                 |this, _, event: &InboxEvent, cx| match event {
-                    InboxEvent::ItemsChanged => this.refresh_visible(cx),
+                    InboxEvent::ItemsChanged => this.items_changed(cx),
                     InboxEvent::SuggestionsChanged => cx.notify(),
                 },
             ));
@@ -289,14 +304,19 @@ impl InboxView {
                 service.update(cx, |service, cx| service.view_closed(cx));
             }));
         }
-        subscriptions.push(cx.on_focus_in(&cx.focus_handle(), window, |_, _, cx| cx.notify()));
-        subscriptions.push(cx.on_focus_out(&cx.focus_handle(), window, |_, _, _, cx| cx.notify()));
+        let focus_handle = cx.focus_handle();
+        let reader_focus = cx.focus_handle();
+        // The selection highlight and the reader's edge follow focus.
+        for handle in [&focus_handle, &reader_focus] {
+            subscriptions.push(cx.on_focus_in(handle, window, |_, _, cx| cx.notify()));
+            subscriptions.push(cx.on_focus_out(handle, window, |_, _, _, cx| cx.notify()));
+        }
         let mut this = Self {
             workspace,
             project,
             service,
-            focus_handle: cx.focus_handle(),
-            reader_focus: cx.focus_handle(),
+            focus_handle,
+            reader_focus,
             filter_editor,
             filter: String::new(),
             visible: Vec::new(),
@@ -312,6 +332,8 @@ impl InboxView {
             layout_save: None,
             last_decision: None,
             in_flight: false,
+            queued: std::collections::VecDeque::new(),
+            filing: HashSet::new(),
             status: None,
             filed_today: 0,
             plus_banner_dismissed: false,
@@ -341,15 +363,38 @@ impl InboxView {
 
     // ----- Rows -----
 
-    /// Re-reads the service's items into the two sections, keeps the
-    /// selection by stem (or by position when the stem left), and drops
-    /// marks, which a refresh from disk clears (§4.3).
+    /// The folder changed on disk: marks clear (§4.3), then the rows refresh.
+    fn items_changed(&mut self, cx: &mut Context<Self>) {
+        // A mark is a decision about particular bytes: it survives a refresh
+        // only while the row reads the same, so a row the phone or an editor
+        // changed underneath is never batch-filed on an old look.
+        let before: std::collections::HashMap<String, String> = self
+            .visible
+            .iter()
+            .map(|entry| (entry.item.stem.clone(), entry.hash.clone()))
+            .collect();
+        self.refresh_visible(cx);
+        let unchanged: HashSet<&str> = self
+            .visible
+            .iter()
+            .filter(|entry| before.get(&entry.item.stem) == Some(&entry.hash))
+            .map(|entry| entry.item.stem.as_str())
+            .collect();
+        self.marked.retain(|stem| unchanged.contains(stem.as_str()));
+    }
+
+    /// Re-reads the service's items into the two sections and keeps the
+    /// selection by stem (or by position when the stem left). Marks on rows
+    /// the filter hides are kept for when it clears.
     fn refresh_visible(&mut self, cx: &mut Context<Self>) {
         let items: Vec<InboxEntry> = self
             .service
             .as_ref()
             .map(|service| service.read(cx).items().to_vec())
             .unwrap_or_default();
+        let all_stems: HashSet<String> =
+            items.iter().map(|entry| entry.item.stem.clone()).collect();
+        self.marked.retain(|stem| all_stems.contains(stem));
         let matches = |entry: &InboxEntry| {
             if self.filter.is_empty() {
                 return true;
@@ -375,7 +420,6 @@ impl InboxView {
             .iter()
             .map(|entry| entry.item.stem.as_str())
             .collect();
-        self.marked.retain(|stem| stems.contains(stem.as_str()));
         if let Some(pending) = &self.pending_selection
             && stems.contains(pending.as_str())
         {
@@ -494,6 +538,11 @@ impl InboxView {
     /// The destination `space` takes for an entry: a suggestion at or
     /// above the outlined tier (§7.4).
     fn suggested_destination(&self, entry: &InboxEntry, cx: &App) -> Option<Destination> {
+        // The cache may hold answers from when the vault had a grant; without
+        // one today there is no chip, so `space` opens the note.
+        if self.availability(cx) != Some(SuggestionAvailability::On) {
+            return None;
+        }
         let suggestion = self.suggestion_for(entry, cx)?;
         match tier(suggestion) {
             Tier::Filled | Tier::Outlined => suggestion.destination,
@@ -584,32 +633,33 @@ impl InboxView {
         cx: &mut Context<Self>,
     ) {
         if !self.marked.is_empty() {
-            // Each marked row goes where its own chip points; the rest stay
-            // marked (§4.3).
-            let mut by_destination: Vec<(Destination, Vec<InboxEntry>)> = Vec::new();
-            for entry in self.targets() {
-                if let Some(destination) = self.suggested_destination(&entry, cx) {
-                    match by_destination
-                        .iter_mut()
-                        .find(|(known, _)| *known == destination)
-                    {
-                        Some((_, entries)) => entries.push(entry),
-                        None => by_destination.push((destination, vec![entry])),
-                    }
-                }
-            }
-            if let Some((destination, entries)) = by_destination.into_iter().next() {
-                self.file(destination, entries, "space", window, cx);
-            }
+            // Each marked row goes where its own chip points; rows without
+            // one are skipped and stay marked (§4.3).
+            let plan: FilingPlan = self
+                .targets()
+                .into_iter()
+                .filter_map(|entry| {
+                    let destination = self.suggested_destination(&entry, cx)?;
+                    Some((entry, destination))
+                })
+                .collect();
+            self.file(plan, "space", window, cx);
             return;
         }
         let Some(entry) = self.selected_entry().cloned() else {
             return;
         };
         match self.suggested_destination(&entry, cx) {
-            Some(destination) => self.file(destination, vec![entry], "space", window, cx),
+            Some(destination) => self.file(vec![(entry, destination)], "space", window, cx),
             None => self.open_selected(window, cx),
         }
+    }
+
+    fn plan_for(&self, destination: Destination) -> FilingPlan {
+        self.targets()
+            .into_iter()
+            .map(|entry| (entry, destination))
+            .collect()
     }
 
     fn send_to_today(
@@ -618,8 +668,8 @@ impl InboxView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let targets = self.targets();
-        self.file(Destination::Today, targets, "t", window, cx);
+        let plan = self.plan_for(Destination::Today);
+        self.file(plan, "t", window, cx);
     }
 
     fn send_to_soon(
@@ -628,8 +678,8 @@ impl InboxView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let targets = self.targets();
-        self.file(Destination::Soon, targets, "s", window, cx);
+        let plan = self.plan_for(Destination::Soon);
+        self.file(plan, "s", window, cx);
     }
 
     fn send_to_someday(
@@ -638,13 +688,13 @@ impl InboxView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let targets = self.targets();
-        self.file(Destination::Someday, targets, "S", window, cx);
+        let plan = self.plan_for(Destination::Someday);
+        self.file(plan, "S", window, cx);
     }
 
     fn archive(&mut self, _: &ArchiveInboxItem, window: &mut Window, cx: &mut Context<Self>) {
-        let targets = self.targets();
-        self.file(Destination::Archive, targets, "e", window, cx);
+        let plan = self.plan_for(Destination::Archive);
+        self.file(plan, "e", window, cx);
     }
 
     fn open_item(&mut self, _: &OpenInboxItem, window: &mut Window, cx: &mut Context<Self>) {
@@ -812,8 +862,8 @@ impl InboxView {
                 let view = view.clone();
                 move |window: &mut Window, cx: &mut App| {
                     view.update(cx, |this, cx| {
-                        let targets = this.targets();
-                        this.file(destination, targets, "menu", window, cx);
+                        let plan = this.plan_for(destination);
+                        this.file(plan, "menu", window, cx);
                     })
                     .log_err();
                 }
@@ -867,18 +917,18 @@ impl InboxView {
 
     // ----- Writes (§6) -----
 
-    /// Files `entries` to `destination`: V40 §5's writes per item, in list
-    /// order, each awaited before the next; then the decision log, the
-    /// selection move and the toast with Undo.
+    /// Files each row of `plan`: V40 §5's writes per item, in list order,
+    /// each awaited before the next; then the decision log, the selection
+    /// move and the toast with Undo. A plan arriving while one is still
+    /// writing waits its turn instead of being dropped.
     fn file(
         &mut self,
-        destination: Destination,
-        entries: Vec<InboxEntry>,
+        plan: FilingPlan,
         via: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if entries.is_empty() || self.in_flight {
+        if plan.is_empty() {
             return;
         }
         let Some(vault) = self.vault(cx) else {
@@ -886,31 +936,20 @@ impl InboxView {
             cx.notify();
             return;
         };
-        // Where the selection lands once these rows leave: the first row
-        // after the last target, else the row before the first.
-        let positions: Vec<usize> = self
-            .visible
+        self.move_selection_past(&plan, cx);
+        if self.in_flight {
+            self.queued.push_back((plan, via));
+            return;
+        }
+        // What the chip said, for the decision log; only when a chip was
+        // shown at all (§7.6).
+        let suggestions_on = self.availability(cx) == Some(SuggestionAvailability::On);
+        let suggestions: Vec<Option<(String, f64)>> = plan
             .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                entries
-                    .iter()
-                    .any(|target| target.item.stem == entry.item.stem)
-            })
-            .map(|(position, _)| position)
-            .collect();
-        let next = positions
-            .last()
-            .map(|last| last + 1)
-            .filter(|next| *next < self.visible.len())
-            .or_else(|| positions.first().and_then(|first| first.checked_sub(1)))
-            .map(|position| {
-                position.saturating_sub(positions.iter().filter(|p| **p < position).count())
-            });
-        let suggestions: Vec<Option<(String, f64)>> = entries
-            .iter()
-            .map(|entry| {
-                self.suggestion_for(entry, cx)
+            .map(|(entry, _)| {
+                suggestions_on
+                    .then(|| self.suggestion_for(entry, cx))
+                    .flatten()
                     .map(|suggestion| (suggestion.choice.clone(), suggestion.confidence))
             })
             .collect();
@@ -922,14 +961,17 @@ impl InboxView {
         let fs = self.fs(cx);
         cx.spawn_in(window, async move |this, cx| {
             let mut filed = Vec::new();
+            let mut filed_suggestions = Vec::new();
             let mut notes = Vec::new();
             let mut failure: Option<anyhow::Error> = None;
-            for entry in &entries {
-                match file_one(&project, &fs, &vault, entry, destination, cx).await {
-                    Ok((item, note)) => {
+            for ((entry, destination), suggestion) in plan.iter().zip(suggestions) {
+                match file_one(&project, &fs, &vault, entry, *destination, cx).await {
+                    Ok((Some(item), note)) => {
                         filed.push(item);
+                        filed_suggestions.push(suggestion);
                         notes.push(note);
                     }
+                    Ok((None, note)) => notes.push(note),
                     Err(error) => {
                         failure = Some(error);
                         break;
@@ -938,20 +980,29 @@ impl InboxView {
             }
             this.update_in(cx, |this, window, cx| {
                 this.in_flight = false;
-                let count = filed.len();
-                if count > 0 {
-                    this.filed_today += count;
-                    this.marked.clear();
-                    this.record_decisions(&filed, &entries, &suggestions, destination, via, cx);
-                    this.last_decision = Some(Decision {
-                        destination,
-                        items: filed,
-                    });
-                    this.pending_selection = None;
-                    this.selected_position = next;
-                    this.selected = None;
+                for (entry, _) in &plan {
+                    this.filing.remove(&entry.item.stem);
+                }
+                if !filed.is_empty() {
+                    this.filed_today += filed.len();
+                    for item in &filed {
+                        this.marked.remove(&item.stem);
+                    }
+                    this.record_decisions(&filed, &filed_suggestions, via, cx);
+                    this.show_undo_toast(&filed, window, cx);
+                    this.last_decision = Some(Decision { items: filed });
                     this.refresh_visible(cx);
-                    this.show_undo_toast(destination, count, window, cx);
+                } else if this.queued.is_empty() {
+                    // Nothing left and nothing waiting: the row the keystroke
+                    // meant is still there, so the selection goes back to it.
+                    let stem = plan.first().map(|(entry, _)| entry.item.stem.clone());
+                    if stem.as_deref().is_some_and(|stem| {
+                        this.visible.iter().any(|entry| entry.item.stem == stem)
+                    }) {
+                        this.pending_selection = None;
+                        this.selected = stem;
+                        this.selected_position = this.selected_index();
+                    }
                 }
                 if notes.contains(&FilingNote::AlreadyArchived) {
                     this.status = Some("Already archived · open the folder".into());
@@ -960,18 +1011,77 @@ impl InboxView {
                     this.status = Some(format!("Couldn't file the item: {error:#}").into());
                 }
                 cx.notify();
+                this.run_queued(window, cx);
             })
             .log_err();
         })
         .detach();
     }
 
+    /// Moves the selection to where it lands once `plan`'s rows leave: the
+    /// first row after the last target that is not itself being filed, else
+    /// the last such row before the first. Done at the keystroke, so the
+    /// next key addresses the next row while this one is still writing.
+    fn move_selection_past(&mut self, plan: &FilingPlan, cx: &mut Context<Self>) {
+        for (entry, _) in plan {
+            self.filing.insert(entry.item.stem.clone());
+        }
+        let is_target = |entry: &InboxEntry| {
+            plan.iter()
+                .any(|(target, _)| target.item.stem == entry.item.stem)
+        };
+        let free = |entry: &InboxEntry| !self.filing.contains(&entry.item.stem);
+        let first = self.visible.iter().position(|entry| is_target(entry));
+        let last = self.visible.iter().rposition(|entry| is_target(entry));
+        let landing = last
+            .and_then(|last| self.visible[last + 1..].iter().find(|entry| free(entry)))
+            .or_else(|| {
+                first.and_then(|first| self.visible[..first].iter().rfind(|entry| free(entry)))
+            })
+            .map(|entry| entry.item.stem.clone());
+        if landing.is_some() {
+            self.selected = landing.clone();
+            self.pending_selection = landing;
+            self.selected_position = self.selected_index();
+            cx.notify();
+        }
+    }
+
+    /// Runs the next waiting plan, minus rows that have left or were just
+    /// filed.
+    fn run_queued(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((plan, via)) = self.queued.pop_front() else {
+            return;
+        };
+        let visible: HashSet<&str> = self
+            .visible
+            .iter()
+            .map(|entry| entry.item.stem.as_str())
+            .collect();
+        let just_filed: HashSet<&str> = self
+            .last_decision
+            .iter()
+            .flat_map(|decision| decision.items.iter())
+            .map(|item| item.stem.as_str())
+            .collect();
+        let (plan, dropped): (FilingPlan, FilingPlan) = plan.into_iter().partition(|(entry, _)| {
+            visible.contains(entry.item.stem.as_str())
+                && !just_filed.contains(entry.item.stem.as_str())
+        });
+        for (entry, _) in dropped {
+            self.filing.remove(&entry.item.stem);
+        }
+        if plan.is_empty() {
+            self.run_queued(window, cx);
+            return;
+        }
+        self.file(plan, via, window, cx);
+    }
+
     fn record_decisions(
         &mut self,
         filed: &[FiledItem],
-        entries: &[InboxEntry],
         suggestions: &[Option<(String, f64)>],
-        destination: Destination,
         via: &str,
         cx: &mut Context<Self>,
     ) {
@@ -979,17 +1089,13 @@ impl InboxView {
             return;
         };
         service.update(cx, |service, cx| {
-            for (index, item) in filed.iter().enumerate() {
-                if entries.get(index).is_none() {
-                    continue;
-                }
-                let suggestion = suggestions.get(index).cloned().flatten();
+            for (item, suggestion) in filed.iter().zip(suggestions) {
                 service.record_decision(
                     &DecisionRecord {
                         stem: item.stem.clone(),
                         suggested: suggestion.as_ref().map(|(choice, _)| choice.clone()),
-                        confidence: suggestion.map(|(_, confidence)| confidence),
-                        chosen: destination.key().to_string(),
+                        confidence: suggestion.as_ref().map(|(_, confidence)| *confidence),
+                        chosen: item.destination.key().to_string(),
                         via: via.to_string(),
                         at: item.at.clone(),
                         undone: false,
@@ -1000,25 +1106,27 @@ impl InboxView {
         });
     }
 
-    fn show_undo_toast(
-        &self,
-        destination: Destination,
-        count: usize,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn show_undo_toast(&self, filed: &[FiledItem], _window: &mut Window, cx: &mut Context<Self>) {
+        let count = filed.len();
+        let destination = filed.first().map(|item| item.destination);
+        let one_destination = filed
+            .iter()
+            .all(|item| Some(item.destination) == destination);
         let message = match (destination, count) {
-            (Destination::Archive, 1) => "Archived".to_string(),
-            (Destination::Archive, n) => format!("Archived {n} items"),
-            (destination, 1) => format!("Added to {}", destination.label()),
-            (destination, n) => format!("Added {n} items to {}", destination.label()),
+            (_, 0) => return,
+            (Some(Destination::Archive), 1) if one_destination => "Archived".to_string(),
+            (Some(Destination::Archive), n) if one_destination => format!("Archived {n} items"),
+            (Some(destination), 1) => format!("Added to {}", destination.label()),
+            (Some(destination), n) if one_destination => {
+                format!("Added {n} items to {}", destination.label())
+            }
+            (_, n) => format!("Filed {n} items"),
         };
         let view = cx.weak_entity();
         let workspace = self.workspace.clone();
         cx.defer(move |cx| {
             workspace
                 .update(cx, |workspace, cx| {
-                    struct InboxDecisionToast;
                     workspace.show_toast(
                         Toast::new(NotificationId::unique::<InboxDecisionToast>(), message)
                             .on_click("Undo", move |window, cx| {
@@ -1064,7 +1172,7 @@ impl InboxView {
                     });
                 }
             }
-            this.update_in(cx, |this, _window, cx| {
+            this.update_in(cx, |this, window, cx| {
                 this.in_flight = false;
                 this.filed_today = this.filed_today.saturating_sub(decision.items.len());
                 this.pending_selection = first_stem;
@@ -1075,13 +1183,13 @@ impl InboxView {
                 cx.defer(move |cx| {
                     workspace
                         .update(cx, |workspace, cx| {
-                            struct InboxDecisionToast;
                             workspace
                                 .dismiss_toast(&NotificationId::unique::<InboxDecisionToast>(), cx);
                         })
                         .log_err();
                 });
                 this.refresh_visible(cx);
+                this.run_queued(window, cx);
             })
             .log_err();
         })
@@ -1782,32 +1890,36 @@ impl gpui::Render for InboxView {
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(cx.theme().colors().editor_background)
-            .on_action(cx.listener(Self::select_next))
-            .on_action(cx.listener(Self::select_previous))
-            .on_action(cx.listener(Self::select_first))
-            .on_action(cx.listener(Self::select_last))
-            .on_action(cx.listener(Self::confirm))
-            .on_action(cx.listener(Self::cancel))
-            .on_action(cx.listener(Self::accept_suggestion))
-            .on_action(cx.listener(Self::send_to_today))
-            .on_action(cx.listener(Self::send_to_soon))
-            .on_action(cx.listener(Self::send_to_someday))
-            .on_action(cx.listener(Self::archive))
-            .on_action(cx.listener(Self::open_item))
-            .on_action(cx.listener(Self::undo))
-            .on_action(cx.listener(Self::mark))
-            .on_action(cx.listener(Self::suggest))
-            .on_action(cx.listener(Self::filter))
-            .on_action(cx.listener(Self::focus_reader))
-            .on_action(cx.listener(Self::show_menu))
-            .on_action(cx.listener(Self::show_keys))
-            .on_action(cx.listener(Self::scroll_reader_down))
-            .on_action(cx.listener(Self::scroll_reader_up))
-            .on_action(cx.listener(Self::scroll_reader_page_down))
-            .on_action(cx.listener(Self::scroll_reader_page_up))
-            .on_action(cx.listener(Self::triage))
+            // While the keys sheet is open no verb runs: a bound key finds no
+            // handler here, falls through to the key listener, and closes
+            // the sheet instead of filing something.
+            .when(!keys_sheet, |this| {
+                this.on_action(cx.listener(Self::select_next))
+                    .on_action(cx.listener(Self::select_previous))
+                    .on_action(cx.listener(Self::select_first))
+                    .on_action(cx.listener(Self::select_last))
+                    .on_action(cx.listener(Self::confirm))
+                    .on_action(cx.listener(Self::cancel))
+                    .on_action(cx.listener(Self::accept_suggestion))
+                    .on_action(cx.listener(Self::send_to_today))
+                    .on_action(cx.listener(Self::send_to_soon))
+                    .on_action(cx.listener(Self::send_to_someday))
+                    .on_action(cx.listener(Self::archive))
+                    .on_action(cx.listener(Self::open_item))
+                    .on_action(cx.listener(Self::undo))
+                    .on_action(cx.listener(Self::mark))
+                    .on_action(cx.listener(Self::suggest))
+                    .on_action(cx.listener(Self::filter))
+                    .on_action(cx.listener(Self::focus_reader))
+                    .on_action(cx.listener(Self::show_menu))
+                    .on_action(cx.listener(Self::show_keys))
+                    .on_action(cx.listener(Self::scroll_reader_down))
+                    .on_action(cx.listener(Self::scroll_reader_up))
+                    .on_action(cx.listener(Self::scroll_reader_page_down))
+                    .on_action(cx.listener(Self::scroll_reader_page_up))
+                    .on_action(cx.listener(Self::triage))
+            })
             .when(keys_sheet, |this| {
-                // Any key closes the sheet; the key itself is not taken.
                 this.on_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
                     this.keys_sheet = false;
                     cx.notify();
@@ -1888,70 +2000,62 @@ fn age_label(captured: Option<&str>) -> Option<String> {
     })
 }
 
-/// The one line `new` lacks against `old`, as a buffer edit, when exactly
-/// one removal separates them.
-fn removal_edit(old: &str, new: &str) -> Option<Range<usize>> {
-    if new.len() >= old.len() {
+/// The single replacement that turns `old` into `new`: the bytes between
+/// their common prefix and common suffix, as a buffer edit. `None` when the
+/// texts are equal.
+fn single_edit(old: &str, new: &str) -> Option<(Range<usize>, String)> {
+    if old == new {
         return None;
     }
-    let prefix = old
+    let mut prefix = old
         .bytes()
         .zip(new.bytes())
         .take_while(|(a, b)| a == b)
         .count();
-    let removed = old.len() - new.len();
-    let prefix = old
-        .char_indices()
-        .map(|(index, _)| index)
-        .rfind(|index| *index <= prefix)
-        .unwrap_or(0);
-    let end = prefix + removed;
-    if !old.is_char_boundary(end) || old.get(end..) != new.get(prefix..) {
-        return None;
+    while !old.is_char_boundary(prefix) {
+        prefix -= 1;
     }
-    Some(prefix..end)
+    let longest_suffix = old.len().min(new.len()) - prefix;
+    let mut suffix = old
+        .bytes()
+        .rev()
+        .zip(new.bytes().rev())
+        .take(longest_suffix)
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !old.is_char_boundary(old.len() - suffix) {
+        suffix -= 1;
+    }
+    Some((
+        prefix..old.len() - suffix,
+        new[prefix..new.len() - suffix].to_string(),
+    ))
 }
 
-/// The text without the first line whose identity matches `line` (V34's
-/// line hash: marker, checkbox and trailing comments ignored). A line that
-/// was appended into an empty section came with its own blank line, so when
-/// blank lines surround it one of them goes too and the section is left as
-/// it was.
+/// The text without the last line that reads exactly `line`. A decision
+/// appends its line at the end of a section, so the last exact match is the
+/// one this view wrote; a line of the person's own that merely looks alike
+/// (a scheduled `09:00 - 09:30 Standup` beside a filed `Standup`) is never
+/// touched. A task appended into an empty section came with its own blank
+/// line, so when blank lines surround the match one of them goes too.
 fn without_line(text: &str, line: &str) -> Option<String> {
-    let wanted = line_hash(line);
-    let mut offset = 0;
-    for candidate in text.split_inclusive('\n') {
-        if line_hash(candidate) == wanted {
-            let before = &text[..offset];
-            let mut after = &text[offset + candidate.len()..];
-            let blank_before = before.ends_with("\n\n") || before.is_empty();
-            if blank_before && !before.is_empty() && after.starts_with('\n') {
-                after = &after[1..];
-            }
-            let mut out = String::with_capacity(text.len());
-            out.push_str(before);
-            out.push_str(after);
-            return Some(out);
-        }
-        offset += candidate.len();
-    }
-    None
-}
-
-/// The text without the last line that equals `line` exactly.
-fn without_last_exact_line(text: &str, line: &str) -> Option<String> {
-    let mut start = None;
+    let mut found = None;
     let mut offset = 0;
     for candidate in text.split_inclusive('\n') {
         if candidate.trim_end_matches(['\n', '\r']) == line {
-            start = Some((offset, candidate.len()));
+            found = Some((offset, candidate.len()));
         }
         offset += candidate.len();
     }
-    let (start, len) = start?;
+    let (start, len) = found?;
+    let before = &text[..start];
+    let mut after = &text[start + len..];
+    if before.ends_with("\n\n") && after.starts_with('\n') {
+        after = &after[1..];
+    }
     let mut out = String::with_capacity(text.len());
-    out.push_str(&text[..start]);
-    out.push_str(&text[start + len..]);
+    out.push_str(before);
+    out.push_str(after);
     Some(out)
 }
 
@@ -1965,8 +2069,22 @@ fn log_destination(destination: Destination, vault: &Vault) -> String {
     }
 }
 
+/// Creates `path` with `contents` when it is missing, so it can be opened as
+/// a buffer.
+async fn ensure_file(fs: &Arc<dyn Fs>, path: &Path, contents: &str) -> Result<()> {
+    if fs.is_file(path).await {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs.create_dir(parent).await?;
+    }
+    fs.atomic_write(path.to_path_buf(), contents.to_string())
+        .await
+}
+
 /// Edits an open (or opened) buffer with `edit` applied to its current text
-/// and saves it, so a note open in the editor sees the change.
+/// and saves it, so a note open in the editor sees the change and a dirty
+/// buffer is never overwritten from underneath.
 async fn edit_buffer(
     project: &Entity<Project>,
     path: PathBuf,
@@ -1995,7 +2113,10 @@ async fn edit_buffer(
 }
 
 /// V40 §5's writes for one item, in order: the task line, the move, the
-/// log line (§6.1). A failure before the move leaves the note in the inbox.
+/// log line (§6.1). A note already archived under the same name, or already
+/// gone, is a no-op: nothing is written and the row stays or leaves on its
+/// own (`Ok((None, note))`). A failure before the move leaves the note in
+/// the inbox.
 async fn file_one(
     project: &Entity<Project>,
     fs: &Arc<dyn Fs>,
@@ -2003,8 +2124,17 @@ async fn file_one(
     entry: &InboxEntry,
     destination: Destination,
     cx: &mut gpui::AsyncWindowContext,
-) -> Result<(FiledItem, FilingNote)> {
+) -> Result<(Option<FiledItem>, FilingNote)> {
     let item = &entry.item;
+    let inbox_path = vault.root.join(&item.path);
+    let archived = vault.root.join(archive_path(&item.path));
+    if !fs.is_file(&inbox_path).await {
+        return Ok((None, FilingNote::AlreadyGone));
+    }
+    if fs.is_file(&archived).await {
+        return Ok((None, FilingNote::AlreadyArchived));
+    }
+
     let title = sanitize_title(&item.title);
     let task_line = inbox_task_line(&title, &item.stem, item.has_body);
     let now = Local::now();
@@ -2039,13 +2169,7 @@ async fn file_one(
         }
         Destination::Soon | Destination::Someday => {
             let path = vault.backlog_path();
-            if !fs.is_file(&path).await {
-                if let Some(parent) = path.parent() {
-                    fs.create_dir(parent).await?;
-                }
-                fs.atomic_write(path.clone(), DEFAULT_BACKLOG.to_string())
-                    .await?;
-            }
+            ensure_file(fs, &path, DEFAULT_BACKLOG).await?;
             let kind = if destination == Destination::Soon {
                 SectionKind::Soon
             } else {
@@ -2072,15 +2196,16 @@ async fn file_one(
         Destination::Archive => None,
     };
 
-    let inbox_path = vault.root.join(&item.path);
-    let archived = vault.root.join(archive_path(&item.path));
-    let note = match move_note(fs, &inbox_path, &archived)
+    // The phone may have archived the note between the check above and now;
+    // the task line is then the spec's accepted worst case (§6.1), and undo
+    // must not pull the phone's copy back.
+    let (moved, note) = match move_note(fs, &inbox_path, &archived)
         .await
         .context("moving the note into the archive")?
     {
-        MoveOutcome::Moved => FilingNote::Filed,
-        MoveOutcome::SourceGone => FilingNote::AlreadyGone,
-        MoveOutcome::DestinationExists => FilingNote::AlreadyArchived,
+        MoveOutcome::Moved => (true, FilingNote::Filed),
+        MoveOutcome::SourceGone => (false, FilingNote::AlreadyGone),
+        MoveOutcome::DestinationExists => (false, FilingNote::AlreadyArchived),
     };
 
     let log_line = triage_log_line(
@@ -2090,7 +2215,7 @@ async fn file_one(
         item.digest.as_deref(),
     );
     let log_path = vault.root.join(TRIAGE_LOG_PATH);
-    let existing = fs.load(&log_path).await.ok();
+    ensure_file(fs, &log_path, "").await?;
     let write = Write::new(
         "desk",
         TRIAGE_LOG_PATH,
@@ -2102,23 +2227,31 @@ async fn file_one(
             create_from_template: false,
         },
     );
-    let applied = apply(existing.as_deref(), &write, None);
-    if let Some(parent) = log_path.parent() {
-        fs.create_dir(parent).await?;
-    }
-    fs.atomic_write(log_path, applied.text)
-        .await
-        .context("writing the triage log")?;
+    // The log is a note the Routine links, so it goes through the buffer
+    // like the task line; the applier gives the same bytes the phone gets.
+    edit_buffer(
+        project,
+        log_path,
+        move |text| {
+            let existing = (!text.is_empty()).then_some(text);
+            single_edit(text, &apply(existing, &write, None).text)
+        },
+        cx,
+    )
+    .await
+    .context("writing the triage log")?;
 
     Ok((
-        FiledItem {
+        Some(FiledItem {
             stem: item.stem.clone(),
+            destination,
             inbox_path,
             archive_path: archived,
+            moved,
             task,
             log_line,
             at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        },
+        }),
         note,
     ))
 }
@@ -2132,32 +2265,31 @@ async fn undo_one(
     item: &FiledItem,
     cx: &mut gpui::AsyncWindowContext,
 ) -> Result<()> {
-    move_note(fs, &item.archive_path, &item.inbox_path)
-        .await
-        .context("moving the note back")?;
+    if item.moved {
+        move_note(fs, &item.archive_path, &item.inbox_path)
+            .await
+            .context("moving the note back")?;
+    }
     if let Some(task) = &item.task {
         let line = task.line.clone();
         edit_buffer(
             project,
             task.path.clone(),
-            move |text| {
-                let new = without_line(text, &line)?;
-                removal_edit(text, &new).map(|range| (range, String::new()))
-            },
+            move |text| single_edit(text, &without_line(text, &line)?),
             cx,
         )
         .await
         .context("removing the task line")?;
     }
-    let log_path = vault.root.join(TRIAGE_LOG_PATH);
-    if let Ok(text) = fs.load(&log_path).await
-        && let Some(new) = without_last_exact_line(&text, &item.log_line)
-    {
-        fs.atomic_write(log_path, new)
-            .await
-            .context("removing the triage-log line")?;
-    }
-    let _ = vault;
+    let log_line = item.log_line.clone();
+    edit_buffer(
+        project,
+        vault.root.join(TRIAGE_LOG_PATH),
+        move |text| single_edit(text, &without_line(text, &log_line)?),
+        cx,
+    )
+    .await
+    .context("removing the triage-log line")?;
     Ok(())
 }
 
@@ -2912,6 +3044,17 @@ mod tests {
             Some("older copy\n")
         );
         assert_eq!(titles(&setup).len(), 4);
+        // A no-op all the way down (§6.1): no log line, no decision, no
+        // undo, and the row is still the selected one.
+        assert_eq!(load(&setup, TRIAGE_LOG_PATH).await, None);
+        assert_eq!(
+            load(&setup, ".thock/state/inbox/decisions.jsonl").await,
+            None
+        );
+        assert_eq!(
+            selected(&setup).as_deref(),
+            Some("idea: routines could carry state")
+        );
         setup.view.read_with(&setup.cx, |view, _| {
             assert!(
                 view.status
@@ -2920,7 +3063,108 @@ mod tests {
                 "{:?}",
                 view.status
             );
+            assert_eq!(view.filed_today, 0);
+            assert!(view.last_decision.is_none());
         });
+        // `t` on it writes no task either.
+        setup.cx.simulate_keystrokes("t");
+        setup.cx.run_until_parked();
+        assert_eq!(
+            load(&setup, "daily/2026-10-10.md").await.as_deref(),
+            Some(TODAY_NOTE)
+        );
+    }
+
+    #[gpui::test]
+    async fn the_keys_sheet_swallows_the_key_that_closes_it(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        setup.cx.simulate_keystrokes("?");
+        setup.cx.run_until_parked();
+        setup
+            .view
+            .read_with(&setup.cx, |view, _| assert!(view.keys_sheet));
+        // A bound verb closes the sheet instead of filing.
+        setup.cx.simulate_keystrokes("t");
+        setup.cx.run_until_parked();
+        setup
+            .view
+            .read_with(&setup.cx, |view, _| assert!(!view.keys_sheet));
+        assert_eq!(titles(&setup).len(), 4);
+        assert_eq!(
+            load(&setup, "daily/2026-10-10.md").await.as_deref(),
+            Some(TODAY_NOTE)
+        );
+        // Now the verb works again.
+        setup.cx.simulate_keystrokes("t");
+        setup.cx.run_until_parked();
+        assert_eq!(titles(&setup).len(), 3);
+    }
+
+    #[gpui::test]
+    async fn space_with_marks_files_each_row_to_its_own_chip(cx: &mut TestAppContext) {
+        let mut setup = setup(
+            cx,
+            Options {
+                grant: true,
+                cached: vec![(SHIP_IT, "someday", 0.91), (Q4, "soon", 0.71)],
+                ..Options::default()
+            },
+        )
+        .await;
+        setup.cx.run_until_parked();
+        // Call Ana (no chip), Q4 (Soon) and Ship it (Someday) marked.
+        setup.cx.simulate_keystrokes("x down x down x");
+        setup
+            .view
+            .read_with(&setup.cx, |view, _| assert_eq!(view.marked.len(), 3));
+        setup.cx.simulate_keystrokes("space");
+        setup.cx.run_until_parked();
+        let backlog = load(&setup, "backlog.md").await.unwrap();
+        assert!(
+            backlog.contains("## Soon\n\n- [ ] Re: Q4 planning doc"),
+            "{backlog}"
+        );
+        assert!(
+            backlog.contains("## Someday\n\n- [ ] Ship it — a practical guide"),
+            "{backlog}"
+        );
+        // The row without a suggestion is skipped and stays marked (§4.3).
+        assert_eq!(
+            titles(&setup),
+            ["Call Ana", "idea: routines could carry state"]
+        );
+        assert!(
+            load(&setup, "inbox/2026-10-10-0931-call-ana.md")
+                .await
+                .is_some()
+        );
+        setup.view.read_with(&setup.cx, |view, _| {
+            assert_eq!(view.marked.len(), 1);
+            assert!(view.marked.contains("2026-10-10-0931-call-ana"));
+        });
+        // One undo takes both back.
+        setup.cx.simulate_keystrokes("u");
+        setup.cx.run_until_parked();
+        assert_eq!(titles(&setup).len(), 4);
+        assert_eq!(load(&setup, "backlog.md").await.unwrap(), DEFAULT_BACKLOG);
+    }
+
+    #[gpui::test]
+    async fn quick_repeated_keys_file_one_row_each(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        // Three archives without letting the first finish writing: the
+        // selection moves at the keystroke, so each targets the next row.
+        setup.cx.simulate_keystrokes("e e e");
+        setup.cx.run_until_parked();
+        assert_eq!(titles(&setup), ["idea: routines could carry state"]);
+        let log = load(&setup, TRIAGE_LOG_PATH).await.unwrap();
+        assert_eq!(log.lines().count(), 3, "{log}");
+        assert!(log.contains("Call Ana → Archived"), "{log}");
+        assert!(log.contains("Re: Q4 planning doc → Archived"), "{log}");
+        assert!(
+            log.contains("Ship it — a practical guide → Archived"),
+            "{log}"
+        );
     }
 
     #[test]
@@ -2933,12 +3177,30 @@ mod tests {
         );
         // The two lines share a prefix, so the edit may start inside the
         // first; what matters is that applying it yields the new text.
-        let range = removal_edit(text, &without).unwrap();
+        let (range, replacement) = single_edit(text, &without).unwrap();
         let mut applied = text.to_string();
-        applied.replace_range(range, "");
+        applied.replace_range(range, &replacement);
         assert_eq!(applied, without);
         assert_eq!(without_line(text, "- [ ] Nope"), None);
-        assert_eq!(removal_edit(text, text), None);
+        assert_eq!(single_edit(text, text), None);
+        // An append is one edit too, and multi-byte text keeps its boundaries.
+        let (range, replacement) = single_edit("- é\n", "- é\n- ü\n").unwrap();
+        assert_eq!((range, replacement.as_str()), (5..5, "- ü\n"));
+        let (range, replacement) = single_edit("aéb", "aüb").unwrap();
+        assert_eq!((range, replacement.as_str()), (1..3, "ü"));
+
+        // Only the exact line goes, and the last one: a scheduled block that
+        // normalises to the same words is the person's and stays.
+        let note = "- [ ] 09:00 - 09:30 Standup\n- [ ] Standup\n\n## Personal\n";
+        assert_eq!(
+            without_line(note, "- [ ] Standup").unwrap(),
+            "- [ ] 09:00 - 09:30 Standup\n\n## Personal\n"
+        );
+        let twice = "- [ ] A\n- [x] B\n- [ ] A\n";
+        assert_eq!(
+            without_line(twice, "- [ ] A").unwrap(),
+            "- [ ] A\n- [x] B\n"
+        );
         // A task that was appended into an empty section takes its blank
         // line with it, so the section reads as it did before.
         assert_eq!(
@@ -2960,10 +3222,10 @@ mod tests {
 
         let log = "- d · A → Archived\n- d · B → Archived\n- d · A → Archived\n";
         assert_eq!(
-            without_last_exact_line(log, "- d · A → Archived").unwrap(),
+            without_line(log, "- d · A → Archived").unwrap(),
             "- d · A → Archived\n- d · B → Archived\n"
         );
-        assert_eq!(without_last_exact_line(log, "- d · C → Archived"), None);
+        assert_eq!(without_line(log, "- d · C → Archived"), None);
         assert_eq!(sender_name("Marta <marta@example.com>"), "Marta");
         assert_eq!(sender_name("<x@y.z>"), "x@y.z");
         assert_eq!(sender_name("\"Ana\" <a@b.c>"), "Ana");
