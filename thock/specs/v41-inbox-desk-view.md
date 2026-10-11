@@ -141,12 +141,14 @@ fixed order — **Today**, **Soon**, **Someday**, **Archive** — so a key's pla
 notes. Each button holds its keycap, its label, the suggestion's probability for it and a thin bar
 drawing that probability, so the stats and the action are one object. The suggested destination
 is drawn in the accent colour (filled or outlined by tier, §7.4) and also carries the `space`
-keycap. After a divider, **Open** and **Undo** as quieter buttons; when there is no suggestion,
-`space` sits on **Open**, so what `space` does is always written on exactly one button. Without a
-suggestion, or with suggestions off, the four buttons show no percentages and no bars. Keycaps are
+keycap, written `space or s`, so the two keys do not read as one chord. After a divider, **Open**
+and **Undo** as quieter buttons of one shared width. `space` only ever takes a suggestion: with
+none, it does nothing and its keycap is on no button, since opening the note is `o`'s job. Without
+a suggestion, or with suggestions off, the four buttons show no percentages and no bars. A
+button's keycaps and percentage keep their size; when it is narrow only the label truncates. Keycaps are
 `ui::KeyBinding::for_action_in`, so a rebinding shows up without a code change. The buttons are
-clickable and dispatch the same actions. Below about 640px of reader width the bar wraps to two
-rows of two.
+clickable and dispatch the same actions. Below about 1024px of reader width (four buttons at
+their minimum, Open, Undo and the reader's sides) the bar wraps to two rows of two.
 
 **Reader.** The note's title, the destination bar, a rule, then the body rendered with
 `markdown::MarkdownElement` and `MarkdownStyle::themed`, as the chat panel renders the agent's
@@ -169,7 +171,8 @@ edge or the split.
 | Pane headers | 52px tall | 20px sides in the list, 40px in the reader |
 | List rows | 60px tall, radius 8 | 12px left, 16px right, 4px title to meta |
 | List footer | 36px tall | 20px sides |
-| Destination buttons | 56px tall, radius 8, at least 140px wide | 8px between, 14px inside |
+| Destination buttons | 56px tall, radius 8, at least 168px wide | 8px between, 14px inside |
+| Open, Undo | 56px tall, radius 8, at least 112px wide | content centred |
 | Reader | | 28px top, 40px sides, 18px title to bar |
 
 | Text | Style |
@@ -183,8 +186,9 @@ edge or the split.
 
 ### 4.3 Marks
 
-`x` marks the selected row; marked rows show a check in the gutter and the list footer reads
-`3 marked`. While any row is marked, the four verbs apply to every marked row in list order, and
+`x` marks the selected row and the list footer reads `3 marked`. While any row is marked, every
+row gets a 14px check column inside its left padding, with the check on the marked ones, so the
+check has room around it and all titles shift together and stay aligned. While any row is marked, the four verbs apply to every marked row in list order, and
 `space` applies each row's own suggestion (rows without one are skipped and stay marked). Marks
 clear when the list refreshes from disk. `escape` clears marks before it leaves the view.
 
@@ -197,7 +201,7 @@ footer's hints, the row menu and the keys sheet render from the bindings.
 | --- | --- | --- |
 | `ctrl-alt-i` (global) | `thock::OpenInbox` | Opens or focuses the Inbox tab |
 | `j` `k` `down` `up` `g g` `shift-g` `home` `end` | `menu::SelectNext` … `menu::SelectLast` | Moves the selection; vim letters gated on vim mode |
-| `space` | `thock::AcceptInboxSuggestion` | Files to the chip; opens the note when there is none |
+| `space` | `thock::AcceptInboxSuggestion` | Files to the chip; does nothing when there is none |
 | `t` | `thock::SendInboxItemToToday` | Task under today's Day planner heading |
 | `s` | `thock::SendInboxItemToSoon` | Task under **Soon** |
 | `shift-s` | `thock::SendInboxItemToSomeday` | Task under **Someday** |
@@ -351,7 +355,7 @@ changes what the row shows, never what the view does on its own:
 | --- | --- | --- | --- |
 | ≥ 0.85 | filled, `Soon` | the button filled in the accent colour | files to the suggestion |
 | 0.50 – 0.85 | outlined, `Soon` | the button outlined in the accent colour | files to the suggestion |
-| < 0.50, or `choice == "unsure"` | none | no button highlighted; `space` on **Open** | opens the note |
+| < 0.50, or `choice == "unsure"` | none | no button highlighted; `space` on no button | does nothing |
 
 The row chip names the destination only; the numbers live in the destination bar (§4.2), where
 every button shows its option's probability and bar whenever a suggestion exists, at any tier.
@@ -521,11 +525,11 @@ step four.
   no suggestion appends under the planner heading; `x` `x` `e` archives two marked rows in order;
   `u` after `s` restores; `/` `ana` `escape` filters and clears; `tab` `j` scrolls the reader and
   `escape` returns; a file event removing the selected item moves the selection without a panic;
-  with no gateway grant, no chip is rendered and `space` opens the note; with vim mode on, `j`/`k`
+  with no gateway grant, no chip is rendered and `space` does nothing; with vim mode on, `j`/`k`
   move and with it off they do not.
 - **Layout (rev 2):** the destination bar's buttons are in the fixed order whatever the
-  suggestion; the suggested button carries the `space` keycap, and with no suggestion **Open**
-  does; clicking a destination button files like its key; every list row lays out at the same
+  suggestion; the suggested button carries the `space` keycap, and with no suggestion no button
+  does; a percentage is never clipped by its button; clicking a destination button files like its key; every list row lays out at the same
   height as the measured one, headers and the divider no taller; the list header's section counts
   follow the selection and a filter.
 - **Service:** suggestions are requested only while a view is open, only for uncached hashes, at
@@ -570,3 +574,7 @@ step four.
    The rail reads best on a wide screen but must collapse into the bar on a narrow one, so it is
    the bar plus a mode. Buttons keep a fixed order rather than sorting by probability, so muscle
    memory survives a change of suggestion.
+10. **`space` never opens a note** (2026-10-11). Rev 1 let `space` open the note when there was no
+    suggestion, so one key meant "file" on one row and "open" on the next, and rev 2 had to write
+    `space or o` on the Open button to say so. Opening is `o`'s job; without a suggestion `space`
+    does nothing.

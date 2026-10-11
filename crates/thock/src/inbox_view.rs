@@ -65,23 +65,22 @@ const PANE_HEADER_HEIGHT: Pixels = px(52.);
 const ROW_HEIGHT: Pixels = px(60.);
 const FOOTER_HEIGHT: Pixels = px(36.);
 const BAR_BUTTON_HEIGHT: Pixels = px(56.);
-const BAR_BUTTON_MIN_WIDTH: Pixels = px(140.);
-/// Open and Undo share one width, wide enough for Open with the `space`
-/// keycap, so the bar keeps its geometry when `space` moves onto Open.
-const QUIET_BUTTON_MIN_WIDTH: Pixels = px(200.);
+const BAR_BUTTON_MIN_WIDTH: Pixels = px(168.);
+/// Open and Undo share one width, so the two read as a pair.
+const QUIET_BUTTON_MIN_WIDTH: Pixels = px(112.);
 const READER_MAX_WIDTH: Pixels = px(680.);
 /// Below this reader width the destination bar wraps to two rows of two:
 /// four buttons at their minimum width, Open, Undo and the reader's sides
 /// no longer fit on one line.
-const BAR_WRAP_WIDTH: Pixels = px(880.);
+const BAR_WRAP_WIDTH: Pixels = px(1024.);
 
 actions!(
     thock,
     [
         /// Opens the Inbox: what's waiting, one key per decision.
         OpenInbox,
-        /// Files the selected inbox item where its suggestion points, or
-        /// opens it when there is none.
+        /// Files the selected inbox item where its suggestion points; does
+        /// nothing when there is none.
         AcceptInboxSuggestion,
         /// Adds the selected inbox item to today's Day planner as a task and
         /// archives it.
@@ -665,9 +664,11 @@ impl InboxView {
         let Some(entry) = self.selected_entry().cloned() else {
             return;
         };
-        match self.suggested_destination(&entry, cx) {
-            Some(destination) => self.file(vec![(entry, destination)], "space", window, cx),
-            None => self.open_selected(window, cx),
+        // Without a suggestion `space` does nothing: opening the note is
+        // `o`'s job, and a key that sometimes files and sometimes opens is a
+        // surprise.
+        if let Some(destination) = self.suggested_destination(&entry, cx) {
+            self.file(vec![(entry, destination)], "space", window, cx);
         }
     }
 
@@ -1646,6 +1647,7 @@ impl InboxView {
         let position = self.position_of(section, index);
         let selected = self.selected_index() == Some(position);
         let marked = self.marked.contains(&item.stem);
+        let marking = !self.marked.is_empty();
         let list_focused = self.focus_handle.is_focused(window);
         let stem = item.stem.clone();
         let colors = cx.theme().colors();
@@ -1712,23 +1714,25 @@ impl InboxView {
                     this.deploy_context_menu(event.position, window, cx);
                 }),
             )
-            .when(marked, |this| {
-                // In the row's left padding, so a mark never shifts the text.
+            // While any row is marked every row gets a check column, so the
+            // check has room to breathe and the titles stay aligned.
+            .when(marking, |this| {
                 this.child(
                     div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
+                        .debug_selector(move || format!("INBOX_CHECK-{position}"))
+                        .flex_none()
+                        .w(px(14.))
                         .h_full()
-                        .w_3()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(
-                            Icon::new(IconName::Check)
-                                .size(IconSize::XSmall)
-                                .color(Color::Accent),
-                        ),
+                        .when(marked, |this| {
+                            this.child(
+                                Icon::new(IconName::Check)
+                                    .size(IconSize::Small)
+                                    .color(Color::Accent),
+                            )
+                        }),
                 )
             })
             .child(
@@ -2142,33 +2146,49 @@ impl InboxView {
             .gap_2()
             .px(px(14.))
             .child(
+                // The keys and the percentage keep their size; when the
+                // button is narrow only the label gives way.
                 h_flex()
                     .w_full()
                     .gap_2()
                     .when(suggested, |this| {
-                        this.child(KeyBinding::for_action_in(
+                        this.child(div().flex_none().child(KeyBinding::for_action_in(
                             &AcceptInboxSuggestion,
                             &self.focus_handle,
                             cx,
-                        ))
-                        .child(keycap_or())
+                        )))
+                        .child(div().flex_none().child(keycap_or()))
                     })
-                    .child(KeyBinding::for_action_in(
+                    .child(div().flex_none().child(KeyBinding::for_action_in(
                         destination_action(destination).as_ref(),
                         &self.focus_handle,
                         cx,
-                    ))
-                    .child(Label::new(destination.label()).color(if suggested {
-                        Color::Accent
-                    } else {
-                        Color::Default
-                    }))
-                    .child(div().flex_1())
+                    )))
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Label::new(destination.label())
+                                .color(if suggested {
+                                    Color::Accent
+                                } else {
+                                    Color::Default
+                                })
+                                .truncate(),
+                        ),
+                    )
                     .when_some(probability, |this, probability| {
+                        let name = destination.key();
                         this.child(
-                            Label::new(format!("{}%", (probability * 100.0).round() as u32))
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
+                            div()
+                                .debug_selector(move || format!("INBOX_PERCENT-{name}"))
+                                .flex_none()
+                                .child(
+                                    Label::new(format!(
+                                        "{}%",
+                                        (probability * 100.0).round() as u32
+                                    ))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                                ),
                         )
                     }),
             )
@@ -2199,14 +2219,12 @@ impl InboxView {
         )
     }
 
-    /// Open or Undo, after the divider; `space` sits on Open when nothing is
-    /// suggested, so what `space` does is always on exactly one button.
+    /// Open or Undo, after the divider.
     fn quiet_button(
         &self,
         name: &'static str,
         action: &dyn Action,
         label: &'static str,
-        with_space: bool,
         cx: &App,
     ) -> gpui::Div {
         let content = h_flex()
@@ -2215,14 +2233,6 @@ impl InboxView {
             .justify_center()
             .gap_2()
             .px(px(14.))
-            .when(with_space, |this| {
-                this.child(KeyBinding::for_action_in(
-                    &AcceptInboxSuggestion,
-                    &self.focus_handle,
-                    cx,
-                ))
-                .child(keycap_or())
-            })
             .child(KeyBinding::for_action_in(action, &self.focus_handle, cx))
             .child(Label::new(label).color(Color::Muted));
         self.bar_button(name, BarLook::Quiet, action.boxed_clone(), content, cx)
@@ -2250,14 +2260,8 @@ impl InboxView {
                         .and_then(|probabilities| probabilities.get(position).copied());
                     self.destination_button(destination, look, probability, cx)
                 });
-        let open = self.quiet_button(
-            "open",
-            &OpenInboxItem,
-            "Open",
-            state.suggested.is_none(),
-            cx,
-        );
-        let undo = self.quiet_button("undo", &UndoInboxMove, "Undo", false, cx);
+        let open = self.quiet_button("open", &OpenInboxItem, "Open", cx);
+        let undo = self.quiet_button("undo", &UndoInboxMove, "Undo", cx);
         let rule = cx.theme().colors().border_variant;
         let divider = |height: Pixels| div().flex_none().w(px(1.)).h(height).mx_1().bg(rule);
         if self.bar_wraps() {
@@ -2291,10 +2295,7 @@ impl InboxView {
 
     fn render_keys_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
         let rows: Vec<(&dyn Action, &str)> = vec![
-            (
-                &AcceptInboxSuggestion,
-                "Take the suggestion, or open the note",
-            ),
+            (&AcceptInboxSuggestion, "Take the suggestion"),
             (
                 &SendInboxItemToToday,
                 "Task under today's Day planner heading",
@@ -3422,11 +3423,20 @@ mod tests {
         let mut setup = setup(cx, Options::default()).await;
         // The first and the last row, so the batch spans both sections and
         // the log follows list order, not marking order.
+        draw(&mut setup);
+        assert_eq!(setup.cx.debug_bounds("INBOX_CHECK-0"), None);
         setup.cx.simulate_keystrokes("end x home x");
         setup.view.read_with(&setup.cx, |view, cx| {
             assert_eq!(view.marked.len(), 2);
             assert_eq!(view.footer_stats(cx), FooterStats::Marked(2));
         });
+        // While marks exist every row has a check column inside its
+        // padding, the same for all rows so the titles stay aligned.
+        let first_row = drawn(&mut setup, "INBOX_ROW-0");
+        let first_check = drawn(&mut setup, "INBOX_CHECK-0");
+        assert!(first_check.left() >= first_row.left() + px(8.));
+        let unmarked_check = drawn(&mut setup, "INBOX_CHECK-1");
+        assert_eq!(unmarked_check.left(), first_check.left());
         setup.cx.simulate_keystrokes("e");
         setup.cx.run_until_parked();
         assert_eq!(
@@ -3573,7 +3583,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn without_a_grant_space_opens_the_note(cx: &mut TestAppContext) {
+    async fn without_a_grant_space_does_nothing(cx: &mut TestAppContext) {
         let mut setup = setup(
             cx,
             Options {
@@ -3591,18 +3601,12 @@ mod tests {
         setup.cx.simulate_keystrokes("space");
         setup.cx.run_until_parked();
         assert_eq!(titles(&setup).len(), 4, "nothing was filed");
+        assert_eq!(load(&setup, TRIAGE_LOG_PATH).await, None);
+        assert_eq!(selected(&setup).as_deref(), Some("Call Ana"));
+        // Opening is `o`'s job; `space` never opens the note.
+        assert!(view_focused(&mut setup));
         setup.workspace.read_with(&setup.cx, |workspace, cx| {
-            let editor = workspace
-                .active_item_as::<Editor>(cx)
-                .expect("space opened the note in the editor");
-            let path = editor
-                .read(cx)
-                .buffer()
-                .read(cx)
-                .as_singleton()
-                .and_then(|buffer| buffer.read(cx).file().map(|file| file.path().clone()))
-                .unwrap();
-            assert_eq!(path.as_unix_str(), "inbox/2026-10-10-0931-call-ana.md");
+            assert!(workspace.active_item_as::<InboxView>(cx).is_some());
         });
     }
 
@@ -3940,16 +3944,16 @@ mod tests {
         let mut first_layout: Option<Vec<gpui::Bounds<Pixels>>> = None;
         // Unsure (Call Ana), outlined Soon (Q4), filled Someday (Ship it).
         for (title, suggested, space_on) in [
-            ("Call Ana", None, "INBOX_BAR-open"),
+            ("Call Ana", None, None),
             (
                 "Re: Q4 planning doc",
                 Some((Destination::Soon, Tier::Outlined)),
-                "INBOX_BAR-soon",
+                Some("INBOX_BAR-soon"),
             ),
             (
                 "Ship it — a practical guide",
                 Some((Destination::Someday, Tier::Filled)),
-                "INBOX_BAR-someday",
+                Some("INBOX_BAR-someday"),
             ),
         ] {
             select(&mut setup, title);
@@ -3972,7 +3976,21 @@ mod tests {
                 assert_eq!(state.suggested, suggested, "{title}");
                 assert!(state.probabilities.is_some(), "{title}");
             });
-            assert_eq!(space_button(&mut setup), Some(space_on), "{title}");
+            assert_eq!(space_button(&mut setup), space_on, "{title}");
+            // The percentage is never clipped by its button.
+            for (button, percent) in [
+                ("INBOX_BAR-today", "INBOX_PERCENT-today"),
+                ("INBOX_BAR-soon", "INBOX_PERCENT-soon"),
+                ("INBOX_BAR-someday", "INBOX_PERCENT-someday"),
+                ("INBOX_BAR-archive", "INBOX_PERCENT-archive"),
+            ] {
+                let button = drawn(&mut setup, button);
+                let percent = drawn(&mut setup, percent);
+                assert!(
+                    percent.right() + px(8.) <= button.right(),
+                    "{title}: {percent:?} inside {button:?}"
+                );
+            }
             // Every option shows its probability whenever there is an
             // answer, an `unsure` one included.
             for selector in [
@@ -3995,7 +4013,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn without_a_suggestion_space_sits_on_open(cx: &mut TestAppContext) {
+    async fn without_a_suggestion_space_is_on_no_button(cx: &mut TestAppContext) {
         let mut setup = setup(
             cx,
             Options {
@@ -4007,7 +4025,8 @@ mod tests {
         // A cached answer without a grant today shows nothing.
         select(&mut setup, "Ship it — a practical guide");
         assert_eq!(bar_order(&mut setup), BAR_BUTTONS);
-        assert_eq!(space_button(&mut setup), Some("INBOX_BAR-open"));
+        assert_eq!(space_button(&mut setup), None);
+        assert_eq!(setup.cx.debug_bounds("KEY_BINDING-space"), None);
         assert_eq!(setup.cx.debug_bounds("INBOX_PROBABILITY-someday"), None);
         assert_eq!(setup.cx.debug_bounds("INBOX_PROBABILITY-today"), None);
         setup.view.read_with(&setup.cx, |view, cx| {
