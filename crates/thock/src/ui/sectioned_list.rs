@@ -29,9 +29,17 @@ pub trait SectionedListDelegate: Render + Sized {
         cx: &mut Context<Self>,
     ) -> AnyElement;
 
+    /// Whether a section starts with a header row. A section the view
+    /// already names elsewhere can opt out.
+    fn has_header(&self, _section: usize) -> bool {
+        true
+    }
+
     /// The flattened rows: headers for non-empty sections, then their items.
     fn layout(&self) -> SectionedLayout {
-        SectionedLayout::new((0..self.sections()).map(|section| self.items_in(section)))
+        SectionedLayout::with_headers(
+            (0..self.sections()).map(|section| (self.items_in(section), self.has_header(section))),
+        )
     }
 }
 
@@ -50,13 +58,21 @@ pub struct SectionedLayout {
 }
 
 impl SectionedLayout {
+    /// Every non-empty section with a header row.
     pub fn new(counts: impl IntoIterator<Item = usize>) -> Self {
+        Self::with_headers(counts.into_iter().map(|count| (count, true)))
+    }
+
+    /// Sections as `(item count, has a header row)`.
+    pub fn with_headers(sections: impl IntoIterator<Item = (usize, bool)>) -> Self {
         let mut rows = Vec::new();
-        for (section, count) in counts.into_iter().enumerate() {
+        for (section, (count, header)) in sections.into_iter().enumerate() {
             if count == 0 {
                 continue;
             }
-            rows.push(SectionedRow::Header(section));
+            if header {
+                rows.push(SectionedRow::Header(section));
+            }
             rows.extend((0..count).map(|index| SectionedRow::Item { section, index }));
         }
         Self { rows }
@@ -94,6 +110,15 @@ impl SectionedLayout {
         self.items()
             .find(|(_, s, i)| *s == section && *i == index)
             .map(|(row, _, _)| row)
+    }
+
+    /// The first row of a section, its header when it has one, for
+    /// scrolling to the section.
+    pub fn section_start(&self, section: usize) -> Option<usize> {
+        self.rows.iter().position(|row| match row {
+            SectionedRow::Header(header) => *header == section,
+            SectionedRow::Item { section: owner, .. } => *owner == section,
+        })
     }
 
     /// The item `steps` positions from `(section, index)` in list order,
@@ -186,8 +211,30 @@ mod tests {
         // A selection that no longer exists restarts from the top.
         assert_eq!(layout.step(Some((7, 7)), 1), Some((0, 0)));
 
+        assert_eq!(layout.section_start(0), Some(0));
+        assert_eq!(layout.section_start(1), None);
+        assert_eq!(layout.section_start(2), Some(3));
+
         let empty = SectionedLayout::new([0, 0]);
         assert!(empty.is_empty());
         assert_eq!(empty.step(None, 1), None);
+    }
+
+    #[test]
+    fn a_section_can_opt_out_of_its_header() {
+        let layout = SectionedLayout::with_headers([(2, false), (1, true)]);
+        assert_eq!(
+            layout.row(0),
+            Some(SectionedRow::Item {
+                section: 0,
+                index: 0
+            })
+        );
+        assert_eq!(layout.row(2), Some(SectionedRow::Header(1)));
+        assert_eq!(layout.len(), 4);
+        assert_eq!(layout.row_of(1, 0), Some(3));
+        assert_eq!(layout.section_start(0), Some(0));
+        assert_eq!(layout.section_start(1), Some(2));
+        assert_eq!(layout.step(Some((0, 1)), 1), Some((1, 0)));
     }
 }

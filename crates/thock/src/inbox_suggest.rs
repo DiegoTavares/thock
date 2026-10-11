@@ -307,7 +307,7 @@ pub fn parse_response(text: &str) -> Result<Suggestion> {
 pub enum Tier {
     /// Confident: a filled chip, `space` files.
     Filled,
-    /// Plausible: an outlined chip with the percentage, `space` files.
+    /// Plausible: an outlined chip, `space` files.
     Outlined,
     /// Below the line, or `unsure`: no chip, `space` opens the note.
     None,

@@ -369,8 +369,9 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
 - [x] **The Inbox at the desk — one key per decision:** a keyboard-first **Inbox view** that opens in the
   centre pane like a note: the waiting items on the left in *New* and *Carried over*, the selected note
   rendered on the right (pictures included), and `t` / `s` / `shift-s` / `e` for Today, Soon, Someday and
-  Archive along the bottom, with `u` to undo. The writes are V40's, so a desk decision and a phone swipe
-  leave the same task line, `move_file` and triage-log line. For Plus vaults each row carries a
+  Archive as a bar of buttons above the note, each showing its suggestion probability, with `u` to undo.
+  The writes are V40's, so a desk decision and a phone swipe leave the same task line, `move_file` and
+  triage-log line. For Plus vaults each row carries a
   **suggested destination** from Jev, TypeSafe's decision model on OpenRouter, called from the desk with
   the gateway key it already holds: one `choice` over today / soon / someday / archive / unsure with the
   item and the vault's `triage-policy.md` as state, a filled chip above 0.85 confidence and an outlined one
