@@ -22,10 +22,25 @@ The two Google transports are read-only: Thock never completes a task, never rem
 never touches your phone-side lists. Completing a task on the phone *before* Thock polls means
 "never mind" — a genuinely useful gesture.
 
+## The Inbox view
+
+The fast path. Open the **Inbox** (`ctrl-alt-i`, the *Inbox* link in this Routine, or **Open** on
+the Inbox row in the sync icon) and the queue takes the centre pane: what is waiting on the left,
+in *New* and *Carried over*, the selected note rendered on the right, pictures included. One key
+per decision along the bottom: `t` for today's Day planner, `s` for Soon, `shift-s` for Someday,
+`e` to archive, `o` to open the note, `u` to take the last decision back. `x` marks rows so one
+key files them all, `/` filters, `tab` moves into the note to scroll it, `?` shows every key.
+
+Each decision leaves exactly what the phone's swipe leaves: a task line, the note moved into
+`archives/inbox/`, and a line in the triage log. With Thock Plus, every row carries a **suggested
+destination** with its confidence, and `space` takes it; a suggestion only ever pre-selects a key,
+nothing is filed without a keystroke. `shift-r` hands what is left to the ritual below.
+
 ## Triage
 
-At the desk, run **Triage Inbox** (`/triage-inbox`, or press enter on the Inbox row — it shows at
-the top of the Backlog panel while items are waiting, and always in the sync icon in the bottom bar). It reads your policy (`routines/inbox/triage-policy.md`), shows one line per item with a
+For the decisions that need the vault's folders and some judgement, run **Triage Inbox**
+(`/triage-inbox`, or `shift-r` from the Inbox view). It reads your policy
+(`routines/inbox/triage-policy.md`), shows one line per item with a
 proposed destination and a one-line reason, and waits. You confirm, re-assign, defer, or drop —
 **nothing is filed without your say-so**, and accepting the whole batch is one word.
 

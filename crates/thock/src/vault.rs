@@ -174,6 +174,8 @@ struct VaultConfigContent {
     markdown: MarkdownConfigContent,
     #[serde(skip_serializing_if = "ImagesConfigContent::is_unset")]
     images: ImagesConfigContent,
+    #[serde(skip_serializing_if = "InboxViewConfigContent::is_unset")]
+    inbox: InboxViewConfigContent,
     #[serde(skip_serializing_if = "LanguageConfigContent::is_unset")]
     language: LanguageConfigContent,
     #[serde(skip_serializing_if = "MemoryConfigContent::is_unset")]
@@ -420,6 +422,39 @@ impl ImagesConfigContent {
 
     fn is_unset(&self) -> bool {
         self.dir.is_none()
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct InboxViewConfigContent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggestions: Option<bool>,
+}
+
+impl InboxViewConfigContent {
+    fn resolve(self) -> InboxViewConfig {
+        InboxViewConfig {
+            suggestions: self.suggestions.unwrap_or(true),
+        }
+    }
+
+    fn is_unset(&self) -> bool {
+        self.suggestions.is_none()
+    }
+}
+
+/// The `[inbox]` table of `config.toml` (V41 §10): whether a Plus vault asks
+/// for suggested destinations in the Inbox view. The landing zone and its
+/// transports live in `.thock/inbox.toml`, not here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InboxViewConfig {
+    pub suggestions: bool,
+}
+
+impl Default for InboxViewConfig {
+    fn default() -> Self {
+        Self { suggestions: true }
     }
 }
 
@@ -800,6 +835,7 @@ pub struct VaultConfig {
     pub backlog: BacklogConfig,
     pub markdown: MarkdownConfig,
     pub images: ImagesConfig,
+    pub inbox: InboxViewConfig,
     pub language: Option<LanguageConfig>,
     pub memory: MemoryConfig,
 }
@@ -824,6 +860,7 @@ impl VaultConfigContent {
             backlog: self.backlog.resolve(),
             markdown: self.markdown.resolve(),
             images: self.images.resolve(),
+            inbox: self.inbox.resolve(),
             language: self.language.resolve(),
             memory: self.memory.resolve(),
         }

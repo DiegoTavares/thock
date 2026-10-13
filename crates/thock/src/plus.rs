@@ -131,6 +131,26 @@ impl Entitlement {
     }
 }
 
+/// The entitlement the chat panel last read, shared so other surfaces that
+/// ride the gateway grant (the Inbox view's suggestions, V41 §7.3) see the
+/// same balance without a second credential read. `None` when Thock Plus is
+/// not connected.
+#[derive(Default)]
+pub struct CurrentEntitlement(Option<Entitlement>);
+
+impl gpui::Global for CurrentEntitlement {}
+
+/// Publishes the entitlement the chat panel holds; observers of
+/// [`CurrentEntitlement`] are notified.
+pub fn set_current_entitlement(entitlement: Option<Entitlement>, cx: &mut gpui::App) {
+    cx.set_global(CurrentEntitlement(entitlement));
+}
+
+pub fn current_entitlement(cx: &gpui::App) -> Option<&Entitlement> {
+    cx.try_global::<CurrentEntitlement>()
+        .and_then(|current| current.0.as_ref())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ConnectResponse {
     pub credential: String,

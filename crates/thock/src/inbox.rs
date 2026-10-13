@@ -6,7 +6,7 @@
 //! in `inbox_service.rs`.
 
 use anyhow::Result;
-use chrono::{DateTime, FixedOffset, NaiveDate};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 use gpui::{AsyncApp, Task};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -22,9 +22,9 @@ use crate::gmail::{break_wikilinks, collapse_whitespace, slug};
 /// here.
 pub const INBOX_CONFIG_FILE: &str = "inbox.toml";
 
-/// The append-only triage log (spec §9.5), written by the triage skill; its
-/// markers are half the state-rebuild scan.
-pub const TRIAGE_LOG_PATH: &str = "archives/inbox/triage-log.md";
+/// The append-only triage log (spec §9.5), written by the triage skill and
+/// the Inbox view; its markers are half the state-rebuild scan.
+pub use thock_sync_core::TRIAGE_LOG_PATH;
 
 const MARKER_PREFIX: &str = "<!--inbox:";
 const MARKER_SUFFIX: &str = "-->";
@@ -350,6 +350,168 @@ pub fn scan_triage_log_markers(text: &str) -> HashSet<String> {
     markers
 }
 
+/// One waiting item as the Inbox view reads it (V41 §8.1): the frontmatter
+/// fields the capture planner writes, the body after it, and the two rules a
+/// decision needs. Every field is optional because a hand-written note with
+/// no frontmatter is a valid item (V13 §4.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct InboxItem {
+    /// Vault-relative, `inbox/<name>.md`.
+    pub path: String,
+    pub stem: String,
+    /// The level-1 heading when there is one (the phone edits the heading,
+    /// not the frontmatter, so it is the newer of the two), else the
+    /// frontmatter title, else the first heading or line, else the stem.
+    pub title: String,
+    pub source: Option<String>,
+    pub from: Option<String>,
+    pub url: Option<String>,
+    pub link: Option<String>,
+    /// RFC 3339 as written.
+    pub captured: Option<String>,
+    /// `YYYY-MM-DD` as written.
+    pub due: Option<String>,
+    /// The `capture:` digest.
+    pub digest: Option<String>,
+    /// Everything after the frontmatter.
+    pub body: String,
+    /// V40 §5's rule: a non-blank line after the heading.
+    pub has_body: bool,
+    /// An image line in the body.
+    pub has_image: bool,
+}
+
+/// Parses an inbox note the way `render_inbox_note` writes one, forgivingly:
+/// missing frontmatter, missing fields and an empty body are all valid.
+pub fn parse_inbox_note(path: &str, content: &str) -> InboxItem {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let stem = name.strip_suffix(".md").unwrap_or(name).to_string();
+    let (fields, body) = split_frontmatter(content);
+    let field = |key: &str| {
+        fields
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+            .filter(|value| !value.is_empty())
+    };
+    let first_line = body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let heading = first_line
+        .strip_prefix('#')
+        .map(|rest| rest.trim_start_matches('#').trim())
+        .filter(|text| !text.is_empty());
+    let title = match heading {
+        Some(text) if first_line.starts_with("# ") => text.to_string(),
+        _ => field("title")
+            .or_else(|| heading.map(str::to_string))
+            .or_else(|| (!first_line.is_empty()).then(|| first_line.to_string()))
+            .unwrap_or_else(|| stem.clone()),
+    };
+    let has_image = body.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("![") && line.contains("](")
+    });
+    InboxItem {
+        path: path.to_string(),
+        stem,
+        title,
+        source: field("source"),
+        from: field("from"),
+        url: field("url"),
+        link: field("link"),
+        captured: field("captured"),
+        due: field("due"),
+        digest: field("capture"),
+        body: body.to_string(),
+        has_body: thock_sync_core::inbox_has_body(content),
+        has_image,
+    }
+}
+
+/// The frontmatter's `key: value` pairs and the text after its terminator.
+/// An unterminated frontmatter swallows the note, as the phone reads it.
+fn split_frontmatter(content: &str) -> (Vec<(String, String)>, &str) {
+    let mut fields = Vec::new();
+    let Some(rest) = content.strip_prefix("---") else {
+        return (fields, content);
+    };
+    let Some(first_break) = rest.find('\n') else {
+        return (fields, "");
+    };
+    if !rest[..first_break].trim().is_empty() {
+        return (fields, content);
+    }
+    let mut cursor = &rest[first_break + 1..];
+    loop {
+        let (line, after) = match cursor.find('\n') {
+            Some(index) => (&cursor[..index], &cursor[index + 1..]),
+            None => (cursor, ""),
+        };
+        let trimmed = line.trim_end();
+        if trimmed == "---" || trimmed == "..." {
+            return (fields, after);
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            fields.push((key.trim().to_string(), value.trim().to_string()));
+        }
+        if after.is_empty() {
+            return (fields, "");
+        }
+        cursor = after;
+    }
+}
+
+/// The identity of a note's bytes for the suggestion cache (V41 §7.5): an
+/// edited item is asked again, the same bytes never cost twice.
+pub fn note_hash(content: &str) -> String {
+    hex::encode(Sha256::digest(content.as_bytes()))
+}
+
+/// Reads `.thock/state/inbox/last-triage`: one ISO timestamp, with or
+/// without an offset, or a bare date.
+pub fn parse_watermark(text: &str) -> Option<DateTime<Utc>> {
+    let text = text.trim();
+    if let Ok(moment) = DateTime::parse_from_rfc3339(text) {
+        return Some(moment.with_timezone(&Utc));
+    }
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(text, format) {
+            return Some(naive.and_utc());
+        }
+    }
+    NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|naive| naive.and_utc())
+}
+
+/// The ritual's own New / Carried over split (`triage-inbox.md` §1): the
+/// note's `captured:` moment, or its mtime for a hand-written note, after
+/// the last triage's watermark. Without a watermark everything is new.
+pub fn is_new(
+    item: &InboxItem,
+    modified: Option<DateTime<Utc>>,
+    watermark: Option<DateTime<Utc>>,
+) -> bool {
+    let Some(watermark) = watermark else {
+        return true;
+    };
+    let moment = item
+        .captured
+        .as_deref()
+        .and_then(|captured| DateTime::parse_from_rfc3339(captured).ok())
+        .map(|captured| captured.with_timezone(&Utc))
+        .or(modified);
+    moment.is_none_or(|moment| moment > watermark)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +554,144 @@ mod tests {
             "inbox",
             CAPTURED_AT,
         )
+    }
+
+    fn parse_rendered(captured: CapturedItem) -> (InboxItem, String) {
+        let plan = plan(
+            &[captured],
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        let file = &plan.files[0];
+        (
+            parse_inbox_note(&file.rel_path, &file.content),
+            file.content.clone(),
+        )
+    }
+
+    #[test]
+    fn parse_round_trips_every_rendered_shape() {
+        let mut link = item("google-tasks", "task-1", "Ship it — a practical guide");
+        link.url = Some("https://example.com/ship-it".to_string());
+        link.due = NaiveDate::from_ymd_opt(2026, 8, 27);
+        let (parsed, content) = parse_rendered(link);
+        assert_eq!(
+            parsed.path,
+            "inbox/2026-08-23-1810-ship-it-a-practical-guide.md"
+        );
+        assert_eq!(parsed.stem, "2026-08-23-1810-ship-it-a-practical-guide");
+        assert_eq!(parsed.title, "Ship it — a practical guide");
+        assert_eq!(parsed.source.as_deref(), Some("google-tasks"));
+        assert_eq!(parsed.url.as_deref(), Some("https://example.com/ship-it"));
+        assert_eq!(parsed.due.as_deref(), Some("2026-08-27"));
+        assert_eq!(parsed.captured.as_deref(), Some(CAPTURED_AT));
+        assert_eq!(
+            parsed.digest.as_deref(),
+            Some(capture_digest(ACCOUNT, "google-tasks", "task-1").as_str())
+        );
+        assert_eq!(parsed.from, None);
+        assert_eq!(parsed.link, None);
+        assert!(content.ends_with(&parsed.body), "{content}");
+        assert!(parsed.body.starts_with("\n# Ship it"), "{}", parsed.body);
+        // The url line after the heading is a body (V40 §5).
+        assert!(parsed.has_body);
+        assert!(!parsed.has_image);
+
+        let mut email = item("gmail", "t-1", "From the road");
+        email.body = Some("Two thoughts.\n\n![whiteboard](/images/w.jpg)\n".to_string());
+        email.link = Some("https://mail.google.com/mail/u/d@e.com/#all/t-1".to_string());
+        email.from = Some("Ana <ana@example.com>".to_string());
+        let (parsed, _) = parse_rendered(email);
+        assert_eq!(parsed.from.as_deref(), Some("Ana <ana@example.com>"));
+        assert_eq!(
+            parsed.link.as_deref(),
+            Some("https://mail.google.com/mail/u/d@e.com/#all/t-1")
+        );
+        assert_eq!(parsed.url, None);
+        assert!(parsed.has_body);
+        assert!(parsed.has_image);
+
+        let (parsed, _) = parse_rendered(item("google-tasks", "task-2", ""));
+        assert_eq!(parsed.title, "(untitled)");
+        // The placeholder is the only line after the heading, so it is a body
+        // the phone would link to as well.
+        assert!(parsed.has_body);
+    }
+
+    #[test]
+    fn hand_written_notes_are_items() {
+        let parsed = parse_inbox_note("inbox/idea.md", "# Routines could carry state\n\nMaybe.\n");
+        assert_eq!(parsed.title, "Routines could carry state");
+        assert_eq!(parsed.digest, None);
+        assert_eq!(parsed.source, None);
+        assert!(parsed.has_body);
+
+        let parsed = parse_inbox_note("inbox/scrap.md", "just a line\n");
+        assert_eq!(parsed.title, "just a line");
+        assert!(!parsed.has_body);
+
+        let parsed = parse_inbox_note("inbox/empty.md", "");
+        assert_eq!(parsed.title, "empty");
+        assert_eq!(parsed.body, "");
+
+        // A phone-edited heading wins over the frontmatter title.
+        let parsed = parse_inbox_note(
+            "inbox/x.md",
+            "---\ntitle: Old\ncapture: abc\n---\n\n# New title\n",
+        );
+        assert_eq!(parsed.title, "New title");
+        assert_eq!(parsed.digest.as_deref(), Some("abc"));
+        assert!(!parsed.has_body);
+
+        // Frontmatter without a level-1 heading keeps its title; a deeper
+        // heading is only the fallback.
+        let parsed = parse_inbox_note("inbox/y.md", "---\ntitle: Kept\n---\n\n## Sub\nbody\n");
+        assert_eq!(parsed.title, "Kept");
+        let parsed = parse_inbox_note("inbox/z.md", "## Sub\n");
+        assert_eq!(parsed.title, "Sub");
+
+        // An image line alone after the heading is both a body and a picture.
+        let parsed = parse_inbox_note("inbox/p.md", "# Pic\n![a](/images/a.png)\n");
+        assert!(parsed.has_body);
+        assert!(parsed.has_image);
+    }
+
+    #[test]
+    fn watermark_splits_new_from_carried_over() {
+        let watermark = parse_watermark("2026-10-09T18:00:00Z");
+        assert!(watermark.is_some());
+        assert_eq!(parse_watermark("2026-10-09T18:00:00"), watermark);
+        assert_eq!(parse_watermark(" 2026-10-09T18:00:00+00:00\n"), watermark);
+        assert!(parse_watermark("2026-10-09").is_some());
+        assert_eq!(parse_watermark("yesterday"), None);
+
+        let mut captured = parse_inbox_note(
+            "inbox/a.md",
+            "---\ncaptured: 2026-10-09T18:42:00Z\n---\n# A\n",
+        );
+        assert!(is_new(&captured, None, watermark));
+        captured.captured = Some("2026-10-09T17:00:00Z".to_string());
+        assert!(!is_new(&captured, None, watermark));
+        // Without a watermark the whole queue is new.
+        assert!(is_new(&captured, None, None));
+
+        let hand_written = parse_inbox_note("inbox/b.md", "# B\n");
+        let later = parse_watermark("2026-10-09T19:00:00Z");
+        assert!(is_new(&hand_written, later, watermark));
+        let earlier = parse_watermark("2026-10-09T10:00:00Z");
+        assert!(!is_new(&hand_written, earlier, watermark));
+        // Nothing to date it by: shown as new rather than hidden.
+        assert!(is_new(&hand_written, None, watermark));
+    }
+
+    #[test]
+    fn note_hash_is_sha256_of_the_bytes() {
+        assert_eq!(
+            note_hash(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_ne!(note_hash("a"), note_hash("b"));
     }
 
     #[test]

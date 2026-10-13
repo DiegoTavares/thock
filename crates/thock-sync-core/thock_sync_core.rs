@@ -6,11 +6,16 @@
 
 mod apply;
 mod envelope;
+mod inbox;
 mod markdown;
 mod write;
 
 pub use apply::{Applied, Outcome, apply, effect_present};
 pub use envelope::{Context, SealError, content_hash, key_check, open, seal, seal_with_nonce};
+pub use inbox::{
+    INBOX_ARCHIVE_DIR, TRIAGE_LOG_PATH, archive_path, inbox_has_body, inbox_task_line,
+    triage_log_line,
+};
 pub use markdown::{heading_key, line_hash, section_hash};
 pub use write::{Heading, Operation, Place, Placement, Write, WriteError, parse_write};
 

@@ -6,8 +6,14 @@ summary = "A front door for the vault — capture anywhere, decide at the desk."
 icon    = "envelope"
 doc     = "routines/inbox/Inbox.md"
 
-# The queue is reached by running triage; browsing raw captures is what the
-# project panel is for, so there is deliberately no row that opens inbox/.
+# The queue itself: the Inbox view, one key per decision (V41). Browsing the
+# raw folder is what the project panel is for.
+[[link]]
+name   = "Inbox"
+action = "thock::OpenInbox"
+icon   = "envelope"
+group  = "Today"
+
 [[link]]
 name  = "Triage log"
 open  = "archives/inbox/triage-log.md"

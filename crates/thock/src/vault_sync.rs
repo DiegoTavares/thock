@@ -12,7 +12,7 @@
 use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
 use chrono::Local;
-use fs::{Fs, RemoveOptions, RenameOptions};
+use fs::{Fs, RemoveOptions};
 use futures::{AsyncReadExt as _, StreamExt as _};
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, SharedString,
@@ -36,6 +36,7 @@ use workspace::Workspace;
 
 use crate::calendar_service::{ManualSyncFinished, show_sync_toast};
 use crate::history;
+use crate::inbox_service::MoveOutcome;
 use crate::notes::{NoteKind, expand_template, parse_date};
 use crate::plus;
 use crate::vault::{VAULT_CONFIG_FILE, VAULT_MARKER_DIR, Vault, VaultStatus};
@@ -1948,31 +1949,23 @@ async fn apply_move_file(
     }
     let from = vault.root.join(&write.path);
     let destination = vault.root.join(to);
-    if !fs.is_file(&from).await {
-        return Ok(AppliedWrite::default());
+    match crate::inbox_service::move_note(fs, &from, &destination)
+        .await
+        .map_err(ApplyFailure::Vault)?
+    {
+        MoveOutcome::SourceGone => Ok(AppliedWrite::default()),
+        MoveOutcome::DestinationExists => {
+            log::warn!(
+                "Thock: {to} is already there; {} stays where it is for the desk to file",
+                write.path
+            );
+            Ok(AppliedWrite::default())
+        }
+        MoveOutcome::Moved => Ok(AppliedWrite {
+            changed: Some(to.to_string()),
+            removed: Some(write.path.clone()),
+        }),
     }
-    if fs.is_file(&destination).await {
-        log::warn!(
-            "Thock: {to} is already there; {} stays where it is for the desk to file",
-            write.path
-        );
-        return Ok(AppliedWrite::default());
-    }
-    fs.rename(
-        &from,
-        &destination,
-        RenameOptions {
-            overwrite: false,
-            ignore_if_exists: false,
-            create_parents: true,
-        },
-    )
-    .await
-    .map_err(ApplyFailure::Vault)?;
-    Ok(AppliedWrite {
-        changed: Some(to.to_string()),
-        removed: Some(write.path.clone()),
-    })
 }
 
 fn open_write(key: &[u8; 32], row: &WriteRow, images_dir: &str) -> Result<Write, ApplyFailure> {
