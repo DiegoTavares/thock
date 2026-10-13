@@ -358,6 +358,10 @@ func TestUploadsPublishVersionsInOrderAndRoundTripBytes(t *testing.T) {
 	if status != 200 || body["version"].(float64) != 4 {
 		t.Fatalf("deleting a tombstone again: %d %v", status, body)
 	}
+	status, body = h.call("DELETE", "/v1/vault/files/never.md", h.desk, map[string]any{"expected_version": 7})
+	if status != 404 || body["code"] != "not_found" {
+		t.Fatalf("deleting a path the vault never had: %d %v", status, body)
+	}
 	listing = h.files(h.phone, "?since=3")
 	files = listing["files"].([]any)
 	if len(files) != 1 || files[0].(map[string]any)["deleted"] != true || files[0].(map[string]any)["path"] != "backlog.md" {

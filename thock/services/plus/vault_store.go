@@ -619,11 +619,13 @@ func (s *store) tombstoneFile(ctx context.Context, vaultID, path string, expecte
 			result = tombstoneResult{Version: current.Version, AlreadyDeleted: true}
 			return nil
 		}
-		if current.Version != expectedVersion {
-			return staleVersionError{current: current}
-		}
+		// Before the version check: a desk whose record outlived the row would
+		// otherwise be told its version is stale and retry against nothing.
 		if current.Version == 0 {
 			return errNotFound
+		}
+		if current.Version != expectedVersion {
+			return staleVersionError{current: current}
 		}
 		version := v.LatestVersion + 1
 		_, err = tx.Exec(ctx, `update files set version = $3, deleted = true, blob_id = null, size_bytes = 0, content_hash = null,

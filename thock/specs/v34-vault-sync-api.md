@@ -424,6 +424,8 @@ the whole upload. Begun uploads never committed are swept after an hour.
 
 → `200 {"version": 1843}`. Writes a tombstone, frees the blob, emits `file` with `deleted: true`.
 Deleting a path that is already a tombstone is `200` with the existing tombstone version.
+Deleting a path the vault never had is `404 not_found` whatever `expected_version` says, and the desk drops
+its record of the path.
 
 ### 6.4 Writes
 

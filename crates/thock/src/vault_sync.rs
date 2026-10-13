@@ -1585,16 +1585,21 @@ async fn run_job(
                 let Some(record) = state.files.get(path).cloned() else {
                     continue;
                 };
-                let version = match api.tombstone(path, record.version).await {
+                let mut attempt = api.tombstone(path, record.version).await;
+                if let Err(error) = &attempt
+                    && let Some(e) = sync_error(error)
+                    && e.code == "stale_version"
+                {
+                    let current = e.current_version.unwrap_or(record.version);
+                    attempt = api.tombstone(path, current).await;
+                }
+                // The server never had the path (or lost it): nothing to delete.
+                let version = match attempt {
                     Ok(version) => version,
-                    Err(error) => match sync_error(&error) {
-                        Some(e) if e.code == "stale_version" => {
-                            let current = e.current_version.unwrap_or(record.version);
-                            api.tombstone(path, current).await?
-                        }
-                        Some(e) if e.code == "not_found" => record.version,
-                        _ => return Err(error),
-                    },
+                    Err(error) if sync_error(&error).is_some_and(|e| e.code == "not_found") => {
+                        record.version
+                    }
+                    Err(error) => return Err(error),
                 };
                 state.cursor = state.cursor.max(version);
                 state.files.remove(path);
@@ -2288,12 +2293,13 @@ mod tests {
                             json(serde_json::json!({"version": self.next_version}))
                         }
                         ("DELETE", _) => {
+                            let Some(file) = self.files.get_mut(&path) else {
+                                return error(404, "not_found", serde_json::Value::Null);
+                            };
                             self.next_version += 1;
-                            if let Some(file) = self.files.get_mut(&path) {
-                                file.version = self.next_version;
-                                file.deleted = true;
-                                file.blob_id.clear();
-                            }
+                            file.version = self.next_version;
+                            file.deleted = true;
+                            file.blob_id.clear();
                             json(serde_json::json!({"version": self.next_version}))
                         }
                         _ => error(404, "not_found", serde_json::Value::Null),
@@ -3062,6 +3068,59 @@ mod tests {
             "begin (409), begin, commit: {:?}",
             server.requests
         );
+    }
+
+    #[gpui::test]
+    async fn deleting_a_path_the_server_never_had_drops_the_record(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        // The desk remembers a version the server has no row for.
+        let state = LocalState {
+            files: BTreeMap::from([(
+                "gone.md".to_string(),
+                FileRecord {
+                    version: 7,
+                    blob_id: "lost".to_string(),
+                    plaintext_hash: "0".repeat(64),
+                },
+            )]),
+            ..LocalState::default()
+        };
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "backlog.md": "## Soon\n",
+            }),
+        )
+        .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+        let service = cx.new(|cx| VaultSyncService::new(project.clone(), cx));
+        service.update(cx, |service, cx| {
+            service.state = state;
+            service.configure_for_test(test_vault(), stub_api(server.clone()), KEY, cx)
+        });
+        cx.run_until_parked();
+
+        let deletes = server
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|r| r.starts_with("DELETE ") && r.contains("/v1/vault/files/gone.md"))
+            .count();
+        assert_eq!(deletes, 2, "409, then 404 on the retry");
+        assert_eq!(
+            server.lock().unwrap().plaintext("backlog.md").as_deref(),
+            Some("## Soon\n"),
+            "the rest of the pass still syncs"
+        );
+        service.read_with(cx, |service, _| {
+            assert!(!service.state.files.contains_key("gone.md"));
+            assert!(service.state.files.contains_key("backlog.md"));
+        });
     }
 
     #[gpui::test]
