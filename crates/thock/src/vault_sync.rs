@@ -18,7 +18,7 @@ use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, SharedString,
     Task, TaskExt as _,
 };
-use http_client::{AsyncBody, HttpClient, Request, Response, http};
+use http_client::{AsyncBody, HttpClient, Request, http};
 use project::Project;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -48,8 +48,7 @@ const KEYCHAIN_URL: &str = "https://plus.thethock.com/vault-key";
 const UPLOAD_DEBOUNCE: Duration = Duration::from_secs(2);
 const RETRY_FLOOR: Duration = Duration::from_secs(5);
 const RETRY_CEILING: Duration = Duration::from_secs(10 * 60);
-const FEED_RECONNECT_FLOOR: Duration = Duration::from_secs(1);
-const FEED_RECONNECT_CEILING: Duration = Duration::from_secs(60);
+const POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// Directories the catch-up scan never enters: the history repository, the
 /// caches and this service's own state.
 const SKIPPED_DIRS: &[&str] = &[".git", ".thock/history", ".thock/cache", ".thock/sync"];
@@ -515,24 +514,6 @@ impl SyncApi {
         }
         Ok(())
     }
-
-    async fn open_feed(&self) -> Result<Response<AsyncBody>> {
-        let request = Request::builder()
-            .method(http::Method::GET)
-            .uri(format!("{}/v1/vault/feed", self.base_url))
-            .header("Accept", "text/event-stream")
-            .header("Authorization", format!("Bearer {}", self.credential))
-            .header(
-                "Thock-Client",
-                format!("desk/{}", env!("CARGO_PKG_VERSION")),
-            )
-            .body(AsyncBody::default())?;
-        let response = self.http.send(request).await?;
-        if !response.status().is_success() {
-            bail!("the change feed answered with status {}", response.status());
-        }
-        Ok(response)
-    }
 }
 
 fn classify(status: http::StatusCode, body: &str) -> SyncError {
@@ -731,6 +712,12 @@ impl Job {
     fn is_empty(&self) -> bool {
         !self.catch_up && !self.drain && self.dirty.is_empty() && self.removed.is_empty()
     }
+
+    /// Only checking the phone's queue, which happens every minute and
+    /// shouldn't flash the status as busy.
+    fn is_poll(&self) -> bool {
+        self.drain && !self.catch_up && self.dirty.is_empty() && self.removed.is_empty()
+    }
 }
 
 struct JobOutcome {
@@ -793,7 +780,7 @@ pub struct VaultSyncService {
     /// The keychain reads a reload starts; the newest wins.
     start_task: Option<Task<()>>,
     debounce_task: Option<Task<()>>,
-    feed_task: Option<Task<()>>,
+    poll_task: Option<Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -817,7 +804,7 @@ impl VaultSyncService {
             announce_next: false,
             start_task: None,
             debounce_task: None,
-            feed_task: None,
+            poll_task: None,
             _subscriptions: vec![project_subscription],
         };
         this.reload(cx);
@@ -930,7 +917,7 @@ impl VaultSyncService {
 
     fn stop_session(&mut self, status: PhoneSyncState) {
         self.session = None;
-        self.feed_task = None;
+        self.poll_task = None;
         self.debounce_task = None;
         self.start_task = None;
         self.pending = Job::default();
@@ -989,7 +976,7 @@ impl VaultSyncService {
         self.pending.catch_up = true;
         self.pending.drain = true;
         self.schedule_work(cx);
-        self.start_feed(cx);
+        self.start_polling(cx);
         cx.notify();
     }
 
@@ -1025,7 +1012,7 @@ impl VaultSyncService {
         self.worker_running = true;
         cx.spawn(async move |this, cx| {
             loop {
-                let Ok(Some((job, session, vault, fs, state, info))) =
+                let Ok(Some((job, announce, session, vault, fs, state, info))) =
                     this.update(cx, |service, cx| {
                         if service.pending.is_empty() || service.session.is_none() {
                             service.worker_running = false;
@@ -1033,10 +1020,16 @@ impl VaultSyncService {
                             return None;
                         }
                         let job = std::mem::take(&mut service.pending);
-                        service.status = PhoneSyncState::Working;
-                        cx.notify();
+                        // A poll already in flight must not answer for a
+                        // `sync_now` that queued its own pass behind it.
+                        let announce = !job.is_poll() && std::mem::take(&mut service.announce_next);
+                        if !job.is_poll() {
+                            service.status = PhoneSyncState::Working;
+                            cx.notify();
+                        }
                         Some((
                             job,
+                            announce,
                             service.session.clone()?,
                             service.vault.clone()?,
                             service.project.read(cx).fs().clone(),
@@ -1049,7 +1042,7 @@ impl VaultSyncService {
                 };
                 let outcome = run_job(&this, job, session, vault, fs, state, info, cx).await;
                 let delay = this
-                    .update(cx, |service, cx| service.finish_job(outcome, cx))
+                    .update(cx, |service, cx| service.finish_job(outcome, announce, cx))
                     .unwrap_or(None);
                 if let Some(delay) = delay {
                     cx.background_executor().timer(delay).await;
@@ -1064,9 +1057,9 @@ impl VaultSyncService {
     fn finish_job(
         &mut self,
         outcome: Result<JobOutcome, (Job, anyhow::Error)>,
+        announce: bool,
         cx: &mut Context<Self>,
     ) -> Option<Duration> {
-        let announce = std::mem::take(&mut self.announce_next);
         let delay = match outcome {
             Ok(outcome) => {
                 self.state = outcome.state;
@@ -1177,95 +1170,26 @@ impl VaultSyncService {
         delay
     }
 
-    /// Holds the change feed open; a `write` event drains, a `vault` event
-    /// pauses. Reconnects with backoff; polling on reconnect is what the
-    /// worker's `drain` flag does.
-    fn start_feed(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.session.clone() else {
-            return;
-        };
-        self.feed_task = Some(cx.spawn(async move |this, cx| {
-            let mut delay = FEED_RECONNECT_FLOOR;
+    /// Drains the phone's queue every `POLL_INTERVAL`. The desk polls rather
+    /// than hold the change feed: an open stream keeps the server's Cloud Run
+    /// instance billed for its whole length.
+    fn start_polling(&mut self, cx: &mut Context<Self>) {
+        self.poll_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                let api = session.api.clone();
-                let events = cx.background_spawn(async move { api.open_feed().await });
-                match events.await {
-                    Ok(response) => {
-                        delay = FEED_RECONNECT_FLOOR;
-                        let mut body = response.into_body();
-                        let mut buffer = Vec::new();
-                        let mut chunk = [0u8; 4096];
-                        loop {
-                            let read = match body.read(&mut chunk).await {
-                                Ok(0) | Err(_) => break,
-                                Ok(read) => read,
-                            };
-                            buffer.extend_from_slice(&chunk[..read]);
-                            for event in drain_sse_events(&mut buffer) {
-                                let keep_going = this
-                                    .update(cx, |service, cx| service.handle_feed_event(event, cx))
-                                    .unwrap_or(false);
-                                if !keep_going {
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        log::debug!("Thock: the change feed dropped: {error:#}");
-                    }
-                }
-                // Whatever we missed while disconnected is a drain away.
-                if this
-                    .update(cx, |service, cx| {
-                        service.pending.drain = true;
-                        service.schedule_work(cx);
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-                cx.background_executor().timer(delay).await;
-                delay = (delay * 2).min(FEED_RECONNECT_CEILING);
-            }
-        }));
-    }
-
-    fn handle_feed_event(&mut self, event: FeedEvent, cx: &mut Context<Self>) -> bool {
-        if self.session.is_none() {
-            return false;
-        }
-        match event.kind.as_str() {
-            "write" | "ack" => {
-                self.pending.drain = true;
-                self.schedule_work(cx);
-            }
-            "vault" => {
-                let status = event
-                    .data
-                    .get("status")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or_default();
-                match status {
-                    "lapsed" => {
-                        self.status = PhoneSyncState::Paused;
-                        cx.notify();
-                    }
-                    "deleted" => {
-                        self.stop_session(PhoneSyncState::Off);
-                        cx.notify();
+                cx.background_executor().timer(POLL_INTERVAL).await;
+                let polling = this.update(cx, |service, cx| {
+                    if service.session.is_none() {
                         return false;
                     }
-                    _ => {}
+                    service.pending.drain = true;
+                    service.schedule_work(cx);
+                    true
+                });
+                if !matches!(polling, Ok(true)) {
+                    return;
                 }
             }
-            "device" => {
-                self.pending.drain = true;
-                self.schedule_work(cx);
-            }
-            _ => {}
-        }
-        true
+        }));
     }
 
     /// `thock::ConnectPhone`: makes sure a key and a server vault exist, then
@@ -1470,48 +1394,8 @@ impl VaultSyncService {
         self.pending.catch_up = true;
         self.pending.drain = true;
         self.schedule_work(cx);
+        self.start_polling(cx);
     }
-}
-
-// --- server-sent events ---
-
-struct FeedEvent {
-    kind: String,
-    data: serde_json::Value,
-}
-
-/// Pulls every complete event (terminated by a blank line) out of `buffer`,
-/// leaving a partial trailing event in place.
-fn drain_sse_events(buffer: &mut Vec<u8>) -> Vec<FeedEvent> {
-    let mut events = Vec::new();
-    loop {
-        let text = String::from_utf8_lossy(buffer);
-        let Some(end) = text.find("\n\n") else {
-            break;
-        };
-        let block = text[..end].to_string();
-        let consumed = text[..end + 2].len();
-        buffer.drain(..consumed);
-        let mut kind = String::from("message");
-        let mut data = String::new();
-        for line in block.lines() {
-            let line = line.trim_end_matches('\r');
-            if let Some(value) = line.strip_prefix("event:") {
-                kind = value.trim().to_string();
-            } else if let Some(value) = line.strip_prefix("data:") {
-                if !data.is_empty() {
-                    data.push('\n');
-                }
-                data.push_str(value.trim_start());
-            }
-        }
-        if data.is_empty() {
-            continue;
-        }
-        let data = serde_json::from_str(&data).unwrap_or(serde_json::Value::Null);
-        events.push(FeedEvent { kind, data });
-    }
-    events
 }
 
 // --- the worker ---
@@ -1527,6 +1411,7 @@ async fn run_job(
     info: Option<VaultInfo>,
     cx: &mut AsyncApp,
 ) -> Result<JobOutcome, (Job, anyhow::Error)> {
+    let saved_state = state.clone();
     let mut dirty = job.dirty.clone();
     let mut removed = job.removed.clone();
     let mut skipped = Vec::new();
@@ -1739,7 +1624,10 @@ async fn run_job(
         Ok(result) => result,
         Err(error) => return Err((job, error)),
     };
-    if let Err(error) = save_state(&fs, &vault.root, &state).await {
+    // Most minute polls find nothing; don't touch the vault for them.
+    if state != saved_state
+        && let Err(error) = save_state(&fs, &vault.root, &state).await
+    {
         return Err((job, error));
     }
     Ok(JobOutcome {
@@ -2197,9 +2085,11 @@ mod tests {
     use super::*;
     use fs::FakeFs;
     use gpui::TestAppContext;
-    use http_client::FakeHttpClient;
+    use http_client::{FakeHttpClient, Response};
     use settings::SettingsStore;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::Mutex;
     use thock_sync_core::{Heading, Placement};
 
@@ -2240,6 +2130,10 @@ mod tests {
         acked_at_version: u64,
         requests: Vec<String>,
         phone_paired: bool,
+        /// Answer every call as if the server copy were deleted.
+        vault_gone: bool,
+        /// Holds the next `GET /v1/vault/writes` until the sender fires.
+        writes_gate: Option<futures::channel::oneshot::Receiver<()>>,
     }
 
     impl StubServer {
@@ -2300,6 +2194,10 @@ mod tests {
 
         fn handle(&mut self, method: &str, uri: &str, body: &[u8]) -> (u16, Vec<u8>) {
             self.requests.push(format!("{method} {uri}"));
+            if self.vault_gone {
+                let body = serde_json::json!({"error": "gone", "code": "vault_missing"});
+                return (404, body.to_string().into_bytes());
+            }
             let path_and_query = uri.trim_start_matches("http://stub");
             let (route, _query) = path_and_query
                 .split_once('?')
@@ -2401,7 +2299,6 @@ mod tests {
                         _ => error(404, "not_found", serde_json::Value::Null),
                     }
                 }
-                ("GET", "/v1/vault/feed") => error(503, "unavailable", serde_json::Value::Null),
                 _ => error(404, "not_found", serde_json::Value::Null),
             }
         }
@@ -2415,6 +2312,12 @@ mod tests {
                 let uri = request.uri().to_string();
                 let mut body = Vec::new();
                 request.body_mut().read_to_end(&mut body).await?;
+                if method == "GET" && uri.contains("/v1/vault/writes") {
+                    let gate = server.lock().unwrap().writes_gate.take();
+                    if let Some(gate) = gate {
+                        gate.await.ok();
+                    }
+                }
                 let (status, bytes) = server.lock().unwrap().handle(&method, &uri, &body);
                 Ok(Response::builder()
                     .status(status)
@@ -2580,6 +2483,156 @@ mod tests {
             assert!(matches!(service.status(), PhoneSyncState::UpToDate { .. }));
             assert_eq!(service.state.acked_through_seq, 2);
         });
+    }
+
+    #[gpui::test]
+    async fn the_desk_polls_for_phone_writes_every_minute(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "daily": {"2026-10-02.md": "# Today\n\n## Day planner\n- [ ] Walk\n"},
+            }),
+        )
+        .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        server.lock().unwrap().phone_paired = true;
+        let service = start_service(&fs, server.clone(), cx).await;
+
+        server.lock().unwrap().queue_write(
+            "daily/2026-10-02.md",
+            "c1",
+            &write_json(
+                "c1",
+                "daily/2026-10-02.md",
+                "Day planner",
+                "- [ ] Buy a card",
+            ),
+        );
+        cx.run_until_parked();
+        assert_eq!(server.lock().unwrap().acked_through, 0);
+
+        cx.executor().advance_clock(POLL_INTERVAL);
+        cx.run_until_parked();
+        let note = fs
+            .load(Path::new("/vault/daily/2026-10-02.md"))
+            .await
+            .unwrap();
+        assert_eq!(
+            note,
+            "# Today\n\n## Day planner\n- [ ] Walk\n- [ ] Buy a card\n"
+        );
+        assert_eq!(server.lock().unwrap().acked_through, 1);
+
+        // An empty poll asks again and leaves the vault alone.
+        let state_file = Path::new("/vault").join(STATE_FILE);
+        let saved = fs.metadata(&state_file).await.unwrap().unwrap().mtime;
+        let asked = server.lock().unwrap().requests.len();
+        cx.executor().advance_clock(POLL_INTERVAL);
+        cx.run_until_parked();
+        {
+            let server = server.lock().unwrap();
+            assert!(
+                server.requests[asked..]
+                    .iter()
+                    .any(|r| r.contains("/v1/vault/writes"))
+            );
+            assert!(!server.requests.iter().any(|r| r.contains("/feed")));
+        }
+        assert_eq!(
+            fs.metadata(&state_file).await.unwrap().unwrap().mtime,
+            saved
+        );
+        service.read_with(cx, |service, _| {
+            assert!(matches!(service.status(), PhoneSyncState::UpToDate { .. }));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_poll_does_not_show_busy_and_polling_stops_with_the_session(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/vault", serde_json::json!({".thock": {"config.toml": ""}}))
+            .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        server.lock().unwrap().phone_paired = true;
+        let service = start_service(&fs, server.clone(), cx).await;
+
+        let saw_working = Rc::new(Cell::new(false));
+        let _observer = cx.update({
+            let saw_working = saw_working.clone();
+            |cx| {
+                cx.observe(&service, move |service, cx| {
+                    if matches!(service.read(cx).status(), PhoneSyncState::Working) {
+                        saw_working.set(true);
+                    }
+                })
+            }
+        });
+        cx.executor().advance_clock(POLL_INTERVAL);
+        cx.run_until_parked();
+        assert!(!saw_working.get());
+        service.read_with(cx, |service, _| {
+            assert!(matches!(service.status(), PhoneSyncState::UpToDate { .. }));
+        });
+
+        server.lock().unwrap().vault_gone = true;
+        cx.executor().advance_clock(POLL_INTERVAL);
+        cx.run_until_parked();
+        service.read_with(cx, |service, _| {
+            assert!(matches!(service.status(), PhoneSyncState::Off));
+        });
+        let asked = server.lock().unwrap().requests.len();
+        cx.executor().advance_clock(POLL_INTERVAL * 3);
+        cx.run_until_parked();
+        assert_eq!(server.lock().unwrap().requests.len(), asked);
+    }
+
+    #[gpui::test]
+    async fn sync_now_during_a_poll_announces_its_own_pass(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/vault", serde_json::json!({".thock": {"config.toml": ""}}))
+            .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        server.lock().unwrap().phone_paired = true;
+        let service = start_service(&fs, server.clone(), cx).await;
+
+        let announced = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update({
+            let announced = announced.clone();
+            let server = server.clone();
+            |cx| {
+                cx.subscribe(&service, move |_, event: &ManualSyncFinished, _| {
+                    let asked = server.lock().unwrap().requests.len();
+                    announced.borrow_mut().push((event.message.clone(), asked));
+                })
+            }
+        });
+        let (open_gate, gate) = futures::channel::oneshot::channel();
+        server.lock().unwrap().writes_gate = Some(gate);
+        cx.executor().advance_clock(POLL_INTERVAL);
+        cx.run_until_parked();
+        let polled = server.lock().unwrap().requests.len();
+
+        service.update(cx, |service, cx| service.sync_now(cx));
+        open_gate.send(()).unwrap();
+        cx.run_until_parked();
+
+        let announced = announced.borrow();
+        assert_eq!(announced.len(), 1, "{announced:?}");
+        let (message, asked) = &announced[0];
+        assert_eq!(message.as_ref(), "Phone synced, nothing new");
+        // Both the poll and the catch-up asked for writes; only the latter speaks.
+        let requests = &server.lock().unwrap().requests;
+        let writes = requests[polled..]
+            .iter()
+            .filter(|r| r.contains("/v1/vault/writes"))
+            .count();
+        assert_eq!(writes, 2, "{requests:?}");
+        assert_eq!(*asked, requests.len(), "{requests:?}");
     }
 
     #[gpui::test]
@@ -3097,16 +3150,6 @@ mod tests {
             seen.as_slice(),
             &[("POST".to_string(), "2".to_string(), "{}".to_string())]
         );
-    }
-
-    #[test]
-    fn sse_events_are_split_on_blank_lines() {
-        let mut buffer = b"event: write\ndata: {\"seq\":58}\n\n: ping\n\nevent: ack\ndata: {\"through_seq\":58,\n".to_vec();
-        let events = drain_sse_events(&mut buffer);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, "write");
-        assert_eq!(events[0].data["seq"], 58);
-        assert_eq!(buffer, b"event: ack\ndata: {\"through_seq\":58,\n".to_vec());
     }
 
     #[test]

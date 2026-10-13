@@ -111,6 +111,9 @@ var (
 	vaultStatusRoute = routeAccess{roles: []deviceRole{roleDesk, rolePhone}, needVault: true, lapsedDesk: true, lapsedPhone: true}
 	vaultDeleteRoute = routeAccess{roles: []deviceRole{roleDesk}, needVault: true, lapsedDesk: true, revokedDesk: true}
 	vaultCreateRoute = routeAccess{roles: []deviceRole{roleDesk}}
+	// Only the phone holds the feed. An open stream keeps a Cloud Run instance
+	// billed for as long as it lasts, so the desk polls instead.
+	feedRoute = routeAccess{roles: []deviceRole{rolePhone}, needVault: true, lapsedPhone: true}
 )
 
 func (s *server) withVault(access routeAccess, next func(http.ResponseWriter, *http.Request, principal)) http.HandlerFunc {

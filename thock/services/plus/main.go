@@ -197,7 +197,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/vault/writes", s.withVault(phoneOnly, s.handleWriteCreate))
 	mux.HandleFunc("GET /v1/vault/writes", s.withVault(deskOnly, s.handleWritesList))
 	mux.HandleFunc("POST /v1/vault/writes/ack", s.withVault(deskOnly, s.handleWritesAck))
-	mux.HandleFunc("GET /v1/vault/feed", s.withVault(bothRead, s.handleFeed))
+	mux.HandleFunc("GET /v1/vault/feed", s.withVault(feedRoute, s.handleFeed))
 	mux.HandleFunc("GET /v1/vault/agent", s.withVault(phoneOnly, s.handleAgentGrant))
 	mux.HandleFunc("POST /v1/vault/feedback", s.withVault(feedbackRoute, s.handleFeedback))
 	if local, ok := s.blobs.(*localBlobStore); ok {

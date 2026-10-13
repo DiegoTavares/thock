@@ -519,28 +519,32 @@ func TestWritesQueueIdempotentlyAndAckPrunes(t *testing.T) {
 	}
 }
 
-func TestFeedNudgesTheOtherDeviceOnly(t *testing.T) {
+func TestFeedNudgesThePhoneAboutTheDeskOnly(t *testing.T) {
 	h := newSyncHarness(t)
-	deskEvents, closeDesk := h.feed(h.desk)
-	defer closeDesk()
 	phoneEvents, closePhone := h.feed(h.phone)
 	defer closePhone()
 
 	h.mustUpload("daily/2026-10-02.md", 0, "# Today\n")
 	expectEvent(t, phoneEvents, `file:{"deleted":false,"path":"daily/2026-10-02.md","version":1}`)
-	expectNoEvent(t, deskEvents)
 
 	h.write("0f7e0b1a-1111-4111-8111-111111111111", "daily/2026-10-02.md", 1, `{}`)
-	expectEvent(t, deskEvents, `write:{"path":"daily/2026-10-02.md","seq":1}`)
 	expectNoEvent(t, phoneEvents)
 
 	h.call("POST", "/v1/vault/writes/ack", h.desk, map[string]any{"through_seq": 1})
 	expectEvent(t, phoneEvents, `ack:{"at_version":1,"through_seq":1}`)
-	expectNoEvent(t, deskEvents)
 
 	// With the phone listening nothing is pushed.
 	if records := h.server.pusher.(*loggingPusher).records(); len(records) != 0 {
 		t.Fatalf("no push while the phone holds the feed: %v", records)
+	}
+}
+
+// An open stream keeps a Cloud Run instance billed, so the desk polls.
+func TestFeedRefusesTheDesk(t *testing.T) {
+	h := newSyncHarness(t)
+	status, body := h.call("GET", "/v1/vault/feed", h.desk, nil)
+	if status != 403 || body["code"] != "role_forbidden" {
+		t.Fatalf("desk opening the feed: %d %v", status, body)
 	}
 }
 
