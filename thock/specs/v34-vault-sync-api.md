@@ -126,8 +126,8 @@ on. The full list:
 
 When `vaults.lapsed_at` is set (V34 §12; also set when the Plus user is revoked or disconnects):
 
-- the phone may still `GET /v1/vault`, `GET /v1/vault/files`, download blobs and hold the feed; every
-  `POST`/`PATCH`/`DELETE` from the phone is `403 plus_lapsed`;
+- the phone may still `GET /v1/vault`, `GET /v1/vault/files`, download blobs and hold the feed
+  (§6.5); every `POST`/`PATCH`/`DELETE` from the phone is `403 plus_lapsed`;
 - the desk may `GET /v1/vault` and `DELETE /v1/vault`; every other desk call is `403 plus_lapsed`;
 - thirty days later the vault's rows and blobs are gone and every call but `POST /v1/vault` is
   `404 vault_missing`.
@@ -250,7 +250,7 @@ Summary; details follow. **D** = desk, **P** = phone, **–** = no credential.
 | `POST /v1/vault/writes` | P | queue a write |
 | `GET /v1/vault/writes` | D | read the queue |
 | `POST /v1/vault/writes/ack` | D | prune the queue through a seq |
-| `GET /v1/vault/feed` | D P | server-sent events |
+| `GET /v1/vault/feed` | P | server-sent events |
 | `GET /v1/entitlement` | D P | V25's route, extended with a `vault` object |
 
 ### 6.1 Vault
@@ -465,15 +465,13 @@ snapshots that carry the writes' effects (§10.4), which is what makes `at_versi
 
 ### 6.5 Feed and push
 
-**`GET /v1/vault/feed`** (both). `Accept: text/event-stream`. The server keeps the connection open,
-sends `: ping` every 25 seconds, and emits events caused by **the other device only**:
+**`GET /v1/vault/feed`** (phone). `Accept: text/event-stream`. The server keeps the connection open,
+sends `: ping` every 25 seconds, and emits events caused by **the desk**, plus vault-level `vault`
+and `device` events:
 
 ```
 event: file
 data: {"path":"daily/2026-10-02.md","version":1842,"deleted":false}
-
-event: write
-data: {"seq":58,"path":"daily/2026-10-02.md"}
 
 event: ack
 data: {"through_seq":58,"at_version":1845}
@@ -485,11 +483,15 @@ event: device
 data: {"device_id":"c41a…","revoked":true}
 ```
 
-Events are nudges, not the record: on connect and on every reconnect a client polls
-`GET /v1/vault/files?since=<cursor>` (both), `GET /v1/vault/writes` (desk) or `GET /v1/vault` (phone,
-for `acked_through_seq`) regardless of what it did or did not receive. The server may close the
-stream at any time (Cloud Run does after an hour); clients reconnect with backoff starting at one
-second, capped at a minute. `Last-Event-ID` is not used.
+Events are nudges, not the record: on connect and on every reconnect the phone polls
+`GET /v1/vault/files?since=<cursor>` and `GET /v1/vault` (for `acked_through_seq`) regardless of
+what it did or did not receive. The server may close the stream at any time (Cloud Run does after
+an hour); clients reconnect with backoff starting at one second, capped at a minute.
+`Last-Event-ID` is not used.
+
+The desk does not hold the feed; a desk credential gets `403 role_forbidden`. An open stream keeps a
+Cloud Run instance billed for its whole length, and a desk left open all day would hold one around
+the clock. The desk polls instead (§10.4).
 
 **APNs** (server internal, shape frozen for the phone). When a `file` or `ack` event has no phone
 feed to go to, the server sends one silent push per thirty-second burst:
@@ -815,7 +817,7 @@ mark pending write sent(seq)
 ### 10.4 Desk drain
 
 ```
-on open, and on every `write` event:
+on open, and every minute while open:
   GET /v1/vault/writes?after=<acked_through_seq>  (page until has_more is false)
   checkpoint (V2) once for the batch
   for each write in seq order: open(Write{client_id}) → parse → apply to the file on disk (seed from the template if asked) → write file
@@ -881,10 +883,11 @@ the signal to talk.
 desk and one phone per vault; pairing single use and expiry; `key_check` adoption only on an empty
 vault; `409 stale_version` carries `current`; versions strictly increase in commit order under
 concurrent commits; `since` paging includes tombstones and the full pull excludes them;
-`cursor_expired` after the retention window; write idempotence by `client_id`; ack prunes and records
-`acked_at_version`; feed emits for the other device only; quota refusal at quota + 10 %; lapse makes
-phone writes `403 plus_lapsed` and phone reads `200`; sweeper deletes after 30 days and not before;
-`path_not_allowed` for every §4.1 violation; the local blob mode round-trips bytes exactly.
+`cursor_expired` after the retention window; write idempotence by `client_id`; ack prunes and
+records `acked_at_version`; feed emits for the other device only and refuses the desk; quota refusal
+at quota + 10 %; lapse makes phone writes `403 plus_lapsed` and phone reads `200`; sweeper deletes
+after 30 days and not before; `path_not_allowed` for every §4.1 violation; the local blob mode
+round-trips bytes exactly.
 
 **Core** (`cargo test -p thock-sync-core`): every fixture passes; applying twice equals applying once;
 `roundtrip` cases are byte-identical; envelope vectors open; a blob moved to another path or `blob_id`

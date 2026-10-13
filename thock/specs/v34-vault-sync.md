@@ -42,9 +42,9 @@ server, sync for anyone without Plus, sync of anything that is not text.
 - Pair in one scan at the desk. No account screen, no key to type, no passphrase to keep.
 - The phone shows the latest vault the desk uploaded, whether or not the desk is open now, and
   works fully offline on that copy.
-- A tick on the phone shows at the desk within seconds while both apps are in the foreground; a
-  change at the desk reaches a phone in a pocket within the time iOS allows (minutes to hours), and
-  on the next open at the latest.
+- A tick on the phone shows at the desk within a minute while the desk is open; a change at the
+  desk reaches a phone in a pocket within the time iOS allows (minutes to hours), and on the next
+  open at the latest.
 - **No write is ever lost.** Two appends to one section both land. Two edits of one line both stay
   in the note, one under the other, marked for the desk to tidy. Nobody is asked to resolve
   anything on the phone.
@@ -114,7 +114,7 @@ desk is never rebuilt from either without the user asking (a *restore* is a late
 │ vault on disk, V2 history    │───────▶│ files: path, version, size,  │───────▶│ decrypted copy in app store  │
 │ vault key, pairing QR        │        │        blob id, who, when    │        │ vault key from the QR        │
 │ sync service: watch, upload, │ writes │ writes: queue until acked    │ writes │ write queue, applied locally │
-│   pull queue, apply, ack     │◀───────│ feed: "something changed"    │◀───────│ rebases queue on new snaps   │
+│   poll queue, apply, ack     │◀───────│ feed to phone: "desk changed"│◀───────│ rebases queue on new snaps   │
 │ only while the app is open   │        │ APNs nudge when phone absent │        │ read-only after Plus lapses  │
 │                              │        │ entitlement, devices, quota, │        │                              │
 │                              │        │   lapse timer                │        │                              │
@@ -150,7 +150,7 @@ planner heading and backlog headings from them (V26) and never writes them (V33 
 | `pairings` | one-time codes | `vault_id`, `code_hash`, `expires_at` (10 minutes), `used_at` |
 
 The `files` table is the index the phone syncs against: *give me every file whose version is above
-the last one I saw*. The `writes` table is what the desk drains on open and on every feed event.
+the last one I saw*. The `writes` table is what the desk drains on open and every minute while open.
 
 ### 6.3 Phone (SQLite, app group container, Data Protection "until first unlock")
 
@@ -220,22 +220,24 @@ so a retried upload after a dropped connection never duplicates an append.
 
 ### 7.5 Desk drain
 
-On open and on every feed event: `GET /v1/vault/writes?after=<last acked seq>` → apply each write in
-`seq` order to the file on disk (§8), after one V2 checkpoint for the batch → upload the new
-snapshots (§7.2) → `POST /v1/vault/writes/ack {through: seq}`. The ack is what prunes the queue. If
-the desk crashes between apply and ack, the writes are applied again on the next open; §8 makes
+On open and every minute while open: `GET /v1/vault/writes?after=<last acked seq>` → apply each
+write in `seq` order to the file on disk (§8), after one V2 checkpoint for the batch → upload the
+new snapshots (§7.2) → `POST /v1/vault/writes/ack {through: seq}`. The ack is what prunes the queue.
+If the desk crashes between apply and ack, the writes are applied again on the next open; §8 makes
 every write idempotent against its own effect, so this is safe.
 
 ### 7.6 Change feed and nudges
 
-`GET /v1/vault/feed` is a one-way stream (server-sent events) that emits `{kind: "file"|"write",
-version|seq}` whenever the other device changed something. Both apps hold it open while in the
-foreground and reconnect on drop (Cloud Run closes connections after an hour; that is fine). When
-the phone is not connected and a snapshot arrives, the backend sends one **APNs silent push** per
-burst; iOS wakes the app briefly to pull. This is the "seconds in the foreground, Apple's schedule
-in the background" promise of §2.
+`GET /v1/vault/feed` is a one-way stream (server-sent events) that emits `file` and `ack` events
+whenever the desk changed something, plus vault-level `vault` and `device` events (contract §6.5).
+The phone holds it open while in the foreground and reconnects on drop (Cloud Run closes connections
+after an hour; that is fine). When the phone is not connected and a snapshot arrives, the backend
+sends one **APNs silent push** per burst; iOS wakes the app briefly to pull. This is the "seconds in
+the foreground, Apple's schedule in the background" promise of §2.
 
-The desk is never pushed: it is either open and on the feed, or closed and catching up on open.
+The desk is never pushed and does not hold the feed: an open stream keeps a Cloud Run instance
+billed for its whole length, so a desk left open all day would cost an instance around the clock. It
+polls for the phone's writes every minute while open and catches up on open.
 
 ## 8. Writes and merge
 
@@ -319,7 +321,7 @@ when they see it, or not.
 ### 10.1 A sync service like V15 and V31
 
 `VaultSyncService` in `crates/thock/src/vault_sync.rs`: starts with the vault when a Plus
-credential and a vault key exist, holds the feed, watches the vault through the project `Fs`,
+credential and a vault key exist, polls for phone writes, watches the vault through the project `Fs`,
 debounces and uploads, drains and applies writes, and exposes a status row the existing sync
 popover renders beside Gmail, Calendar and Readwise: *Phone · up to date · 2 min ago*, *Phone ·
 3 waiting from your phone*, *Phone · not connected*, *Phone · 1 file not sent*. Phone is a fifth
@@ -430,6 +432,8 @@ From the interview, with Diego's answers:
 9. **History:** latest state only on the server.
 10. **Desk process:** sync runs only while Thock is open.
 11. **Latency:** pushed, seconds in the foreground; Apple's schedule in the background.
+    _Amended 2026-10-13: desk → phone only. The desk polls every minute instead of holding the feed,
+    which kept a Cloud Run instance billed around the clock._
 12. **Plus lapse:** phone read-only, server copy kept 30 days.
 13. **Text scope:** Markdown plus the vault's own config formats, by extension allow-list.
 14. **Phone storage:** whatever gives the best experience; files need not be materialised.

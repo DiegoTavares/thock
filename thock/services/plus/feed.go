@@ -10,7 +10,9 @@ import (
 )
 
 // The change feed (contract §6.5): one server-sent-events stream per
-// connected device, carrying nudges caused by the other device. Events are
+// connected phone, carrying nudges caused by the desk and vault-level
+// changes. The desk polls rather than hold a stream; the `write` event a
+// phone causes is still published, for desks older than that. Events are
 // hints, never the record; clients poll on every (re)connect regardless.
 
 const (

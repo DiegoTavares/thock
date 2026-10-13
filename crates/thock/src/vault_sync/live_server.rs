@@ -10,7 +10,7 @@
 use super::*;
 use fs::FakeFs;
 use gpui::TestAppContext;
-use http_client::FakeHttpClient;
+use http_client::{FakeHttpClient, Response};
 use settings::SettingsStore;
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
@@ -146,14 +146,6 @@ fn roundtrip(
 
 fn live_http() -> Arc<dyn HttpClient> {
     FakeHttpClient::create(|mut request| async move {
-        // The feed never ends, which a read-to-EOF client can't hold; the
-        // service treats a refused feed as "poll instead", which is all
-        // these tests need.
-        if request.uri().path() == "/v1/vault/feed" {
-            return Ok(Response::builder().status(503).body(AsyncBody::from(
-                r#"{"error":"no feed here","code":"unavailable"}"#,
-            ))?);
-        }
         let mut body = Vec::new();
         request.body_mut().read_to_end(&mut body).await?;
         let headers: Vec<_> = request
