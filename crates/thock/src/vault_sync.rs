@@ -1586,17 +1586,7 @@ async fn run_job(
                 let Some(record) = state.files.get(path).cloned() else {
                     continue;
                 };
-                let version = match api.tombstone(path, record.version).await {
-                    Ok(version) => version,
-                    Err(error) => match sync_error(&error) {
-                        Some(e) if e.code == "stale_version" => {
-                            let current = e.current_version.unwrap_or(record.version);
-                            api.tombstone(path, current).await?
-                        }
-                        Some(e) if e.code == "not_found" => record.version,
-                        _ => return Err(error),
-                    },
-                };
+                let version = tombstone_file(&api, path, record.version).await?;
                 state.cursor = state.cursor.max(version);
                 state.files.remove(path);
             }
@@ -1834,6 +1824,26 @@ async fn upload_file(
         }
     }
     bail!("the Thock Plus service kept refusing the version of {path}")
+}
+
+/// Records `path` as deleted on the server, retrying once on a stale version.
+/// A path the server has no row for (a reset, or a swept tombstone) is
+/// already gone, so `not_found` counts as done on either attempt.
+async fn tombstone_file(api: &SyncApi, path: &str, expected_version: u64) -> Result<u64> {
+    let mut expected = expected_version;
+    for attempt in 0..2 {
+        match api.tombstone(path, expected).await {
+            Ok(version) => return Ok(version),
+            Err(error) => match sync_error(&error) {
+                Some(e) if e.code == "stale_version" && attempt == 0 => {
+                    expected = e.current_version.unwrap_or(expected);
+                }
+                Some(e) if e.code == "not_found" => return Ok(expected),
+                _ => return Err(error),
+            },
+        }
+    }
+    bail!("the Thock Plus service kept refusing the deletion of {path}")
 }
 
 /// Applies one queued write to the file on disk. Returns the path when the
@@ -2243,6 +2253,11 @@ mod tests {
                     let path = path.replace("%20", " ");
                     let expected = body_json["expected_version"].as_u64().unwrap_or(0);
                     let current = self.files.get(&path).map(|f| f.version).unwrap_or(0);
+                    if method == "DELETE"
+                        && let Some(file) = self.files.get(&path).filter(|f| f.deleted)
+                    {
+                        return json(serde_json::json!({"version": file.version}));
+                    }
                     if expected != current {
                         return error(
                             409,
@@ -2281,12 +2296,13 @@ mod tests {
                             json(serde_json::json!({"version": self.next_version}))
                         }
                         ("DELETE", _) => {
+                            let Some(file) = self.files.get_mut(&path) else {
+                                return error(404, "not_found", serde_json::Value::Null);
+                            };
                             self.next_version += 1;
-                            if let Some(file) = self.files.get_mut(&path) {
-                                file.version = self.next_version;
-                                file.deleted = true;
-                                file.blob_id.clear();
-                            }
+                            file.version = self.next_version;
+                            file.deleted = true;
+                            file.blob_id.clear();
                             json(serde_json::json!({"version": self.next_version}))
                         }
                         _ => error(404, "not_found", serde_json::Value::Null),
@@ -3097,6 +3113,40 @@ mod tests {
         assert!(server.files.get("notes.txt").is_some_and(|f| f.deleted));
         drop(server);
         service.read_with(cx, |service, _| {
+            assert!(!service.state.files.contains_key("notes.txt"));
+        });
+    }
+
+    #[gpui::test]
+    async fn deleting_a_file_the_server_no_longer_has_does_not_stall_sync(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "notes.txt": "gone soon\n",
+            }),
+        )
+        .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        let service = start_service(&fs, server.clone(), cx).await;
+        // A reset or the tombstone sweeper dropped the row this desk recorded.
+        server.lock().unwrap().files.remove("notes.txt");
+
+        fs.remove_file(Path::new("/vault/notes.txt"), RemoveOptions::default())
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(UPLOAD_DEBOUNCE * 2);
+        cx.run_until_parked();
+
+        service.read_with(cx, |service, _| {
+            assert!(
+                !matches!(service.status(), PhoneSyncState::Failing { .. }),
+                "sync should not fail: {:?}",
+                service.status()
+            );
             assert!(!service.state.files.contains_key("notes.txt"));
         });
     }
