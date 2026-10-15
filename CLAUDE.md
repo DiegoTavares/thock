@@ -32,8 +32,8 @@ Check design and implementation decisions against these (VISION.md §4 is the fu
 
 ## Repo layout and fork discipline
 
-Development happens directly on the fork (`github.com/DiegoTavares/thock`). All Thock code and docs are
-isolated so the delta against upstream Zed stays legible and extractable:
+Development happens directly on the fork (`github.com/DiegoTavares/thock`). Thock code and docs live
+apart from the inherited Zed crates so the domain stays legible:
 
 - `thock/` — VISION.md, `specs/`, and the runbooks `TESTING.md` and `RELEASING.md`. New features get a spec here.
 - `crates/thock/` — all Thock Rust: panels, vault model, routines, skills, backlog, history.
@@ -49,20 +49,21 @@ isolated so the delta against upstream Zed stays legible and extractable:
   for rebases. Verify the remote before any push.
 - Do not add Thock credentials, vault paths, or personal data to anything that could reach upstream.
 
-### Keep syncing with upstream cheap
+### Hard fork
 
-Every line changed outside `crates/thock/` and `thock/` is a future merge conflict. Before editing
-an upstream file, ask whether the change can live in the Thock crate instead.
+Thock is a hard fork of Zed (V42). Upstream is not merged; fixes are ported one at a time with the
+`zed-upstream-review` skill, and every port carries `(cherry picked from commit …)` or
+`Upstream-Commit:`.
 
-- **Add, don't rewrite.** Prefer new files and new modules over restructuring upstream ones. Prefer
-  registering a new panel over changing how the workspace lays out docks.
-- **Keep upstream touch-points small and mechanical** — a registration call, a keymap entry, a `Cargo.toml`
-  member. Ideally each is a one-liner that re-applies trivially after a rebase.
-- **Never reformat, reorder, or "clean up" upstream code**, and don't fix unrelated upstream bugs in passing.
-- **Disable rather than delete.** When de-Zed-ifying (git pane, billing surfaces, code-editor chrome), prefer
-  hiding/gating behind Thock config over ripping upstream code out.
-- Keymap changes go in the existing `assets/keymaps/default-{macos,linux}.json` blocks — add entries, don't
-  restructure the file. Keep macOS and Linux in sync, and update `assets/keymaps/vim.json` when a pane's
+- Product code goes in `crates/thock`. Edit an inherited crate when the change belongs there (a bug
+  in `editor`, a dependency edge to cut), not to host Thock features.
+- Delete what Thock doesn't use instead of hiding it behind a setting.
+- Don't rename inherited library crates or reformat their code: both break every future cherry-pick
+  into them.
+- The `upstream` remote is fetch-only and fetches tags into `refs/upstream-tags/`. Never fetch
+  upstream tags into `refs/tags` — Zed's `v*` tags are Thock's release trigger.
+- Keymap changes go in `assets/keymaps/default-{macos,linux}.json`; removing the bindings of a deleted
+  feature is expected. Keep macOS and Linux in sync, and update `assets/keymaps/vim.json` when a pane's
   key context is added or renamed.
 
 ## Panels — keyboard navigation is mandatory
@@ -313,8 +314,8 @@ PRs go to `DiegoTavares/thock` — never upstream.
 - Use a clear, correctly capitalized, imperative title (for example, `Add keyboard navigation to the Backlog panel`).
 - Prefix with `thock:` when the Thock crate or docs are the scope, matching existing history.
 - Avoid conventional commit prefixes (`fix:`, `feat:`, `docs:`) and trailing punctuation.
-- Call out explicitly in the body any file touched **outside** `crates/thock/` and `thock/`, and why
-  it couldn't be avoided — that section is the rebase risk.
+- Call out explicitly in the body any inherited crate touched, and why the change belongs there rather
+  than in `crates/thock/`.
 - Include a `Release Notes:` section as the final section, with one bullet:
   - `- Added ...`, `- Fixed ...`, or `- Improved ...` for user-facing changes, or
   - `- N/A` for docs-only and other non-user-facing changes.
