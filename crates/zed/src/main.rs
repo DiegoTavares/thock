@@ -1738,7 +1738,6 @@ struct Args {
     /// Output current environment variables as JSON to stdout
     #[arg(long, hide = true)]
     printenv: bool,
-
 }
 
 #[derive(Clone, Debug)]
