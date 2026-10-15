@@ -1,6 +1,6 @@
 # Thock V42 — Hard fork from Zed: prune what Thock never uses, own the app shell
 
-**Status:** In progress (step 1 of §9)
+**Status:** In progress (step 2 of §9)
 **Owner:** Diego · **Date:** 2026-10-15
 **Companion docs:** `v12-de-zed-ification.md` (the hide-don't-delete pass this replaces with deletion),
 `v35-app-identity.md` (bundle id and `thock://`, whose upstream-preserving rewrite this simplifies),
@@ -309,8 +309,8 @@ change in `crates/thock`. The PR body says which crates stayed and why.
 - **Menus.** `app_menus.rs` loses Open Recent, Extensions and anything else that pointed into a
   removed crate.
 - **Bundling.** `script/bundle-mac` and `script/bundle-linux` stop building `remote_server`, a second
-  release build of most of the workspace. This lands in step 2 together with the crate's deletion, so
-  `main` stays releasable in between.
+  release build of most of the workspace. This lands in step 2; the crate itself goes in step 3, once
+  `recent_projects` no longer depends on it.
 
 ### 5.3 Edges to cut inside kept crates
 
@@ -362,7 +362,11 @@ Upstream-only tooling with no Thock user is deleted:
   `eval_utils`, `edit_prediction_cli`, `extension_cli`, `docs_preprocessor`, `theme_importer`,
   `schema_generator`, the `*_benchmarks` crates, `gpui_web`, `gpui_windows`, `windows_resources`,
   `explorer_command_injector`, `auto_update_helper`, `etw_tracing` and `aws_http_client`.
-  `gpui_platform` loses its Windows and web arms.
+  `gpui_platform` loses its Windows and web arms. Zed's `cargo xtask` tooling (`xtask`,
+  `compliance`) goes with them. Four of the list have to wait for the crates that depend on them:
+  `remote_server` (a dependency of `recent_projects`, and of `agent_ui`'s and `sidebar`'s tests) and
+  `eval_utils` (`agent`, `agent_ui`) go in step 3; `aws_http_client` and `bedrock`
+  (`language_models`) go in step 4.
 - `script/`, down to what `ci.yml`, `release.yml`, `promote-release.yml`, the deploy workflows and
   the bundle scripts call (`bundle-mac`, `bundle-linux`, `linux`, `check-keymaps`,
   `generate-licenses`, `clippy` and their helpers under `script/lib`). The other hundred scripts
