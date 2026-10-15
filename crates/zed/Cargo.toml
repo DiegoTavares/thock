@@ -253,15 +253,11 @@ zlog.workspace = true
 zlog_settings.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-etw_tracing.workspace = true
 windows.workspace = true
 gpui = { workspace = true, features = [
     "input-latency-histogram",
     "windows-manifest",
 ] }
-
-[build-dependencies]
-windows_resources = { path = "../windows_resources" }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 gpui = { workspace = true, features = [

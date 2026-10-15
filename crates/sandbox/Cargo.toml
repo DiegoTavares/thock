@@ -23,10 +23,9 @@ nixos-test = [
     "http_proxy/nixos-integration-tests",
 ]
 
-# Builds `wsl_sandbox_test_helper`, the Windows analog of `bwrap_test_helper`.
-# It drives the real WSL/Bubblewrap sandbox end-to-end (see
-# `script/test-wsl-sandbox.ps1` / `cargo xtask wsl-sandbox-tests`). Off by
-# default so normal builds and the workspace test run don't produce it.
+# Builds `wsl_sandbox_test_helper`, the Windows analog of `bwrap_test_helper`,
+# which drives the real WSL/Bubblewrap sandbox end-to-end. Off by default so
+# normal builds and the workspace test run don't produce it.
 wsl-test = []
 
 # Behavior test helper for the Linux Bubblewrap sandbox. Only built when the
