@@ -1,5 +1,6 @@
-# Thock's own dependency surfaces only. The Cargo workspace follows upstream
-# Zed's lockfile, so it is updated by rebasing, not by Dependabot.
+# Thock's own dependency surfaces only. The Cargo workspace is inherited from
+# Zed; its bumps arrive through the upstream review (security ones first), not
+# through Dependabot.
 version: 2
 updates:
   - package-ecosystem: github-actions

@@ -37,7 +37,7 @@ suites_for() {
     thock/ios/*) echo ios ;;
     .github/*) echo workflows ;;
     crates/thock/*) echo rust ;;
-    *.md | thock/specs/* | docs/* | legal/*) ;;
+    *.md | thock/specs/* | legal/*) ;;
     Cargo.lock | Cargo.toml | rust-toolchain.toml) echo rust; echo sync-core ;;
     *) echo rust ;;
   esac
