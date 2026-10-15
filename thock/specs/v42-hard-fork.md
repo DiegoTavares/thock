@@ -93,7 +93,7 @@ release builds, bundling and `remote_server` included) stand in for both platfor
 | Release bundle, Linux (`thock-linux-x86_64.tar.gz`, v1.19.0) | 124 MB |
 | Release workflow build job, v1.19.0: macOS (aarch64) / Linux (x86_64) | 101 / 74 min |
 | CI wall time on `main`: Clippy / Test (ubuntu) / Test (macOS) | 6 / 5 / 4 min |
-| Incremental `cargo build -p zed -j 4` after touching `crates/thock`, Linux dev machine | _pending_ |
+| Incremental `cargo build -p zed -j 4` after touching `crates/thock`, Linux dev machine (i5-10500T, 15 GB) | 23 s |
 
 ## 4. Declaring the fork
 
