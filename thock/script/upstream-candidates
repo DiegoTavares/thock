@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# Lists the upstream Zed commits Thock hasn't reviewed yet, for the
+# zed-upstream-review skill (thock/specs/v42-hard-fork.md §4.5).
+#
+#   thock/script/upstream-candidates               since the last review, up to Zed's newest stable tag
+#   thock/script/upstream-candidates --ref main    up to another upstream ref (a tag name, `main`, or a sha)
+#   thock/script/upstream-candidates --base <sha>  start after <sha> instead of the last Upstream-Reviewed-Through
+#   thock/script/upstream-candidates --labels      add each PR's GitHub labels (one `gh` call per commit, slow)
+#   thock/script/upstream-candidates --no-fetch    use what the `upstream` remote already has
+#
+# Prints the range and the counts on stderr, then one tab-separated row per
+# live commit on stdout:
+#
+#   sha  pr  subject  crates  release-note  signal  labels
+#
+# A commit is live when it touches a path Thock still has, or a new file in a
+# directory (for crates, a crate) Thock still has. A commit whose every path is
+# in a deleted crate or file is gone, and only counted. Commits Thock already
+# carries are dropped: a `(cherry picked from commit …)` line, an
+# `Upstream-Commit:` trailer, or an identical patch-id.
+#
+# Read-only toward the repository: it fetches, but never checks out, commits or
+# pushes, and it refuses to run while the `upstream` remote can be pushed to.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+UPSTREAM_URL=https://github.com/zed-industries/zed.git
+HEADS_REFSPEC='+refs/heads/main:refs/remotes/upstream/main'
+TAGS_REFSPEC='+refs/tags/v*:refs/upstream-tags/v*'
+
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+die() { echo "upstream-candidates: $*" >&2; exit 1; }
+
+ref=""
+base=""
+with_labels=false
+fetch=true
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ref) [[ $# -ge 2 ]] || { usage; exit 2; }; ref="$2"; shift ;;
+    --base) [[ $# -ge 2 ]] || { usage; exit 2; }; base="$2"; shift ;;
+    --labels) with_labels=true ;;
+    --no-fetch) fetch=false ;;
+    -h | --help) usage; exit 0 ;;
+    *) usage; exit 2 ;;
+  esac
+  shift
+done
+
+# The remote must look exactly like §4.3: fetch-only, tags kept out of
+# refs/tags (Zed's v* tags are Thock's release trigger), only main fetched.
+# Everything but a deliberate push URL is repaired in place.
+ensure_remote() {
+  if ! git remote get-url upstream >/dev/null 2>&1; then
+    git remote add upstream "$UPSTREAM_URL"
+  fi
+  local pushurl refspecs
+  pushurl="$(git config --get remote.upstream.pushurl || true)"
+  if [[ -z "$pushurl" ]]; then
+    git config remote.upstream.pushurl DISABLED
+  elif [[ "$pushurl" != DISABLED ]]; then
+    die "the upstream remote has a push URL ($pushurl); nothing is ever pushed to Zed, set it to DISABLED"
+  fi
+  if [[ "$(git config --get remote.upstream.tagopt || true)" != --no-tags ]]; then
+    git config remote.upstream.tagopt --no-tags
+  fi
+  refspecs="$(git config --get-all remote.upstream.fetch || true)"
+  if [[ "$refspecs" != "$HEADS_REFSPEC"$'\n'"$TAGS_REFSPEC" ]]; then
+    git config --unset-all remote.upstream.fetch || true
+    git config --add remote.upstream.fetch "$HEADS_REFSPEC"
+    git config --add remote.upstream.fetch "$TAGS_REFSPEC"
+  fi
+}
+
+ensure_remote
+if $fetch; then
+  # A bare fetch applies the configured refspecs; naming a ref would skip the tags.
+  git fetch --quiet upstream || die "fetching upstream failed"
+fi
+
+thock_ref=origin/main
+if ! git rev-parse --verify --quiet "$thock_ref^{commit}" >/dev/null; then
+  echo "upstream-candidates: no origin/main here; reading Thock's history from HEAD" >&2
+  thock_ref=HEAD
+fi
+
+if [[ -z "$base" ]]; then
+  base="$(git log -1 --grep='^Upstream-Reviewed-Through:' \
+    --format='%(trailers:key=Upstream-Reviewed-Through,valueonly)' "$thock_ref" | awk 'NF { print $1; exit }')"
+  [[ -n "$base" ]] || die "no Upstream-Reviewed-Through trailer on $thock_ref; pass --base <sha>"
+fi
+base_sha="$(git rev-parse --verify --quiet "$base^{commit}")" || die "baseline $base is not a commit here"
+
+if [[ -z "$ref" ]]; then
+  ref="$(git for-each-ref --format='%(refname:strip=2)' 'refs/upstream-tags/v*' | grep -v -- - | sort -V | tail -1)" || true
+  [[ -n "$ref" ]] || die "no stable tag under refs/upstream-tags/; did the fetch run?"
+fi
+target_name="$ref"
+if git rev-parse --verify --quiet "refs/upstream-tags/$ref^{commit}" >/dev/null; then
+  target="refs/upstream-tags/$ref"
+elif git rev-parse --verify --quiet "refs/remotes/upstream/$ref^{commit}" >/dev/null; then
+  target="refs/remotes/upstream/$ref"
+elif git rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
+  target="$ref"
+else
+  die "upstream ref $ref not found (a tag under refs/upstream-tags/, main, or a sha)"
+fi
+target_sha="$(git rev-parse "$target^{commit}")"
+echo "upstream-candidates: range ${base_sha:0:12}..${target_name} (${target_sha:0:12})" >&2
+
+# Thock's own commits since the fork point: whatever $thock_ref reaches that the
+# upstream baseline doesn't. Ports are recorded there in three ways.
+thock_range="$base_sha..$thock_ref"
+declare -A ported=()
+while IFS= read -r sha; do
+  [[ -n "$sha" ]] || continue
+  full="$(git rev-parse --verify --quiet "$sha^{commit}" || echo "$sha")"
+  ported["$full"]=1
+done < <(git log --no-merges --format=%B "$thock_range" \
+  | sed -nE 's/^\(cherry picked from commit ([0-9a-f]{7,40})\)$/\1/p; s/^Upstream-Commit: *([0-9a-f]{7,40}).*$/\1/p')
+
+declare -A thock_patch_ids=()
+while read -r patch_id _; do
+  [[ -n "$patch_id" ]] && thock_patch_ids["$patch_id"]=1
+done < <(git log --no-merges -p --format='commit %H' "$thock_range" | git patch-id --stable)
+while read -r patch_id sha; do
+  [[ -n "${thock_patch_ids[$patch_id]:-}" ]] && ported["$sha"]=1
+done < <(git log --no-merges -p --format='commit %H' "$base_sha..$target" | git patch-id --stable)
+
+declare -A tree_paths=() tree_dirs=()
+while IFS= read -r path; do
+  tree_paths["$path"]=1
+  while [[ "$path" == */* ]]; do
+    path="${path%/*}"
+    tree_dirs["$path"]=1
+  done
+done < <(git ls-tree -r --name-only "$thock_ref")
+
+# Sets `component` to the crate (or top-level directory) a live path belongs
+# to, or to nothing when the path is gone from Thock's tree.
+component_of() {
+  local path="$1" dir crate
+  component=""
+  if [[ "$path" == crates/*/* ]]; then
+    crate="${path#crates/}"
+    crate="${crate%%/*}"
+    [[ -n "${tree_dirs[crates/$crate]:-}" ]] && component="$crate"
+    return 0
+  fi
+  dir="${path%/*}"
+  if [[ -n "${tree_paths[$path]:-}" ]] || { [[ "$path" == */* ]] && [[ -n "${tree_dirs[$dir]:-}" ]]; }; then
+    component="${path%%/*}"
+  fi
+}
+
+# The first bullet of the Release Notes section, with its continuation lines joined.
+release_note() {
+  awk '
+    /^Release Notes:/ { found = 1; next }
+    found && !started && NF { sub(/^[-*] */, ""); note = $0; started = 1; next }
+    started && (!NF || /^[-*] /) { print note; printed = 1; exit }
+    started { sub(/^ +/, ""); note = note " " $0 }
+    END { if (started && !printed) print note }
+  ' <<< "$1"
+}
+
+# words <alternatives>: a regex matching any alternative as a whole word, so
+# "hang" doesn't match "change". Spelled out because \b isn't portable ERE.
+words() { printf '(^|[^[:alnum:]_])(%s)([^[:alnum:]_]|$)' "$1"; }
+re_security="$(words 'security|cve-[0-9]+-[0-9]+|vulnerability|vulnerabilities|vulnerable')"
+re_crash="$(words 'panic|panics|panicked|panicking|crash|crashes|crashed|crashing|hang|hangs|hanging|hung|deadlock|deadlocks|deadlocked|freeze|freezes|freezing|frozen')"
+re_data="$(words 'data loss|corrupt|corrupts|corrupted|corruption|lost changes|lost work|unsaved changes')"
+re_platform="$(words 'wayland|x11|macos')"
+re_perf="$(words 'perf|performance|faster|leak|leaks|leaking')"
+signal_for() {
+  local text="${1,,}"
+  if [[ "$text" =~ $re_security ]]; then echo security
+  elif [[ "$text" =~ $re_crash ]]; then echo crash
+  elif [[ "$text" =~ $re_data ]]; then echo data
+  elif [[ "$text" =~ $re_platform ]]; then echo platform
+  elif [[ "$text" =~ $re_perf ]]; then echo perf
+  fi
+}
+
+# add_unique <list variable> <item>: appends <item> to a comma-separated list once.
+add_unique() {
+  local -n list="$1"
+  case ",$list," in
+    *",$2,"*) ;;
+    *) list="${list:+$list,}$2" ;;
+  esac
+}
+
+total=0
+ported_count=0
+live=0
+gone=0
+while IFS= read -r sha; do
+  [[ -n "$sha" ]] || continue
+  total=$((total + 1))
+  if [[ -n "${ported[$sha]:-}" ]]; then
+    ported_count=$((ported_count + 1))
+    echo "upstream-candidates: already ported: ${sha:0:12} $(git show -s --format=%s "$sha")" >&2
+    continue
+  fi
+  mapfile -d '' parts < <(git show --no-renames --format='%s%x00%b%x00' --name-only "$sha")
+  subject="${parts[0]:-}"
+  body="${parts[1]:-}"
+  # Crates first; top-level files and directories (Cargo.lock, assets, docs)
+  # only when the commit touches nothing inside a live crate.
+  crates=""
+  others=""
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    component_of "$path"
+    [[ -n "$component" ]] || continue
+    if [[ "$path" == crates/* ]]; then
+      add_unique crates "$component"
+    else
+      add_unique others "$component"
+    fi
+  done <<< "${parts[2]:-}"
+  crates="${crates:-$others}"
+  if [[ -z "$crates" ]]; then
+    gone=$((gone + 1))
+    continue
+  fi
+  live=$((live + 1))
+  pr=""
+  [[ "$subject" =~ \(#([0-9]+)\)[[:space:]]*$ ]] && pr="${BASH_REMATCH[1]}"
+  labels=""
+  if $with_labels && [[ -n "$pr" ]]; then
+    labels="$(gh pr view "$pr" --repo zed-industries/zed --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null)" || labels=""
+  fi
+  note="$(release_note "$body")"
+  # Zed's PR template ends in a "Self-Review Checklist" whose boxes mention
+  # security and performance, so checkbox lines don't count as signal.
+  signal="$(signal_for "$subject"$'\n'"$(sed -E '/^- \[[ xX]\] /d' <<< "$body")"$'\n'"$labels")"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${sha:0:12}" "$pr" "${subject//$'\t'/ }" "$crates" "${note//$'\t'/ }" "$signal" "$labels"
+done < <(git log --no-merges --reverse --format=%H "$base_sha..$target")
+
+echo "upstream-candidates: $total commits, $ported_count already ported, $live live, $gone gone" >&2

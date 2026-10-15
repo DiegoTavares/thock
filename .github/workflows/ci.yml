@@ -281,12 +281,27 @@ jobs:
       - name: Lint workflows and scripts
         run: thock/script/lint-workflows
 
+  # The helper behind the zed-upstream-review skill, against a throwaway
+  # repository; needs nothing but git.
+  upstream:
+    name: Upstream
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'upstream')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test the upstream-candidates helper
+        run: thock/script/test upstream
+
   # The one check branch protection requires. A suite the plan skipped counts
   # as passing; a failed or cancelled one does not.
   ci:
     name: CI
     if: always()
-    needs: [plan, style, clippy, test, go, ios, integration, workflows]
+    needs: [plan, style, clippy, test, go, ios, integration, workflows, upstream]
     runs-on: ubuntu-latest
     steps:
       - name: Check job results
