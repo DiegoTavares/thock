@@ -3,7 +3,6 @@ use crate::{
     item::{Item, ItemEvent},
 };
 use agent_settings::AgentSettings;
-use git::Clone as GitClone;
 use gpui::{
     Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
     ParentElement, Render, Styled, Task, Window, actions,
@@ -13,7 +12,7 @@ use menu::{SelectNext, SelectPrevious};
 
 use settings::Settings;
 use ui::{ButtonLike, Divider, DividerColor, KeyBinding, Vector, VectorName, prelude::*};
-use zed_actions::{Extensions, OpenKeymap, OpenSettings, assistant::ToggleFocus, command_palette};
+use zed_actions::{OpenKeymap, OpenSettings, assistant::ToggleFocus, command_palette};
 
 actions!(
     zed,
@@ -146,7 +145,7 @@ impl SectionEntry {
     }
 }
 
-const CONTENT: (Section<4>, Section<3>) = (
+const CONTENT: (Section<3>, Section<2>) = (
     Section {
         title: "Get Started",
         entries: [
@@ -160,12 +159,6 @@ const CONTENT: (Section<4>, Section<3>) = (
                 icon: IconName::FolderOpen,
                 title: "Open Project",
                 action: &Open::DEFAULT,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::CloudDownload,
-                title: "Clone Repository",
-                action: &GitClone,
                 visibility_guard: SectionVisibility::Always,
             },
             SectionEntry {
@@ -189,15 +182,6 @@ const CONTENT: (Section<4>, Section<3>) = (
                 icon: IconName::Keyboard,
                 title: "Customize Keymaps",
                 action: &OpenKeymap,
-                visibility_guard: SectionVisibility::Always,
-            },
-            SectionEntry {
-                icon: IconName::Blocks,
-                title: "Explore Extensions",
-                action: &Extensions {
-                    category_filter: None,
-                    id: None,
-                },
                 visibility_guard: SectionVisibility::Always,
             },
         ],

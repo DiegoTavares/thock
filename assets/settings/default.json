@@ -521,13 +521,6 @@
     "space": "•",
     "tab": "→",
   },
-  // Settings related to calls in Zed
-  "calls": {
-    // Join calls with the microphone live by default
-    "mute_on_join": false,
-    // Share your project when you are the first to join a channel
-    "share_on_join": false,
-  },
   // Toolbar related settings
   "toolbar": {
     // Whether to show breadcrumbs.
@@ -545,24 +538,6 @@
   "use_system_window_tabs": false,
   // Titlebar related settings
   "title_bar": {
-    // Whether to show git status indicators on the branch icon in the titlebar.
-    "show_branch_status_icon": false,
-    // Whether to show the branch name button in the titlebar.
-    "show_branch_name": true,
-    // Whether to show the worktree name button in the titlebar.
-    "show_worktree_name": true,
-    // Whether to show the project host and name in the titlebar.
-    "show_project_items": true,
-    // Whether to show onboarding banners in the titlebar.
-    "show_onboarding_banner": true,
-    // Thock: no accounts and no sign-in (V12 de-Zed-ification). Settings,
-    // keymap, and themes stay reachable from the app menu and command palette.
-    // Whether to show user picture in the titlebar.
-    "show_user_picture": false,
-    // Whether to show the user menu in the titlebar.
-    "show_user_menu": false,
-    // Whether to show the sign in button in the titlebar.
-    "show_sign_in": false,
     // Whether to show the menus in the titlebar.
     "show_menus": false,
     // The layout of window control buttons in the title bar (Linux only).
@@ -963,78 +938,6 @@
     // Default depth to expand outline items in the current file.
     // Set to 0 to collapse all items that have children, 1 or higher to collapse items at that depth or deeper.
     "expand_outlines_with_depth": 100,
-  },
-  "git_panel": {
-    // Whether to show the git panel button in the status bar.
-    // Thock: versioning is invisible — the word "git" never appears in the UI
-    // (V12 de-Zed-ification).
-    "button": false,
-    // Where to dock the git panel. Can be 'left' or 'right'.
-    "dock": "left",
-    // Default width of the git panel.
-    "default_width": 360,
-    // Style of the git status indicator in the panel.
-    //
-    // Choices: label_color, icon
-    // Default: icon
-    "status_style": "icon",
-    // Whether to show file icons in the git panel.
-    //
-    // Default: false
-    "file_icons": false,
-    // Whether to show folder icons or chevrons for directories in the git panel.
-    //
-    // Default: true
-    "folder_icons": true,
-    // What branch name to use if `init.defaultBranch` is not set
-    //
-    // Default: main
-    "fallback_branch_name": "main",
-    // How to sort entries in the git panel.
-    //
-    // Default: path
-    "sort_by": "path",
-    // How to group entries in the git panel.
-    //
-    // Default: status
-    "group_by": "status",
-    // Whether to collapse untracked files in the diff panel.
-    //
-    // Default: false
-    "collapse_untracked_diff": false,
-    /// Whether to show entries with tree or flat view in the panel
-    ///
-    /// Default: false
-    "tree_view": false,
-    // Whether the git panel should open on startup.
-    //
-    // Default: false
-    "starts_open": false,
-    // Whether to show a badge on the git panel icon with the count of uncommitted changes.
-    //
-    // Default: false
-    "show_count_badge": false,
-    "scrollbar": {
-      // When to show the scrollbar in the git panel.
-      //
-      // Choices: always, auto, never, system
-      // Default: inherits editor scrollbar settings
-      // "show": null
-    },
-    // Whether to show the addition/deletion change count next to each file in the Git panel.
-    //
-    // Default: true
-    "diff_stats": true,
-    // Maximum length of the commit message title before a warning is shown.
-    // Set to 0 to disable.
-    //
-    // Default: 0
-    "commit_title_max_length": 0,
-    // Default action when clicking a changed file in the Git panel.
-    //
-    // Choices: project_diff, file_diff, view_file
-    // Default: project_diff
-    "entry_primary_click_action": "project_diff",
   },
   "agent": {
     // Whether the inline assistant should use streaming tools, when available
@@ -2690,24 +2593,6 @@
   //   "W": "workspace::Save"
   // }
   "command_aliases": {},
-  // ssh_connections is an array of ssh connections.
-  // You can configure these from `project: Open Remote` in the command palette.
-  // Zed's ssh support will pull configuration from your ~/.ssh too.
-  // Examples:
-  // [
-  //   {
-  //     "host": "example-box",
-  //     // "port": 22, "username": "test", "args": ["-i", "/home/user/.ssh/id_rsa"]
-  //     "projects": [
-  //       {
-  //         "paths": ["/home/user/code/zed"]
-  //       }
-  //     ]
-  //   }
-  // ]
-  "ssh_connections": [],
-  // Whether to read ~/.ssh/config for ssh connection sources.
-  "read_ssh_config": true,
   // Default timeout in seconds for all context server tool calls.
   // Individual servers can override this in their configuration.
   // Examples:

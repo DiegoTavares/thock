@@ -1,7 +1,7 @@
 use gpui::{Action, actions};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 // If the zed binary doesn't use anything in this crate, it will be optimized away
 // and the actions won't initialize. So we just provide an empty initialization function
@@ -117,12 +117,6 @@ pub struct Extensions {
 #[action(namespace = zed)]
 #[serde(deny_unknown_fields)]
 pub struct AcpRegistry;
-
-/// Show call diagnostics and connection quality statistics.
-#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = collab)]
-#[serde(deny_unknown_fields)]
-pub struct ShowCallStats;
 
 /// Decreases the font size in the editor buffer.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
@@ -289,89 +283,6 @@ pub mod workspace {
     );
 }
 
-/// Describes which ref to base a new git worktree on. The worktree is
-/// always created in a detached HEAD state; users can opt into creating
-/// a branch afterwards from the worktree itself.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum NewWorktreeBranchTarget {
-    /// Create a detached worktree from the current HEAD.
-    #[default]
-    CurrentBranch,
-    /// Create a detached worktree at the tip of an existing branch.
-    ExistingBranch { name: String },
-    /// Create a detached worktree at the tip of a remote-tracking branch.
-    RemoteBranch {
-        remote_name: String,
-        branch_name: String,
-    },
-}
-
-/// Creates a new git worktree and switches the workspace to it.
-/// Dispatched by the unified worktree picker when the user selects a "Create new worktree" entry.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Action)]
-#[action(namespace = git)]
-#[serde(deny_unknown_fields)]
-pub struct CreateWorktree {
-    /// When this is None, Zed will randomly generate a worktree name.
-    pub worktree_name: Option<String>,
-    pub branch_target: NewWorktreeBranchTarget,
-}
-
-/// Switches the workspace to an existing linked worktree.
-/// Dispatched by the unified worktree picker when the user selects an existing worktree.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Action)]
-#[action(namespace = git)]
-#[serde(deny_unknown_fields)]
-pub struct SwitchWorktree {
-    pub path: PathBuf,
-    pub display_name: String,
-}
-
-/// Opens an existing worktree in a new window.
-/// Dispatched by the worktree picker's "Open in New Window" button.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Action)]
-#[action(namespace = git)]
-#[serde(deny_unknown_fields)]
-pub struct OpenWorktreeInNewWindow {
-    pub path: PathBuf,
-}
-
-pub mod git {
-    use gpui::actions;
-
-    actions!(
-        git,
-        [
-            /// Checks out a different git branch.
-            CheckoutBranch,
-            /// Switches to a different git branch.
-            Switch,
-            /// Selects a different repository.
-            SelectRepo,
-            /// Filter remotes.
-            FilterRemotes,
-            /// Create a git remote.
-            CreateRemote,
-            /// Opens the git branch selector.
-            #[action(deprecated_aliases = ["branches::OpenRecent"])]
-            Branch,
-            /// Shows uncommitted changes across the project.
-            ViewUncommittedChanges,
-            /// Shows unstaged changes across the project.
-            ViewUnstagedChanges,
-            /// Shows staged changes across the project.
-            ViewStagedChanges,
-            /// Opens the git stash selector.
-            ViewStash,
-            /// Opens the git worktree selector.
-            Worktree,
-            /// Creates a pull request for the current branch.
-            CreatePullRequest
-        ]
-    );
-}
-
 pub mod toast {
     use gpui::actions;
 
@@ -533,16 +444,6 @@ pub mod buffer_search {
         ]
     );
 }
-pub mod settings_profile_selector {
-    use gpui::Action;
-    use schemars::JsonSchema;
-    use serde::Deserialize;
-
-    #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-    #[action(namespace = settings_profile_selector)]
-    pub struct Toggle;
-}
-
 pub mod agent {
     use gpui::{Action, SharedString, actions};
     use schemars::JsonSchema;
@@ -665,32 +566,6 @@ pub mod assistant {
     }
 }
 
-/// Opens the recent projects interface.
-#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
-#[action(namespace = projects)]
-#[serde(deny_unknown_fields)]
-pub struct OpenRecent {
-    #[serde(default)]
-    pub create_new_window: Option<bool>,
-}
-
-/// Creates a project from a selected template.
-#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
-#[action(namespace = projects)]
-#[serde(deny_unknown_fields)]
-pub struct OpenRemote {
-    #[serde(default)]
-    pub from_existing_connection: bool,
-    #[serde(default)]
-    pub create_new_window: Option<bool>,
-}
-
-/// Opens the dev container connection modal.
-#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
-#[action(namespace = projects)]
-#[serde(deny_unknown_fields)]
-pub struct OpenDevContainer;
-
 /// Where to spawn the task in the UI.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -776,21 +651,6 @@ pub mod outline {
     pub static TOGGLE_OUTLINE: OnceLock<fn(AnyView, &mut Window, &mut App)> = OnceLock::new();
 }
 
-actions!(
-    zed_predict_onboarding,
-    [
-        /// Opens the Zed Predict onboarding modal.
-        OpenZedPredictOnboarding
-    ]
-);
-actions!(
-    git_onboarding,
-    [
-        /// Opens the git integration onboarding modal.
-        OpenGitIntegrationOnboarding
-    ]
-);
-
 pub mod debug_panel {
     use gpui::actions;
     actions!(
@@ -826,37 +686,6 @@ pub mod vim {
             OpenDefaultKeymap
         ]
     );
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct WslConnectionOptions {
-    pub distro_name: String,
-    pub user: Option<String>,
-}
-
-#[cfg(target_os = "windows")]
-pub mod wsl_actions {
-    use gpui::Action;
-    use schemars::JsonSchema;
-    use serde::Deserialize;
-
-    /// Opens a folder inside Wsl.
-    #[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
-    #[action(namespace = projects)]
-    #[serde(deny_unknown_fields)]
-    pub struct OpenFolderInWsl {
-        #[serde(default)]
-        pub create_new_window: Option<bool>,
-    }
-
-    /// Open a wsl distro.
-    #[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
-    #[action(namespace = projects)]
-    #[serde(deny_unknown_fields)]
-    pub struct OpenWsl {
-        #[serde(default)]
-        pub create_new_window: Option<bool>,
-    }
 }
 
 pub mod preview {
@@ -948,18 +777,6 @@ pub mod notebook {
             EnterEditMode,
             /// Exits the cell editor and returns to cell command mode.
             EnterCommandMode,
-        ]
-    );
-}
-
-pub mod git_panel {
-    use gpui::actions;
-
-    actions!(
-        git_panel,
-        [
-            /// Toggles focus on the git panel.
-            ToggleFocus,
         ]
     );
 }

@@ -87,7 +87,7 @@ fn hide_inherited_zed_actions(cx: &mut App) {
         );
     }
     CommandPaletteFilter::update_global(cx, |filter, _| {
-        for namespace in ["client", "collab", "debugger", "dev", "feedback"] {
+        for namespace in ["client", "debugger", "dev", "feedback"] {
             filter.hide_namespace(namespace);
         }
         filter.hide_action_types(&[

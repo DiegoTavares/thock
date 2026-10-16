@@ -7356,7 +7356,6 @@ impl Render for ProjectPanel {
         } else {
             let focus_handle = self.focus_handle(cx);
             let workspace = self.workspace.clone();
-            let workspace_clone = self.workspace.clone();
 
             v_flex()
                 .id("empty-project_panel-wrapper")
@@ -7373,14 +7372,6 @@ impl Render for ProjectPanel {
                             .update(cx, |_, cx| {
                                 window
                                     .dispatch_action(workspace::Open::default().boxed_clone(), cx);
-                            })
-                            .log_err();
-                    })
-                    .on_clone_repo(move |_, window, cx| {
-                        telemetry::event!("Project Panel Clone Repo Clicked");
-                        workspace_clone
-                            .update(cx, |_, cx| {
-                                window.dispatch_action(git::Clone.boxed_clone(), cx);
                             })
                             .log_err();
                     }),

@@ -5,15 +5,12 @@ members = [
     "crates/action_log",
     "crates/agent_servers",
     "crates/agent_settings",
-    "crates/agent_skills",
     "crates/askpass",
     "crates/assets",
-    "crates/audio",
     "crates/auto_update",
     "crates/auto_update_ui",
     "crates/breadcrumbs",
     "crates/buffer_diff",
-    "crates/call",
     "crates/channel",
     "crates/cli",
     "crates/client",
@@ -30,7 +27,6 @@ members = [
     "crates/credentials_provider",
     "crates/dap",
     "crates/db",
-    "crates/dev_container",
     "crates/edit_prediction_types",
     "crates/editor",
     "crates/env_var",
@@ -46,7 +42,6 @@ members = [
     "crates/fuzzy_nucleo",
     "crates/git",
     "crates/git_hosting_providers",
-    "crates/git_ui",
     "crates/go_to_line",
     "crates/google_ai",
     "crates/grammars",
@@ -74,8 +69,6 @@ members = [
     "crates/language_model_core",
     "crates/languages",
     "crates/line_ending_selector",
-    "crates/livekit_api",
-    "crates/livekit_client",
     "crates/lsp",
     "crates/markdown",
     "crates/markdown_preview",
@@ -91,7 +84,6 @@ members = [
     "crates/open_path_prompt",
     "crates/outline",
     "crates/outline_panel",
-    "crates/panel",
     "crates/path",
     "crates/paths",
     "crates/picker",
@@ -100,14 +92,11 @@ members = [
     "crates/prettier",
     "crates/project",
     "crates/project_panel",
-    "crates/prompt_store",
     "crates/proto",
-    "crates/recent_projects",
     "crates/refineable",
     "crates/refineable/derive_refineable",
     "crates/release_channel",
     "crates/remote",
-    "crates/remote_connection",
     "crates/reqwest_client",
     "crates/rope",
     "crates/rpc",
@@ -192,15 +181,12 @@ acp_thread = { path = "crates/acp_thread" }
 action_log = { path = "crates/action_log" }
 agent_servers = { path = "crates/agent_servers" }
 agent_settings = { path = "crates/agent_settings" }
-agent_skills = { path = "crates/agent_skills" }
 askpass = { path = "crates/askpass" }
 assets = { path = "crates/assets" }
-audio = { path = "crates/audio" }
 auto_update = { path = "crates/auto_update" }
 auto_update_ui = { path = "crates/auto_update_ui" }
 breadcrumbs = { path = "crates/breadcrumbs" }
 buffer_diff = { path = "crates/buffer_diff" }
-call = { path = "crates/call" }
 channel = { path = "crates/channel" }
 cli = { path = "crates/cli" }
 client = { path = "crates/client" }
@@ -220,7 +206,6 @@ crossbeam = "0.8.4"
 dap = { path = "crates/dap" }
 db = { path = "crates/db" }
 derive_refineable = { path = "crates/refineable/derive_refineable" }
-dev_container = { path = "crates/dev_container" }
 dialoguer = { version = "0.12", default-features = false }
 editor = { path = "crates/editor" }
 env_var = { path = "crates/env_var" }
@@ -235,7 +220,6 @@ fuzzy = { path = "crates/fuzzy" }
 fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }
 git = { path = "crates/git" }
 git_hosting_providers = { path = "crates/git_hosting_providers" }
-git_ui = { path = "crates/git_ui" }
 go_to_line = { path = "crates/go_to_line" }
 google_ai = { path = "crates/google_ai" }
 grammars = { path = "crates/grammars" }
@@ -264,8 +248,6 @@ language_model = { path = "crates/language_model" }
 language_model_core = { path = "crates/language_model_core" }
 languages = { path = "crates/languages" }
 line_ending_selector = { path = "crates/line_ending_selector" }
-livekit_api = { path = "crates/livekit_api" }
-livekit_client = { path = "crates/livekit_client" }
 lsp = { path = "crates/lsp" }
 markdown = { path = "crates/markdown" }
 markdown_preview = { path = "crates/markdown_preview" }
@@ -282,7 +264,6 @@ oauth_callback_server = { path = "crates/oauth_callback_server" }
 open_path_prompt = { path = "crates/open_path_prompt" }
 outline = { path = "crates/outline" }
 outline_panel = { path = "crates/outline_panel" }
-panel = { path = "crates/panel" }
 paths = { path = "crates/paths" }
 path = { path = "crates/path" }
 perf = { path = "tooling/perf" }
@@ -291,13 +272,10 @@ picker_preview = { path = "crates/picker_preview" }
 prettier = { path = "crates/prettier" }
 project = { path = "crates/project" }
 project_panel = { path = "crates/project_panel" }
-prompt_store = { path = "crates/prompt_store" }
 proto = { path = "crates/proto" }
-recent_projects = { path = "crates/recent_projects" }
 refineable = { path = "crates/refineable" }
 release_channel = { path = "crates/release_channel" }
 remote = { path = "crates/remote" }
-remote_connection = { path = "crates/remote_connection" }
 reqwest_client = { path = "crates/reqwest_client" }
 rodio = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9de0dda6b90af4ed1fb66a", features = ["wav", "playback", "wav_output", "recording"] }
 rope = { path = "crates/rope" }
@@ -517,8 +495,6 @@ jupyter-websocket-client = "1.1.0"
 libc = "0.2"
 libsqlite3-sys = { version = "0.30.1", features = ["bundled"] }
 linkify = "0.10.0"
-libwebrtc = "0.3.26"
-livekit = { version = "0.7.32", features = ["tokio", "rustls-tls-native-roots"] }
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 lru = "0.16"
 lsp-types = { git = "https://github.com/zed-industries/lsp-types", rev = "f4dfa89a21ca35cd929b70354b1583fabae325f8" }
@@ -741,7 +717,6 @@ wax = "0.7"
 which = "6.0.0"
 wasm-bindgen = "0.2.120"
 web-time = "1.1.0"
-webrtc-sys = "0.3.23"
 wgpu = "29.0.4"
 windows-core = "0.61"
 yaml-rust2 = "0.8"
@@ -816,11 +791,8 @@ async-process = { git = "https://github.com/zed-industries/async-process.git", r
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
 calloop = { git = "https://github.com/zed-industries/calloop" }
-livekit = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "d0e27be0cdad89eadab3e36207cda0a2b6e359ee" }
-libwebrtc = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "d0e27be0cdad89eadab3e36207cda0a2b6e359ee" }
 notify = { git = "https://github.com/zed-industries/notify", rev = "0890bbb8ca40a4b5d1f67031698dd7918b37d991" }
 notify-types = { git = "https://github.com/zed-industries/notify", rev = "0890bbb8ca40a4b5d1f67031698dd7918b37d991" }
-webrtc-sys = { git = "https://github.com/zed-industries/livekit-rust-sdks", rev = "d0e27be0cdad89eadab3e36207cda0a2b6e359ee" }
 
 [profile.dev]
 split-debuginfo = "unpacked"

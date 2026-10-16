@@ -17,14 +17,12 @@ tracy = ["ztracing/tracy"]
 track-project-leak = ["gpui/leak-detection"]
 test-support = [
     "gpui/test-support",
-    "gpui_platform/screen-capture",
     "dep:image",
     "workspace/test-support",
     "project/test-support",
     "editor/test-support",
     "terminal_view/test-support",
     "image_viewer/test-support",
-    "title_bar/test-support",
 ]
 
 [[bin]]
@@ -62,7 +60,7 @@ git_hosting_providers.workspace = true
 go_to_line.workspace = true
 system_specs.workspace = true
 gpui = { workspace = true, features = ["input-latency-histogram"] }
-gpui_platform = {workspace = true, features=["screen-capture", "font-kit", "wayland", "x11"]}
+gpui_platform = {workspace = true, features=["font-kit", "wayland", "x11"]}
 hdrhistogram.workspace = true
 image = { workspace = true, optional = true }
 itertools.workspace = true
@@ -163,10 +161,6 @@ image.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.build-dependencies]
 image.workspace = true
 
-
-[target.'cfg(target_os = "linux")'.build-dependencies]
-pkg-config = "0.3.22"
-
 [dev-dependencies]
 editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["input-latency-histogram", "test-support"] }
@@ -177,7 +171,6 @@ pretty_assertions.workspace = true
 project = { workspace = true, features = ["test-support"] }
 semver.workspace = true
 terminal_view = { workspace = true, features = ["test-support"] }
-title_bar = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
 image.workspace = true
 search = { workspace = true, features = ["test-support"] }

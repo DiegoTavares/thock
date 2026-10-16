@@ -5,7 +5,6 @@
       "ctrl-{": "pane::ActivatePreviousItem",
       "ctrl-}": "pane::ActivateNextItem",
       "shift-escape": null, // Unmap workspace::zoom
-      "ctrl-~": "git::Branch",
       "ctrl-f2": "debugger::Stop",
       "f6": "debugger::Pause",
       "f7": "debugger::StepInto",
@@ -118,14 +117,12 @@
       "shift-f10": "task::Spawn",
       "ctrl-f5": "task::Rerun",
       "ctrl-e": "file_finder::Toggle",
-      "ctrl-k": "git_panel::ToggleFocus", // bug: This should also focus commit editor
       "ctrl-shift-n": "file_finder::Toggle",
       "ctrl-alt-n": "file_finder::Toggle",
       "ctrl-n": "project_symbols::Toggle",
       "ctrl-shift-a": "command_palette::Toggle",
       "shift shift": "command_palette::Toggle",
       "ctrl-alt-shift-n": "project_symbols::Toggle",
-      "alt-0": "git_panel::ToggleFocus",
       "alt-1": "project_panel::ToggleFocus",
       "alt-5": "debug_panel::ToggleFocus",
       "alt-6": "diagnostics::Deploy",
@@ -144,14 +141,12 @@
       "alt-7": "outline_panel::ToggleFocus",
       "alt-8": null, // Services (bottom dock)
       "alt-9": null, // Git History (bottom dock)
-      "alt-0": "git_panel::ToggleFocus",
     },
   },
   {
     "context": "Workspace || Editor",
     "bindings": {
       "alt-f12": "terminal_panel::Toggle",
-      "ctrl-shift-k": "git::Push",
     },
   },
   {
