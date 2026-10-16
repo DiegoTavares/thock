@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# Tests thock/script/upstream-candidates against a throwaway repository with a
+# fake upstream history: live and gone paths, one commit cherry-picked with -x,
+# one hand-ported with a trailer, one patch-id duplicate, stable and -pre tags,
+# and the remote-configuration guard. Runs as the `upstream` suite of
+# thock/script/test.
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+helper="$here/upstream-candidates"
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# Keep the user's git configuration (signing, hooks, default branch) out of the test.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com
+export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
+
+failures=0
+check() { # check <name> <expected> <actual>
+  if [[ "$2" == "$3" ]]; then
+    echo "ok   $1"
+  else
+    echo "FAIL $1"
+    echo "  expected: $2"
+    echo "  actual:   $3"
+    failures=$((failures + 1))
+  fi
+}
+
+# commit <repo> <subject> [body]: stages everything, commits, prints the sha.
+commit() {
+  local args=(-m "$2")
+  [[ $# -ge 3 ]] && args+=(-m "$3")
+  git -C "$1" add -A
+  git -C "$1" commit --quiet --allow-empty "${args[@]}"
+  git -C "$1" rev-parse HEAD
+}
+
+# Runs the helper inside the Thock repo, capturing both streams and the status.
+run_helper() {
+  status=0
+  (cd "$thock" && "$helper" "$@") >"$tmp/out" 2>"$tmp/err" || status=$?
+  out="$(cat "$tmp/out")"
+  err="$(cat "$tmp/err")"
+}
+
+# --- Upstream: Zed's history up to the fork point ----------------------------
+
+upstream="$tmp/upstream"
+git init --quiet -b main "$upstream"
+mkdir -p "$upstream"/crates/{editor,gpui,agent_ui}/src "$upstream/docs" "$upstream/assets/keymaps"
+echo 'fn editor() {}' > "$upstream/crates/editor/src/editor.rs"
+echo 'fn gpui() {}' > "$upstream/crates/gpui/src/gpui.rs"
+echo 'fn agent() {}' > "$upstream/crates/agent_ui/src/agent_ui.rs"
+echo '# Docs' > "$upstream/docs/index.md"
+echo '[]' > "$upstream/assets/keymaps/default-linux.json"
+baseline="$(commit "$upstream" "Initial import (#1)")"
+
+# --- Thock: the fork, with a deleted crate and the baseline trailer -----------
+
+thock="$tmp/thock"
+git clone --quiet "$upstream" "$thock"
+git -C "$thock" remote rename origin upstream
+git init --quiet --bare -b main "$tmp/origin.git"
+git -C "$thock" remote add origin "$tmp/origin.git"
+rm -r "$thock/crates/agent_ui" "$thock/docs"
+mkdir -p "$thock/crates/thock/src"
+echo 'fn thock() {}' > "$thock/crates/thock/src/thock.rs"
+commit "$thock" "thock: Fork" >/dev/null
+commit "$thock" "thock: Declare the hard fork from Zed" "Upstream-Reviewed-Through: $baseline
+Upstream-Ref: main" >/dev/null
+
+# --- Upstream moves on --------------------------------------------------------
+
+echo 'fn editor() { fixed }' > "$upstream/crates/editor/src/editor.rs"
+c_panic="$(commit "$upstream" "editor: Fix a panic when deleting the last line (#2)" "Release Notes:
+
+- Fixed a crash when deleting the last line.")"
+echo 'fn agent() { more }' > "$upstream/crates/agent_ui/src/agent_ui.rs"
+commit "$upstream" "agent_ui: Add a shiny thing (#3)" "Release Notes:
+
+- Added a shiny thing." >/dev/null
+echo '# Docs v2' > "$upstream/docs/index.md"
+commit "$upstream" "docs: Describe the shiny thing (#4)" "Release Notes:
+
+- N/A" >/dev/null
+echo '[{"bindings": {}}]' > "$upstream/assets/keymaps/default-linux.json"
+c_keymap="$(commit "$upstream" "keymap: Add a binding (#5)" "Release Notes:
+
+- N/A")"
+echo 'fn motion() {}' > "$upstream/crates/editor/src/motion.rs"
+c_motion="$(commit "$upstream" "vim: Fix a motion (#6)" "Release Notes:
+
+- Fixed a vim motion.")"
+echo 'fn gpui() { resize }' > "$upstream/crates/gpui/src/gpui.rs"
+c_wayland="$(commit "$upstream" "gpui: Fix window resize on Wayland (#7)" "Release Notes:
+
+- Fixed window resizing on Wayland.")"
+echo 'fn selection() {}' > "$upstream/crates/editor/src/selection.rs"
+c_picked="$(commit "$upstream" "editor: Fix selection after undo (#8)" "Release Notes:
+
+- Fixed selection after undo.")"
+echo 'fn scroll() {}' > "$upstream/crates/editor/src/scroll.rs"
+c_hand_ported="$(commit "$upstream" "editor: Fix scroll position (#9)" "Release Notes:
+
+- Fixed the scroll position.")"
+echo 'fn wrap() {}' > "$upstream/crates/editor/src/wrap.rs"
+c_duplicate="$(commit "$upstream" "editor: Fix soft wrap (#10)" "Release Notes:
+
+- Fixed soft wrap.")"
+git -C "$upstream" tag v1.0.0
+echo 'fn later() {}' > "$upstream/crates/editor/src/later.rs"
+c_later="$(commit "$upstream" "editor: A fix after the stable tag (#11)" "Release Notes:
+
+- Fixed something later.")"
+git -C "$upstream" tag v1.1.0-pre
+
+# --- Thock ports three of them, each the way the spec allows ------------------
+
+git -C "$thock" fetch --quiet "$upstream" main
+git -C "$thock" cherry-pick --quiet -x "$c_picked" >/dev/null
+echo 'fn scroll() { ported by hand }' > "$thock/crates/editor/src/scroll.rs"
+commit "$thock" "editor: Fix scroll position (#9)" "Upstream-Commit: $c_hand_ported" >/dev/null
+git -C "$thock" cherry-pick --quiet --no-commit "$c_duplicate"
+commit "$thock" "thock: Port the soft wrap fix" >/dev/null
+git -C "$thock" push --quiet origin main
+
+# --- 1. Default run: newest stable tag, baseline from the trailer -------------
+
+run_helper
+check "default run exits 0" 0 "$status"
+check "default run: range line" \
+  "upstream-candidates: range ${baseline:0:12}..v1.0.0 (${c_duplicate:0:12})" \
+  "$(sed -n 1p <<< "$err")"
+check "default run: counts" \
+  "upstream-candidates: 9 commits, 3 already ported, 4 live, 2 gone" \
+  "$(tail -n 1 <<< "$err")"
+check "default run: lists the ported commits" \
+  "${c_picked:0:12}
+${c_hand_ported:0:12}
+${c_duplicate:0:12}" \
+  "$(sed -nE 's/^upstream-candidates: already ported: ([0-9a-f]{12}) .*/\1/p' <<< "$err")"
+expected="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  "${c_panic:0:12}" 2 "editor: Fix a panic when deleting the last line (#2)" editor "Fixed a crash when deleting the last line." crash "" \
+  "${c_keymap:0:12}" 5 "keymap: Add a binding (#5)" assets "N/A" "" "" \
+  "${c_motion:0:12}" 6 "vim: Fix a motion (#6)" editor "Fixed a vim motion." "" "" \
+  "${c_wayland:0:12}" 7 "gpui: Fix window resize on Wayland (#7)" gpui "Fixed window resizing on Wayland." platform "")"
+check "default run: rows" "$expected" "$out"
+
+check "remote: push disabled" DISABLED "$(git -C "$thock" config --get remote.upstream.pushurl)"
+check "remote: no tag following" --no-tags "$(git -C "$thock" config --get remote.upstream.tagopt)"
+check "remote: refspecs" \
+  "+refs/heads/main:refs/remotes/upstream/main
++refs/tags/v*:refs/upstream-tags/v*" \
+  "$(git -C "$thock" config --get-all remote.upstream.fetch)"
+check "tags stay out of refs/tags" "" "$(git -C "$thock" tag -l)"
+check "tags land in refs/upstream-tags" "$c_duplicate" "$(git -C "$thock" rev-parse refs/upstream-tags/v1.0.0)"
+check "pre-release tag is fetched but not chosen" "$c_later" "$(git -C "$thock" rev-parse refs/upstream-tags/v1.1.0-pre)"
+
+# --- 2. --ref main includes the commit after the stable tag -------------------
+
+run_helper --ref main --no-fetch
+check "--ref main exits 0" 0 "$status"
+check "--ref main: counts" \
+  "upstream-candidates: 10 commits, 3 already ported, 5 live, 2 gone" \
+  "$(tail -n 1 <<< "$err")"
+check "--ref main: last row" \
+  "$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "${c_later:0:12}" 11 "editor: A fix after the stable tag (#11)" editor "Fixed something later." "" "")" \
+  "$(tail -n 1 <<< "$out")"
+
+# --- 3. --base overrides the trailer ------------------------------------------
+
+run_helper --base "$c_wayland" --no-fetch
+check "--base exits 0" 0 "$status"
+check "--base: counts" \
+  "upstream-candidates: 3 commits, 3 already ported, 0 live, 0 gone" \
+  "$(tail -n 1 <<< "$err")"
+check "--base: no rows" "" "$out"
+
+# --- 4. A newer review trailer moves the baseline -----------------------------
+
+commit "$thock" "thock: Port upstream Zed fixes from v1.0.0" "Upstream-Reviewed-Through: $c_wayland
+Upstream-Ref: v1.0.0" >/dev/null
+git -C "$thock" push --quiet origin main
+run_helper --no-fetch
+check "newest trailer wins: counts" \
+  "upstream-candidates: 3 commits, 3 already ported, 0 live, 0 gone" \
+  "$(tail -n 1 <<< "$err")"
+
+# --- 5. A push URL on upstream stops the run before anything happens ----------
+
+git -C "$thock" config remote.upstream.pushurl "$upstream"
+run_helper --no-fetch
+check "push URL: exits 1" 1 "$status"
+check "push URL: no rows" "" "$out"
+case "$err" in
+  *"push URL"*) echo "ok   push URL: names the problem" ;;
+  *) echo "FAIL push URL: names the problem"; echo "  actual: $err"; failures=$((failures + 1)) ;;
+esac
+check "push URL: left for the user to fix" "$upstream" "$(git -C "$thock" config --get remote.upstream.pushurl)"
+
+if [[ $failures -gt 0 ]]; then
+  echo "$failures check(s) failed" >&2
+  exit 1
+fi
+echo "all checks passed"

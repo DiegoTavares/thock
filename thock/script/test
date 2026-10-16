@@ -16,7 +16,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-ALL_SUITES=(rust sync-core go-plus go-releases go-budget-guard go-site ios integration workflows)
+ALL_SUITES=(rust sync-core go-plus go-releases go-budget-guard go-site ios integration workflows upstream)
 
 usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -24,6 +24,7 @@ usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
 # code, top-level manifests) falls through to `rust`, the suite that compiles it.
 suites_for() {
   case "$1" in
+    thock/script/upstream-candidates | thock/script/test-upstream-candidates) echo upstream; echo workflows ;;
     .github/workflows/ci.yml | thock/script/*) printf '%s\n' "${ALL_SUITES[@]}" ;;
     crates/thock-sync-core/fixtures/*) echo sync-core; echo ios ;;
     crates/thock-sync-core/*) echo sync-core; echo rust; echo integration ;;
@@ -75,6 +76,7 @@ run_suite() {
     ios) thock/ios/script/test ;;
     integration) thock/script/integration ;;
     workflows) thock/script/lint-workflows ;;
+    upstream) thock/script/test-upstream-candidates ;;
     *) echo "unknown suite: $1 (one of: ${ALL_SUITES[*]})" >&2; exit 2 ;;
   esac
 }

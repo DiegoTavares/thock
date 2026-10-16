@@ -25,6 +25,7 @@ the same thing. The path → suite mapping lives in `suites_for` in that script 
 | `ios` | `thock/ios/`: ThockKit, the phone's whole data layer | `thock/ios/script/test` (`swift test`, on the Mac, no simulator) | ~5 s |
 | `integration` | the sync contract end to end: the real desk and phone clients against a real Plus server | `thock/script/integration` (starts the server and a throwaway Postgres) | ~30 s |
 | `workflows` | `.github/` and the Thock shell scripts | `thock/script/lint-workflows` (actionlint, zizmor, shellcheck) | seconds |
+| `upstream` | `thock/script/upstream-candidates`, the helper behind the `zed-upstream-review` skill | `thock/script/test-upstream-candidates` (a throwaway repo with a fake upstream history; needs only git) | seconds |
 
 `integration` runs when either side of the sync contract changes: `thock/services/plus/`,
 `crates/thock-sync-core/`, `crates/thock/src/vault_sync*`, or ThockKit's `Sync*` sources.
