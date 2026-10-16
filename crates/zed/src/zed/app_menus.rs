@@ -1,10 +1,9 @@
 use gpui::{App, Menu, MenuItem, OsAction};
-use release_channel::ReleaseChannel;
 use terminal_view::terminal_panel;
-use zed_actions::{Quit, dev, project_panel};
+use zed_actions::{Quit, project_panel};
 
-pub fn app_menus(cx: &mut App) -> Vec<Menu> {
-    let mut view_items = vec![
+pub fn app_menus(_cx: &mut App) -> Vec<Menu> {
+    let view_items = vec![
         MenuItem::action(
             "Zoom In",
             zed_actions::IncreaseBufferFontSize { persist: false },
@@ -53,14 +52,6 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         MenuItem::separator(),
     ];
 
-    if ReleaseChannel::try_global(cx) == Some(ReleaseChannel::Dev) {
-        view_items.push(MenuItem::action(
-            "Toggle GPUI Inspector",
-            dev::ToggleInspector,
-        ));
-        view_items.push(MenuItem::separator());
-    }
-
     vec![
         Menu {
             name: "Thock".into(),
@@ -92,7 +83,6 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 #[cfg(target_os = "macos")]
                 MenuItem::os_submenu("Services", gpui::SystemMenuType::Services),
                 MenuItem::separator(),
-                MenuItem::action("Extensions", zed_actions::Extensions::default()),
                 #[cfg(not(target_os = "windows"))]
                 MenuItem::action("Install CLI", install_cli::InstallCliBinary),
                 MenuItem::separator(),
@@ -123,8 +113,6 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                     },
                     workspace::Open::default(),
                 ),
-                MenuItem::action("Open Recent…", zed_actions::OpenRecent::default()),
-                MenuItem::action("Open Remote…", zed_actions::OpenRemote::default()),
                 MenuItem::separator(),
                 MenuItem::action("Add Folder to Project…", workspace::AddFolderToProject),
                 MenuItem::separator(),

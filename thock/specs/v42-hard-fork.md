@@ -1,6 +1,6 @@
 # Thock V42 — Hard fork from Zed: prune what Thock never uses, own the app shell
 
-**Status:** In progress (step 2 of §9)
+**Status:** In progress (step 3 of §9)
 **Owner:** Diego · **Date:** 2026-10-15
 **Companion docs:** `v12-de-zed-ification.md` (the hide-don't-delete pass this replaces with deletion),
 `v35-app-identity.md` (bundle id and `thock://`, whose upstream-preserving rewrite this simplifies),
@@ -294,6 +294,17 @@ vault-only `project`, which is out of scope (§10).
 The list is a starting point, not a contract. A crate stays if removing it turns out to need a
 change in `crates/thock`. The PR body says which crates stayed and why.
 
+Step 3 took every crate above out of the app and deleted the thirty that nothing else used. The
+rest stay in the workspace until their last user goes: `agent`, `agent_skills`, `audio`, `codestral`,
+`copilot`, `copilot_chat`, `copilot_ui`, `edit_prediction`, `edit_prediction_ui`, `language_models`
+with its providers, `prompt_store`, `web_search`, `streaming_diff` and `eval_utils` through
+`settings_ui`, `auto_update_ui` and `agent` (step 4); `git_ui` through `project_panel`, `title_bar`
+and `vim`'s tests (step 4); `recent_projects`, `dev_container`, `remote_connection`, `remote_server`,
+`call` and `livekit_client` through `title_bar` (step 5); `dap_adapters` and
+`debug_adapter_extension` through `remote_server`. Two of them stay initialized as well:
+`agent_settings` and `audio` register settings that pages in `settings_ui` still read, and an
+unregistered setting panics on read.
+
 ### 5.2 Everything that referenced them
 
 - **Keymaps.** About 250 bindings in each default keymap name actions from removed crates (`agent::`
@@ -304,7 +315,9 @@ change in `crates/thock`. The PR body says which crates stayed and why.
 - **Settings.** `default.json` entries whose only reader was a removed crate are deleted, along with
   their `// Thock:` comments from V12. The `settings_content` structs stay. They're inert, and
   removing them is a large edit for no user benefit. A user's `settings.json` that still sets a
-  removed key keeps parsing.
+  removed key keeps parsing. Step 3 deleted `repl`, `journal` and `collaboration_panel`; `jupyter`
+  stays because the editor's settings still unwrap it, and the AI, git and call sections wait for the
+  crates that still register them (steps 4 and 5).
 - **Command palette filter.** `thock::init` stops hiding namespaces that no longer exist.
 - **Menus.** `app_menus.rs` loses Open Recent, Extensions and anything else that pointed into a
   removed crate.
@@ -364,9 +377,8 @@ Upstream-only tooling with no Thock user is deleted:
   `explorer_command_injector`, `auto_update_helper`, `etw_tracing` and `aws_http_client`.
   `gpui_platform` loses its Windows and web arms. Zed's `cargo xtask` tooling (`xtask`,
   `compliance`) goes with them. Four of the list have to wait for the crates that depend on them:
-  `remote_server` (a dependency of `recent_projects`, and of `agent_ui`'s and `sidebar`'s tests) and
-  `eval_utils` (`agent`, `agent_ui`) go in step 3; `aws_http_client` and `bedrock`
-  (`language_models`) go in step 4.
+  `eval_utils` (`agent`), `aws_http_client` and `bedrock` (`language_models`) go in step 4, and
+  `remote_server` (`recent_projects`, through `title_bar`) in step 5.
 - `script/`, down to what `ci.yml`, `release.yml`, `promote-release.yml`, the deploy workflows and
   the bundle scripts call (`bundle-mac`, `bundle-linux`, `linux`, `check-keymaps`,
   `generate-licenses`, `clippy` and their helpers under `script/lib`). The other hundred scripts

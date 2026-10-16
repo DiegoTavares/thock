@@ -73,10 +73,10 @@ pub fn init(cx: &mut App) {
     hide_inherited_zed_actions(cx);
 }
 
-/// Hides command-palette actions for the Zed subsystems Thock turns off
-/// (V12 de-Zed-ification). The subsystems stay registered so upstream rebases
-/// stay cheap, but a note-taker never sees debugger, task, collab,
-/// account, or Zed-branded storefront commands.
+/// Hides command-palette actions that inherited crates still register but a
+/// note-taker never needs: account and collaboration plumbing, developer
+/// tooling, and Zed-branded surfaces (V12 de-Zed-ification). Namespaces whose
+/// crates V42 deleted are gone from the registry and need no hiding.
 fn hide_inherited_zed_actions(cx: &mut App) {
     use std::any::TypeId;
     if CommandPaletteFilter::try_global(cx).is_none() {
@@ -87,19 +87,7 @@ fn hide_inherited_zed_actions(cx: &mut App) {
         );
     }
     CommandPaletteFilter::update_global(cx, |filter, _| {
-        for namespace in [
-            "call",
-            "channel",
-            "client",
-            "collab",
-            "collab_panel",
-            "debugger",
-            "dev",
-            "feedback",
-            "onboarding",
-            "repl",
-            "task",
-        ] {
+        for namespace in ["client", "collab", "debugger", "dev", "feedback"] {
             filter.hide_namespace(namespace);
         }
         filter.hide_action_types(&[
