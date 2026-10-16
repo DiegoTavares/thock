@@ -5098,11 +5098,9 @@ mod tests {
                 "collab",
                 "command_palette",
                 "context_server",
-                "copilot",
                 "debug_panel",
                 "debugger",
                 "dev",
-                "edit_prediction",
                 "editor",
                 "feedback",
                 "file_finder",
@@ -5116,7 +5114,6 @@ mod tests {
                 "image_viewer",
                 "keymap_editor",
                 "keystroke_input",
-                "welcome",
                 "line_ending_selector",
                 "markdown",
                 "menu",
@@ -5136,7 +5133,6 @@ mod tests {
                 "search",
                 "settings_editor",
                 "settings_profile_selector",
-                "skill_creator",
                 "stash_picker",
                 "svg",
                 "tab_switcher",
@@ -5155,7 +5151,6 @@ mod tests {
                 "zed",
                 "zed_actions",
                 "zed_predict_onboarding",
-                "zeta",
             ];
             assert_eq!(
                 all_namespaces,
@@ -5348,7 +5343,6 @@ mod tests {
             gpui_tokio::init(cx);
             AppState::set_global(app_state.clone(), cx);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
-            audio::init(cx);
             channel::init(&app_state.client, app_state.user_store.clone(), cx);
             notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
             workspace::init(app_state.clone(), cx);

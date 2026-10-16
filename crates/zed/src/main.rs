@@ -631,8 +631,8 @@ fn main() {
         );
         command_palette::init(cx);
         language_model::init(cx);
-        // Thock: Zed's agent and audio settings are still read by settings
-        // pages that leave in V42 step 4, so they stay registered until then.
+        // Thock: `workspace` gates its sidebar on `AgentSettings`, so the
+        // setting stays registered although Zed's agent is gone.
         agent_settings::AgentSettings::register(cx);
         zed::telemetry_log::init(cx);
         zed::remote_debug::init(cx);
@@ -648,7 +648,6 @@ fn main() {
         editor::init(cx);
         image_viewer::init(cx);
 
-        audio::init(cx);
         workspace::init(app_state.clone(), cx);
         ui_prompt::init(cx);
 
