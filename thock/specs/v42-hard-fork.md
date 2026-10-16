@@ -1,6 +1,6 @@
 # Thock V42 — Hard fork from Zed: prune what Thock never uses, own the app shell
 
-**Status:** In progress (step 4 of §9)
+**Status:** In progress (steps 1–5 of §9 landed; step 6, the first upstream review, next)
 **Owner:** Diego · **Date:** 2026-10-15
 **Companion docs:** `v12-de-zed-ification.md` (the hide-don't-delete pass this replaces with deletion),
 `v35-app-identity.md` (bundle id and `thock://`, whose upstream-preserving rewrite this simplifies),
@@ -54,6 +54,10 @@ page and the status-bar pickers (decisions 4, 5 and 13).
 | 14 | **The first upstream review runs after the pruning PRs.** Step 1 only proves the helper reports the right range. | Triage is cheaper once the deleted crates make most of the range `gone`. Security advisories are the exception: one that touches a live crate is ported whenever it appears. |
 | 15 | **macOS is validated on palloma, not in CI.** `cargo check -p zed` (later `thock_app`) and the darwin `cargo tree` run there before each pruning PR; CI compiles the app crate only on Linux. | macOS Actions minutes cost ten times Linux ones (`TESTING.md`), and the check takes minutes on a warm Mac. |
 | 16 | **The app crate's tests run in CI on ubuntu only.** It joins the nextest job on Linux from step 3, when the keymap and action tests exist; the macOS job keeps `thock` and `thock_sync_core`. | The two new tests need every action registered, which only the app crate does. Linux is enough to catch a dangling binding. |
+| 17 | **Dead `zed::` actions are deleted, live ones renamed.** An action with no handler, or whose handler opened a zed.dev page, goes; the rest become `thock::` with the old name as a deprecated alias. | Decision 6 applied to the action registry. Hiding dead actions from the palette was V12's workaround for cheap rebases, and a binding to a deleted action fails loudly in the keymap guard. |
+| 18 | **The CLI is part of the shell.** The `thock` command drops the flags the app ignored, the flatpak and Windows arms and Zed's uninstall script, and says Thock in its help. The binary joins the `app` suite and CI's clippy line. | The CLI ships in every bundle under the app's name. Nothing in CI built it: step 2 deleted the uninstall script it embedded, and the next release would have found out. |
+| 19 | **The IPC schemes are renamed with the OS scheme.** `thock-cli://`, `thock-dock-action://` and `thock-<channel>.sock` replace the `zed-` names. | The CLI and the app ship together, so there is nothing to migrate, and a grep for `zed` in the shell should come up empty. |
+| 20 | **Release bundle size and release build time are measured on the next release**, not with a release-sized CI run on the step 5 branch. | A `workflow_dispatch` run costs about a hundred macOS minutes for numbers the v1.20.0 release produces anyway. §3.1 is updated when it ships. |
 
 ## 3. Where things stand
 
@@ -94,6 +98,19 @@ release builds, bundling and `remote_server` included) stand in for both platfor
 | Release workflow build job, v1.19.0: macOS (aarch64) / Linux (x86_64) | 101 / 74 min |
 | CI wall time on `main`: Clippy / Test (ubuntu) / Test (macOS) | 6 / 5 / 4 min |
 | Incremental `cargo build -p zed -j 4` after touching `crates/thock`, Linux dev machine (i5-10500T, 15 GB) | 23 s |
+
+### 3.2 After step 5
+
+Measured on the step 5 branch the same way as §3 and §3.1.
+
+| Measure | Baseline | After step 5 |
+|---|---|---|
+| Workspace members | 249 | 153 |
+| Compiled into the app, Linux x86_64 | 206 | 149 |
+| Compiled into the app, macOS arm64 | 206 | MACOS_CLOSURE |
+| Incremental `cargo build -p thock_app -j 2` after touching `crates/thock`, Linux dev machine | 23 s (`-j 4`) | INCREMENTAL_BUILD |
+| CI wall time on the PR: Clippy / Test (ubuntu) / App | 6 / 5 / – min | CI_TIMES |
+| Release bundle size and release build time | 109 MB / 124 MB; 101 / 74 min | measured on the v1.20.0 release (decision 20) |
 
 ## 4. Declaring the fork
 
@@ -309,6 +326,12 @@ tests also link `git_ui`; that edge goes with the crate. `agent_settings` stays 
 `workspace` reads it to decide whether the multi-workspace sidebar exists. `audio` is no longer
 initialized, and its `default.json` section is gone with the settings page that read it.
 
+Step 5 rewrote the title bar and deleted what it held: `git_ui` (and through it `prompt_store`,
+`agent_skills` and `panel`), `recent_projects`, `dev_container`, `remote_connection`, `call`,
+`livekit_client`, `livekit_api` and `audio`, with the livekit and webrtc dependencies, `vim`'s
+test-only edge to `git_ui`, and the `calls`, `git_panel` and `ssh_connections` sections of
+`default.json`. Every crate in the list above is gone.
+
 ### 5.2 Everything that referenced them
 
 - **Keymaps.** About 250 bindings in each default keymap name actions from removed crates (`agent::`
@@ -412,10 +435,16 @@ against `cargo tree --target aarch64-apple-darwin` as well before it is made.
 - Every `-p zed` / `--package zed` changes: `ci.yml`, `script/bundle-*`, `thock/script/test`,
   `TESTING.md`, `RELEASING.md`, `CLAUDE.md`.
 - Zed-only modules are deleted: `edit_prediction_registry.rs`, `quick_action_bar/repl_menu.rs`,
-  `telemetry_log.rs`, the hang-detection telemetry under `reliability/`, `visual_test_runner.rs`
-  with its `visual-tests` feature, and the Zed Nightly bundle metadata. `migrate.rs` stays because
-  it migrates settings. The local crash handler (`crashes`) stays, and minidump upload remains off
+  `telemetry_log.rs`, `remote_debug.rs`, the hang-detection telemetry under `reliability/`,
+  `visual_test_runner.rs` with its `visual-tests` feature, `windows_only_instance.rs` with the
+  Windows resources and the Windows arms of `main.rs` (decision 10), the flatpak and snap templates
+  whose scripts step 2 deleted, and the Zed Nightly icons, provisioning profile and bundle metadata.
+  The desktop entry and the entitlements are named after the app. `migrate.rs` stays because it
+  migrates settings. The local crash handler (`crashes`) stays, and minidump upload remains off
   (V12 §2).
+- Two strings the shell still inherited are fixed with the rename: the HTTP user agent says
+  `Thock/<version>`, and the macOS single-instance port moves two thousand above Zed's with its own
+  handshake, so a Zed running on the same Mac is no longer mistaken for a running Thock.
 
 ### 6.2 `zed::` actions become `thock::`
 
@@ -427,10 +456,27 @@ inherited `zed_actions::` aliases are preserved too.
 Thock's own actions already live in `thock::`. A test asserts that no two actions register the same
 name, so a collision fails in CI rather than at startup.
 
+Dead actions are deleted rather than renamed (decision 17): `OpenProjectTasks`,
+`OpenWorktreeSetupTasks`, `OpenAccountSettings`, `OpenServerSettings`, `OpenDocs`, `OpenStatusPage`,
+`GetMerch`, `OpenTelemetryLog`, `OpenPerformanceProfiler`, `OpenOnboarding`, `Extensions`,
+`AcpRegistry`, `ShowDefaultSemanticTokenRules` and `CopySystemSpecsIntoClipboard`, with the buttons
+that dispatched them (the theme selectors' Install Themes footer, the settings window's Install from
+Extensions and Install from Registry entries, vim's `:help`). The `zed` namespace outside
+`zed_actions` is renamed the same way: `workspace`'s `OpenLog`, `RevealLogInFileManager` and
+`ShowWelcome`, `extension_host`'s `ReloadExtensions`, and gpui's `NoAction` and `Unbind` markers.
+`OpenZedUrl` becomes `thock::OpenThockUrl`, and the debugging actions (`DebugElements`,
+`ResetDatabase`, `TestPanic`, `TestCrash`) move to the `dev` namespace the palette already hides.
+
 The `zed://` and `thock://` handling from V35 becomes direct. `open_listener.rs` parses `thock://`
 natively and the rewrite to `zed://` is removed. `zed://` stops being accepted. After V35, Thock no
 longer registers that scheme with the OS, so those links never reach it anyway. V35 shipped in
 v1.17.0, so nothing blocks this step.
+
+The schemes the CLI and the dock use between the two processes follow (decision 19): `thock-cli://`,
+`thock-dock-action://` and the `thock-<channel>.sock` socket, as do the `thock://schemas/` URIs the
+JSON language server asks the app for. The `client` crate keeps only the scheme constant; its zed.dev
+channel-link parser and URL helpers go, so a link in a note opens through the OS like any other URL,
+and `cli::RegisterZedScheme` becomes `cli::RegisterUrlScheme` with the old name as an alias.
 
 ### 6.3 Title bar
 
@@ -439,6 +485,18 @@ controls, branch picker, project picker, sign-in or user menu. It keeps the wind
 vault name, the update button and the platform-specific chrome from `platform_title_bar`.
 
 This is a removal, not a redesign. A title bar with Thock-specific content belongs in a later spec.
+The title bar settings that drove the removed chrome leave `default.json` and the settings window;
+`show_menus` and `button_layout` stay.
+
+### 6.4 The CLI
+
+`crates/cli` is the `thock` command that ships in every bundle (decision 18). It drops `--diff`,
+`--dev-container`, `--dev-server-token` and `--wsl`, which the app had ignored since step 3, the
+flatpak and Windows arms, the per-channel `--stable`/`--preview` dispatch and `--uninstall`, and its
+help, version line and open-behavior prompt say Thock. `--zed` becomes `--app`. On Linux it looks
+for `libexec/thock-editor`, which is what `bundle-linux` installs, where it had been looking for
+Zed's `zed-editor`, and the app looks for its CLI at `bin/thock`. The binary joins the `app` suite
+and CI's clippy line, because nothing else built it between releases.
 
 ## 7. What a user notices
 
@@ -450,6 +508,11 @@ This is a removal, not a redesign. A title bar with Thock-specific content belon
   and the language-server activity indicator (decision 13).
 - **Palette names change** from `zed:` to `thock:`. Old names in a personal keymap keep working.
 - **The settings window loses its AI pages.** They configured features that were already off.
+- **The `thock` command says Thock.** `--diff`, `--dev-container`, `--dev-server-token`, `--wsl` and
+  `--uninstall` are gone, and `--zed` is `--app`. On Linux the command finds the app it ships with.
+- **The empty-pane welcome and the theme selectors lose their dead buttons** (Clone Repository,
+  Explore Extensions, Install Themes), and the settings window its Git Panel and title bar sections.
+- **On macOS, Thock starts while Zed is running.** They no longer share the single-instance port.
 - Nothing else changes. Every panel, binding and ritual behaves the same, and the vault on disk is
   untouched.
 
@@ -462,7 +525,9 @@ This is a removal, not a redesign. A title bar with Thock-specific content belon
 - **Deprecated aliases.** A keymap binding `zed::OpenSettings` dispatches `thock::OpenSettings`.
 - **TOML is built in.** The app crate's bundled-languages test finds `TOML` with no extension
   installed, and `routine.toml` resolves to it.
-- **`thock://` URLs** open the same handlers V35's tests cover, without the rewrite.
+- **`thock://` URLs** open the same handlers V35's tests cover, without the rewrite, and a `zed://`
+  URL opens nothing.
+- **The CLI binary builds.** The `app` suite runs `-p thock_app -p cli`, and clippy covers both.
 - **The upstream suite** from §4.5.
 - **Existing suites** (`thock/script/test`, `cargo clippy -p thock -p thock_sync_core -p
   thock_app`) stay green throughout. From step 3 the ubuntu half of CI's nextest job also runs the
@@ -499,8 +564,8 @@ Each step is its own PR, and `main` stays shippable between them.
    live crate doesn't wait for this step.
 
 Each PR's body records crate counts before and after, and each pruning PR is preceded by
-`cargo check -p zed` and the darwin `cargo tree` on palloma (decision 15). PR 5 records the full set
-of measurements against §3.1.
+`cargo check -p zed` and the darwin `cargo tree` on palloma (decision 15). PR 5 records the
+measurements in §3.2; bundle size and release build time wait for the v1.20.0 release (decision 20).
 
 ## 10. Not in this spec
 
@@ -517,7 +582,7 @@ of measurements against §3.1.
 - The app's workspace-crate count on Linux x86_64 is at most 150, down from 206 counted as in §3,
   and the macOS count falls by a similar margin. Both numbers are recorded in the PR.
 - Build time and release bundle size are lower than the §3.1 baselines. The PR reports the numbers
-  whatever they turn out to be.
+  it can measure; the release numbers are recorded in §3.2 when v1.20.0 ships (decision 20).
 - No `zed:` entry in the command palette and no `zed::` action in the bundled keymaps.
 - `routine.toml` opens with TOML highlighting on a fresh install with no network.
 - `cargo tree -p thock_app` contains none of the crates in §5.1.

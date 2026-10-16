@@ -55,7 +55,7 @@ shift $((OPTIND-1))
 # fall back to the committed RELEASE_CHANNEL file (dev), which never polls for
 # updates. Release binaries compile the channel in via include_str!, so a
 # pre-set value has to be written through to the file before the build.
-pushd crates/zed
+pushd crates/thock_app
 if [[ -n "${ZED_RELEASE_CHANNEL:-}" ]]; then
     channel="${ZED_RELEASE_CHANNEL}"
     if [[ "${channel}" != "$(<RELEASE_CHANNEL)" ]]; then
@@ -99,11 +99,11 @@ script/generate-licenses
 
 rustup target add $target_triple
 
-echo "Compiling zed binaries"
-cargo build ${build_flag} --package zed --package cli --target $target_triple
+echo "Compiling Thock binaries"
+cargo build ${build_flag} --package thock_app --package cli --target $target_triple
 
 echo "Creating application bundle"
-pushd crates/zed
+pushd crates/thock_app
 cp Cargo.toml Cargo.toml.backup
 sed \
     -i.backup \
@@ -118,7 +118,7 @@ echo "Bundled ${app_path}"
 
 # DocumentTypes.plist references CFBundleTypeIconFile "Document", so the bundle must contain Document.icns.
 # We use the app icon as a placeholder document icon for now.
-document_icon_source="crates/zed/resources/Document.icns"
+document_icon_source="crates/thock_app/resources/Document.icns"
 document_icon_target="${app_path}/Contents/Resources/Document.icns"
 if [[ -f "${document_icon_source}" ]]; then
     mkdir -p "$(dirname "${document_icon_target}")"
@@ -214,8 +214,8 @@ function sign_app_binaries() {
         # sequence of codesign commands modeled after this example: https://developer.apple.com/forums/thread/701514
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/cli" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/git" -v
-        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/thock" -v
-        /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}" -v
+        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/thock_app/resources/thock.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/thock" -v
+        /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/thock_app/resources/thock.entitlements --sign "$IDENTITY" "${app_path}" -v
     else
         echo "One or more of the following variables are missing: MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD, APPLE_NOTARIZATION_KEY, APPLE_NOTARIZATION_KEY_ID, APPLE_NOTARIZATION_ISSUER_ID"
 
@@ -228,9 +228,9 @@ function sign_app_binaries() {
         # - get a signing key for the MQ55VZLNZQ team from Nathan.
         # - create your own signing key, and update references to MQ55VZLNZQ to your own team ID
         # then comment out this line.
-        cat crates/zed/resources/zed.entitlements | sed '/com.apple.developer.associated-domains/,+1d' > "${app_path}/Contents/Resources/zed.entitlements"
+        cat crates/thock_app/resources/thock.entitlements | sed '/com.apple.developer.associated-domains/,+1d' > "${app_path}/Contents/Resources/thock.entitlements"
 
-        codesign --force --deep --entitlements "${app_path}/Contents/Resources/zed.entitlements" --sign ${MACOS_SIGNING_KEY:- -} "${app_path}" -v
+        codesign --force --deep --entitlements "${app_path}/Contents/Resources/thock.entitlements" --sign ${MACOS_SIGNING_KEY:- -} "${app_path}" -v
     fi
 
     bundle_name=$(basename "$app_path")
@@ -294,44 +294,10 @@ function sign_app_binaries() {
     fi
 }
 
-function upload_debug_symbols() {
-    if [ "$local_install" = true ]; then
-        echo "local install; skipping sentry upload."
-    elif [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
-        echo "Uploading zed debug symbols to sentry..."
-        exe_path="target/${target_triple}/release/Zed"
-        if ! dsymutil --flat "target/${target_triple}/${target_dir}/thock" 2> target/dsymutil.log; then
-            echo "dsymutil failed"
-            cat target/dsymutil.log
-            exit 1
-        fi
-        # note: this uploads the unstripped binary which is needed because it contains
-        # .eh_frame data for stack unwinding. see https://github.com/getsentry/symbolic/issues/783
-        # Try uploading up to 3 times
-        for attempt in 1 2 3; do
-            echo "Sentry upload attempt $attempt..."
-            if sentry-cli debug-files upload --include-sources --wait -p zed -o zed-dev \
-                "target/${target_triple}/${target_dir}/thock.dwarf"; then
-                break
-            else
-                echo "Sentry upload failed on attempt $attempt"
-                if [ $attempt -eq 3 ]; then
-                    echo "All sentry upload attempts failed"
-                    exit 1
-                fi
-            fi
-        done
-    else
-        echo "missing SENTRY_AUTH_TOKEN. skipping sentry upload."
-    fi
-}
-
-upload_debug_symbols
-
 cp target/${target_triple}/${target_dir}/thock "${app_path}/Contents/MacOS/thock"
 cp target/${target_triple}/${target_dir}/cli "${app_path}/Contents/MacOS/cli"
 # Ship stripped binaries; symbolication uses the unstripped binaries left in
-# target/ (and the .dwarf files produced above when the Sentry upload ran).
+# target/.
 strip "${app_path}/Contents/MacOS/thock"
 strip "${app_path}/Contents/MacOS/cli"
 sign_app_binaries

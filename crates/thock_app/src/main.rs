@@ -1,5 +1,5 @@
 mod reliability;
-mod zed;
+mod thock_app;
 
 // Ensure the binary name stays in sync with APP_NAME so that the paths used
 // at runtime (data dir, config dir, etc.) match what the binary is called.
@@ -50,19 +50,19 @@ use std::{
 };
 use theme::{ActiveTheme, GlobalTheme, ThemeRegistry};
 use theme_settings::load_user_theme;
+use thock_app::{
+    OpenListener, OpenRequest, RawOpenRequest, app_menus, build_window_options,
+    derive_paths_with_position, handle_cli_connection, handle_keymap_file_changes,
+    initialize_workspace, open_paths_with_positions,
+};
 use util::ResultExt;
 use uuid::Uuid;
 use workspace::{
     AppState, MultiWorkspace, SerializedWorkspaceLocation, SessionWorkspace, Toast,
     WorkspaceSettings, WorkspaceStore, notifications::NotificationId, restore_multiworkspace,
 };
-use zed::{
-    OpenListener, OpenRequest, RawOpenRequest, app_menus, build_window_options,
-    derive_paths_with_position, handle_cli_connection, handle_keymap_file_changes,
-    initialize_workspace, open_paths_with_positions,
-};
 
-use crate::zed::{CrashHandler, OpenRequestKind, eager_load_active_theme_and_icon_theme};
+use crate::thock_app::{CrashHandler, OpenRequestKind, eager_load_active_theme_and_icon_theme};
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
@@ -300,17 +300,17 @@ fn main() {
     } else {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
-            crate::zed::listen_for_cli_connections(open_listener.clone()).is_err()
+            crate::thock_app::listen_for_cli_connections(open_listener.clone()).is_err()
         }
 
         #[cfg(target_os = "macos")]
         {
-            use zed::mac_only_instance::*;
+            use thock_app::mac_only_instance::*;
             ensure_only_instance() != IsOnlyInstance::Yes
         }
     };
     if failed_single_instance_check {
-        println!("zed is already running");
+        println!("thock is already running");
         return;
     }
 
@@ -426,11 +426,11 @@ fn main() {
         }
         settings::init(cx);
         zlog_settings::init(cx);
-        zed::watch_settings_files(fs.clone(), cx);
+        thock_app::watch_settings_files(fs.clone(), cx);
         handle_keymap_file_changes(user_keymap_file_rx, user_keymap_watcher, cx);
 
         let user_agent = format!(
-            "Zed/{} ({}; {})",
+            "Thock/{} ({}; {})",
             AppVersion::global(cx),
             std::env::consts::OS,
             std::env::consts::ARCH
@@ -513,9 +513,9 @@ fn main() {
 
         Client::set_global(client.clone(), cx);
 
-        zed::init(cx);
+        thock_app::init(cx);
         #[cfg(target_os = "macos")]
-        zed::move_to_applications::init(cx);
+        thock_app::move_to_applications::init(cx);
         project::Project::init(&client, cx);
         client::init(&client, cx);
         feature_flags::FeatureFlagStore::init(cx);
@@ -925,7 +925,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
     let mut task = None;
     if !request.open_paths.is_empty() {
         let app_state = app_state.clone();
-        let base_open_options = zed::open_options_for_request(
+        let base_open_options = thock_app::open_options_for_request(
             request.open_behavior,
             &workspace::SerializedWorkspaceLocation::Local,
             cx,

@@ -346,10 +346,9 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   tooling. The app shell becomes Thock's: `crates/zed` → `crates/thock_app`, `zed:` palette actions →
   `thock:` (old names still bind), and a title bar without the collab and git chrome. The target is
   at most 150 compiled workspace crates, down from 206. Spec `specs/v42-hard-fork.md`. _(in progress:
-  declared, the repository cleaned, the app shell no longer carries the AI, collaboration, debugger,
-  REPL, remote-development or code-editor-tool crates, the settings window, project panel, welcome
-  page and updater no longer drag the AI and git crates back in, TOML highlights without the
-  extension; the title bar and the shell rename remain)_
+  declared, the repository cleaned, the pruning done at 149 compiled crates on Linux, the title bar
+  rewritten, `crates/thock_app` and `thock:` actions in place, the `thock` command and `thock://`
+  handling Thock's own; the first upstream review remains)_
 
 ### Milestone 5: Thock Plus & the hosted agent
 - [x] **Subscription core, billing-agnostic:** a small backend (`thock/services/plus`, Go on Postgres with embedded migrations) with plans as hot-changeable rows (allowance in normalized units, model-tier mapping, per-plan limits, edited through the admin API and live on the next request), its own users/entitlements tables and usage ledger, per-user budget-capped OpenRouter keys minted and disabled through the provisioning API (a fake gateway stands in when no management key is set), and dev entitlements via admin-minted invite codes. The allowance loop runs end to end without Polar: usage syncs from the gateway, 80% warns, zero disables the key, and admin endpoints reset, top up, or revoke any user. Spec `specs/v25-thock-plus-hosted-agent.md`. _(shipped, Stage 1)_

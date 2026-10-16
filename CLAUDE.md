@@ -269,7 +269,7 @@ New docked panes implement the `Panel` trait and are registered with the workspa
   iterating: `thock/script/test rust -- backlog::`.
 - **Never run `cargo build`, `cargo test` or `cargo clippy` without `-p`.** The workspace is all of Zed; an
   unscoped command takes tens of minutes and tens of gigabytes. The Thock packages are `thock` and
-  `thock_sync_core`; add `zed` only when `crates/zed` changed.
+  `thock_sync_core`; add `thock_app` only when `crates/thock_app` changed.
 - Lint with `cargo clippy -p thock -p thock_sync_core --all-targets -- --deny warnings`. Bare
   `./script/clippy` means `--workspace --release` — don't.
 - Before pushing: `cargo fmt --all -- --check`, the clippy line above when Rust changed, and

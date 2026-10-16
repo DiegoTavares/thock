@@ -25,8 +25,8 @@ accepts this repository on `main` or on a tag, nothing else (setup: `specs/v20-a
 
 ## Desktop app
 
-1. **Bump.** Branch `release-X.Y.Z` off `main`; set `version` in `crates/zed/Cargo.toml` and let
-   `Cargo.lock` follow (`cargo update -p zed --precise X.Y.Z` or a scoped `cargo check -p zed`).
+1. **Bump.** Branch `release-X.Y.Z` off `main`; set `version` in `crates/thock_app/Cargo.toml` and let
+   `Cargo.lock` follow (`cargo update -p thock_app --precise X.Y.Z` or a scoped `cargo check -p thock_app`).
    Two lines change. PR it as `Release X.Y.Z` and merge.
 2. **Tag.** On the merge commit: `git tag -a vX.Y.Z -m "Thock X.Y.Z" && git push origin vX.Y.Z`.
 3. **Wait.** `release.yml` first verifies the tag: it matches the crate version, the commit is on

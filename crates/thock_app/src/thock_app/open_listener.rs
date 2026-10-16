@@ -729,7 +729,7 @@ pub async fn derive_paths_with_position(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zed::{open_listener::open_local_workspace, tests::init_test};
+    use crate::thock_app::{open_listener::open_local_workspace, tests::init_test};
     use cli::CliResponse;
     use editor::Editor;
     use futures::poll;
@@ -1435,14 +1435,10 @@ mod tests {
         CliRequest::Open {
             paths,
             urls: vec![],
-            diff_paths: vec![],
-            diff_all: false,
-            wsl: None,
             wait: false,
             open_behavior,
             env: None,
             user_data_dir: None,
-            dev_container: false,
             cwd: None,
         }
     }
@@ -1454,14 +1450,10 @@ mod tests {
         CliRequest::Open {
             paths: vec![],
             urls,
-            diff_paths: vec![],
-            diff_all: false,
-            wsl: None,
             wait: false,
             open_behavior,
             env: None,
             user_data_dir: None,
-            dev_container: false,
             cwd: None,
         }
     }

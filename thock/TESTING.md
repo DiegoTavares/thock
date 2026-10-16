@@ -17,7 +17,7 @@ the same thing. The path → suite mapping lives in `suites_for` in that script 
 | Suite | Covers | Runs | Takes (warm) |
 |---|---|---|---|
 | `rust` | `crates/thock/` and anything upstream the fork touches | `cargo nextest run -p thock` (falls back to `cargo test`) | ~10 s rebuild + 1 s for ~470 tests |
-| `app` | `crates/zed/`, the bundled keymaps and `default.json`: the app shell's own tests, among them the guard that every keymap binding names a registered action | `cargo nextest run -p zed` (Linux only in CI) | ~1 min rebuild + tests |
+| `app` | `crates/thock_app/`, `crates/cli/`, the bundled keymaps and `default.json`: the app shell's own tests, among them the guard that every keymap binding names a registered action, and the `thock` command's | `cargo nextest run -p thock_app -p cli` (Linux only in CI) | ~1 min rebuild + tests |
 | `sync-core` | `crates/thock-sync-core/`: the rules the desk and the phone must agree on | `cargo test -p thock_sync_core` | ~10 s |
 | `go-plus` | `thock/services/plus/`: the Plus backend and vault sync API | `go vet` + `go test`, against an embedded Postgres it starts itself | ~30 s |
 | `go-releases` | `thock/services/releases/`: the update index and manifest writer | `go vet` + `go test` + `write_manifest_test.py` | seconds |
@@ -44,8 +44,8 @@ The slow loop on this repo has never been the Thock tests; it is building things
   crates, tens of minutes, tens of gigabytes in `target/`.
 - **Never `./script/clippy` bare.** It means `--workspace --release` and builds a second artifact
   tree. Lint with `cargo clippy -p thock -p thock_sync_core --all-targets -- --deny warnings`; add
-  `-p zed` only when `crates/zed` changed.
-- **Don't build the app (`cargo run`, `cargo build -p zed`) to check logic.** Write a test. Build
+  `-p thock_app -p cli` only when `crates/thock_app` or `crates/cli` changed.
+- **Don't build the app (`cargo run`, `cargo build -p thock_app`) to check logic.** Write a test. Build
   the app only to look at it, and say so when handing over.
 - Go: each module pins a patched toolchain in `go.mod`; the script sets `GOTOOLCHAIN=auto` so `go` fetches
   it. Running `go test` by hand with an older local Go needs the same.

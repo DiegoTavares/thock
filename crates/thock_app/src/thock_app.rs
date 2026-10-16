@@ -1044,10 +1044,10 @@ fn initialize_pane(
 
 fn open_about_window(cx: &mut App) {
     fn about_window_icon(release_channel: ReleaseChannel) -> Arc<Image> {
+        // Thock ships no nightly channel; a nightly build shows the dev icon.
         let bytes = match release_channel {
-            ReleaseChannel::Dev => include_bytes!("../resources/app-icon-dev.png").as_slice(),
-            ReleaseChannel::Nightly => {
-                include_bytes!("../resources/app-icon-nightly.png").as_slice()
+            ReleaseChannel::Dev | ReleaseChannel::Nightly => {
+                include_bytes!("../resources/app-icon-dev.png").as_slice()
             }
             ReleaseChannel::Preview => {
                 include_bytes!("../resources/app-icon-preview.png").as_slice()
@@ -1863,7 +1863,7 @@ pub fn load_default_keymap(cx: &mut App) {
 }
 
 /// Loads a built-in keymap asset. When Zed subsystems are compiled out (see the
-/// feature list in crates/zed/Cargo.toml), the shipped keymaps still contain
+/// feature list in crates/thock_app/Cargo.toml), the shipped keymaps still contain
 /// bindings for their actions; those bindings are skipped instead of fatal.
 fn load_builtin_keymap(asset_path: &str, source: KeybindSource, cx: &App) -> Vec<KeyBinding> {
     #[cfg(all(

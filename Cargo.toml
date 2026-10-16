@@ -129,6 +129,7 @@ members = [
     "crates/theme_selector",
     "crates/thock",
     "crates/thock-sync-core",
+    "crates/thock_app",
     "crates/time_format",
     "crates/title_bar",
     "crates/ui",
@@ -143,7 +144,6 @@ members = [
     "crates/which_key",
     "crates/workspace",
     "crates/worktree",
-    "crates/zed",
     "crates/zed_actions",
     "crates/zed_credentials_provider",
     "crates/zed_env_vars",
@@ -165,7 +165,7 @@ members = [
 
     "tooling/perf",
 ]
-default-members = ["crates/zed"]
+default-members = ["crates/thock_app"]
 
 [workspace.package]
 publish = false
@@ -308,6 +308,7 @@ theme_extension = { path = "crates/theme_extension" }
 theme_settings = { path = "crates/theme_settings" }
 theme_selector = { path = "crates/theme_selector" }
 thock = { path = "crates/thock" }
+thock_app = { path = "crates/thock_app" }
 thock_sync_core = { path = "crates/thock-sync-core" }
 time_format = { path = "crates/time_format" }
 platform_title_bar = { path = "crates/platform_title_bar" }
@@ -325,7 +326,6 @@ which_key = { path = "crates/which_key" }
 watch = { path = "crates/watch" }
 workspace = { path = "crates/workspace" }
 worktree = { path = "crates/worktree" }
-zed = { path = "crates/zed" }
 zed_actions = { path = "crates/zed_actions" }
 zed_credentials_provider = { path = "crates/zed_credentials_provider" }
 zed_env_vars = { path = "crates/zed_env_vars" }
@@ -871,7 +871,7 @@ lto = "thin"
 codegen-units = 1
 
 [profile.release.package]
-zed = { codegen-units = 16 }
+thock_app = { codegen-units = 16 }
 
 [profile.release-fast]
 inherits = "release"

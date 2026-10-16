@@ -34,7 +34,7 @@ env:
   CARGO_PROFILE_RELEASE_DEBUG: "false"
   # Ship on the stable channel so the bundles poll for updates; the committed
   # RELEASE_CHANNEL file stays `dev` so local builds never do. The bundle
-  # scripts write this through to crates/zed/RELEASE_CHANNEL before building.
+  # scripts write this through to crates/thock_app/RELEASE_CHANNEL before building.
   ZED_RELEASE_CHANNEL: stable
 
 jobs:
@@ -58,9 +58,9 @@ jobs:
       - name: Tag matches the crate version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zed/Cargo.toml | head -1)"
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/thock_app/Cargo.toml | head -1)"
           [ "v${crate}" = "${GITHUB_REF_NAME}" ] || {
-            echo "tag ${GITHUB_REF_NAME} does not match crates/zed/Cargo.toml ${crate}" >&2
+            echo "tag ${GITHUB_REF_NAME} does not match crates/thock_app/Cargo.toml ${crate}" >&2
             exit 1
           }
 
