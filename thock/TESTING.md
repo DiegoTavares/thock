@@ -17,6 +17,7 @@ the same thing. The path → suite mapping lives in `suites_for` in that script 
 | Suite | Covers | Runs | Takes (warm) |
 |---|---|---|---|
 | `rust` | `crates/thock/` and anything upstream the fork touches | `cargo nextest run -p thock` (falls back to `cargo test`) | ~10 s rebuild + 1 s for ~470 tests |
+| `app` | `crates/zed/`, the bundled keymaps and `default.json`: the app shell's own tests, among them the guard that every keymap binding names a registered action | `cargo nextest run -p zed` (Linux only in CI) | ~1 min rebuild + tests |
 | `sync-core` | `crates/thock-sync-core/`: the rules the desk and the phone must agree on | `cargo test -p thock_sync_core` | ~10 s |
 | `go-plus` | `thock/services/plus/`: the Plus backend and vault sync API | `go vet` + `go test`, against an embedded Postgres it starts itself | ~30 s |
 | `go-releases` | `thock/services/releases/`: the update index and manifest writer | `go vet` + `go test` + `write_manifest_test.py` | seconds |
@@ -85,7 +86,8 @@ job that is skipped when its paths didn't change. `CI` is the single required ch
 pass, failed or cancelled ones don't. Pushes to `main` run every suite.
 
 macOS minutes cost ten times Linux ones, so the macOS half of the Rust test job (`Test (macos-15)`)
-runs on `main` and on pull requests carrying the `needs-mac` label, not on every pull request. Add
+runs on `main` and on pull requests carrying the `needs-mac` label, not on every pull request, and the
+`App` job runs on Linux only. Add
 the label when a change touches platform code (`crates/gpui_macos`, bundling, anything under
 `cfg(target_os = "macos")`); adding it re-runs CI. The `iPhone` and `Sync integration` jobs have no
 Linux equivalent and keep running on the pull requests whose paths need them.

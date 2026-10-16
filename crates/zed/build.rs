@@ -204,11 +204,6 @@ fn main() {
 
         println!("cargo:rerun-if-env-changed=RELEASE_CHANNEL");
         println!("cargo:rerun-if-env-changed=GITHUB_RUN_NUMBER");
-
-        #[cfg(windows)]
-        {
-            windows_resources::compile(false).expect("failed to compile Windows resources");
-        }
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

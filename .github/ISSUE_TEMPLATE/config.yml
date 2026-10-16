@@ -1,6 +1,0 @@
-# yaml-language-server: $schema=https://www.schemastore.org/github-issue-config.json
-blank_issues_enabled: true
-contact_links:
-  - name: Thock support
-    url: https://thethock.com/support
-    about: Questions and help with the desktop app, the phone, or Thock Plus.

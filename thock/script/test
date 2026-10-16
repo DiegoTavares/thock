@@ -16,7 +16,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-ALL_SUITES=(rust sync-core go-plus go-releases go-budget-guard go-site ios integration workflows upstream)
+ALL_SUITES=(rust app sync-core go-plus go-releases go-budget-guard go-site ios integration workflows upstream)
 
 usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -37,8 +37,9 @@ suites_for() {
     thock/ios/*) echo ios ;;
     .github/*) echo workflows ;;
     crates/thock/*) echo rust ;;
-    *.md | thock/specs/* | docs/* | legal/*) ;;
-    Cargo.lock | Cargo.toml | rust-toolchain.toml) echo rust; echo sync-core ;;
+    crates/zed/* | assets/keymaps/* | assets/settings/*) echo app ;;
+    *.md | thock/specs/* | legal/*) ;;
+    Cargo.lock | Cargo.toml | rust-toolchain.toml) echo rust; echo app; echo sync-core ;;
     *) echo rust ;;
   esac
 }
@@ -62,12 +63,23 @@ run_rust() {
   fi
 }
 
+# The app shell's own tests, among them the guard that every bundled keymap
+# binding names a registered action. CI runs this suite on Linux only.
+run_app() {
+  if cargo nextest --version >/dev/null 2>&1; then
+    cargo nextest run -p zed --no-fail-fast "$@"
+  else
+    cargo test -p zed "$@"
+  fi
+}
+
 run_suite() {
   echo "==> $1" >&2
   # The modules pin a patched toolchain; let `go` fetch it when the local one is older.
   local -x GOTOOLCHAIN=auto
   case "$1" in
     rust) run_rust ${RUST_ARGS[@]+"${RUST_ARGS[@]}"} ;;
+    app) run_app ${RUST_ARGS[@]+"${RUST_ARGS[@]}"} ;;
     sync-core) cargo test -p thock_sync_core ;;
     go-plus) (cd thock/services/plus && go vet ./... && go test ./...) ;;
     go-releases) (cd thock/services/releases && go vet ./... && go test ./... && python3 write_manifest_test.py) ;;
