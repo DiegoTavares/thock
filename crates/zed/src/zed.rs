@@ -7,17 +7,12 @@ pub(crate) mod move_to_applications;
 mod open_listener;
 mod open_url_modal;
 mod quick_action_bar;
-pub mod remote_debug;
-pub mod telemetry_log;
-#[cfg(target_os = "windows")]
-pub(crate) mod windows_only_instance;
 
 use anyhow::Context as _;
 pub use app_menus::*;
 use assets::Assets;
 
 use breadcrumbs::Breadcrumbs;
-use client::zed_urls;
 use collections::VecDeque;
 use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
@@ -39,7 +34,6 @@ use migrator::migrate_keymap;
 pub use open_listener::*;
 use outline_panel::OutlinePanel;
 use paths::local_settings_file_relative_path;
-use project::ProjectItem;
 use project_panel::ProjectPanel;
 use quick_action_bar::QuickActionBar;
 use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
@@ -78,47 +72,56 @@ use workspace::{
 };
 use workspace::{CloseIntent, CloseProject, CloseWindow, with_active_or_new_workspace};
 use workspace::{Pane, notifications::DetachAndPromptErr};
-use zed_actions::{
-    About, GetMerch, OpenAccountSettings, OpenBrowser, OpenDocs, OpenServerSettings,
-    OpenSettingsFile, OpenStatusPage, OpenZedUrl, Quit,
-};
-
-const DOCS_URL: &str = "https://zed.dev/docs/";
-const STATUS_URL: &str = "https://status.zed.dev";
-const MERCH_URL: &str = "https://merch.zed.dev/";
+use zed_actions::{About, OpenBrowser, OpenSettingsFile, OpenThockUrl, Quit};
 
 pub struct CrashHandler(pub Arc<crashes::Client>);
 
 impl gpui::Global for CrashHandler {}
 
 actions!(
-    zed,
+    thock,
     [
-        /// Opens the element inspector for debugging UI.
-        DebugElements,
         /// Hides the application window.
+        #[action(deprecated_aliases = ["zed::Hide"])]
         Hide,
         /// Hides all other application windows.
+        #[action(deprecated_aliases = ["zed::HideOthers"])]
         HideOthers,
         /// Minimizes the current window.
+        #[action(deprecated_aliases = ["zed::Minimize"])]
         Minimize,
         /// Opens the default settings file.
+        #[action(deprecated_aliases = ["zed::OpenDefaultSettings"])]
         OpenDefaultSettings,
         /// Opens project-specific settings file.
+        #[action(deprecated_aliases = ["zed::OpenProjectSettingsFile"])]
         OpenProjectSettingsFile,
-        /// Shows the default semantic token rules (read-only).
-        ShowDefaultSemanticTokenRules,
-        /// Resets the application database.
-        ResetDatabase,
         /// Shows all hidden windows.
+        #[action(deprecated_aliases = ["zed::ShowAll"])]
         ShowAll,
         /// Toggles fullscreen mode.
+        #[action(deprecated_aliases = ["zed::ToggleFullScreen"])]
         ToggleFullScreen,
         /// Zooms the window.
+        #[action(deprecated_aliases = ["zed::Zoom"])]
         Zoom,
+    ]
+);
+
+actions!(
+    dev,
+    [
+        /// Opens the element inspector for debugging UI.
+        #[action(deprecated_aliases = ["zed::DebugElements"])]
+        DebugElements,
+        /// Resets the application database.
+        #[action(deprecated_aliases = ["zed::ResetDatabase"])]
+        ResetDatabase,
         /// Triggers a test panic for debugging.
+        #[action(deprecated_aliases = ["zed::TestPanic"])]
         TestPanic,
         /// Triggers a hard crash for debugging.
+        #[action(deprecated_aliases = ["zed::TestCrash"])]
         TestCrash,
     ]
 );
@@ -229,23 +232,6 @@ pub fn init(cx: &mut App) {
             open_settings_file(
                 paths::settings_file(),
                 || settings::initial_user_settings_content().as_ref().into(),
-                window,
-                cx,
-            );
-        });
-    })
-    .on_action(|_: &OpenAccountSettings, cx| {
-        with_active_or_new_workspace(cx, |_, _, cx| {
-            cx.open_url(&zed_urls::account_url(cx));
-        });
-    })
-    .on_action(|_: &ShowDefaultSemanticTokenRules, cx| {
-        with_active_or_new_workspace(cx, |workspace, window, cx| {
-            open_bundled_file(
-                workspace,
-                settings::default_semantic_token_rules(),
-                "Default Semantic Token Rules",
-                "JSONC",
                 window,
                 cx,
             );
@@ -527,56 +513,17 @@ fn initialize_file_watcher(window: &mut Window, cx: &mut Context<Workspace>) {
     }
 }
 
-#[cfg(target_os = "windows")]
-#[allow(unused)]
-fn initialize_file_watcher(window: &mut Window, cx: &mut Context<Workspace>) {
-    if let Err(e) = fs::fs_watcher::global(|_| {}) {
-        let message = format!(
-            db::indoc! {r#"
-            ReadDirectoryChangesW initialization failed: {}
-
-            This may occur on network filesystems and WSL paths. For troubleshooting see: https://zed.dev/docs/windows
-            "#},
-            e
-        );
-        let prompt = window.prompt(
-            PromptLevel::Critical,
-            "Could not start ReadDirectoryChangesW",
-            Some(&message),
-            &["Troubleshoot and Quit"],
-            cx,
-        );
-        cx.spawn(async move |_, cx| {
-            if prompt.await == Ok(0) {
-                cx.update(|cx| {
-                    cx.open_url("https://zed.dev/docs/windows");
-                    cx.quit()
-                });
-            }
-        })
-        .detach()
-    }
-}
-
 fn show_software_emulation_warning_if_needed(
     specs: gpui::GpuSpecs,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
     if specs.is_software_emulated && std::env::var("ZED_ALLOW_EMULATED_GPU").is_err() {
-        let (graphics_api, docs_url, open_url) = if cfg!(target_os = "windows") {
-            (
-                "DirectX",
-                "https://zed.dev/docs/windows",
-                "https://zed.dev/docs/windows",
-            )
-        } else {
-            (
-                "Vulkan",
-                "https://zed.dev/docs/linux",
-                "https://zed.dev/docs/linux#zed-fails-to-open-windows",
-            )
-        };
+        let (graphics_api, docs_url, open_url) = (
+            "Vulkan",
+            "https://zed.dev/docs/linux",
+            "https://zed.dev/docs/linux#zed-fails-to-open-windows",
+        );
         let message = format!(
             db::indoc! {r#"
             Zed uses {} for rendering and requires a compatible GPU.
@@ -672,12 +619,9 @@ fn register_actions(
     app_state: Arc<AppState>,
     workspace: &mut Workspace,
     _: &mut Window,
-    cx: &mut Context<Workspace>,
+    _cx: &mut Context<Workspace>,
 ) {
     workspace
-        .register_action(|_, _: &OpenDocs, _, cx| cx.open_url(DOCS_URL))
-        .register_action(|_, _: &OpenStatusPage, _, cx| cx.open_url(STATUS_URL))
-        .register_action(|_, _: &GetMerch, _, cx| cx.open_url(MERCH_URL))
         .register_action(
             |workspace: &mut Workspace,
              _: &DumpAccessibilityTree,
@@ -738,7 +682,7 @@ fn register_actions(
         .register_action(|_, _: &ToggleFullScreen, window, _| {
             window.toggle_fullscreen();
         })
-        .register_action(|_, action: &OpenZedUrl, _, cx| {
+        .register_action(|_, action: &OpenThockUrl, _, cx| {
             OpenListener::global(cx).open(RawOpenRequest {
                 urls: vec![String::from(&*action.url)],
                 ..Default::default()
@@ -1023,40 +967,7 @@ fn register_actions(
             }
         });
 
-    #[cfg(not(target_os = "windows"))]
     workspace.register_action(install_cli);
-
-    if workspace.project().read(cx).is_via_remote_server() {
-        workspace.register_action({
-            move |workspace, _: &OpenServerSettings, window, cx| {
-                let open_server_settings = workspace
-                    .project()
-                    .update(cx, |project, cx| project.open_server_settings(cx));
-
-                cx.spawn_in(window, async move |workspace, cx| {
-                    let buffer = open_server_settings.await?;
-
-                    workspace
-                        .update_in(cx, |workspace, window, cx| {
-                            workspace.open_path(
-                                buffer
-                                    .read(cx)
-                                    .project_path(cx)
-                                    .expect("Settings file must have a location"),
-                                None,
-                                true,
-                                window,
-                                cx,
-                            )
-                        })?
-                        .await?;
-
-                    anyhow::Ok(())
-                })
-                .detach_and_log_err(cx);
-            }
-        });
-    }
 
     #[cfg(debug_assertions)]
     workspace.register_action(|workspace, _: &ShowWorkspaceError, _, cx| {
@@ -1122,9 +1033,6 @@ fn initialize_pane(
             toolbar.add_item(quick_action_bar, window, cx);
             let project_search_bar = cx.new(|_| ProjectSearchBar::new());
             toolbar.add_item(project_search_bar, window, cx);
-            let telemetry_log_item =
-                cx.new(|cx| telemetry_log::TelemetryLogToolbarItemView::new(window, cx));
-            toolbar.add_item(telemetry_log_item, window, cx);
             let migration_banner =
                 cx.new(|inner_cx| MigrationBanner::new(workspace_handle.clone(), inner_cx));
             toolbar.add_item(migration_banner, window, cx);
@@ -1362,7 +1270,6 @@ fn open_about_window(cx: &mut App) {
     .log_err();
 }
 
-#[cfg(not(target_os = "windows"))]
 fn install_cli(
     _: &mut Workspace,
     _: &install_cli::InstallCliBinary,
@@ -1767,20 +1674,6 @@ pub fn handle_keymap_file_changes(
     })
     .detach();
 
-    #[cfg(target_os = "windows")]
-    {
-        let mut current_layout_id = cx.keyboard_layout().id().to_string();
-        cx.on_keyboard_layout_change(move |cx| {
-            let next_layout_id = cx.keyboard_layout().id();
-            if next_layout_id != current_layout_id {
-                current_layout_id = next_layout_id.to_string();
-                keyboard_layout_tx.unbounded_send(()).ok();
-            }
-        })
-        .detach();
-    }
-
-    #[cfg(not(target_os = "windows"))]
     {
         let mut current_mapping = cx.keyboard_mapper().get_key_equivalents().cloned();
         cx.on_keyboard_layout_change(move |cx| {
@@ -1934,7 +1827,6 @@ fn reload_keymaps(cx: &mut App, mut user_key_bindings: Vec<KeyBinding>) {
     let menus = app_menus(cx);
     cx.set_menus(menus);
     // On Windows, this is set in the `update_jump_list` method of the `HistoryManager`.
-    #[cfg(not(target_os = "windows"))]
     cx.set_dock_menu(vec![gpui::MenuItem::action(
         "New Window",
         workspace::NewWindow,
@@ -5050,11 +4942,15 @@ mod tests {
 
         init_keymap_test(cx);
         cx.update(|cx| {
+            let deprecated_aliases = cx.deprecated_actions_to_preferred_actions();
             let all_actions = cx.all_action_names();
 
             let mut actions_without_namespace = Vec::new();
             let all_namespaces = all_actions
                 .iter()
+                // Old names kept as aliases (`zed::`, `zed_actions::`) are not
+                // namespaces of their own.
+                .filter(|action_name| !deprecated_aliases.contains_key(*action_name))
                 .filter_map(|action_name| {
                     let namespace = action_name
                         .split("::")
@@ -5084,10 +4980,7 @@ mod tests {
                 "agents_sidebar",
                 "app_menu",
                 "assistant",
-                "assistant2",
                 "auto_update",
-                "branch_picker",
-                "branches",
                 "buffer_search",
                 "cli",
                 "client",
@@ -5101,10 +4994,6 @@ mod tests {
                 "feedback",
                 "file_finder",
                 "git",
-                "git_graph",
-                "git_onboarding",
-                "git_panel",
-                "git_picker",
                 "go_to_line",
                 "icon_theme_selector",
                 "image_viewer",
@@ -5118,18 +5007,12 @@ mod tests {
                 "outline",
                 "outline_panel",
                 "pane",
-                "panel",
                 "picker",
                 "project_panel",
                 "project_search",
                 "project_symbols",
-                "projects",
-                "recent_projects",
-                "remote_debug",
                 "search",
                 "settings_editor",
-                "settings_profile_selector",
-                "stash_picker",
                 "svg",
                 "tab_switcher",
                 "task",
@@ -5143,10 +5026,6 @@ mod tests {
                 "vim",
                 "window",
                 "workspace",
-                "worktree_picker",
-                "zed",
-                "zed_actions",
-                "zed_predict_onboarding",
             ];
             assert_eq!(
                 all_namespaces,
@@ -5157,6 +5036,50 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         });
+    }
+
+    /// Every action name, including the old `zed::` names kept as deprecated
+    /// aliases, is registered exactly once. A collision would otherwise panic
+    /// at startup when gpui loads the registry (V42 §6.2).
+    #[test]
+    fn test_action_names_are_unique() {
+        let mut owners = std::collections::HashMap::new();
+        for action in gpui::generate_list_of_all_registered_actions() {
+            for name in
+                std::iter::once(action.name).chain(action.deprecated_aliases.iter().copied())
+            {
+                if let Some(previous) = owners.insert(name, action.name) {
+                    panic!(
+                        "`{name}` is registered by both `{previous}` and `{}`",
+                        action.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// A personal keymap written for Zed keeps working: a binding to an old
+    /// `zed::` name dispatches the renamed `thock::` action (V42 §6.2).
+    #[gpui::test]
+    fn test_zed_action_names_resolve_to_thock_actions(cx: &mut App) {
+        let key_bindings = match KeymapFile::load(
+            r#"[{"bindings": {"ctrl-shift-alt-x": "zed::OpenSettings"}}]"#,
+            cx,
+        ) {
+            KeymapFileLoadResult::Success { key_bindings } => key_bindings,
+            other => panic!("expected the keymap to load, got {other:?}"),
+        };
+        let action = key_bindings
+            .first()
+            .map(|binding| binding.action())
+            .expect("one binding");
+        assert_eq!(action.name(), "thock::OpenSettings");
+        assert!(action.partial_eq(&zed_actions::OpenSettings));
+
+        let unbind = cx
+            .build_action("zed::NoAction", None)
+            .expect("zed::NoAction still resolves");
+        assert!(gpui::is_no_action(unbind.as_ref()));
     }
 
     /// Every binding in the bundled keymaps must name an action the app still

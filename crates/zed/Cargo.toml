@@ -61,7 +61,6 @@ go_to_line.workspace = true
 system_specs.workspace = true
 gpui = { workspace = true, features = ["input-latency-histogram"] }
 gpui_platform = {workspace = true, features=["font-kit", "wayland", "x11"]}
-hdrhistogram.workspace = true
 image = { workspace = true, optional = true }
 itertools.workspace = true
 semver.workspace = true
@@ -114,7 +113,6 @@ sysinfo.workspace = true
 tab_switcher.workspace = true
 task.workspace = true
 telemetry.workspace = true
-telemetry_events.workspace = true
 terminal_view.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
@@ -141,13 +139,6 @@ zed_actions.workspace = true
 zed_env_vars.workspace = true
 zlog.workspace = true
 zlog_settings.workspace = true
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows.workspace = true
-gpui = { workspace = true, features = [
-    "input-latency-histogram",
-    "windows-manifest",
-] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 gpui = { workspace = true, features = [

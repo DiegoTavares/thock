@@ -38,7 +38,7 @@ use util::{
 };
 use workspace::{Item, SaveIntent, Workspace, notifications::NotifyResultExt};
 use workspace::{SplitDirection, notifications::DetachAndPromptErr};
-use zed_actions::{OpenDocs, RevealTarget};
+use zed_actions::RevealTarget;
 
 use crate::{
     ToggleMarksView, ToggleRegistersView, Vim, VimSettings,
@@ -1783,7 +1783,6 @@ fn generate_commands(_: &App) -> Vec<VimCommand> {
         VimCommand::new(("cpp", "link"), editor::actions::CopyPermalinkToLine).range(act_on_range),
         VimCommand::str(("opt", "ions"), "zed::OpenDefaultSettings"),
         VimCommand::str(("map", ""), "vim::OpenDefaultKeymap"),
-        VimCommand::new(("h", "elp"), OpenDocs),
     ]
 }
 

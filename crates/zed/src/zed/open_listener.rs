@@ -805,9 +805,8 @@ mod tests {
         );
     }
 
-    // Test file with colon (`:`) in the name on non-Windows platforms,
-    // as it is valid for file names on Unix-like systems.
-    #[cfg(not(target_os = "windows"))]
+    // A colon (`:`) is valid in a file name, so a path that exists wins over
+    // the `path:line` reading.
     #[gpui::test]
     async fn test_derive_paths_with_position_colon_in_name_reverts_on_unix(
         cx: &mut TestAppContext,
@@ -829,33 +828,6 @@ mod tests {
         assert_eq!(
             paths,
             vec![(path!("/root/test.txt:10").to_string(), None, None)]
-        );
-    }
-
-    // On Windows `:` is used to delimit NTFS alternate data streams,
-    // `notes.txt:10` should be parsed as `notes.txt` at row 10
-    #[cfg(target_os = "windows")]
-    #[gpui::test]
-    async fn test_derive_paths_with_position_colon_in_name_parsed_as_position_on_windows(
-        cx: &mut TestAppContext,
-    ) {
-        let app_state = init_test(cx);
-        let fs = app_state.fs.as_fake();
-
-        fs.insert_tree(path!("/root"), json!({ "test.txt": "" }))
-            .await;
-
-        let result =
-            derive_paths_with_position(fs.as_ref(), vec![path!("/root/test.txt:10").to_string()])
-                .await;
-
-        let paths: Vec<_> = result
-            .iter()
-            .map(|p| (p.path.to_string_lossy().to_string(), p.row, p.column))
-            .collect();
-        assert_eq!(
-            paths,
-            vec![(path!("/root/test.txt").to_string(), Some(10), None)]
         );
     }
 

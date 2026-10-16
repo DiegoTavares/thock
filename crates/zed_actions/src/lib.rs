@@ -14,113 +14,66 @@ pub fn init() {}
 
 /// Opens a URL in the system's default web browser.
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = thock, deprecated_aliases = ["zed::OpenBrowser"])]
 #[serde(deny_unknown_fields)]
 pub struct OpenBrowser {
     pub url: Arc<str>,
 }
 
-/// Opens a zed:// URL within the application.
+/// Opens a thock:// URL within the application.
 #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = thock, deprecated_aliases = ["zed::OpenZedUrl"])]
 #[serde(deny_unknown_fields)]
-pub struct OpenZedUrl {
+pub struct OpenThockUrl {
     pub url: Arc<str>,
 }
 
 /// Opens the keymap to either add a keybinding or change an existing one
 #[derive(PartialEq, Clone, Default, Action, JsonSchema, Serialize, Deserialize)]
-#[action(namespace = zed, no_json, no_register)]
+#[action(namespace = thock, no_json, no_register)]
 pub struct ChangeKeybinding {
     pub action: String,
 }
 
 actions!(
-    zed,
+    thock,
     [
         /// Opens the settings editor.
-        #[action(deprecated_aliases = ["zed_actions::OpenSettingsEditor"])]
+        #[action(deprecated_aliases = ["zed::OpenSettings", "zed_actions::OpenSettingsEditor"])]
         OpenSettings,
         /// Opens the settings JSON file.
-        #[action(deprecated_aliases = ["zed_actions::OpenSettings"])]
+        #[action(deprecated_aliases = ["zed::OpenSettingsFile", "zed_actions::OpenSettings"])]
         OpenSettingsFile,
         /// Opens project-specific settings.
-        #[action(deprecated_aliases = ["zed_actions::OpenProjectSettings"])]
+        #[action(deprecated_aliases = ["zed::OpenProjectSettings", "zed_actions::OpenProjectSettings"])]
         OpenProjectSettings,
-        /// Opens the project tasks configuration.
-        OpenProjectTasks,
-        /// Opens the project tasks configuration with worktree setup guidance.
-        OpenWorktreeSetupTasks,
         /// Opens the default keymap file.
+        #[action(deprecated_aliases = ["zed::OpenDefaultKeymap"])]
         OpenDefaultKeymap,
         /// Opens the user keymap file.
-        #[action(deprecated_aliases = ["zed_actions::OpenKeymap"])]
+        #[action(deprecated_aliases = ["zed::OpenKeymapFile", "zed_actions::OpenKeymap"])]
         OpenKeymapFile,
         /// Opens the keymap editor.
-        #[action(deprecated_aliases = ["zed_actions::OpenKeymapEditor"])]
+        #[action(deprecated_aliases = ["zed::OpenKeymap", "zed_actions::OpenKeymapEditor"])]
         OpenKeymap,
-        /// Opens account settings.
-        OpenAccountSettings,
-        /// Opens server settings.
-        OpenServerSettings,
         /// Quits the application.
+        #[action(deprecated_aliases = ["zed::Quit"])]
         Quit,
         /// Shows information about Thock.
+        #[action(deprecated_aliases = ["zed::About"])]
         About,
-        /// Opens the documentation website.
-        OpenDocs,
         /// Views open source licenses.
+        #[action(deprecated_aliases = ["zed::OpenLicenses"])]
         OpenLicenses,
-        /// Opens the Zed status page.
-        OpenStatusPage,
-        /// Opens the Zed merch store.
-        GetMerch,
-        /// Opens the telemetry log.
-        OpenTelemetryLog,
-        /// Opens the performance profiler.
-        OpenPerformanceProfiler,
-        /// Opens the onboarding view.
-        OpenOnboarding,
         /// Shows the auto-update notification for testing.
+        #[action(deprecated_aliases = ["zed::ShowUpdateNotification"])]
         ShowUpdateNotification,
     ]
 );
 
-#[derive(PartialEq, Clone, Copy, Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtensionCategoryFilter {
-    Themes,
-    IconThemes,
-    Languages,
-    Grammars,
-    LanguageServers,
-    ContextServers,
-    Snippets,
-    DebugAdapters,
-}
-
-/// Opens the extensions management interface.
-#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
-#[serde(deny_unknown_fields)]
-pub struct Extensions {
-    /// Filters the extensions page down to extensions that are in the specified category.
-    #[serde(default)]
-    pub category_filter: Option<ExtensionCategoryFilter>,
-    /// Focuses just the extension with the specified ID.
-    #[serde(default)]
-    pub id: Option<String>,
-}
-
-/// Opens the ACP registry.
-#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
-#[serde(deny_unknown_fields)]
-pub struct AcpRegistry;
-
 /// Decreases the font size in the editor buffer.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = thock, deprecated_aliases = ["zed::DecreaseBufferFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct DecreaseBufferFontSize {
     #[serde(default)]
@@ -129,7 +82,7 @@ pub struct DecreaseBufferFontSize {
 
 /// Increases the font size in the editor buffer.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = thock, deprecated_aliases = ["zed::IncreaseBufferFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct IncreaseBufferFontSize {
     #[serde(default)]
@@ -138,7 +91,7 @@ pub struct IncreaseBufferFontSize {
 
 /// Opens the settings editor at a specific path.
 #[derive(PartialEq, Clone, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = thock, deprecated_aliases = ["zed::OpenSettingsAt"])]
 #[serde(deny_unknown_fields)]
 pub struct OpenSettingsAt {
     /// A path to a specific setting (e.g. `theme.mode`)
@@ -150,7 +103,7 @@ pub struct OpenSettingsAt {
 }
 
 #[derive(PartialEq, Clone, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = thock, deprecated_aliases = ["zed::OpenSettingsPage"])]
 #[serde(deny_unknown_fields)]
 pub struct OpenSettingsPage {
     /// A settings page title (e.g. `AI`).
@@ -177,7 +130,7 @@ pub enum OpenSettingsAtTarget {
 
 /// Resets the buffer font size to the default value.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = thock, deprecated_aliases = ["zed::ResetBufferFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct ResetBufferFontSize {
     #[serde(default)]
@@ -186,7 +139,7 @@ pub struct ResetBufferFontSize {
 
 /// Decreases the font size of the user interface.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = thock, deprecated_aliases = ["zed::DecreaseUiFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct DecreaseUiFontSize {
     #[serde(default)]
@@ -195,7 +148,7 @@ pub struct DecreaseUiFontSize {
 
 /// Increases the font size of the user interface.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = thock, deprecated_aliases = ["zed::IncreaseUiFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct IncreaseUiFontSize {
     #[serde(default)]
@@ -204,16 +157,16 @@ pub struct IncreaseUiFontSize {
 
 /// Resets the UI font size to the default value.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = thock, deprecated_aliases = ["zed::ResetUiFontSize"])]
 #[serde(deny_unknown_fields)]
 pub struct ResetUiFontSize {
     #[serde(default)]
     pub persist: bool,
 }
 
-/// Resets all zoom levels (UI and buffer font sizes, including in the agent panel) to their default values.
+/// Resets all zoom levels (UI and buffer font sizes) to their default values.
 #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
-#[action(namespace = zed)]
+#[action(namespace = thock, deprecated_aliases = ["zed::ResetAllZoom"])]
 #[serde(deny_unknown_fields)]
 pub struct ResetAllZoom {
     #[serde(default)]
@@ -243,25 +196,6 @@ pub mod dev {
         [
             /// Toggles the developer inspector for debugging UI elements.
             ToggleInspector
-        ]
-    );
-}
-
-pub mod remote_debug {
-    use gpui::actions;
-
-    actions!(
-        remote_debug,
-        [
-            /// Simulates a disconnection from the remote server for testing purposes.
-            /// This will trigger the reconnection logic.
-            SimulateDisconnect,
-            /// Simulates a timeout/slow connection to the remote server for testing purposes.
-            /// This will cause heartbeat failures and trigger reconnection.
-            SimulateTimeout,
-            /// Simulates a timeout/slow connection to the remote server for testing purposes.
-            /// This will cause heartbeat failures and attempting a reconnection while having exhausted all attempts.
-            SimulateTimeoutExhausted,
         ]
     );
 }

@@ -83,7 +83,6 @@ pub fn app_menus(_cx: &mut App) -> Vec<Menu> {
                 #[cfg(target_os = "macos")]
                 MenuItem::os_submenu("Services", gpui::SystemMenuType::Services),
                 MenuItem::separator(),
-                #[cfg(not(target_os = "windows"))]
                 MenuItem::action("Install CLI", install_cli::InstallCliBinary),
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]

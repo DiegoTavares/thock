@@ -1,6 +1,3 @@
-// Disable command line from opening on release mode
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 mod reliability;
 mod zed;
 
@@ -199,8 +196,7 @@ fn main() {
 
     let args = Args::parse();
 
-    // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
-    #[cfg(not(target_os = "windows"))]
+    // `thock --askpass` makes the app operate in nc/netcat mode for use with askpass
     if let Some(socket) = &args.askpass {
         askpass::main(socket);
         return;
@@ -210,15 +206,6 @@ fn main() {
     if let Some(socket) = &args.crash_handler {
         crashes::crash_server(socket.as_path(), paths::logs_dir().clone());
         return;
-    }
-
-    #[cfg(all(not(debug_assertions), target_os = "windows"))]
-    unsafe {
-        use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
-
-        if args.foreground {
-            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
-        }
     }
 
     // `zed --printenv` Outputs environment variables as JSON to stdout
@@ -235,17 +222,6 @@ fn main() {
     // Set custom data directory.
     if let Some(dir) = &args.user_data_dir {
         paths::set_custom_data_dir(dir);
-    }
-
-    #[cfg(target_os = "windows")]
-    match util::get_zed_cli_path() {
-        Ok(path) => askpass::set_askpass_program(path),
-        Err(err) => {
-            eprintln!("Error: {}", err);
-            if std::option_env!("ZED_BUNDLE").is_some() {
-                process::exit(1);
-            }
-        }
     }
 
     let file_errors = init_paths();
@@ -301,9 +277,6 @@ fn main() {
             .unwrap_or("unknown"),
     );
 
-    #[cfg(windows)]
-    check_for_conpty_dll();
-
     let app = build_application().with_assets(Assets);
 
     let app_db = db::AppDatabase::new();
@@ -328,11 +301,6 @@ fn main() {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
             crate::zed::listen_for_cli_connections(open_listener.clone()).is_err()
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            !crate::zed::windows_only_instance::handle_single_instance(open_listener.clone(), &args)
         }
 
         #[cfg(target_os = "macos")]
@@ -634,8 +602,6 @@ fn main() {
         // Thock: `workspace` gates its sidebar on `AgentSettings`, so the
         // setting stays registered although Zed's agent is gone.
         agent_settings::AgentSettings::register(cx);
-        zed::telemetry_log::init(cx);
-        zed::remote_debug::init(cx);
         snippet_provider::init(cx);
         project::AgentRegistryStore::init_global(
             cx,
@@ -1278,19 +1244,6 @@ struct Args {
     #[arg(long, value_name = "DIR", verbatim_doc_comment)]
     user_data_dir: Option<String>,
 
-    /// The username and WSL distribution to use when opening paths. If not specified,
-    /// Zed will attempt to open the paths directly.
-    ///
-    /// The username is optional, and if not specified, the default user for the distribution
-    /// will be used.
-    ///
-    /// Example: `me@Ubuntu` or `Ubuntu`.
-    ///
-    /// WARN: You should not fill in this field by hand.
-    #[cfg(target_os = "windows")]
-    #[arg(long, value_name = "USER@DISTRO")]
-    wsl: Option<String>,
-
     /// Instructs zed to run as a dev server on this machine. (not implemented)
     #[arg(long)]
     dev_server_token: Option<String>,
@@ -1308,23 +1261,9 @@ struct Args {
     #[arg(long, hide = true)]
     crash_handler: Option<PathBuf>,
 
-    /// Run zed in the foreground, only used on Windows, to match the behavior on macOS.
-    #[arg(long)]
-    #[cfg(target_os = "windows")]
-    #[arg(hide = true)]
-    foreground: bool,
-
-    /// The dock action to perform. This is used on Windows only.
-    #[arg(long)]
-    #[cfg(target_os = "windows")]
-    #[arg(hide = true)]
-    dock_action: Option<usize>,
-
     /// Used for SSH/Git password authentication, to remove the need for netcat as a dependency,
-    /// by having Zed act like netcat communicating over a Unix socket.
-    #[arg(long)]
-    #[cfg(not(target_os = "windows"))]
-    #[arg(hide = true)]
+    /// by having Thock act like netcat communicating over a Unix socket.
+    #[arg(long, hide = true)]
     askpass: Option<String>,
 
     #[arg(long, hide = true)]
@@ -1545,22 +1484,4 @@ fn dump_all_gpui_actions() {
         serde_json::to_string_pretty(&output).unwrap().as_bytes(),
     )
     .unwrap();
-}
-
-#[cfg(target_os = "windows")]
-fn check_for_conpty_dll() {
-    use windows::{
-        Win32::{Foundation::FreeLibrary, System::LibraryLoader::LoadLibraryW},
-        core::w,
-    };
-
-    if let Ok(hmodule) = unsafe { LoadLibraryW(w!("conpty.dll")) } {
-        unsafe {
-            FreeLibrary(hmodule)
-                .context("Failed to free conpty.dll")
-                .log_err();
-        }
-    } else {
-        log::warn!("Failed to load conpty.dll. Terminal will work with reduced functionality.");
-    }
 }

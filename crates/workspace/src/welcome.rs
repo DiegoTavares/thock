@@ -15,9 +15,10 @@ use ui::{ButtonLike, Divider, DividerColor, KeyBinding, Vector, VectorName, prel
 use zed_actions::{OpenKeymap, OpenSettings, assistant::ToggleFocus, command_palette};
 
 actions!(
-    zed,
+    thock,
     [
-        /// Show the Zed welcome screen
+        /// Shows the welcome page.
+        #[action(deprecated_aliases = ["zed::ShowWelcome"])]
         ShowWelcome
     ]
 );

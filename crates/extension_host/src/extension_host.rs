@@ -255,9 +255,10 @@ pub struct ExtensionIndexLanguageEntry {
 }
 
 actions!(
-    zed,
+    thock,
     [
         /// Reloads all installed extensions.
+        #[action(deprecated_aliases = ["zed::ReloadExtensions"])]
         ReloadExtensions
     ]
 );

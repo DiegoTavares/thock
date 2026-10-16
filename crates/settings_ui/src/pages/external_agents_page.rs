@@ -256,7 +256,6 @@ pub(crate) fn render_add_agent_popover(
     window: &mut Window,
     cx: &mut Context<SettingsWindow>,
 ) -> impl IntoElement {
-    let original_window = settings_window.original_window;
     // Stable handle so the button keeps focus state across renders and can show a
     // focus ring even when the page is opened (and the button auto-focused) via a
     // mouse click, where `focus_visible` styling is suppressed.
@@ -284,18 +283,7 @@ pub(crate) fn render_add_agent_popover(
         .menu(move |window, cx| {
             let settings_window = settings_window.clone();
             Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
-                menu.entry("Install from Registry", None, move |_window, cx| {
-                    if let Some(original_window) = original_window {
-                        cx.activate(true);
-                        original_window
-                            .update(cx, |_, window, cx| {
-                                window.activate_window();
-                                window.dispatch_action(Box::new(zed_actions::AcpRegistry), cx);
-                            })
-                            .log_err();
-                    }
-                })
-                .entry("Add Custom Agent", None, move |window, cx| {
+                menu.entry("Add Custom Agent", None, move |window, cx| {
                     settings_window
                         .update(cx, |this, cx| {
                             open_custom_agent_form(this, None, window, cx);

@@ -23,10 +23,7 @@ use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, RefreshK
 use util::ResultExt;
 use workspace::WorkspaceStore;
 
-mod hang_detection;
-
 pub fn init(client: Arc<Client>, workspace_store: Entity<WorkspaceStore>, cx: &mut App) {
-    hang_detection::start(client.clone(), cx);
     start_memory_usage_logging(workspace_store, cx);
 
     cx.on_flags_ready({

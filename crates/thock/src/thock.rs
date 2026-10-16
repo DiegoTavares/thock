@@ -87,17 +87,10 @@ fn hide_inherited_zed_actions(cx: &mut App) {
         );
     }
     CommandPaletteFilter::update_global(cx, |filter, _| {
-        for namespace in ["client", "debugger", "dev", "feedback"] {
+        for namespace in ["client", "collab", "debugger", "dev", "feedback"] {
             filter.hide_namespace(namespace);
         }
-        filter.hide_action_types(&[
-            TypeId::of::<zed_actions::OpenOnboarding>(),
-            TypeId::of::<zed_actions::OpenAccountSettings>(),
-            TypeId::of::<workspace::welcome::ShowWelcome>(),
-            TypeId::of::<zed_actions::OpenStatusPage>(),
-            TypeId::of::<zed_actions::GetMerch>(),
-            TypeId::of::<zed_actions::OpenTelemetryLog>(),
-        ]);
+        filter.hide_action_types(&[TypeId::of::<workspace::welcome::ShowWelcome>()]);
     });
 }
 
@@ -246,15 +239,7 @@ mod tests {
                 filter.is_hidden(&zed_actions::feedback::FileBugReport),
                 "actions in hidden namespaces should be hidden"
             );
-            assert!(filter.is_hidden(&zed_actions::OpenOnboarding));
-            assert!(filter.is_hidden(&zed_actions::OpenAccountSettings));
             assert!(filter.is_hidden(&workspace::welcome::ShowWelcome));
-            assert!(
-                filter.is_hidden(&zed_actions::GetMerch),
-                "Zed-branded storefront and status commands should be hidden"
-            );
-            assert!(filter.is_hidden(&zed_actions::OpenStatusPage));
-            assert!(filter.is_hidden(&zed_actions::OpenTelemetryLog));
 
             assert!(
                 !filter.is_hidden(&routines_panel::OpenToday),

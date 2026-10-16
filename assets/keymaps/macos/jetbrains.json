@@ -17,8 +17,8 @@
   {
     "context": "Editor",
     "bindings": {
-      "ctrl->": ["zed::IncreaseBufferFontSize", { "persist": true }],
-      "ctrl-<": ["zed::DecreaseBufferFontSize", { "persist": true }],
+      "ctrl->": ["thock::IncreaseBufferFontSize", { "persist": true }],
+      "ctrl-<": ["thock::DecreaseBufferFontSize", { "persist": true }],
       "ctrl-shift-j": "editor::JoinLines",
       "cmd-d": "editor::DuplicateSelection",
       "cmd-backspace": "editor::DeleteLine",
