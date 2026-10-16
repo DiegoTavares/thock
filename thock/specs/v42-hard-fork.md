@@ -1,6 +1,6 @@
 # Thock V42 — Hard fork from Zed: prune what Thock never uses, own the app shell
 
-**Status:** In progress (step 3 of §9)
+**Status:** In progress (step 4 of §9)
 **Owner:** Diego · **Date:** 2026-10-15
 **Companion docs:** `v12-de-zed-ification.md` (the hide-don't-delete pass this replaces with deletion),
 `v35-app-identity.md` (bundle id and `thock://`, whose upstream-preserving rewrite this simplifies),
@@ -294,16 +294,20 @@ vault-only `project`, which is out of scope (§10).
 The list is a starting point, not a contract. A crate stays if removing it turns out to need a
 change in `crates/thock`. The PR body says which crates stayed and why.
 
-Step 3 took every crate above out of the app and deleted the thirty that nothing else used. The
-rest stay in the workspace until their last user goes: `agent`, `agent_skills`, `audio`, `codestral`,
-`copilot`, `copilot_chat`, `copilot_ui`, `edit_prediction`, `edit_prediction_ui`, `language_models`
-with its providers, `prompt_store`, `web_search`, `streaming_diff` and `eval_utils` through
-`settings_ui`, `auto_update_ui` and `agent` (step 4); `git_ui` through `project_panel`, `title_bar`
-and `vim`'s tests (step 4); `recent_projects`, `dev_container`, `remote_connection`, `remote_server`,
-`call` and `livekit_client` through `title_bar` (step 5); `dap_adapters` and
-`debug_adapter_extension` through `remote_server`. Two of them stay initialized as well:
-`agent_settings` and `audio` register settings that pages in `settings_ui` still read, and an
-unregistered setting panics on read.
+Step 3 took every crate above out of the app and deleted the thirty that nothing else used. Step 4
+cut the §5.3 edges and deleted the thirty-two that this orphaned: the whole AI and prediction stack
+(`agent`, `ai_onboarding`, `codestral`, `copilot`, `copilot_chat`, `copilot_ui`, `edit_prediction`,
+`edit_prediction_context`, `edit_prediction_metrics`, `edit_prediction_ui`, `language_models`,
+`language_models_cloud` and the provider crates `anthropic`, `bedrock`, `deepseek`, `llama_cpp`,
+`lmstudio`, `mistral`, `ollama`, `open_ai`, `open_router`, `opencode`, `x_ai`, plus `web_search`,
+`streaming_diff`, `eval_utils`, `aws_http_client`, `html_to_markdown` and `shell_command_parser`),
+and `remote_server` with `dap_adapters` and `debug_adapter_extension`, which only
+`recent_projects`'s tests still reached. What remains of the list waits for `title_bar` (step 5):
+`git_ui` (and through it `prompt_store`, `agent_skills` and `panel`), `recent_projects`,
+`dev_container`, `remote_connection`, `call`, `livekit_client`, `livekit_api` and `audio`. `vim`'s
+tests also link `git_ui`; that edge goes with the crate. `agent_settings` stays registered for good:
+`workspace` reads it to decide whether the multi-workspace sidebar exists. `audio` is no longer
+initialized, and its `default.json` section is gone with the settings page that read it.
 
 ### 5.2 Everything that referenced them
 
@@ -355,7 +359,14 @@ way the other built-in grammars are linked. No language server is registered. Th
 What a user loses is taplo's generic TOML diagnostics. `routine.toml` has no schema today, so
 nothing Thock-specific was being validated; if the vault ever wants real validation it belongs in
 `crates/thock`, which already parses the file. A user who installed the TOML extension by hand keeps
-it; PR 4 checks which grammar wins for `.toml` in that case and records the answer here.
+it, and the two `TOML` languages coexist: `LanguageRegistry` resolves a path by walking the
+available languages from the most recently registered and only replaces a candidate on a strictly
+longer suffix match, so the extension's `TOML` (registered after the built-ins) wins `.toml` files,
+while `language_for_name("TOML")` walks forward and returns the built-in. The extension's `toml`
+grammar also replaces the native one in the grammar table once it loads. Both are tree-sitter-toml
+(the extension pins `tree-sitter/tree-sitter-toml`, the app links the `tree-sitter-grammars` fork
+published as `tree-sitter-toml-ng`), so the same queries run either way. taplo still never starts,
+because `enable_language_server` is `false` for every language Thock doesn't list in `default.json`.
 
 Themes are unaffected. Bundled themes stay, user themes in `~/.config/thock/themes/` keep loading,
 and the Customize App ritual's theme section already names both. Its mention of themes "from
@@ -376,9 +387,9 @@ Upstream-only tooling with no Thock user is deleted:
   `schema_generator`, the `*_benchmarks` crates, `gpui_web`, `gpui_windows`, `windows_resources`,
   `explorer_command_injector`, `auto_update_helper`, `etw_tracing` and `aws_http_client`.
   `gpui_platform` loses its Windows and web arms. Zed's `cargo xtask` tooling (`xtask`,
-  `compliance`) goes with them. Four of the list have to wait for the crates that depend on them:
-  `eval_utils` (`agent`), `aws_http_client` and `bedrock` (`language_models`) go in step 4, and
-  `remote_server` (`recent_projects`, through `title_bar`) in step 5.
+  `compliance`) goes with them. Four of the list had to wait for the crates that depended on them:
+  `eval_utils` (`agent`), `aws_http_client` and `bedrock` (`language_models`) went in step 4, as did
+  `remote_server`, once `recent_projects`'s tests stopped linking it.
 - `script/`, down to what `ci.yml`, `release.yml`, `promote-release.yml`, the deploy workflows and
   the bundle scripts call (`bundle-mac`, `bundle-linux`, `linux`, `check-keymaps`,
   `generate-licenses`, `clippy` and their helpers under `script/lib`). The other hundred scripts
