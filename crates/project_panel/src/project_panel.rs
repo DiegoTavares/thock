@@ -17,8 +17,6 @@ use file_icons::FileIcons;
 use fs::TrashId;
 use git;
 use git::status::GitSummary;
-use git_ui;
-use git_ui::file_diff_view::FileDiffView;
 use gpui::{
     Action, AnyElement, App, AsyncWindowContext, Bounds, ClipboardEntry as GpuiClipboardEntry,
     ClipboardItem, Context, CursorStyle, DismissEvent, Div, DragMoveEvent, Entity, EventEmitter,
@@ -49,7 +47,6 @@ use settings::{
 };
 use smallvec::SmallVec;
 use std::{
-    any::TypeId,
     cell::OnceCell,
     cmp,
     collections::HashSet,
@@ -404,8 +401,6 @@ actions!(
         SelectNextDirectory,
         /// Selects the previous directory.
         SelectPrevDirectory,
-        /// Opens a diff view to compare two marked files.
-        CompareMarkedFiles,
         /// Undoes the last file operation.
         Undo,
         /// Redoes the last undone file operation.
@@ -542,50 +537,6 @@ pub fn init(cx: &mut App) {
                 panel.update(cx, |panel, cx| panel.delete(action, window, cx));
             }
         });
-
-        // Forwards `git::FileHistory` to `git_ui::git_graph` when the project
-        // panel is the focused source of selection. Lives here (and not in
-        // `git_ui`) so that `git_ui` does not need to depend on
-        // `project_panel`, which would create a dependency cycle.
-        workspace.register_action_renderer(|div, workspace, window, cx| {
-            let Some(panel) = workspace.panel::<ProjectPanel>(cx) else {
-                return div;
-            };
-            if !panel.read(cx).focus_handle(cx).contains_focused(window, cx) {
-                return div;
-            }
-            if panel.read(cx).selected_entry_project_path(cx).is_none() {
-                return div;
-            }
-            let workspace = workspace.weak_handle();
-            div.capture_action(move |_: &git::FileHistory, window, cx| {
-                workspace
-                    .update(cx, |workspace, cx| {
-                        let Some(panel) = workspace.panel::<ProjectPanel>(cx) else {
-                            return;
-                        };
-                        let Some(project_path) = panel.read(cx).selected_entry_project_path(cx)
-                        else {
-                            return;
-                        };
-                        let Some((repo_id, log_source)) =
-                            git_ui::git_graph::resolve_file_history_target_from_project_path(
-                                workspace,
-                                &project_path,
-                                cx,
-                            )
-                        else {
-                            return;
-                        };
-                        let git_store = workspace.project().read(cx).git_store().clone();
-                        git_ui::git_graph::open_or_reuse_graph(
-                            workspace, repo_id, git_store, log_source, None, window, cx,
-                        );
-                    })
-                    .log_err();
-                cx.stop_propagation();
-            })
-        });
     })
     .detach();
 }
@@ -701,17 +652,7 @@ impl ProjectPanel {
                         }
                     }
                     project::Event::ActiveEntryChanged(None) => {
-                        let is_active_item_file_diff_view = this
-                            .workspace
-                            .upgrade()
-                            .and_then(|ws| ws.read(cx).active_item(cx))
-                            .map(|item| {
-                                item.act_as_type(TypeId::of::<FileDiffView>(), cx).is_some()
-                            })
-                            .unwrap_or(false);
-                        if !is_active_item_file_diff_view {
-                            this.marked_entries.clear();
-                        }
+                        this.marked_entries.clear();
                     }
                     project::Event::RevealInProjectPanel(entry_id) => {
                         if let Some(()) = this
@@ -1099,7 +1040,6 @@ impl ProjectPanel {
             let should_hide_rename = is_root
                 && (cfg!(target_os = "windows")
                     || (settings.hide_root && visible_worktrees_count == 1));
-            let should_show_compare = !is_dir && self.file_abs_paths_to_diff(cx).is_some();
 
             let (has_git_repo, has_history) = {
                 let project_path = project::ProjectPath {
@@ -1153,10 +1093,6 @@ impl ProjectPanel {
                             })
                             .when(is_foldable, |menu| {
                                 menu.action("Fold Directory", Box::new(FoldDirectory))
-                            })
-                            .when(should_show_compare, |menu| {
-                                menu.separator()
-                                    .action("Compare Marked Files", Box::new(CompareMarkedFiles))
                             })
                             .separator()
                             .action("Cut", Box::new(Cut))
@@ -3771,50 +3707,6 @@ impl ProjectPanel {
             let worktree_id = entry.worktree_id;
             self.project
                 .update(cx, |project, cx| project.remove_worktree(worktree_id, cx));
-        }
-    }
-
-    fn file_abs_paths_to_diff(&self, cx: &Context<Self>) -> Option<(PathBuf, PathBuf)> {
-        let mut selections_abs_path = self
-            .marked_entries
-            .iter()
-            .filter_map(|entry| {
-                let project = self.project.read(cx);
-                let worktree = project.worktree_for_id(entry.worktree_id, cx)?;
-                let entry = worktree.read(cx).entry_for_id(entry.entry_id)?;
-                if !entry.is_file() {
-                    return None;
-                }
-                Some(worktree.read(cx).absolutize(&entry.path))
-            })
-            .rev();
-
-        let last_path = selections_abs_path.next()?;
-        let previous_to_last = selections_abs_path.next()?;
-        Some((previous_to_last, last_path))
-    }
-
-    fn compare_marked_files(
-        &mut self,
-        _: &CompareMarkedFiles,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let selected_files = self.file_abs_paths_to_diff(cx);
-        if let Some((file_path1, file_path2)) = selected_files {
-            self.workspace
-                .update(cx, |workspace, cx| {
-                    FileDiffView::open(
-                        file_path1,
-                        file_path2,
-                        None,
-                        workspace.weak_handle(),
-                        window,
-                        cx,
-                    )
-                    .detach_and_log_err(cx);
-                })
-                .ok();
         }
     }
 
@@ -6631,16 +6523,6 @@ impl ProjectPanel {
             cx.notify();
             return Ok(());
         }
-        let is_active_item_file_diff_view = self
-            .workspace
-            .upgrade()
-            .and_then(|ws| ws.read(cx).active_item(cx))
-            .map(|item| item.act_as_type(TypeId::of::<FileDiffView>(), cx).is_some())
-            .unwrap_or(false);
-        if is_active_item_file_diff_view {
-            return Ok(());
-        }
-
         self.expand_entry(worktree_id, entry_id, cx);
         self.update_visible_entries(Some((worktree_id, entry_id)), false, true, window, cx);
         self.marked_entries.clear();
@@ -7023,7 +6905,6 @@ impl Render for ProjectPanel {
                 .on_action(cx.listener(Self::unfold_directory))
                 .on_action(cx.listener(Self::fold_directory))
                 .on_action(cx.listener(Self::remove_from_project))
-                .on_action(cx.listener(Self::compare_marked_files))
                 .when(!project.is_read_only(cx), |el| {
                     el.on_action(cx.listener(Self::new_file))
                         .on_action(cx.listener(Self::new_directory))

@@ -568,16 +568,6 @@
     // The layout of window control buttons in the title bar (Linux only).
     "button_layout": "platform_default",
   },
-  "audio": {
-    // Select specific output audio device.
-    // `null` means use system default.
-    // Any unrecognized output device will fall back to system default.
-    "experimental.output_audio_device": null,
-    // Select specific input audio device.
-    // `null` means use system default.
-    // Any unrecognized input device will fall back to system default.
-    "experimental.input_audio_device": null,
-  },
   // Scrollbar related settings
   "scrollbar": {
     // When to show the scrollbar in the editor.
@@ -2149,10 +2139,9 @@
   // If you don't want any of these extensions, add this field to your settings
   // and change the value to `false`.
   "auto_install_extensions": {
-    // Thock: TOML powers routine.toml editing; html has no place in a vault
+    // Thock: TOML is built into the app (V42), and html has no place in a vault
     // (V12 de-Zed-ification).
     "html": false,
-    "toml": true,
   },
   // The capabilities granted to extensions.
   //
@@ -2425,10 +2414,6 @@
         "plugins": ["prettier-plugin-svelte"],
       },
     },
-    "TOML": {
-      // Thock: routine.toml is a first-class file (V12 de-Zed-ification).
-      "enable_language_server": true,
-    },
     "TSX": {
       "language_servers": ["!typescript-language-server", "vtsls", "..."],
       "prettier": {
@@ -2477,49 +2462,6 @@
       "format_on_save": "on",
       "language_servers": ["zls", "..."],
     },
-  },
-  // Different settings for specific language models.
-  "language_models": {
-    "anthropic": {
-      "api_url": "https://api.anthropic.com",
-    },
-    "anthropic_compatible": {},
-    "bedrock": {},
-    "google": {
-      "api_url": "https://generativelanguage.googleapis.com",
-    },
-    "ollama": {
-      "api_url": "http://localhost:11434",
-    },
-    "llama.cpp": {
-      "api_url": "http://localhost:8080",
-    },
-    "openai": {
-      "api_url": "https://api.openai.com/v1",
-    },
-    "openai_compatible": {},
-    "opencode": {
-      "api_url": "https://opencode.ai/zen",
-    },
-    "open_router": {
-      "api_url": "https://openrouter.ai/api/v1",
-    },
-    "lmstudio": {
-      "api_url": "http://localhost:1234/api/v0",
-    },
-    "deepseek": {
-      "api_url": "https://api.deepseek.com/v1",
-    },
-    "mistral": {
-      "api_url": "https://api.mistral.ai/v1",
-    },
-    "vercel_ai_gateway": {
-      "api_url": "https://ai-gateway.vercel.sh/v1",
-    },
-    "x_ai": {
-      "api_url": "https://api.x.ai/v1",
-    },
-    "zed.dev": {},
   },
   "session": {
     // Whether or not to restore unsaved buffers on restart.

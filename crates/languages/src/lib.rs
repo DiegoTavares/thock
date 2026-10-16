@@ -210,6 +210,12 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
             adapters: vec![yaml_lsp_adapter],
             ..Default::default()
         },
+        // Thock: routine.toml is a first-class vault file, so TOML ships with the
+        // app instead of arriving through the extension store (V42 §5.4).
+        LanguageInfo {
+            name: "toml",
+            ..Default::default()
+        },
         LanguageInfo {
             name: "gitcommit",
             ..Default::default()
