@@ -5320,6 +5320,14 @@ mod tests {
                 .unwrap();
         }
         cx.run_until_parked();
+
+        // Thock: TOML is built in (V42 §5.4), so routine.toml highlights with
+        // no extension installed and no network.
+        let toml = languages.language_for_name("TOML").await.unwrap();
+        let routine_toml = languages
+            .language_for_file_path(Path::new("routines/finance/routine.toml"))
+            .expect("routine.toml resolves to a bundled language");
+        assert_eq!(routine_toml, toml.id());
     }
 
     pub(crate) fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {

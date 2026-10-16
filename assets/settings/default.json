@@ -2149,10 +2149,9 @@
   // If you don't want any of these extensions, add this field to your settings
   // and change the value to `false`.
   "auto_install_extensions": {
-    // Thock: TOML powers routine.toml editing; html has no place in a vault
+    // Thock: TOML is built into the app (V42), and html has no place in a vault
     // (V12 de-Zed-ification).
     "html": false,
-    "toml": true,
   },
   // The capabilities granted to extensions.
   //
@@ -2424,10 +2423,6 @@
         "allowed": true,
         "plugins": ["prettier-plugin-svelte"],
       },
-    },
-    "TOML": {
-      // Thock: routine.toml is a first-class file (V12 de-Zed-ification).
-      "enable_language_server": true,
     },
     "TSX": {
       "language_servers": ["!typescript-language-server", "vtsls", "..."],
