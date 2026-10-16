@@ -856,17 +856,17 @@ fn register_actions(
                 }
             }
         })
-        .register_action(|_, _: &install_cli::RegisterZedScheme, window, cx| {
+        .register_action(|_, _: &install_cli::RegisterUrlScheme, window, cx| {
             cx.spawn_in(window, async move |workspace, cx| {
-                install_cli::register_zed_scheme(cx).await?;
+                install_cli::register_url_scheme(cx).await?;
                 workspace.update_in(cx, |workspace, _, cx| {
-                    struct RegisterZedScheme;
+                    struct RegisterUrlScheme;
 
                     workspace.show_toast(
                         Toast::new(
-                            NotificationId::unique::<RegisterZedScheme>(),
+                            NotificationId::unique::<RegisterUrlScheme>(),
                             format!(
-                                "zed:// links will now open in {}.",
+                                "thock:// links will now open in {}.",
                                 ReleaseChannel::global(cx).display_name()
                             ),
                         ),
@@ -876,7 +876,7 @@ fn register_actions(
                 Ok(())
             })
             .detach_and_prompt_err(
-                "Error registering zed:// scheme",
+                "Error registering thock:// scheme",
                 window,
                 cx,
                 |_, _, _| None,

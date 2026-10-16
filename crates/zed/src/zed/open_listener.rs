@@ -83,30 +83,25 @@ impl OpenRequest {
         this.open_behavior = request.open_behavior;
 
         for url in request.urls {
-            // Thock registers `thock://` with the OS; every handler below speaks `zed://`.
-            let url = match url.strip_prefix("thock://") {
-                Some(rest) => format!("zed://{rest}"),
-                None => url,
-            };
-            if let Some(server_name) = url.strip_prefix("zed-cli://") {
+            if let Some(server_name) = url.strip_prefix("thock-cli://") {
                 this.kind = Some(OpenRequestKind::CliConnection(connect_to_cli(server_name)?));
-            } else if let Some(action_index) = url.strip_prefix("zed-dock-action://") {
+            } else if let Some(action_index) = url.strip_prefix("thock-dock-action://") {
                 this.kind = Some(OpenRequestKind::DockMenuAction {
                     index: action_index.parse()?,
                 });
             } else if let Some(file) = url.strip_prefix("file://") {
                 this.parse_file_path(file)
-            } else if let Some(file) = url.strip_prefix("zed://file") {
+            } else if let Some(file) = url.strip_prefix("thock://file") {
                 this.parse_file_path(file)
-            } else if url == "zed://" || url == "zed://open" || url == "zed://open/" {
+            } else if url == "thock://" || url == "thock://open" || url == "thock://open/" {
                 this.kind = Some(OpenRequestKind::FocusApp);
-            } else if let Some(schema_path) = url.strip_prefix("zed://schemas/") {
+            } else if let Some(schema_path) = url.strip_prefix("thock://schemas/") {
                 this.kind = Some(OpenRequestKind::BuiltinJsonSchema {
                     schema_path: schema_path.to_string(),
                 });
-            } else if url == "zed://settings" || url == "zed://settings/" {
+            } else if url == "thock://settings" || url == "thock://settings/" {
                 this.kind = Some(OpenRequestKind::Setting { setting_path: None });
-            } else if let Some(setting_path) = url.strip_prefix("zed://settings/") {
+            } else if let Some(setting_path) = url.strip_prefix("thock://settings/") {
                 this.kind = Some(OpenRequestKind::Setting {
                     setting_path: Some(setting_path.to_string()),
                 });
@@ -155,7 +150,7 @@ pub fn listen_for_cli_connections(opener: OpenListener) -> Result<()> {
     use release_channel::RELEASE_CHANNEL_NAME;
     use std::os::unix::net::UnixDatagram;
 
-    let sock_path = paths::data_dir().join(format!("zed-{}.sock", *RELEASE_CHANNEL_NAME));
+    let sock_path = paths::data_dir().join(format!("thock-{}.sock", *RELEASE_CHANNEL_NAME));
     // remove the socket if the process listening on it has died
     if let Err(e) = UnixDatagram::unbound()?.connect(&sock_path)
         && e.kind() == std::io::ErrorKind::ConnectionRefused
@@ -895,7 +890,7 @@ mod tests {
     fn test_parse_focus_app_url(cx: &mut TestAppContext) {
         let _app_state = init_test(cx);
 
-        for url in ["zed://", "zed://open", "zed://open/"] {
+        for url in ["thock://", "thock://open", "thock://open/"] {
             let request = cx.update(|cx| {
                 OpenRequest::parse(
                     RawOpenRequest {
@@ -921,37 +916,37 @@ mod tests {
     #[gpui::test]
     fn test_parse_thock_scheme_urls(cx: &mut TestAppContext) {
         let _app_state = init_test(cx);
+        let parse = |url: &str, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                OpenRequest::parse(
+                    RawOpenRequest {
+                        urls: vec![url.to_string()],
+                        ..Default::default()
+                    },
+                    cx,
+                )
+                .unwrap()
+            })
+        };
 
-        let zed_urls = [
-            "zed://".to_string(),
-            "zed://settings/theme".to_string(),
-            "zed://file/tmp/note.md".to_string(),
-        ];
+        let request = parse("thock://settings/theme", cx);
+        assert!(
+            matches!(
+                &request.kind,
+                Some(OpenRequestKind::Setting { setting_path: Some(path) }) if path.as_str() == "theme"
+            ),
+            "got {:?}",
+            request.kind
+        );
 
-        for zed_url in zed_urls {
-            let thock_url = zed_url.replacen("zed://", "thock://", 1);
-            let parse = |url: String, cx: &mut TestAppContext| {
-                cx.update(|cx| {
-                    OpenRequest::parse(
-                        RawOpenRequest {
-                            urls: vec![url],
-                            ..Default::default()
-                        },
-                        cx,
-                    )
-                    .unwrap()
-                })
-            };
-            let expected = parse(zed_url.clone(), cx);
-            let actual = parse(thock_url.clone(), cx);
-            assert!(expected.kind.is_some() || !expected.open_paths.is_empty());
-            assert_eq!(
-                format!("{:?}", actual.kind),
-                format!("{:?}", expected.kind),
-                "{thock_url} should parse like {zed_url}"
-            );
-            assert_eq!(actual.open_paths, expected.open_paths, "{thock_url}");
-        }
+        let request = parse("thock://file/tmp/note.md", cx);
+        assert_eq!(request.open_paths, vec!["/tmp/note.md".to_string()]);
+
+        // `zed://` stopped being accepted in V42 (§6.2). The OS never hands
+        // one to Thock, and a stray one must not open anything.
+        let request = parse("zed://settings/theme", cx);
+        assert!(request.kind.is_none(), "got {:?}", request.kind);
+        assert!(request.open_paths.is_empty());
     }
 
     #[gpui::test]

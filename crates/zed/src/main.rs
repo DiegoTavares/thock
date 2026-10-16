@@ -14,7 +14,7 @@ const _: () = assert!(
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use cli::FORCE_CLI_MODE_ENV_VAR_NAME;
-use client::{Client, ProxySettings, UserStore, parse_zed_link};
+use client::{Client, ProxySettings, UserStore};
 use collections::HashMap;
 use crashes::InitCrashHandler;
 use db::kvp::{GlobalKeyValueStore, KeyValueStore};
@@ -847,7 +847,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                                     .project()
                                     .update(cx, |project, _| project.lsp_store())
                             })?;
-                            let uri = format!("zed://schemas/{}", schema_path);
+                            let uri = format!("thock://schemas/{}", schema_path);
                             let json_schema_content =
                                 json_schema_store::handle_schema_request(lsp_store, uri, cx)
                                     .await?;
@@ -896,8 +896,8 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                 });
             }
             OpenRequestKind::Setting { setting_path } => {
-                // zed://settings/languages/$(language)/tab_size  - DONT SUPPORT
-                // zed://settings/languages/Rust/tab_size  - SUPPORT
+                // thock://settings/languages/$(language)/tab_size  - DONT SUPPORT
+                // thock://settings/languages/Rust/tab_size  - SUPPORT
                 // languages.$(language).tab_size
                 // [ languages $(language) tab_size]
                 cx.spawn(async move |cx| {
@@ -1232,7 +1232,7 @@ struct Args {
     /// Use `path:line:row` syntax to open a file at a specific location.
     /// Non-existing paths and directories will ignore `:line:row` suffix.
     ///
-    /// URLs can either be `file://` or `zed://` scheme, or relative to <https://zed.dev>.
+    /// URLs can use the `file://` or `thock://` scheme.
     paths_or_urls: Vec<String>,
 
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
@@ -1288,16 +1288,13 @@ impl ToString for IdType {
     }
 }
 
-fn parse_url_arg(arg: &str, cx: &App) -> String {
+fn parse_url_arg(arg: &str, _cx: &App) -> String {
     match std::fs::canonicalize(Path::new(&arg)) {
         Ok(path) => format!("file://{}", path.display()),
         Err(_) => {
             if arg.starts_with("file://")
-                || arg.starts_with("zed://")
                 || arg.starts_with("thock://")
-                || arg.starts_with("zed-cli://")
-                || arg.starts_with("ssh://")
-                || parse_zed_link(arg, cx).is_some()
+                || arg.starts_with("thock-cli://")
             {
                 arg.into()
             } else {
