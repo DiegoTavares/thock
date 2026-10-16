@@ -16,10 +16,6 @@ doctest = false
 name = "cli"
 path = "src/main.rs"
 
-[features]
-no-bundled-uninstall = []
-default = []
-
 [dependencies]
 anyhow.workspace = true
 askpass.workspace = true
@@ -37,7 +33,6 @@ serde.workspace = true
 util.workspace = true
 tempfile.workspace = true
 rayon.workspace = true
-walkdir = "2.5"
 
 [dev-dependencies]
 serde_json.workspace = true
@@ -51,6 +46,3 @@ fork.workspace = true
 core-foundation.workspace = true
 core-services = "0.2"
 plist = "1.3"
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows.workspace = true

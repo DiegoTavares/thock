@@ -2,10 +2,7 @@
     clippy::disallowed_methods,
     reason = "We are not in an async environment, so std::process::Command is fine"
 )]
-#![cfg_attr(
-    any(target_os = "linux", target_os = "freebsd", target_os = "windows"),
-    allow(dead_code)
-)]
+#![cfg_attr(any(target_os = "linux", target_os = "freebsd"), allow(dead_code))]
 
 mod completions;
 
@@ -16,7 +13,6 @@ use clap::{CommandFactory, Parser};
 use cli::{CliRequest, CliResponse, IpcHandshake, ipc::IpcOneShotServer};
 use parking_lot::Mutex;
 use std::{
-    collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsStr,
     fs, io,
@@ -25,9 +21,8 @@ use std::{
     sync::Arc,
     thread::{self, JoinHandle},
 };
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::NamedTempFile;
 use util::paths::PathWithPosition;
-use walkdir::WalkDir;
 
 use std::io::IsTerminal;
 
@@ -36,7 +31,7 @@ const URL_PREFIX: [&'static str; 2] = ["thock://", "file://"];
 struct Detect;
 
 trait InstalledApp {
-    fn zed_version_string(&self) -> String;
+    fn version_string(&self) -> String;
     fn launch(&self, ipc_url: String, user_data_dir: Option<&str>) -> anyhow::Result<()>;
     fn run_foreground(
         &self,
@@ -48,21 +43,21 @@ trait InstalledApp {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "zed",
+    name = "thock",
     disable_version_flag = true,
-    before_help = "The Zed CLI binary.
-This CLI is a separate binary that invokes Zed.
+    before_help = "The Thock command line.
+This CLI is a separate binary that opens Thock.
 
 Examples:
-    `zed`
-          Simply opens Zed
-    `zed --foreground`
+    `thock`
+          Simply opens Thock
+    `thock --foreground`
           Runs in foreground (shows all logs)
-    `zed path-to-your-project`
-          Open your project in Zed
-    `zed -n path-to-file `
+    `thock path-to-your-vault`
+          Open your vault in Thock
+    `thock -n path-to-file `
           Open file/folder in a new window",
-    after_help = "To read from stdin, append '-', e.g. 'ps axf | zed -'"
+    after_help = "To read from stdin, append '-', e.g. 'ps axf | thock -'"
 )]
 struct Args {
     /// Wait for all of the given paths to be opened/closed before exiting.
@@ -79,7 +74,7 @@ struct Args {
     /// Reuse an existing window, replacing its workspace
     #[arg(short, long, overrides_with_all = ["add", "new", "existing", "classic"], hide = true)]
     reuse: bool,
-    /// Open in existing Zed window
+    /// Open in existing Thock window
     #[arg(short = 'e', long = "existing", overrides_with_all = ["add", "new", "reuse", "classic"])]
     existing: bool,
     /// Use the classic open behavior: new window for directories, reuse for files
@@ -87,70 +82,34 @@ struct Args {
     classic: bool,
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     /// This overrides the default platform-specific data directory location:
-    #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Zed`.")]
-    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\Zed`.")]
-    #[cfg_attr(
-        not(any(target_os = "windows", target_os = "macos")),
-        doc = "`$XDG_DATA_HOME/zed`."
-    )]
+    #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Thock`.")]
+    #[cfg_attr(not(target_os = "macos"), doc = "`$XDG_DATA_HOME/thock`.")]
     #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     user_data_dir: Option<String>,
-    /// The paths to open in Zed (space-separated).
+    /// The paths to open in Thock (space-separated).
     ///
     /// Use `path:line:column` syntax to open a file at the given line and column.
     #[arg(trailing_var_arg = true, value_hint = clap::ValueHint::AnyPath)]
     paths_with_position: Vec<String>,
-    /// Print Zed's version and the app path.
+    /// Print Thock's version and the app path.
     #[arg(short, long)]
     version: bool,
-    /// Run zed in the foreground (useful for debugging)
+    /// Run Thock in the foreground (useful for debugging)
     #[arg(long)]
     foreground: bool,
-    /// Custom path to Zed.app or the zed binary
+    /// Custom path to Thock.app or the thock binary
     #[arg(long)]
-    zed: Option<PathBuf>,
-    /// Run zed in dev-server mode
-    #[arg(long)]
-    dev_server_token: Option<String>,
-    /// The username and WSL distribution to use when opening paths. If not specified,
-    /// Zed will attempt to open the paths directly.
-    ///
-    /// The username is optional, and if not specified, the default user for the distribution
-    /// will be used.
-    ///
-    /// Example: `me@Ubuntu` or `Ubuntu`.
-    ///
-    /// WARN: You should not fill in this field by hand.
-    #[cfg(target_os = "windows")]
-    #[arg(long, value_name = "USER@DISTRO")]
-    wsl: Option<String>,
-    /// Not supported in Zed CLI, only supported on Zed binary
+    app: Option<PathBuf>,
+    /// Not supported in the Thock CLI, only on the Thock binary.
     /// Will attempt to give the correct command to run
     #[arg(long)]
     system_specs: bool,
-    /// Open the project in a dev container.
-    ///
-    /// Automatically triggers "Reopen in Dev Container" if a `.devcontainer/`
-    /// configuration is found in the project directory.
-    #[arg(long)]
-    dev_container: bool,
-    /// Pairs of file paths to diff. Can be specified multiple times.
-    /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.
-    #[arg(long, action = clap::ArgAction::Append, num_args = 2, value_names = ["OLD_PATH", "NEW_PATH"], value_hint = clap::ValueHint::AnyPath)]
-    diff: Vec<String>,
-    /// Generate shell completions for Zed
+    /// Generate shell completions for Thock
     #[arg(long, value_names = ["SHELL"])]
     completions: Option<Shell>,
-    /// Uninstall Zed from user system
-    #[cfg(all(
-        any(target_os = "linux", target_os = "macos"),
-        not(feature = "no-bundled-uninstall")
-    ))]
-    #[arg(long)]
-    uninstall: bool,
 
     /// Used for SSH/Git password authentication, to remove the need for netcat as a dependency,
-    /// by having Zed act like netcat communicating over a Unix socket.
+    /// by having Thock act like netcat communicating over a Unix socket.
     #[arg(long, hide = true)]
     askpass: Option<String>,
 }
@@ -161,7 +120,7 @@ struct Args {
 /// If a part of path doesn't exist, it will canonicalize the
 /// existing part and append the non-existing part.
 ///
-/// This method must return an absolute path, as many zed
+/// This method must return an absolute path, as many Thock
 /// crates assume absolute paths.
 fn parse_path_with_position(argument_str: &str) -> anyhow::Result<String> {
     match Path::new(argument_str).canonicalize() {
@@ -200,111 +159,6 @@ fn parse_path_with_position(argument_str: &str) -> anyhow::Result<String> {
         }),
     }
     .map(|path_with_pos| path_with_pos.to_string(&|path| path.to_string_lossy().into_owned()))
-}
-
-/// Returns whether a `--diff` argument refers to an existing path, allowing a
-/// trailing `:line:column` suffix (parsed later by the Zed side, matching how
-/// regular `zed path:line:column` arguments are handled).
-fn diff_path_exists(diff_path: &str) -> bool {
-    Path::new(diff_path).exists() || PathWithPosition::parse_str(diff_path).path.exists()
-}
-
-fn expand_directory_diff_pairs(
-    diff_pairs: Vec<[String; 2]>,
-) -> anyhow::Result<(Vec<[String; 2]>, Vec<TempDir>)> {
-    let mut expanded = Vec::new();
-    let mut temp_dirs = Vec::new();
-
-    for pair in diff_pairs {
-        let left = PathBuf::from(&pair[0]);
-        let right = PathBuf::from(&pair[1]);
-
-        if left.is_dir() && right.is_dir() {
-            let (mut pairs, temp_dir) = expand_directory_pair(&left, &right)?;
-            expanded.append(&mut pairs);
-            if let Some(temp_dir) = temp_dir {
-                temp_dirs.push(temp_dir);
-            }
-        } else {
-            expanded.push(pair);
-        }
-    }
-
-    Ok((expanded, temp_dirs))
-}
-
-fn expand_directory_pair(
-    left: &Path,
-    right: &Path,
-) -> anyhow::Result<(Vec<[String; 2]>, Option<TempDir>)> {
-    let left_files = collect_files(left)?;
-    let right_files = collect_files(right)?;
-
-    let mut rel_paths = BTreeSet::new();
-    rel_paths.extend(left_files.keys().cloned());
-    rel_paths.extend(right_files.keys().cloned());
-
-    let mut temp_dir = TempDir::new()?;
-    let mut temp_dir_used = false;
-    let mut pairs = Vec::new();
-
-    for rel in rel_paths {
-        match (left_files.get(&rel), right_files.get(&rel)) {
-            (Some(left_path), Some(right_path)) => {
-                pairs.push([
-                    left_path.to_string_lossy().into_owned(),
-                    right_path.to_string_lossy().into_owned(),
-                ]);
-            }
-            (Some(left_path), None) => {
-                let stub = create_empty_stub(&mut temp_dir, &rel)?;
-                temp_dir_used = true;
-                pairs.push([
-                    left_path.to_string_lossy().into_owned(),
-                    stub.to_string_lossy().into_owned(),
-                ]);
-            }
-            (None, Some(right_path)) => {
-                let stub = create_empty_stub(&mut temp_dir, &rel)?;
-                temp_dir_used = true;
-                pairs.push([
-                    stub.to_string_lossy().into_owned(),
-                    right_path.to_string_lossy().into_owned(),
-                ]);
-            }
-            (None, None) => {}
-        }
-    }
-
-    let temp_dir = if temp_dir_used { Some(temp_dir) } else { None };
-    Ok((pairs, temp_dir))
-}
-
-fn collect_files(root: &Path) -> anyhow::Result<BTreeMap<PathBuf, PathBuf>> {
-    let mut files = BTreeMap::new();
-
-    for entry in WalkDir::new(root) {
-        let entry = entry?;
-        if entry.file_type().is_file() {
-            let rel = entry
-                .path()
-                .strip_prefix(root)
-                .context("stripping directory prefix")?
-                .to_path_buf();
-            files.insert(rel, entry.into_path());
-        }
-    }
-
-    Ok(files)
-}
-
-fn create_empty_stub(temp_dir: &mut TempDir, rel: &Path) -> anyhow::Result<PathBuf> {
-    let stub_path = temp_dir.path().join(rel);
-    if let Some(parent) = stub_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::File::create(&stub_path)?;
-    Ok(stub_path)
 }
 
 #[cfg(test)]
@@ -429,51 +283,6 @@ mod tests {
     }
 }
 
-fn parse_path_in_wsl(source: &str, wsl: &str) -> Result<String> {
-    let mut source = PathWithPosition::parse_str(source);
-
-    let (user, distro_name) = if let Some((user, distro)) = wsl.split_once('@') {
-        if user.is_empty() {
-            anyhow::bail!("user is empty in wsl argument");
-        }
-        (Some(user), distro)
-    } else {
-        (None, wsl)
-    };
-
-    let mut args = vec!["--distribution", distro_name];
-    if let Some(user) = user {
-        args.push("--user");
-        args.push(user);
-    }
-
-    let command = [
-        OsStr::new("realpath"),
-        OsStr::new("-s"),
-        source.path.as_ref(),
-    ];
-
-    let output = util::command::new_std_command("wsl.exe")
-        .args(&args)
-        .arg("--exec")
-        .args(&command)
-        .output()?;
-    let result = if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).to_string()
-    } else {
-        let fallback = util::command::new_std_command("wsl.exe")
-            .args(&args)
-            .arg("--")
-            .args(&command)
-            .output()?;
-        String::from_utf8_lossy(&fallback.stdout).to_string()
-    };
-
-    source.path = Path::new(result.trim()).to_owned();
-
-    Ok(source.to_string(&|path| path.to_string_lossy().into_owned()))
-}
-
 fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error:#}");
@@ -485,24 +294,6 @@ fn run() -> Result<()> {
     #[cfg(unix)]
     util::prevent_root_execution();
 
-    // Exit flatpak sandbox if needed
-    #[cfg(target_os = "linux")]
-    {
-        flatpak::try_restart_to_host();
-        flatpak::ld_extra_libs();
-    }
-
-    // Intercept version designators
-    #[cfg(target_os = "macos")]
-    if let Some(channel) = std::env::args().nth(1).filter(|arg| arg.starts_with("--")) {
-        // When the first argument is a name of a release channel, we're going to spawn off the CLI of that version, with trailing args passed along.
-        use std::str::FromStr as _;
-
-        if let Ok(channel) = release_channel::ReleaseChannel::from_str(&channel[2..]) {
-            return mac_os::spawn_channel_cli(channel, std::env::args().skip(2).collect());
-        }
-    }
-
     // Must happen before clap — SSH invokes cli.exe directly as SSH_ASKPASS
     // and passes the socket path via env var to avoid argument parsing.
     if let Ok(socket) = std::env::var("ZED_ASKPASS_SOCKET") {
@@ -512,7 +303,7 @@ fn run() -> Result<()> {
 
     let args = Args::parse();
 
-    // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
+    // `thock --askpass` makes the CLI operate in nc/netcat mode for use with askpass
     if let Some(socket) = &args.askpass {
         askpass::main(socket);
         return Ok(());
@@ -524,10 +315,7 @@ fn run() -> Result<()> {
         paths::set_custom_data_dir(dir);
     }
 
-    #[cfg(target_os = "linux")]
-    let args = flatpak::set_bin_if_no_escape(args);
-
-    let app = Detect::detect(args.zed.as_deref()).context("Bundle detection")?;
+    let app = Detect::detect(args.app.as_deref()).context("Bundle detection")?;
 
     if let Some(shell) = &args.completions {
         let file_path = std::env::current_exe()?;
@@ -544,45 +332,22 @@ fn run() -> Result<()> {
     }
 
     if args.version {
-        println!("{}", app.zed_version_string());
+        println!("{}", app.version_string());
         return Ok(());
     }
 
     if args.system_specs {
         let path = app.path();
         let msg = [
-            "The `--system-specs` argument is not supported in the Zed CLI, only on Zed binary.",
+            "The `--system-specs` argument is not supported in the Thock CLI, only on the Thock binary.",
             "To retrieve the system specs on the command line, run the following command:",
             &format!("{} --system-specs", path.display()),
         ];
         anyhow::bail!(msg.join("\n"));
     }
 
-    #[cfg(all(
-        any(target_os = "linux", target_os = "macos"),
-        not(feature = "no-bundled-uninstall")
-    ))]
-    if args.uninstall {
-        static UNINSTALL_SCRIPT: &[u8] = include_bytes!("../../../script/uninstall.sh");
-
-        let tmp_dir = tempfile::tempdir()?;
-        let script_path = tmp_dir.path().join("uninstall.sh");
-        fs::write(&script_path, UNINSTALL_SCRIPT)?;
-
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
-
-        let status = std::process::Command::new("sh")
-            .arg(&script_path)
-            .env("ZED_CHANNEL", &*release_channel::RELEASE_CHANNEL_NAME)
-            .status()
-            .context("Failed to execute uninstall script")?;
-
-        std::process::exit(status.code().unwrap_or(1));
-    }
-
     let (server, server_name) =
-        IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Zed spawn")?;
+        IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Thock spawn")?;
     let url = format!("thock-cli://{server_name}");
 
     let open_behavior = if args.new {
@@ -604,7 +369,7 @@ fn run() -> Result<()> {
         {
             use collections::HashMap;
 
-            // On Linux, the desktop entry uses `cli` to spawn `zed`.
+            // On Linux, the desktop entry uses `cli` to spawn `thock`.
             // We need to handle env vars correctly since std::env::vars() may not contain
             // project-specific vars (e.g. those set by direnv).
             // By setting env to None here, the LSP will use worktree env vars instead,
@@ -616,14 +381,7 @@ fn run() -> Result<()> {
             }
         }
 
-        #[cfg(target_os = "windows")]
-        {
-            // On Windows, by default, a child process inherits a copy of the environment block of the parent process.
-            // So we don't need to pass env vars explicitly.
-            None
-        }
-
-        #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "windows")))]
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         {
             use collections::HashMap;
 
@@ -634,42 +392,8 @@ fn run() -> Result<()> {
     let exit_status = Arc::new(Mutex::new(None));
     let mut paths = vec![];
     let mut urls = vec![];
-    let mut diff_paths = vec![];
     let mut stdin_tmp_file: Option<fs::File> = None;
     let mut anonymous_fd_tmp_files = vec![];
-
-    // Check if any diff paths are directories to determine diff_all mode
-    let diff_all_mode = args
-        .diff
-        .chunks(2)
-        .any(|pair| Path::new(&pair[0]).is_dir() || Path::new(&pair[1]).is_dir());
-
-    for path in args.diff.chunks(2) {
-        let left = parse_path_with_position(&path[0])?;
-        let right = parse_path_with_position(&path[1])?;
-        for diff_path in [&left, &right] {
-            anyhow::ensure!(
-                diff_path_exists(diff_path),
-                "--diff path does not exist: {diff_path}"
-            );
-        }
-        diff_paths.push([left, right]);
-    }
-
-    let (expanded_diff_paths, temp_dirs) = expand_directory_diff_pairs(diff_paths)?;
-    diff_paths = expanded_diff_paths;
-    // Prevent automatic cleanup of temp directories containing empty stub files
-    // for directory diffs. The CLI process may exit before Zed has read these
-    // files (e.g., when RPC-ing into an already-running instance). The files
-    // live in the OS temp directory and will be cleaned up on reboot.
-    for temp_dir in temp_dirs {
-        let _ = temp_dir.keep();
-    }
-
-    #[cfg(target_os = "windows")]
-    let wsl = args.wsl.as_ref();
-    #[cfg(not(target_os = "windows"))]
-    let wsl = None;
 
     for path in args.paths_with_position.iter() {
         if URL_PREFIX.iter().any(|&prefix| path.starts_with(prefix)) {
@@ -684,17 +408,10 @@ fn run() -> Result<()> {
             paths.push(tmp_file.path().to_string_lossy().into_owned());
             let (tmp_file, _) = tmp_file.keep()?;
             anonymous_fd_tmp_files.push((file, tmp_file));
-        } else if let Some(wsl) = wsl {
-            urls.push(format!("file://{}", parse_path_in_wsl(path, wsl)?));
         } else {
             paths.push(parse_path_with_position(path)?);
         }
     }
-
-    anyhow::ensure!(
-        args.dev_server_token.is_none(),
-        "Dev servers were removed in v0.157.x please upgrade to SSH remoting: https://zed.dev/docs/remote-development"
-    );
 
     rayon::ThreadPoolBuilder::new()
         .num_threads(4)
@@ -709,25 +426,16 @@ fn run() -> Result<()> {
             let exit_status = exit_status.clone();
             let user_data_dir_for_thread = user_data_dir.clone();
             move || {
-                let (_, handshake) = server.accept().context("Handshake after Zed spawn")?;
+                let (_, handshake) = server.accept().context("Handshake after Thock spawn")?;
                 let (tx, rx) = (handshake.requests, handshake.responses);
-
-                #[cfg(target_os = "windows")]
-                let wsl = args.wsl;
-                #[cfg(not(target_os = "windows"))]
-                let wsl = None;
 
                 let open_request = CliRequest::Open {
                     paths,
                     urls,
-                    diff_paths,
-                    diff_all: diff_all_mode,
-                    wsl,
                     wait: args.wait,
                     open_behavior,
                     env,
                     user_data_dir: user_data_dir_for_thread,
-                    dev_container: args.dev_container,
                     cwd: env::current_dir().ok(),
                 };
 
@@ -835,13 +543,13 @@ fn anonymous_fd(path: &str) -> Option<fs::File> {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
     {
         _ = path;
-        // not implemented for bsd, windows. Could be, but isn't yet
+        // not implemented for other BSDs. Could be, but isn't yet
         None
     }
 }
 
 /// Shows an interactive prompt asking the user to choose the default open
-/// behavior for `zed <path>`. Returns `None` if the prompt cannot be shown
+/// behavior for `thock <path>`. Returns `None` if the prompt cannot be shown
 /// (e.g. stdin is not a terminal) or the user cancels.
 fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     if !std::io::stdin().is_terminal() {
@@ -851,16 +559,16 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     let blue = console::Style::new().blue();
     let items = [
         format!(
-            "Add to existing Zed window ({})",
-            blue.apply_to("zed --existing")
+            "Add to existing Thock window ({})",
+            blue.apply_to("thock --existing")
         ),
-        format!("Open a new window ({})", blue.apply_to("zed --classic")),
+        format!("Open a new window ({})", blue.apply_to("thock --classic")),
     ];
 
     let prompt = format!(
         "Configure default behavior for {}\n{}",
-        blue.apply_to("zed <path>"),
-        console::style("You can change this later in Zed settings"),
+        blue.apply_to("thock <path>"),
+        console::style("You can change this later in Thock settings"),
     );
 
     let selection = dialoguer::Select::new()
@@ -906,10 +614,13 @@ mod linux {
                 let cli = env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
-                // ./zed is for the target directory in development builds.
-                let possible_locations =
-                    ["../libexec/zed-editor", "../lib/zed/zed-editor", "./zed"];
+                // libexec is the standard, lib/thock is for Arch (and other non-libexec distros),
+                // ./thock is for the target directory in development builds.
+                let possible_locations = [
+                    "../libexec/thock-editor",
+                    "../lib/thock/thock-editor",
+                    "./thock",
+                ];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -923,9 +634,9 @@ mod linux {
     }
 
     impl InstalledApp for App {
-        fn zed_version_string(&self) -> String {
+        fn version_string(&self) -> String {
             format!(
-                "Zed {}{}{} – {}",
+                "Thock {}{}{} – {}",
                 if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
                     "".to_string()
                 } else {
@@ -1026,241 +737,6 @@ mod linux {
     }
 }
 
-#[cfg(target_os = "linux")]
-mod flatpak {
-    use std::ffi::OsString;
-    use std::path::PathBuf;
-    use std::process::Command;
-    use std::{env, process};
-
-    const EXTRA_LIB_ENV_NAME: &str = "ZED_FLATPAK_LIB_PATH";
-    const NO_ESCAPE_ENV_NAME: &str = "ZED_FLATPAK_NO_ESCAPE";
-
-    /// Adds bundled libraries to LD_LIBRARY_PATH if running under flatpak
-    pub fn ld_extra_libs() {
-        let mut paths = if let Ok(paths) = env::var("LD_LIBRARY_PATH") {
-            env::split_paths(&paths).collect()
-        } else {
-            Vec::new()
-        };
-
-        if let Ok(extra_path) = env::var(EXTRA_LIB_ENV_NAME) {
-            paths.push(extra_path.into());
-        }
-
-        unsafe { env::set_var("LD_LIBRARY_PATH", env::join_paths(paths).unwrap()) };
-    }
-
-    /// Restarts outside of the sandbox if currently running within it
-    pub fn try_restart_to_host() {
-        if let Some(flatpak_dir) = get_flatpak_dir() {
-            let mut args = vec!["/usr/bin/flatpak-spawn".into(), "--host".into()];
-            args.append(&mut get_xdg_env_args());
-            args.push("--env=ZED_UPDATE_EXPLANATION=Please use flatpak to update zed".into());
-            args.push(
-                format!(
-                    "--env={EXTRA_LIB_ENV_NAME}={}",
-                    flatpak_dir.join("lib").to_str().unwrap()
-                )
-                .into(),
-            );
-            args.push(flatpak_dir.join("bin").join("zed").into());
-
-            let mut is_app_location_set = false;
-            for arg in &env::args_os().collect::<Vec<_>>()[1..] {
-                args.push(arg.clone());
-                is_app_location_set |= arg == "--zed";
-            }
-
-            if !is_app_location_set {
-                args.push("--zed".into());
-                args.push(flatpak_dir.join("libexec").join("zed-editor").into());
-            }
-
-            let error = exec::execvp("/usr/bin/flatpak-spawn", args);
-            eprintln!("failed restart cli on host: {:?}", error);
-            process::exit(1);
-        }
-    }
-
-    pub fn set_bin_if_no_escape(mut args: super::Args) -> super::Args {
-        if env::var(NO_ESCAPE_ENV_NAME).is_ok()
-            && env::var("FLATPAK_ID").is_ok_and(|id| id.starts_with("dev.zed.Zed"))
-            && args.zed.is_none()
-        {
-            args.zed = Some("/app/libexec/zed-editor".into());
-            unsafe { env::set_var("ZED_UPDATE_EXPLANATION", "Please use flatpak to update zed") };
-        }
-        args
-    }
-
-    fn get_flatpak_dir() -> Option<PathBuf> {
-        if env::var(NO_ESCAPE_ENV_NAME).is_ok() {
-            return None;
-        }
-
-        if let Ok(flatpak_id) = env::var("FLATPAK_ID") {
-            if !flatpak_id.starts_with("dev.zed.Zed") {
-                return None;
-            }
-
-            let install_dir = Command::new("/usr/bin/flatpak-spawn")
-                .arg("--host")
-                .arg("flatpak")
-                .arg("info")
-                .arg("--show-location")
-                .arg(flatpak_id)
-                .output()
-                .unwrap();
-            let install_dir = PathBuf::from(String::from_utf8(install_dir.stdout).unwrap().trim());
-            Some(install_dir.join("files"))
-        } else {
-            None
-        }
-    }
-
-    fn get_xdg_env_args() -> Vec<OsString> {
-        let xdg_keys = [
-            "XDG_DATA_HOME",
-            "XDG_CONFIG_HOME",
-            "XDG_CACHE_HOME",
-            "XDG_STATE_HOME",
-        ];
-        env::vars()
-            .filter(|(key, _)| xdg_keys.contains(&key.as_str()))
-            .map(|(key, val)| format!("--env=FLATPAK_{}={}", key, val).into())
-            .collect()
-    }
-}
-
-#[cfg(target_os = "windows")]
-mod windows {
-    use anyhow::Context;
-    use release_channel::app_identifier;
-    use windows::{
-        Win32::{
-            Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GENERIC_WRITE, GetLastError},
-            Storage::FileSystem::{
-                CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, OPEN_EXISTING, WriteFile,
-            },
-            System::Threading::CreateMutexW,
-        },
-        core::HSTRING,
-    };
-
-    use crate::{Detect, InstalledApp};
-    use std::io;
-    use std::path::{Path, PathBuf};
-    use std::process::{ExitStatus, Stdio};
-
-    fn check_single_instance() -> bool {
-        let mutex = unsafe {
-            CreateMutexW(
-                None,
-                false,
-                &HSTRING::from(format!("{}-Instance-Mutex", app_identifier())),
-            )
-            .expect("Unable to create instance sync event")
-        };
-        let last_err = unsafe { GetLastError() };
-        let _ = unsafe { CloseHandle(mutex) };
-        last_err != ERROR_ALREADY_EXISTS
-    }
-
-    struct App(PathBuf);
-
-    impl InstalledApp for App {
-        fn zed_version_string(&self) -> String {
-            format!(
-                "Zed {}{}{} – {}",
-                if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
-                    "".to_string()
-                } else {
-                    format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
-                },
-                option_env!("RELEASE_VERSION").unwrap_or_default(),
-                match option_env!("ZED_COMMIT_SHA") {
-                    Some(commit_sha) => format!(" {commit_sha} "),
-                    None => "".to_string(),
-                },
-                self.0.display(),
-            )
-        }
-
-        fn launch(&self, ipc_url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
-            if check_single_instance() {
-                let mut cmd = std::process::Command::new(self.0.clone());
-                cmd.arg(ipc_url);
-                if let Some(dir) = user_data_dir {
-                    cmd.arg("--user-data-dir").arg(dir);
-                }
-                cmd.stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                cmd.spawn()?;
-            } else {
-                unsafe {
-                    let pipe = CreateFileW(
-                        &HSTRING::from(format!("\\\\.\\pipe\\{}-Named-Pipe", app_identifier())),
-                        GENERIC_WRITE.0,
-                        FILE_SHARE_MODE::default(),
-                        None,
-                        OPEN_EXISTING,
-                        FILE_FLAGS_AND_ATTRIBUTES::default(),
-                        None,
-                    )?;
-                    let message = ipc_url.as_bytes();
-                    let mut bytes_written = 0;
-                    WriteFile(pipe, Some(message), Some(&mut bytes_written), None)?;
-                    CloseHandle(pipe)?;
-                }
-            }
-            Ok(())
-        }
-
-        fn run_foreground(
-            &self,
-            ipc_url: String,
-            user_data_dir: Option<&str>,
-        ) -> io::Result<ExitStatus> {
-            let mut cmd = std::process::Command::new(self.0.clone());
-            cmd.arg(ipc_url).arg("--foreground");
-            if let Some(dir) = user_data_dir {
-                cmd.arg("--user-data-dir").arg(dir);
-            }
-            cmd.spawn()?.wait()
-        }
-
-        fn path(&self) -> PathBuf {
-            self.0.clone()
-        }
-    }
-
-    impl Detect {
-        pub fn detect(path: Option<&Path>) -> anyhow::Result<impl InstalledApp> {
-            let path = if let Some(path) = path {
-                path.to_path_buf().canonicalize()?
-            } else {
-                let cli = std::env::current_exe()?;
-                let dir = cli.parent().context("no parent path for cli")?;
-
-                // ../Zed.exe is the standard, lib/zed is for MSYS2, ./zed.exe is for the target
-                // directory in development builds.
-                let possible_locations = ["../Zed.exe", "../lib/zed/zed-editor.exe", "./zed.exe"];
-                possible_locations
-                    .iter()
-                    .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
-                    .context(format!(
-                        "could not find any of: {}",
-                        possible_locations.join(", ")
-                    ))?
-            };
-
-            Ok(App(path))
-        }
-    }
-}
-
 #[cfg(target_os = "macos")]
 mod mac_os {
     use anyhow::{Context as _, Result};
@@ -1344,8 +820,8 @@ mod mac_os {
     }
 
     impl InstalledApp for Bundle {
-        fn zed_version_string(&self) -> String {
-            format!("Zed {} – {}", self.version(), self.path().display(),)
+        fn version_string(&self) -> String {
+            format!("Thock {} – {}", self.version(), self.path().display(),)
         }
 
         fn launch(&self, url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
@@ -1381,7 +857,7 @@ mod mac_os {
                     anyhow::ensure!(
                         status == 0,
                         "cannot start app bundle {}",
-                        self.zed_version_string()
+                        self.version_string()
                     );
                 }
 
@@ -1390,7 +866,7 @@ mod mac_os {
                         .parent()
                         .with_context(|| format!("Executable {executable:?} path has no parent"))?;
                     let subprocess_stdout_file = fs::File::create(
-                        executable_parent.join("zed_dev.log"),
+                        executable_parent.join("thock_dev.log"),
                     )
                     .with_context(|| format!("Log file creation in {executable_parent:?}"))?;
                     let subprocess_stdin_file =
@@ -1456,31 +932,5 @@ mod mac_os {
                 Self::LocalPath { executable, .. } => executable,
             }
         }
-    }
-
-    pub(super) fn spawn_channel_cli(
-        channel: release_channel::ReleaseChannel,
-        leftover_args: Vec<String>,
-    ) -> Result<()> {
-        use anyhow::bail;
-
-        let app_path_prompt = format!(
-            "POSIX path of (path to application \"{}\")",
-            channel.display_name()
-        );
-        let app_path_output = Command::new("osascript")
-            .arg("-e")
-            .arg(&app_path_prompt)
-            .output()?;
-        if !app_path_output.status.success() {
-            bail!(
-                "Could not determine app path for {}",
-                channel.display_name()
-            );
-        }
-        let app_path = String::from_utf8(app_path_output.stdout)?.trim().to_owned();
-        let cli_path = format!("{app_path}/Contents/MacOS/cli");
-        Command::new(cli_path).args(leftover_args).spawn()?;
-        Ok(())
     }
 }
