@@ -107,7 +107,7 @@ Measured on the step 5 branch the same way as §3 and §3.1.
 |---|---|---|
 | Workspace members | 249 | 153 |
 | Compiled into the app, Linux x86_64 | 206 | 149 |
-| Compiled into the app, macOS arm64 | 206 | MACOS_CLOSURE |
+| Compiled into the app, macOS arm64 | 206 | 149 |
 | Incremental `cargo build -p thock_app -j 2` after touching `crates/thock`, Linux dev machine | 23 s (`-j 4`) | INCREMENTAL_BUILD |
 | CI wall time on the PR: Clippy / Test (ubuntu) / App | 6 / 5 / – min | CI_TIMES |
 | Release bundle size and release build time | 109 MB / 124 MB; 101 / 74 min | measured on the v1.20.0 release (decision 20) |
