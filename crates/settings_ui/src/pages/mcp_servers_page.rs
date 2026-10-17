@@ -4,7 +4,7 @@ use collections::HashMap;
 use context_server::ContextServerId;
 use editor::Editor;
 use extension_host::ExtensionStore;
-use gpui::{Action as _, Entity, Focusable as _, ScrollHandle, WeakEntity, prelude::*};
+use gpui::{Entity, Focusable as _, ScrollHandle, WeakEntity, prelude::*};
 use project::context_server_store::{
     ContextServerConfiguration, ContextServerStatus, ContextServerStore,
 };
@@ -15,8 +15,6 @@ use ui::{
     Switch, ToggleState, Tooltip, prelude::*,
 };
 use util::ResultExt as _;
-
-use zed_actions::ExtensionCategoryFilter;
 
 use crate::{PROJECT, SettingField, SettingItem, SettingsPageItem, SettingsWindow, USER};
 
@@ -528,7 +526,6 @@ pub(crate) fn render_add_server_popover(
     window: &mut Window,
     cx: &mut Context<SettingsWindow>,
 ) -> impl IntoElement {
-    let original_window = settings_window.original_window;
     // Stable handle so the button keeps focus state across renders and can show a
     // focus ring even when the page is opened (and the button auto-focused) via a
     // mouse click, where `focus_visible` styling is suppressed.
@@ -579,7 +576,6 @@ pub(crate) fn render_add_server_popover(
                         }
                     })
                     .entry("Add Remote Server", None, {
-                        let settings_window = settings_window.clone();
                         move |window, cx| {
                             settings_window
                                 .update(cx, |this, cx| {
@@ -592,29 +588,6 @@ pub(crate) fn render_add_server_popover(
                                     );
                                 })
                                 .log_err();
-                        }
-                    })
-                    .separator()
-                    .entry("Install from Extensions", None, {
-                        move |_window, cx| {
-                            if let Some(original_window) = original_window.as_ref() {
-                                cx.activate(true);
-                                original_window
-                                    .update(cx, |_, window, cx| {
-                                        window.activate_window();
-                                        window.dispatch_action(
-                                            zed_actions::Extensions {
-                                                category_filter: Some(
-                                                    ExtensionCategoryFilter::ContextServers,
-                                                ),
-                                                id: None,
-                                            }
-                                            .boxed_clone(),
-                                            cx,
-                                        );
-                                    })
-                                    .log_err();
-                            }
                         }
                     })
                 }))

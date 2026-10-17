@@ -118,11 +118,11 @@ jobs:
           key: clippy
           cache-all-crates: true
 
-      # Thock lives in `crates/thock` and `crates/thock-sync-core`; `crates/zed`
-      # is the only upstream crate the fork registers into, so together they
-      # cover the whole delta.
+      # Thock lives in `crates/thock` and `crates/thock-sync-core`; `crates/thock_app`
+      # is the shell that registers them, and `crates/cli` is the `thock` command,
+      # which only the bundle scripts build otherwise.
       - name: cargo clippy
-        run: cargo clippy -p thock -p thock_sync_core -p zed --all-targets -- --deny warnings
+        run: cargo clippy -p thock -p thock_sync_core -p thock_app -p cli --all-targets -- --deny warnings
 
   test:
     name: Test (${{ matrix.os }})

@@ -482,12 +482,7 @@ impl Render for SystemWindowTabs {
                             .icon_size(IconSize::Small)
                             .icon_color(Color::Muted)
                             .on_click(|_event, window, cx| {
-                                window.dispatch_action(
-                                    Box::new(zed_actions::OpenRecent {
-                                        create_new_window: Some(true),
-                                    }),
-                                    cx,
-                                );
+                                window.dispatch_action(Box::new(workspace::NewWindow), cx);
                             }),
                     ),
             )

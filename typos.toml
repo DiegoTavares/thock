@@ -24,7 +24,6 @@ extend-exclude = [
     "crates/json_schema_store/src/schemas/",
 
     # Not our typos.
-    "crates/livekit_api/",
     # Vim makes heavy use of partial typing tables.
     "crates/vim/",
     # Editor, file finder, and fuzzy matching rely on partial typing and custom in-string syntax.
@@ -54,7 +53,6 @@ extend-exclude = [
     # Spellcheck triggers on `|Fixe[sd]|` regex part.
     "script/danger/dangerfile.ts",
     # File type extensions are not typos
-    "crates/zed/resources/windows/zed.iss",
     # typos-cli doesn't understand our `vˇariable` markup
     "crates/editor/src/hover_links.rs",
     # typos-cli doesn't understand `setis` is intentional test case

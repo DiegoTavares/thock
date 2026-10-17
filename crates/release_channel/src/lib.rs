@@ -12,10 +12,15 @@ const ZED_DOCS_URL: &str = "https://zed.dev/docs";
 /// stable | dev | nightly | preview
 pub static RELEASE_CHANNEL_NAME: LazyLock<String> = LazyLock::new(|| {
     if cfg!(debug_assertions) {
-        env::var("ZED_RELEASE_CHANNEL")
-            .unwrap_or_else(|_| include_str!("../../zed/RELEASE_CHANNEL").trim().to_string())
+        env::var("ZED_RELEASE_CHANNEL").unwrap_or_else(|_| {
+            include_str!("../../thock_app/RELEASE_CHANNEL")
+                .trim()
+                .to_string()
+        })
     } else {
-        include_str!("../../zed/RELEASE_CHANNEL").trim().to_string()
+        include_str!("../../thock_app/RELEASE_CHANNEL")
+            .trim()
+            .to_string()
     }
 });
 
@@ -210,7 +215,7 @@ impl ReleaseChannel {
 
     /// Returns the application ID that's used by Wayland as application ID
     /// and WM_CLASS on X11.
-    /// This also has to match the macOS bundle identifier in `crates/zed/Cargo.toml`.
+    /// This also has to match the macOS bundle identifier in `crates/thock_app/Cargo.toml`.
     pub fn app_id(&self) -> &'static str {
         match self {
             ReleaseChannel::Dev => "com.thethock.Thock-Dev",
@@ -272,14 +277,18 @@ mod tests {
 
     #[test]
     fn app_id_matches_bundle_identifier() {
-        let manifest_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../zed/Cargo.toml");
+        let manifest_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../thock_app/Cargo.toml");
         let manifest: toml::Table = std::fs::read_to_string(manifest_path)
-            .expect("read crates/zed/Cargo.toml")
+            .expect("read crates/thock_app/Cargo.toml")
             .parse()
-            .expect("parse crates/zed/Cargo.toml");
+            .expect("parse crates/thock_app/Cargo.toml");
         let metadata = &manifest["package"]["metadata"];
 
-        for channel in ReleaseChannel::ALL {
+        // Thock ships no nightly channel, so the manifest has no bundle for it.
+        for channel in ReleaseChannel::ALL
+            .into_iter()
+            .filter(|channel| *channel != ReleaseChannel::Nightly)
+        {
             let section_name = format!("bundle-{}", channel.dev_name());
             let bundle = metadata
                 .get(&section_name)

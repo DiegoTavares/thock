@@ -38,7 +38,7 @@ use util::{
 };
 use workspace::{Item, SaveIntent, Workspace, notifications::NotifyResultExt};
 use workspace::{SplitDirection, notifications::DetachAndPromptErr};
-use zed_actions::{OpenDocs, RevealTarget};
+use zed_actions::RevealTarget;
 
 use crate::{
     ToggleMarksView, ToggleRegistersView, Vim, VimSettings,
@@ -1773,9 +1773,7 @@ fn generate_commands(_: &App) -> Vec<VimCommand> {
         VimCommand::str(("Ve", "xplore"), "project_panel::ToggleFocus"),
         VimCommand::str(("te", "rm"), "terminal_panel::Toggle"),
         VimCommand::str(("T", "erm"), "terminal_panel::Toggle"),
-        VimCommand::str(("C", "ollab"), "collab_panel::ToggleFocus"),
         VimCommand::str(("A", "I"), "agent::ToggleFocus"),
-        VimCommand::str(("G", "it"), "git_panel::ToggleFocus"),
         VimCommand::str(("D", "ebug"), "debug_panel::ToggleFocus"),
         VimCommand::new(("noh", "lsearch"), search::buffer_search::Dismiss),
         VimCommand::new(("$", ""), EndOfDocument),
@@ -1785,7 +1783,6 @@ fn generate_commands(_: &App) -> Vec<VimCommand> {
         VimCommand::new(("cpp", "link"), editor::actions::CopyPermalinkToLine).range(act_on_range),
         VimCommand::str(("opt", "ions"), "zed::OpenDefaultSettings"),
         VimCommand::str(("map", ""), "vim::OpenDefaultKeymap"),
-        VimCommand::new(("h", "elp"), OpenDocs),
     ]
 }
 

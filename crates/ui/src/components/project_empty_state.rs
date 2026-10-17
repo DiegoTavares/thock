@@ -1,4 +1,4 @@
-use crate::{Divider, DividerColor, KeyBinding, prelude::*};
+use crate::{KeyBinding, prelude::*};
 use gpui::{ClickEvent, FocusHandle};
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -9,7 +9,6 @@ pub struct ProjectEmptyState {
     focus_handle: FocusHandle,
     open_project_key_binding: KeyBinding,
     on_open_project: Option<ClickHandler>,
-    on_clone_repo: Option<ClickHandler>,
 }
 
 impl ProjectEmptyState {
@@ -23,7 +22,6 @@ impl ProjectEmptyState {
             focus_handle,
             open_project_key_binding,
             on_open_project: None,
-            on_clone_repo: None,
         }
     }
 
@@ -32,14 +30,6 @@ impl ProjectEmptyState {
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_open_project = Some(Box::new(handler));
-        self
-    }
-
-    pub fn on_clone_repo(
-        mut self,
-        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
-        self.on_clone_repo = Some(Box::new(handler));
         self
     }
 }
@@ -72,20 +62,6 @@ impl RenderOnce for ProjectEmptyState {
                             .full_width()
                             .key_binding(self.open_project_key_binding)
                             .when_some(self.on_open_project, |button, handler| {
-                                button.on_click(handler)
-                            }),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(Divider::horizontal().color(DividerColor::Border))
-                            .child(Label::new("or").size(LabelSize::XSmall).color(Color::Muted))
-                            .child(Divider::horizontal().color(DividerColor::Border)),
-                    )
-                    .child(
-                        Button::new("clone_repo", "Clone Repository")
-                            .full_width()
-                            .when_some(self.on_clone_repo, |button, handler| {
                                 button.on_click(handler)
                             }),
                     ),

@@ -37,7 +37,7 @@ suites_for() {
     thock/ios/*) echo ios ;;
     .github/*) echo workflows ;;
     crates/thock/*) echo rust ;;
-    crates/zed/* | assets/keymaps/* | assets/settings/*) echo app ;;
+    crates/thock_app/* | crates/cli/* | assets/keymaps/* | assets/settings/*) echo app ;;
     *.md | thock/specs/* | legal/*) ;;
     Cargo.lock | Cargo.toml | rust-toolchain.toml) echo rust; echo app; echo sync-core ;;
     *) echo rust ;;
@@ -64,12 +64,13 @@ run_rust() {
 }
 
 # The app shell's own tests, among them the guard that every bundled keymap
-# binding names a registered action. CI runs this suite on Linux only.
+# binding names a registered action, and the CLI binary, which nothing else
+# builds. CI runs this suite on Linux only.
 run_app() {
   if cargo nextest --version >/dev/null 2>&1; then
-    cargo nextest run -p zed --no-fail-fast "$@"
+    cargo nextest run -p thock_app -p cli --no-fail-fast "$@"
   else
-    cargo test -p zed "$@"
+    cargo test -p thock_app -p cli "$@"
   fi
 }
 

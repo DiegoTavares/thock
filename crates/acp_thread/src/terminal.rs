@@ -131,8 +131,7 @@ impl LinuxWslSandboxError {
     }
 
     /// The slug of the sandboxing docs section that best explains how to resolve
-    /// this failure, for deep-linking from the UI. Pair with
-    /// `client::zed_urls::sandboxing_docs`.
+    /// this failure, for deep-linking from the UI.
     pub fn docs_section(&self) -> &'static str {
         match self {
             // Both "no bwrap" and "only a setuid-root bwrap" are resolved by

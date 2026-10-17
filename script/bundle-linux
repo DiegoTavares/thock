@@ -51,15 +51,15 @@ export ZED_BUNDLE=true
 # pre-set value has to be written through to the file before the build.
 if [[ -n "${ZED_RELEASE_CHANNEL:-}" ]]; then
     channel="${ZED_RELEASE_CHANNEL}"
-    if [[ "${channel}" != "$(<crates/zed/RELEASE_CHANNEL)" ]]; then
-        echo "${channel}" > crates/zed/RELEASE_CHANNEL
+    if [[ "${channel}" != "$(<crates/thock_app/RELEASE_CHANNEL)" ]]; then
+        echo "${channel}" > crates/thock_app/RELEASE_CHANNEL
     fi
 else
-    channel=$(<crates/zed/RELEASE_CHANNEL)
+    channel=$(<crates/thock_app/RELEASE_CHANNEL)
 fi
 target_dir="${CARGO_TARGET_DIR:-target}"
 
-version="$(script/get-crate-version zed)"
+version="$(script/get-crate-version thock_app)"
 # Set RELEASE_VERSION so it's compiled into GPUI and it knows about the version.
 export RELEASE_VERSION="${version}"
 
@@ -75,7 +75,6 @@ script/generate-licenses
 export CC=${CC:-$(which clang)}
 
 # Build binary in release mode
-# We need lld to link libwebrtc.a successfully on aarch64-linux.
 # NOTE: Since RUSTFLAGS env var overrides all .cargo/config.toml rustflags
 # (see https://github.com/rust-lang/cargo/issues/5376), the
 # [target.aarch64-unknown-linux-gnu] section in config.toml has no effect here.
@@ -84,36 +83,9 @@ if [[ "$(uname -m)" == "aarch64" ]]; then
 else
     export RUSTFLAGS="${RUSTFLAGS:-} -C link-args=-Wl,--disable-new-dtags,-rpath,\$ORIGIN/../lib"
 fi
-cargo build --release --target "${target_triple}" --package zed --package cli
+cargo build --release --target "${target_triple}" --package thock_app --package cli
 
-# Upload debug info to sentry.io
-if ! command -v sentry-cli >/dev/null 2>&1; then
-    echo "sentry-cli not found. skipping sentry upload."
-    echo "install with: 'curl -sL https://sentry.io/get-cli | bash'"
-else
-    if [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
-        echo "Uploading zed debug symbols to sentry..."
-        # note: this uploads the unstripped binary which is needed because it contains
-        # .eh_frame data for stack unwinding. see https://github.com/getsentry/symbolic/issues/783
-        for attempt in 1 2 3; do
-            echo "Attempting sentry upload (attempt $attempt/3)..."
-            if sentry-cli debug-files upload --include-sources --wait -p zed -o zed-dev \
-                "${target_dir}/${target_triple}"/release/thock; then
-                echo "Sentry upload successful on attempt $attempt"
-                break
-            else
-                echo "Sentry upload failed on attempt $attempt"
-                if [ $attempt -eq 3 ]; then
-                    echo "All sentry upload attempts failed"
-                fi
-            fi
-        done
-    else
-        echo "missing SENTRY_AUTH_TOKEN. skipping sentry upload."
-    fi
-fi
-
-# Strip debug symbols and save them for upload to DigitalOcean.
+# Strip debug symbols.
 # We use llvm-objcopy because GNU objcopy on older distros (e.g. Ubuntu 20.04)
 # doesn't understand CREL sections produced by newer LLVM.
 llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/thock"
@@ -151,9 +123,9 @@ cp $(find_libs) "${app_dir}/lib"
 # Icons
 icon_suffix="$suffix"
 mkdir -p "${app_dir}/share/icons/hicolor/512x512/apps"
-cp "crates/zed/resources/app-icon$icon_suffix.png" "${app_dir}/share/icons/hicolor/512x512/apps/thock.png"
+cp "crates/thock_app/resources/app-icon$icon_suffix.png" "${app_dir}/share/icons/hicolor/512x512/apps/thock.png"
 mkdir -p "${app_dir}/share/icons/hicolor/1024x1024/apps"
-cp "crates/zed/resources/app-icon$icon_suffix@2x.png" "${app_dir}/share/icons/hicolor/1024x1024/apps/thock.png"
+cp "crates/thock_app/resources/app-icon$icon_suffix@2x.png" "${app_dir}/share/icons/hicolor/1024x1024/apps/thock.png"
 
 # .desktop
 # APP_ID has to keep matching `ReleaseChannel::app_id`, which Wayland and X11
@@ -165,8 +137,6 @@ export APP_ARGS="%U"
 export APP_NAME="Thock"
 if [[ "$channel" == "preview" ]]; then
   APP_ID="com.thethock.Thock-Preview"
-elif [[ "$channel" == "nightly" ]]; then
-  APP_ID="com.thethock.Thock-Nightly"
 elif [[ "$channel" == "dev" ]]; then
   APP_ID="com.thethock.Thock-Dev"
 else
@@ -174,7 +144,7 @@ else
 fi
 
 mkdir -p "${app_dir}/share/applications"
-envsubst < "crates/zed/resources/zed.desktop.in" > "${app_dir}/share/applications/$APP_ID.desktop"
+envsubst < "crates/thock_app/resources/thock.desktop.in" > "${app_dir}/share/applications/$APP_ID.desktop"
 chmod +x "${app_dir}/share/applications/$APP_ID.desktop"
 
 # Copy generated licenses so they'll end up in archive too
