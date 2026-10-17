@@ -85,11 +85,13 @@ else
 fi
 cargo build --release --target "${target_triple}" --package thock_app --package cli
 
-# Strip debug symbols.
+# Split debug symbols into a local .dbg file, then strip debug info and local
+# symbols from the shipped binaries. The .dbg file keeps symbols recoverable.
 # We use llvm-objcopy because GNU objcopy on older distros (e.g. Ubuntu 20.04)
 # doesn't understand CREL sections produced by newer LLVM.
-llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/thock"
-llvm-objcopy --strip-debug "${target_dir}/${target_triple}/release/cli"
+llvm-objcopy --only-keep-debug "${target_dir}/${target_triple}/release/thock" "${target_dir}/${target_triple}/release/thock.dbg"
+llvm-objcopy --strip-debug --discard-all "${target_dir}/${target_triple}/release/thock"
+llvm-objcopy --strip-debug --discard-all "${target_dir}/${target_triple}/release/cli"
 
 suffix=""
 if [ "$channel" != "stable" ]; then
