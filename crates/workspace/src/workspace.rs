@@ -12256,6 +12256,14 @@ mod tests {
     #[gpui::test]
     async fn test_failed_close_window_resets_removing(cx: &mut TestAppContext) {
         init_test(cx);
+        // The default autosave saves dirty items on close instead of prompting.
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |settings, cx| {
+                settings.update_user_settings(cx, |settings| {
+                    settings.workspace.autosave = Some(AutosaveSetting::Off);
+                })
+            });
+        });
 
         let fs = FakeFs::new(cx.executor());
         let project = Project::test(fs, None, cx).await;
