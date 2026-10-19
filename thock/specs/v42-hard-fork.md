@@ -568,11 +568,11 @@ Each PR's body records crate counts before and after, and each pruning PR is pre
 measurements in §3.2; bundle size and release build time wait for the v1.20.0 release (decision 20).
 
 Step 6 landed as PR #143. The range `97d854b89b5b..v1.24.3` held 1117 upstream commits: 216 only
-touched deleted crates, 5 were already carried, and 896 were triaged. 199 were ported (196
-cherry-picked, 3 hand-ported) in seven groups by file ownership, with six Thock-side commits for
-defaults and tests (a vault is indexed whole: `file_scan_depth` is 0, because upstream's new default
-of 5 applies to any folder without `.git`). The review closed with `Upstream-Reviewed-Through:
-2a857f5f2ec368745c1af5209d49836968fe75b8`.
+touched deleted crates, 5 were already carried, and 896 were triaged. 200 were ported (197
+cherry-picked, 3 hand-ported) in seven groups by file ownership, with nine Thock-side commits for
+defaults, tests and small fixes (a vault is indexed whole: `file_scan_depth` is 0, because
+upstream's new default of 5 applies to any folder without `.git`). The review closed with
+`Upstream-Reviewed-Through: 2a857f5f2ec368745c1af5209d49836968fe75b8`.
 
 ## 10. Not in this spec
 
