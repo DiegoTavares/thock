@@ -30,6 +30,8 @@ file = "backlog.md"          # the Soon / Someday / Completed holding pen
 # [markdown]
 # conceal = true             # hide markup while the cursor is off the line
 # email_view = true          # render synced email notes as conversations
+# body_font = "IBM Plex Sans" # the face notes are set in; "buffer" uses your editor font
+# heading_font = "Petrona"   # the face of # and ## headings; "body" uses the body font
 
 # [images]
 # dir = "images"             # where every picture a note links is kept
@@ -401,6 +403,10 @@ struct MarkdownConfigContent {
     conceal: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     email_view: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_font: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heading_font: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -475,31 +481,49 @@ impl Default for ImagesConfig {
 
 impl MarkdownConfigContent {
     fn resolve(self) -> MarkdownConfig {
+        let defaults = MarkdownConfig::default();
         MarkdownConfig {
-            conceal: self.conceal.unwrap_or(true),
-            email_view: self.email_view.unwrap_or(true),
+            conceal: self.conceal.unwrap_or(defaults.conceal),
+            email_view: self.email_view.unwrap_or(defaults.email_view),
+            body_font: self.body_font.unwrap_or(defaults.body_font),
+            heading_font: self.heading_font.unwrap_or(defaults.heading_font),
         }
     }
 
     fn is_unset(&self) -> bool {
-        self.conceal.is_none() && self.email_view.is_none()
+        self.conceal.is_none()
+            && self.email_view.is_none()
+            && self.body_font.is_none()
+            && self.heading_font.is_none()
     }
 }
 
 /// The `[markdown]` table: whether Markdown markup in vault notes is hidden
-/// while the cursor is off the line (spec V10 §9), and whether synced email
-/// notes render with the email view (spec V16 §4). Both default to on.
+/// while the cursor is off the line (spec V10 §9), whether synced email
+/// notes render with the email view (spec V16 §4), and the faces a
+/// concealed note is set in (V43 §7.1): `body_font` for the text, or
+/// `"buffer"` for the editor's own font, and `heading_font` for `#` and
+/// `##` headings, or `"body"` for the body face.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarkdownConfig {
     pub conceal: bool,
     pub email_view: bool,
+    pub body_font: String,
+    pub heading_font: String,
 }
+
+/// The `body_font` value that keeps the editor's own font.
+pub const BODY_FONT_BUFFER: &str = "buffer";
+/// The `heading_font` value that draws headings in the body face.
+pub const HEADING_FONT_BODY: &str = "body";
 
 impl Default for MarkdownConfig {
     fn default() -> Self {
         Self {
             conceal: true,
             email_view: true,
+            body_font: "IBM Plex Sans".to_string(),
+            heading_font: "Petrona".to_string(),
         }
     }
 }
@@ -1385,9 +1409,30 @@ mod tests {
             }
             other => panic!("expected valid vault, got {other:?}"),
         }
-        // An absent section means the defaults: concealed, email view on.
-        assert!(VaultConfig::default().markdown.conceal);
-        assert!(VaultConfig::default().markdown.email_view);
+        // An absent section means the defaults: concealed, email view on,
+        // Plex Sans body and Petrona headings.
+        let defaults = VaultConfig::default().markdown;
+        assert!(defaults.conceal);
+        assert!(defaults.email_view);
+        assert_eq!(defaults.body_font, "IBM Plex Sans");
+        assert_eq!(defaults.heading_font, "Petrona");
+
+        fs::write(
+            marker.join(VAULT_CONFIG_FILE),
+            "schema = 1\n[markdown]\nbody_font = \"buffer\"\nheading_font = \"body\"\n",
+        )
+        .unwrap();
+        match Vault::detect(dir.path()) {
+            VaultStatus::Valid(vault) => {
+                assert_eq!(vault.config.markdown.body_font, BODY_FONT_BUFFER);
+                assert_eq!(vault.config.markdown.heading_font, HEADING_FONT_BODY);
+                assert!(
+                    vault.config.markdown.conceal,
+                    "the other keys keep their defaults"
+                );
+            }
+            other => panic!("expected valid vault, got {other:?}"),
+        }
     }
 
     #[test]

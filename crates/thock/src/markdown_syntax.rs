@@ -66,6 +66,14 @@ pub enum SpanKind {
     /// The `src` of an image line, read by the editor to place the picture.
     /// Neither folded nor coloured on its own.
     ImageSource,
+    /// A journal entry's leading `HH:MM`, before a ` · ` (V43 §7.3), drawn
+    /// in the accent colour; the ` · ` stays visible.
+    JournalTime,
+    /// A task's leading `HH:MM - HH:MM` or `HH:MM`, as the Day Planner reads
+    /// it, drawn in the calendar colour.
+    TaskTime,
+    /// The ` - ` between a task's two times, drawn as an en dash.
+    TimeDash,
 }
 
 /// A byte range of the scanned text and how it should display.
@@ -237,6 +245,59 @@ fn closes_fence(line: &str, marker: u8, length: usize) -> bool {
     run >= length && rest[run..].iter().all(|byte| byte.is_ascii_whitespace())
 }
 
+/// A journal entry's time: a line-leading `HH:MM` followed by ` · ` (the
+/// V33 §9 convention), returned as the range of the time alone.
+fn journal_time(line: &str) -> Option<Range<usize>> {
+    let (_, rest) = crate::day_plan::parse_time_prefix(line)?;
+    rest.starts_with(" · ").then(|| 0..line.len() - rest.len())
+}
+
+/// A task's leading time token, read with the Day Planner's own parser so
+/// the editor and the panel agree on what is a time: the whole token takes
+/// `TaskTime`, and a `-` between its two times (with the spaces around it)
+/// takes `TimeDash`.
+fn push_task_time_spans(
+    line: &str,
+    after_checkbox: usize,
+    line_start: usize,
+    spans: &mut Vec<ConcealSpan>,
+) {
+    let Some(text) = line.get(after_checkbox..) else {
+        return;
+    };
+    let indent = text.len() - text.trim_start_matches([' ', '\t']).len();
+    let token_start = after_checkbox + indent;
+    let token = &line[token_start..];
+    let Some((_, after_start)) = crate::day_plan::parse_time_prefix(token) else {
+        return;
+    };
+    let start_len = token.len() - after_start.len();
+    let mut token_len = start_len;
+    let mut dash = None;
+    if let Some((_, after_end)) = crate::day_plan::parse_range_end(after_start) {
+        token_len = token.len() - after_end.len();
+        let between = &token[start_len..token_len];
+        let leading = between.len() - between.trim_start().len();
+        if let Some(after_hyphen) = between[leading..].strip_prefix('-') {
+            let trailing = after_hyphen.len() - after_hyphen.trim_start().len();
+            dash = Some(start_len..start_len + leading + 1 + trailing);
+        }
+    }
+    // A time with no space before the label is not a time to the planner.
+    let after_token = &token[token_len..];
+    if !after_token.is_empty() && !after_token.starts_with([' ', '\t']) {
+        return;
+    }
+    let base = line_start + token_start;
+    spans.push(ConcealSpan::new(base..base + token_len, SpanKind::TaskTime));
+    if let Some(dash) = dash {
+        spans.push(ConcealSpan::new(
+            base + dash.start..base + dash.end,
+            SpanKind::TimeDash,
+        ));
+    }
+}
+
 /// `^ {0,3}_{3,}[ \t]*$` — the one thematic-break form V10 conceals. `---`
 /// is ambiguous with front matter and setext underlines and `***` is rare,
 /// so they stay visible (spec §3).
@@ -309,18 +370,31 @@ fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
         ));
         inline_from = text_start;
     } else if let Some(bullet) = bullet_marker(line) {
-        spans.push(ConcealSpan::new(
-            line_start + bullet.start..line_start + bullet.end,
-            SpanKind::Bullet,
-        ));
-        inline_from = bullet.end;
         if let Some((range, checked)) = task_checkbox(line) {
+            // The checkbox is marker enough: the bullet and the space after
+            // it fold away entirely (V43 §7.3).
+            spans.push(ConcealSpan::new(
+                line_start + bullet.start..line_start + range.start,
+                SpanKind::Marker,
+            ));
             spans.push(ConcealSpan::new(
                 line_start + range.start..line_start + range.end,
                 SpanKind::Checkbox(checked),
             ));
             inline_from = range.end;
+            push_task_time_spans(line, range.end, line_start, spans);
+        } else {
+            spans.push(ConcealSpan::new(
+                line_start + bullet.start..line_start + bullet.end,
+                SpanKind::Bullet,
+            ));
+            inline_from = bullet.end;
         }
+    } else if let Some(range) = journal_time(line) {
+        spans.push(ConcealSpan::new(
+            line_start + range.start..line_start + range.end,
+            SpanKind::JournalTime,
+        ));
     }
 
     for comment in &comments {
@@ -1723,7 +1797,7 @@ mod tests {
         assert_eq!(
             slices("- [ ] ~~read [[notes/spec]]~~\n"),
             vec![
-                ("-", SpanKind::Bullet),
+                ("- ", SpanKind::Marker),
                 ("[ ]", SpanKind::Checkbox(false)),
                 ("[[", SpanKind::Marker),
                 ("notes/spec", SpanKind::WikilinkLabel),
@@ -1803,27 +1877,89 @@ mod tests {
 
     #[test]
     fn task_checkboxes_conceal_the_brackets_and_carry_their_state() {
+        // The bullet and its space fold away with the brackets: the box is
+        // marker enough (V43 §7.3).
         assert_eq!(
             slices("- [ ] open task\n"),
-            vec![("-", SpanKind::Bullet), ("[ ]", SpanKind::Checkbox(false)),]
+            vec![("- ", SpanKind::Marker), ("[ ]", SpanKind::Checkbox(false)),]
         );
         assert_eq!(
             slices("* [x] done\n+ [X] also done\n"),
             vec![
-                ("*", SpanKind::Bullet),
+                ("* ", SpanKind::Marker),
                 ("[x]", SpanKind::Checkbox(true)),
-                ("+", SpanKind::Bullet),
+                ("+ ", SpanKind::Marker),
                 ("[X]", SpanKind::Checkbox(true)),
             ]
         );
         // Nested tasks are tasks, and an empty task is still a checkbox.
         assert_eq!(
             slices("    - [ ] nested\n"),
-            vec![("-", SpanKind::Bullet), ("[ ]", SpanKind::Checkbox(false)),]
+            vec![("- ", SpanKind::Marker), ("[ ]", SpanKind::Checkbox(false)),]
         );
         assert_eq!(
             slices("- [ ]\n"),
-            vec![("-", SpanKind::Bullet), ("[ ]", SpanKind::Checkbox(false)),]
+            vec![("- ", SpanKind::Marker), ("[ ]", SpanKind::Checkbox(false)),]
+        );
+        // A plain item keeps its bullet.
+        assert_eq!(slices("- item\n"), vec![("-", SpanKind::Bullet)]);
+    }
+
+    #[test]
+    fn times_are_spans_the_planner_would_read() {
+        assert_eq!(
+            slices("20:29 · I'm tired\n"),
+            vec![("20:29", SpanKind::JournalTime)]
+        );
+        assert_eq!(
+            slices("20:29 I'm tired\n"),
+            vec![],
+            "no middle dot, no entry"
+        );
+        assert_eq!(slices("9:5 · x\n"), vec![], "not a time");
+        assert_eq!(
+            slices("- [ ] 09:00 - 11:00 Misc\n"),
+            vec![
+                ("- ", SpanKind::Marker),
+                ("[ ]", SpanKind::Checkbox(false)),
+                ("09:00 - 11:00", SpanKind::TaskTime),
+                (" - ", SpanKind::TimeDash),
+            ]
+        );
+        assert_eq!(
+            slices("- [x] 15:00 Call\n"),
+            vec![
+                ("- ", SpanKind::Marker),
+                ("[x]", SpanKind::Checkbox(true)),
+                ("15:00", SpanKind::TaskTime),
+            ]
+        );
+        assert_eq!(
+            slices("- [ ] 09:00 – 10:30 Already an en dash\n"),
+            vec![
+                ("- ", SpanKind::Marker),
+                ("[ ]", SpanKind::Checkbox(false)),
+                ("09:00 – 10:30", SpanKind::TaskTime),
+            ]
+        );
+        assert_eq!(
+            slices("- [ ] 09:00-11:00 Tight\n"),
+            vec![
+                ("- ", SpanKind::Marker),
+                ("[ ]", SpanKind::Checkbox(false)),
+                ("09:00-11:00", SpanKind::TaskTime),
+                ("-", SpanKind::TimeDash),
+            ]
+        );
+        assert_eq!(
+            slices("- [ ] 09:00x not a time\n"),
+            vec![("- ", SpanKind::Marker), ("[ ]", SpanKind::Checkbox(false))],
+            "the planner would not read it either"
+        );
+        assert_eq!(
+            slices("- 09:00 plain item\n"),
+            vec![("-", SpanKind::Bullet)],
+            "only tasks carry a time"
         );
     }
 
@@ -1854,7 +1990,7 @@ mod tests {
         assert_eq!(
             slices("- [x] read [[notes/spec]]\n"),
             vec![
-                ("-", SpanKind::Bullet),
+                ("- ", SpanKind::Marker),
                 ("[x]", SpanKind::Checkbox(true)),
                 ("[[", SpanKind::Marker),
                 ("notes/spec", SpanKind::WikilinkLabel),

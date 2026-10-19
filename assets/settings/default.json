@@ -649,7 +649,8 @@
   "double_click_in_multibuffer": "select",
   "gutter": {
     // Whether to show line numbers in the gutter.
-    "line_numbers": true,
+    // Thock: notes are prose, not code (V43 §7.1); turn them back on here.
+    "line_numbers": false,
     // Whether to show runnables buttons in the gutter.
     // Thock: no code running in a vault (V12 de-Zed-ification).
     "runnables": false,

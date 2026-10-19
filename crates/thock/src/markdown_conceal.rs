@@ -4,14 +4,20 @@
 //! and HTML comments are folded away behind an invisible placeholder,
 //! headings and link labels are coloured, struck text takes its line,
 //! emphasis takes its weight and slant, a quoted line recedes, a task list's
-//! `[ ]` draws as a checkbox, a list bullet as a `•`, and a `___` line as a
-//! rule. Putting the cursor on a line restores that whole line's source
+//! `- [ ]` draws as a checkbox alone, a plain list bullet as a `•`, a `___`
+//! line as a rule, and a journal entry's or a task's time takes its colour
+//! (V43 §7.3). Putting the cursor on a line restores that whole line's source
 //! (§4.2). Everything here is display-only: folds and highlights live in the
 //! `DisplayMap` and no code path writes to the buffer (§4.3).
+//!
+//! With conceal on, the note is also set in the vault's body face (V43
+//! §7.1) through a text-style refinement, dropped again when the source is
+//! shown, so the source reads in the editor's own font.
 
 use crate::markdown_syntax::{self, SpanKind};
 use crate::markdown_text;
-use crate::vault::{Vault, VaultStatus};
+use crate::thock_theme::on_accent_color;
+use crate::vault::{BODY_FONT_BUFFER, Vault, VaultStatus};
 use collections::{HashMap, HashSet};
 use editor::actions::GoToDefinition;
 use editor::display_map::{
@@ -20,10 +26,10 @@ use editor::display_map::{
 };
 use editor::{Editor, EditorEvent, EditorMode, FoldPlaceholder, HighlightKey};
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Empty, Entity, HighlightStyle, Hsla, ImageSource,
-    IntoElement as _, ParentElement as _, Resource, RetainAllImageCache, SharedString, SharedUri,
-    StrikethroughStyle, Styled as _, Subscription, Task, TaskExt as _, WeakEntity, Window, div,
-    img, px,
+    AnyElement, App, AppContext as _, Context, Empty, Entity, FontFeatures, HighlightStyle, Hsla,
+    ImageSource, IntoElement as _, ParentElement as _, Resource, RetainAllImageCache, SharedString,
+    SharedUri, StrikethroughStyle, Styled as _, Subscription, Task, TaskExt as _,
+    TextStyleRefinement, WeakEntity, Window, div, img, px,
 };
 use multi_buffer::{
     Anchor, MultiBufferOffset, MultiBufferPoint, MultiBufferSnapshot, ToOffset as _, ToPoint as _,
@@ -106,6 +112,9 @@ pub struct ConcealSettings {
     /// The vault's images folder, which a bare `images/x.png` resolves
     /// against the root rather than the note (V39 §4.3).
     pub images_dir: String,
+    /// The face a concealed note is set in, or `"buffer"` for the editor's
+    /// own font (V43 §7.1).
+    pub body_font: String,
 }
 
 /// One image line's picture: the line it sits under, what it points at, and
@@ -126,6 +135,7 @@ pub struct MarkdownConcealAddon {
     email_enabled: bool,
     account: Option<String>,
     images_dir: String,
+    body_font: String,
     spans: Vec<AnchorSpan>,
     email: Option<EmailAnchors>,
     images: Vec<ImageEntry>,
@@ -235,6 +245,7 @@ fn vault_markdown_settings(editor: &Editor, cx: &App) -> Option<ConcealSettings>
                 email_view,
                 account,
                 images_dir: vault.config.images.dir,
+                body_font: vault.config.markdown.body_font,
             })
         }
         _ => None,
@@ -327,6 +338,7 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         email_enabled: settings.email_view,
         account: settings.account,
         images_dir: settings.images_dir,
+        body_font: settings.body_font,
         spans: Vec::new(),
         email: None,
         images: Vec::new(),
@@ -338,7 +350,35 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         reparse: Task::ready(()),
         _subscriptions: subscriptions,
     });
+    apply_body_font(editor);
     schedule_reparse(editor, cx);
+}
+
+/// Sets the note in the vault's body face with lining numerals while
+/// concealed, and lets the editor's own font through otherwise, so showing
+/// the source is unmistakable (V43 §7.1).
+fn apply_body_font(editor: &mut Editor) {
+    let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
+        return;
+    };
+    let refinement = if addon.enabled && addon.body_font != BODY_FONT_BUFFER {
+        TextStyleRefinement {
+            font_family: Some(SharedString::from(addon.body_font.clone())),
+            font_features: Some(FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))),
+            ..Default::default()
+        }
+    } else {
+        TextStyleRefinement::default()
+    };
+    editor.set_text_style_refinement(refinement);
+}
+
+/// The family the note's body is set in right now: the vault's face while
+/// concealed, otherwise `None` for the editor's own.
+#[cfg(test)]
+fn body_font(editor: &Editor) -> Option<String> {
+    let addon = editor.addon::<MarkdownConcealAddon>()?;
+    (addon.enabled && addon.body_font != BODY_FONT_BUFFER).then(|| addon.body_font.clone())
 }
 
 /// Makes `[[wikilinks]]` act like code references: go-to-definition with the
@@ -467,6 +507,7 @@ fn toggle(editor: &mut Editor, cx: &mut Context<Editor>) {
         return;
     };
     addon.enabled = !addon.enabled;
+    apply_body_font(editor);
     apply_highlights(editor, cx);
     apply_folds(editor, cx);
     apply_image_blocks(editor, cx);
@@ -1215,6 +1256,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
                 SpanKind::EmailMarker(own) => sender_dot_placeholder(own),
                 SpanKind::EmailLink => email_link_placeholder(),
                 SpanKind::ImageTail(false) => image_not_found_placeholder(),
+                SpanKind::TimeDash => time_dash_placeholder(),
                 _ => marker_placeholder(),
             };
             Crease::simple(range, placeholder)
@@ -1276,6 +1318,7 @@ fn collapsed_text_for(kind: SpanKind) -> &'static str {
         SpanKind::EmailMarker(_) => "●",
         SpanKind::EmailLink => "Open in Gmail ↗",
         SpanKind::ImageTail(false) => IMAGE_NOT_FOUND,
+        SpanKind::TimeDash => "–",
         _ => " ",
     }
 }
@@ -1297,7 +1340,29 @@ fn is_folded(kind: SpanKind) -> bool {
             | SpanKind::EmailLink
             | SpanKind::EmailMarker(_)
             | SpanKind::ImageTail(_)
+            | SpanKind::TimeDash
     )
+}
+
+/// Placeholder for the `-` between a task's two times: an en dash, set
+/// like the times around it (V43 §7.3).
+fn time_dash_placeholder() -> FoldPlaceholder {
+    FoldPlaceholder {
+        render: Arc::new(|_, _, cx| {
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .text_color(cx.theme().status().info)
+                .child("–")
+                .into_any_element()
+        }),
+        constrain_width: false,
+        merge_adjacent: false,
+        type_tag: Some(fold_type_tag()),
+        gutter_toggle: false,
+        collapsed_text: Some("–".into()),
+    }
 }
 
 /// Placeholder for the tail of an image line whose picture is missing: a
@@ -1360,8 +1425,8 @@ fn marker_placeholder() -> FoldPlaceholder {
 }
 
 /// Placeholder for a task list's `[ ]` / `[x]`: the checkbox it stands for,
-/// drawn the way the rest of the app draws checkboxes. Display-only — the
-/// box is not clickable, since ticking it would write to the buffer.
+/// a checked one filled with the accent (V43 §7.3). Display-only — the box
+/// is not clickable, since ticking it would write to the buffer.
 fn checkbox_placeholder(checked: bool) -> FoldPlaceholder {
     FoldPlaceholder {
         render: Arc::new(move |_, _, cx| {
@@ -1374,15 +1439,15 @@ fn checkbox_placeholder(checked: bool) -> FoldPlaceholder {
                 .rounded_xs()
                 .border_1()
                 .border_color(if checked {
-                    colors.border_selected
+                    colors.text_accent
                 } else {
                     colors.border
                 });
             if checked {
-                checkbox = checkbox.child(
+                checkbox = checkbox.bg(colors.text_accent).child(
                     Icon::new(IconName::Check)
                         .size(IconSize::XSmall)
-                        .color(Color::Accent),
+                        .color(Color::Custom(on_accent_color(cx))),
                 );
             }
             div()
@@ -1558,8 +1623,9 @@ fn sender_color(own: bool, cx: &App) -> Hsla {
 
 /// The number of highlight slots: the quote tint, three heading colours,
 /// bold and italic, inline code, two link colours, the strikethrough, the
-/// email view's sender/own/muted trio, and the hidden slot.
-const HIGHLIGHT_SLOTS: usize = 14;
+/// email view's sender/own/muted trio, the hidden slot, and the journal and
+/// task times.
+const HIGHLIGHT_SLOTS: usize = 16;
 
 /// A later slot's style merges over an earlier one's, so the order below is
 /// priority order: the quote tint sits under everything else a quoted line
@@ -1585,6 +1651,10 @@ const EMAIL_MUTED_SLOT: usize = 12;
 /// wide, and unseen. Only an image line's `!` takes it, which cannot fold
 /// because the editor drops a block whose row begins inside a fold.
 const HIDDEN_SLOT: usize = 13;
+/// A journal entry's time, in the accent (V43 §7.3).
+const JOURNAL_TIME_SLOT: usize = 14;
+/// A task's time, in the calendar colour.
+const TASK_TIME_SLOT: usize = 15;
 
 /// The highlight slot for a styled span, or `None` for one that folds away
 /// rather than taking a colour.
@@ -1605,6 +1675,8 @@ fn highlight_slot(kind: SpanKind) -> Option<usize> {
         SpanKind::EmailSender(true) => Some(EMAIL_OWN_SENDER_SLOT),
         SpanKind::EmailDate | SpanKind::EmailQuote => Some(EMAIL_MUTED_SLOT),
         SpanKind::ImageBang => Some(HIDDEN_SLOT),
+        SpanKind::JournalTime => Some(JOURNAL_TIME_SLOT),
+        SpanKind::TaskTime => Some(TASK_TIME_SLOT),
         SpanKind::Marker
         | SpanKind::Rule
         | SpanKind::Bullet
@@ -1613,7 +1685,8 @@ fn highlight_slot(kind: SpanKind) -> Option<usize> {
         | SpanKind::EmailLink
         | SpanKind::EmailMarker(_)
         | SpanKind::ImageTail(_)
-        | SpanKind::ImageSource => None,
+        | SpanKind::ImageSource
+        | SpanKind::TimeDash => None,
     }
 }
 
@@ -1663,8 +1736,11 @@ fn slot_style(slot: usize, cx: &App) -> HighlightStyle {
             ..Default::default()
         },
         _ => {
-            let font_weight = matches!(slot, EMAIL_SENDER_SLOT | EMAIL_OWN_SENDER_SLOT)
-                .then_some(gpui::FontWeight::SEMIBOLD);
+            let font_weight = matches!(
+                slot,
+                EMAIL_SENDER_SLOT | EMAIL_OWN_SENDER_SLOT | JOURNAL_TIME_SLOT | TASK_TIME_SLOT
+            )
+            .then_some(gpui::FontWeight::SEMIBOLD);
             HighlightStyle {
                 color: Some(slot_color(slot, cx)),
                 font_weight,
@@ -1692,6 +1768,8 @@ fn slot_color(slot: usize, cx: &App) -> Hsla {
         EMAIL_OWN_SENDER_SLOT => sender_color(true, cx),
         EMAIL_MUTED_SLOT => colors.text_muted,
         HIDDEN_SLOT => colors.editor_background,
+        JOURNAL_TIME_SLOT => colors.text_accent,
+        TASK_TIME_SLOT => cx.theme().status().info,
         _ => {
             let players = &cx.theme().players().0;
             // Slot 0 of the player palette is the local-user colour; heading
@@ -1787,6 +1865,7 @@ mod tests {
             email_view: true,
             account: Some("diego.exodo@gmail.com".to_string()),
             images_dir: "images".to_string(),
+            body_font: "IBM Plex Sans".to_string(),
         }
     }
 
@@ -1956,14 +2035,87 @@ mod tests {
         move_cursor_to(&editor, 2, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            "• ☐ open  \n• ☑ done\nplain tail\n"
+            " ☐ open  \n ☑ done\nplain tail\n",
+            "a task's bullet folds away; the box is marker enough"
         );
 
         // The cursor's line shows the source it stands for, comment included.
         move_cursor_to(&editor, 0, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            "- [ ] open <!--id:7-->\n• ☑ done\nplain tail\n"
+            "- [ ] open <!--id:7-->\n ☑ done\nplain tail\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn times_take_their_colour_and_a_task_dash_becomes_an_en_dash(cx: &mut TestAppContext) {
+        let note = "20:29 · I'm tired\n- [ ] 09:00 - 11:00 Misc\n- [x] 15:00 Call\nplain tail\n";
+        let (editor, mut cx) = setup(cx, note).await;
+        move_cursor_to(&editor, 3, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "20:29 · I'm tired\n ☐ 09:00–11:00 Misc\n ☑ 15:00 Call\nplain tail\n"
+        );
+        let highlighted = |editor: &mut Editor, slot: usize, cx: &mut Context<Editor>| {
+            let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+            editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(slot), cx)
+                .map(|(_, ranges)| {
+                    ranges
+                        .iter()
+                        .map(|range| {
+                            let start = range.start.to_offset(&buffer_snapshot);
+                            let end = range.end.to_offset(&buffer_snapshot);
+                            note[start.0..end.0].to_string()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        editor.update_in(&mut cx, |editor, _, cx| {
+            assert_eq!(highlighted(editor, JOURNAL_TIME_SLOT, cx), vec!["20:29"]);
+            assert_eq!(
+                highlighted(editor, TASK_TIME_SLOT, cx),
+                vec!["09:00 - 11:00", "15:00"]
+            );
+        });
+        move_cursor_to(&editor, 1, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "20:29 · I'm tired\n- [ ] 09:00 - 11:00 Misc\n ☑ 15:00 Call\nplain tail\n",
+            "the cursor's line shows its source"
+        );
+        assert_eq!(editor.read_with(&cx, |editor, cx| editor.text(cx)), note);
+    }
+
+    #[gpui::test]
+    async fn the_body_face_applies_while_concealed(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, NOTE).await;
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| body_font(editor)),
+            Some("IBM Plex Sans".to_string())
+        );
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| body_font(editor)),
+            None,
+            "the source shows in the editor's own font"
+        );
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| body_font(editor)),
+            Some("IBM Plex Sans".to_string())
+        );
+        editor.update_in(&mut cx, |editor, _, _| {
+            if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+                addon.body_font = BODY_FONT_BUFFER.to_string();
+            }
+            apply_body_font(editor);
+        });
+        assert_eq!(
+            editor.read_with(&cx, |editor, _| body_font(editor)),
+            None,
+            "\"buffer\" keeps the editor's font"
         );
     }
 
@@ -1974,7 +2126,7 @@ mod tests {
         move_cursor_to(&editor, 1, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            "• ☐  dropped  task\nplain tail\n"
+            " ☐  dropped  task\nplain tail\n"
         );
 
         move_cursor_to(&editor, 0, &mut cx);
@@ -2060,7 +2212,7 @@ mod tests {
         let note = "- [x] done <!--id:7-->\nplain tail\n";
         let (editor, mut cx) = setup(cx, note).await;
         move_cursor_to(&editor, 1, &mut cx);
-        assert_eq!(display_text(&editor, &mut cx), "• ☑ done  \nplain tail\n");
+        assert_eq!(display_text(&editor, &mut cx), " ☑ done  \nplain tail\n");
 
         editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
         cx.run_until_parked();
