@@ -85,6 +85,8 @@ use std::{
     task::Poll,
     time::Duration,
 };
+#[cfg(target_os = "linux")]
+use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
 use sum_tree::SumTree;
 use task::{ResolvedTask, ShellKind, TaskContext};
 use text::{Anchor, PointUtf16, ReplicaId, ToOffset, Unclipped};
@@ -221,7 +223,7 @@ async fn test_symlinks(cx: &mut gpui::TestAppContext) {
     .unwrap();
 
     let project = Project::test(
-        Arc::new(RealFs::new(None, cx.executor())),
+        RealFs::new(None, cx.executor()),
         [root_link_path.as_ref()],
         cx,
     )
@@ -236,6 +238,153 @@ async fn test_symlinks(cx: &mut gpui::TestAppContext) {
                 .unwrap()
                 .inode
         );
+    });
+}
+
+#[cfg(not(windows))]
+#[gpui::test]
+async fn test_resolve_abs_file_link_project_aliases(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    cx.executor().allow_parking();
+    cx.update(|cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.project.worktree.file_scan_exclusions =
+                    Some(vec!["**/hidden".to_string()]);
+            });
+        });
+    });
+
+    let directory = TempTree::new(json!({
+        "project": {
+            "sub": {},
+            "hidden": {"unopened.rs": "unindexed"},
+        },
+        "outside": {
+            "child": {},
+            "target.rs": "saved",
+            "link.rs": "actual outside target",
+        },
+    }));
+    let root = directory.path().join("project");
+    let target = directory.path().join("outside/target.rs");
+    os::unix::fs::symlink(&target, root.join("link.rs")).unwrap();
+    os::unix::fs::symlink(root.join("sub"), root.join("hop")).unwrap();
+    os::unix::fs::symlink(directory.path().join("outside/child"), root.join("escape")).unwrap();
+    let outside_alias = directory.path().join("outside/alias.rs");
+    os::unix::fs::symlink(&target, &outside_alias).unwrap();
+
+    let project = Project::test(RealFs::new(None, cx.executor()), [root.as_path()], cx).await;
+    let alias = project.read_with(cx, |project, cx| {
+        project
+            .project_path_for_absolute_path(&root.join("link.rs"), cx)
+            .unwrap()
+    });
+    let buffer = project
+        .update(cx, |project, cx| project.open_buffer(alias.clone(), cx))
+        .await
+        .unwrap();
+    buffer.update(cx, |buffer, cx| {
+        buffer.edit([(0..0, "unsaved ")], None, cx);
+    });
+
+    for relative_path in ["hop/../link.rs", "hidden/../link.rs"] {
+        let path = root.join(relative_path);
+        let resolved = project
+            .update(cx, |project, cx| {
+                project.resolve_abs_file_link(path.to_str().unwrap(), cx)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.project_path(), Some(&alias), "{relative_path}");
+        let reopened = project
+            .update(cx, |project, cx| {
+                project.open_buffer(resolved.project_path().unwrap().clone(), cx)
+            })
+            .await
+            .unwrap();
+        assert_eq!(reopened, buffer);
+        buffer.read_with(cx, |buffer, _| {
+            assert_eq!(buffer.text(), "unsaved saved");
+            assert!(buffer.is_dirty());
+        });
+    }
+
+    let unindexed_path = root.join("hidden/unopened.rs");
+    let unindexed_alias = project.read_with(cx, |project, cx| {
+        let path = project
+            .project_path_for_absolute_path(&unindexed_path, cx)
+            .unwrap();
+        assert!(project.entry_for_path(&path, cx).is_none());
+        assert!(project.get_open_buffer(&path, cx).is_none());
+        assert!(
+            project
+                .entry_for_path(&(alias.worktree_id, rel_path("hidden")).into(), cx)
+                .is_none()
+        );
+        path
+    });
+    let resolved = project
+        .update(cx, |project, cx| {
+            project.resolve_abs_file_link(unindexed_path.to_str().unwrap(), cx)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.project_path(), Some(&unindexed_alias));
+
+    for (input, expected) in [
+        (
+            root.join("escape/../link.rs"),
+            directory.path().join("outside/link.rs"),
+        ),
+        (outside_alias, target),
+    ] {
+        let resolved = project
+            .update(cx, |project, cx| {
+                project.resolve_abs_file_link(input.to_str().unwrap(), cx)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.abs_path(), expected.to_str());
+    }
+    let missing = root.join("missing/../link.rs");
+    let resolved = project
+        .update(cx, |project, cx| {
+            project.resolve_abs_file_link(missing.to_str().unwrap(), cx)
+        })
+        .await
+        .unwrap();
+    assert!(resolved.is_none());
+    project.read_with(cx, |project, cx| {
+        assert_eq!(project.worktrees(cx).count(), 1);
+        assert_eq!(project.get_open_buffer(&alias, cx), Some(buffer));
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[gpui::test]
+async fn test_resolve_abs_file_link_rejects_non_utf8_target(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    cx.executor().allow_parking();
+    let directory = TempTree::new(json!({}));
+    let target = directory.path().join(OsStr::from_bytes(b"\xff.rs"));
+    std::fs::write(&target, "actual target").unwrap();
+    std::fs::write(directory.path().join("�.rs"), "replacement-character decoy").unwrap();
+    let alias = directory.path().join("alias.rs");
+    os::unix::fs::symlink(&target, &alias).unwrap();
+    let project = Project::test(RealFs::new(None, cx.executor()), [], cx).await;
+    let error = project
+        .update(cx, |project, cx| {
+            project.resolve_abs_file_link(alias.to_str().unwrap(), cx)
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "canonical file path is not valid UTF-8");
+    project.read_with(cx, |project, cx| {
+        assert_eq!(project.worktrees(cx).count(), 0);
     });
 }
 
@@ -326,14 +475,14 @@ async fn test_editorconfig_support(cx: &mut gpui::TestAppContext) {
 
     cx.executor().run_until_parked();
 
-    let settings_for = async |path: &str, cx: &mut TestAppContext| -> LanguageSettings {
+    let settings_for = async |path: &str, cx: &mut TestAppContext| -> Arc<LanguageSettings> {
         let buffer = project
             .update(cx, |project, cx| {
                 project.open_buffer((worktree.read(cx).id(), rel_path(path)), cx)
             })
             .await
             .unwrap();
-        cx.update(|cx| LanguageSettings::for_buffer(&buffer.read(cx), cx).into_owned())
+        cx.update(|cx| LanguageSettings::for_buffer(&buffer.read(cx), cx))
     };
 
     let settings_a = settings_for("a.rs", cx).await;
@@ -411,14 +560,14 @@ async fn test_external_editorconfig_support(cx: &mut gpui::TestAppContext) {
     let worktree = project.update(cx, |project, cx| project.worktrees(cx).next().unwrap());
 
     cx.executor().run_until_parked();
-    let settings_for = async |path: &str, cx: &mut TestAppContext| -> LanguageSettings {
+    let settings_for = async |path: &str, cx: &mut TestAppContext| -> Arc<LanguageSettings> {
         let buffer = project
             .update(cx, |project, cx| {
                 project.open_buffer((worktree.read(cx).id(), rel_path(path)), cx)
             })
             .await
             .unwrap();
-        cx.update(|cx| LanguageSettings::for_buffer(&buffer.read(cx), cx).into_owned())
+        cx.update(|cx| LanguageSettings::for_buffer(&buffer.read(cx), cx))
     };
 
     let settings_rs = settings_for("main.rs", cx).await;
@@ -468,7 +617,7 @@ async fn test_internal_editorconfig_root_stops_traversal(cx: &mut gpui::TestAppC
         .await
         .unwrap();
     cx.update(|cx| {
-        let settings = LanguageSettings::for_buffer(buffer.read(cx), cx).into_owned();
+        let settings = LanguageSettings::for_buffer(buffer.read(cx), cx);
         assert_eq!(Some(settings.tab_size), NonZeroU32::new(2));
     });
 }
@@ -757,7 +906,7 @@ async fn test_adding_worktree_discovers_external_editorconfigs(cx: &mut gpui::Te
         .unwrap();
 
     cx.update(|cx| {
-        let settings = LanguageSettings::for_buffer(&buffer.read(cx), cx).into_owned();
+        let settings = LanguageSettings::for_buffer(&buffer.read(cx), cx);
 
         // Test existing worktree has tab_size = 7
         assert_eq!(Some(settings.tab_size), NonZeroU32::new(7));
@@ -5883,7 +6032,8 @@ async fn test_rename_file_to_new_directory(cx: &mut gpui::TestAppContext) {
             })
             .await
             .unwrap()
-            .text,
+            .text
+            .to_string(),
         expected_contents,
         "Moved file's contents should be preserved"
     );
@@ -5930,7 +6080,8 @@ async fn test_rename_file_to_new_directory(cx: &mut gpui::TestAppContext) {
             })
             .await
             .unwrap()
-            .text,
+            .text
+            .to_string(),
         expected_contents,
         "Moved file's contents should be preserved"
     );
@@ -6340,7 +6491,7 @@ async fn test_rescan_and_remote_updates(cx: &mut gpui::TestAppContext) {
         }
     }));
 
-    let project = Project::test(Arc::new(RealFs::new(None, cx.executor())), [dir.path()], cx).await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [dir.path()], cx).await;
 
     let buffer_for_path = |path: &'static str, cx: &mut gpui::TestAppContext| {
         let buffer = project.update(cx, |p, cx| p.open_local_buffer(dir.path().join(path), cx));
@@ -6494,7 +6645,7 @@ async fn test_recreated_directory_receives_child_events(cx: &mut gpui::TestAppCo
     cx.executor().allow_parking();
 
     let dir = TempTree::new(json!({}));
-    let project = Project::test(Arc::new(RealFs::new(None, cx.executor())), [dir.path()], cx).await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [dir.path()], cx).await;
     let tree = project.update(cx, |project, cx| project.worktrees(cx).next().unwrap());
 
     tree.flush_fs_events(cx).await;
@@ -9006,6 +9157,117 @@ async fn test_search_with_unicode(cx: &mut gpui::TestAppContext) {
         .await
         .unwrap(),
         HashMap::from_iter([(path!("dir/two.rs").to_string(), vec![3..16]),])
+    );
+}
+
+#[gpui::test]
+async fn test_search_in_unopened_non_utf8_files(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let text = "// 你好世界 hello\n// 这是一个中文注释，包含很多汉字，用来帮助编码检测器正确判断文件编码。\n// 编码检测需要足够多的中文内容才能可靠工作。\n";
+
+    let gb2312 = encoding_rs::Encoding::for_label(b"gb2312").unwrap();
+    assert_eq!(gb2312, encoding_rs::GBK);
+    let (gbk_bytes, _, had_errors) = gb2312.encode(text);
+    assert!(!had_errors);
+
+    let korean_text = "// 안녕하세요 세계 hello\n// 이것은 한국어 주석입니다. 인코딩 감지기가 파일 인코딩을 올바르게 판단할 수 있도록 충분히 많은 한글 내용을 담고 있습니다.\n// 인코딩 감지는 충분한 한국어 내용이 있어야 안정적으로 작동합니다.\n";
+    let (euc_kr_bytes, _, had_errors) = encoding_rs::EUC_KR.encode(korean_text);
+    assert!(!had_errors);
+
+    let mut utf16_bytes = vec![0xFF, 0xFE];
+    utf16_bytes.extend(text.encode_utf16().flat_map(|u| u.to_le_bytes()));
+
+    let mut binary_bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    binary_bytes.extend_from_slice(text.as_bytes());
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/dir"),
+        json!({
+            "utf8.rs": text,
+        }),
+    )
+    .await;
+    fs.insert_file(path!("/dir/gbk.rs"), gbk_bytes.into_owned())
+        .await;
+    fs.insert_file(path!("/dir/euc_kr.rs"), euc_kr_bytes.into_owned())
+        .await;
+    fs.insert_file(path!("/dir/utf16.rs"), utf16_bytes).await;
+    fs.insert_file(path!("/dir/binary.dat"), binary_bytes).await;
+
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+
+    assert_eq!(
+        search(
+            &project,
+            SearchQuery::text(
+                "世界",
+                false,
+                true,
+                false,
+                PathMatcher::default(),
+                PathMatcher::default(),
+                false,
+                None,
+            )
+            .unwrap(),
+            cx
+        )
+        .await
+        .unwrap(),
+        HashMap::from_iter([
+            (path!("dir/utf8.rs").to_string(), vec![9..15]),
+            (path!("dir/gbk.rs").to_string(), vec![9..15]),
+            (path!("dir/utf16.rs").to_string(), vec![9..15]),
+        ])
+    );
+
+    assert_eq!(
+        search(
+            &project,
+            SearchQuery::text(
+                "HELLO",
+                false,
+                false,
+                false,
+                PathMatcher::default(),
+                PathMatcher::default(),
+                false,
+                None,
+            )
+            .unwrap(),
+            cx
+        )
+        .await
+        .unwrap(),
+        HashMap::from_iter([
+            (path!("dir/utf8.rs").to_string(), vec![16..21]),
+            (path!("dir/gbk.rs").to_string(), vec![16..21]),
+            (path!("dir/euc_kr.rs").to_string(), vec![26..31]),
+            (path!("dir/utf16.rs").to_string(), vec![16..21]),
+        ])
+    );
+
+    assert_eq!(
+        search(
+            &project,
+            SearchQuery::text(
+                "세계",
+                false,
+                true,
+                false,
+                PathMatcher::default(),
+                PathMatcher::default(),
+                false,
+                None,
+            )
+            .unwrap(),
+            cx
+        )
+        .await
+        .unwrap(),
+        HashMap::from_iter([(path!("dir/euc_kr.rs").to_string(), vec![19..25])])
     );
 }
 
@@ -12045,12 +12307,7 @@ async fn test_staging_hunk_preserve_executable_permission(cx: &mut gpui::TestApp
     git_commit("Initial commit", &repo);
     std::fs::write(&file_path, file_contents).unwrap();
 
-    let project = Project::test(
-        Arc::new(RealFs::new(None, cx.executor())),
-        [root.path()],
-        cx,
-    )
-    .await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [root.path()], cx).await;
 
     let buffer = project
         .update(cx, |project, cx| {
@@ -12285,12 +12542,7 @@ async fn test_git_repository_status(cx: &mut gpui::TestAppContext) {
     std::fs::remove_file(work_dir.join("d.txt")).unwrap();
     std::fs::write(work_dir.join("a.txt"), "aa").unwrap();
 
-    let project = Project::test(
-        Arc::new(RealFs::new(None, cx.executor())),
-        [root.path()],
-        cx,
-    )
-    .await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [root.path()], cx).await;
 
     let tree = project.read_with(cx, |project, cx| project.worktrees(cx).next().unwrap());
     tree.flush_fs_events(cx).await;
@@ -12571,12 +12823,7 @@ async fn test_git_events_after_project_excludes_dot_git(cx: &mut gpui::TestAppCo
     git_commit("Initial commit", &repo);
     git_branch("other-branch", &repo);
 
-    let project = Project::test(
-        Arc::new(RealFs::new(None, cx.executor())),
-        [work_dir.as_path()],
-        cx,
-    )
-    .await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [work_dir.as_path()], cx).await;
 
     let tree = project.read_with(cx, |project, cx| project.worktrees(cx).next().unwrap());
     tree.flush_fs_events(cx).await;
@@ -12663,12 +12910,7 @@ async fn test_git_status_postprocessing(cx: &mut gpui::TestAppContext) {
     // `sub` is a nested git repository.
     let _sub = git_init(&work_dir.join("sub"));
 
-    let project = Project::test(
-        Arc::new(RealFs::new(None, cx.executor())),
-        [root.path()],
-        cx,
-    )
-    .await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [root.path()], cx).await;
 
     let tree = project.read_with(cx, |project, cx| project.worktrees(cx).next().unwrap());
     tree.flush_fs_events(cx).await;
@@ -13519,7 +13761,7 @@ async fn test_conflicted_cherry_pick(cx: &mut gpui::TestAppContext) {
     git_add("a.txt", &repo);
     git_commit("init", &repo);
 
-    let project = Project::test(Arc::new(RealFs::new(None, cx.executor())), [root_path], cx).await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [root_path], cx).await;
 
     let tree = project.read_with(cx, |project, cx| project.worktrees(cx).next().unwrap());
     tree.flush_fs_events(cx).await;
@@ -13675,10 +13917,20 @@ async fn test_rename_work_directory(cx: &mut gpui::TestAppContext) {
     git_commit("init", &repo);
     std::fs::write(root_path.join("projects/project1/a"), "aa").unwrap();
 
-    let project = Project::test(Arc::new(RealFs::new(None, cx.executor())), [root_path], cx).await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [root_path], cx).await;
 
     let tree = project.read_with(cx, |project, cx| project.worktrees(cx).next().unwrap());
     tree.flush_fs_events(cx).await;
+    project
+        .update(cx, |project, cx| project.git_scans_complete(cx))
+        .await;
+    cx.executor().run_until_parked();
+    let _buffer = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer(root_path.join("projects/project1/a"), cx)
+        })
+        .await
+        .unwrap();
     project
         .update(cx, |project, cx| project.git_scans_complete(cx))
         .await;
@@ -13780,7 +14032,7 @@ async fn test_file_status(cx: &mut gpui::TestAppContext) {
     git_add(DOTGITIGNORE, &repo);
     git_commit("Initial commit", &repo);
 
-    let project = Project::test(Arc::new(RealFs::new(None, cx.executor())), [root_path], cx).await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [root_path], cx).await;
 
     let tree = project.read_with(cx, |project, cx| project.worktrees(cx).next().unwrap());
     tree.flush_fs_events(cx).await;
@@ -13989,7 +14241,7 @@ async fn test_ignored_dirs_events(cx: &mut gpui::TestAppContext) {
     git_add(".gitignore", &repo);
     git_commit("Initial commit", &repo);
 
-    let project = Project::test(Arc::new(RealFs::new(None, cx.executor())), [root_path], cx).await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [root_path], cx).await;
     let repository_updates = Arc::new(Mutex::new(Vec::new()));
     let project_events = Arc::new(Mutex::new(Vec::new()));
     project.update(cx, |project, cx| {
@@ -15835,12 +16087,7 @@ async fn test_os_read_only_files_open_as_read_only(cx: &mut gpui::TestAppContext
     permissions.set_readonly(true);
     std::fs::set_permissions(&file_path, permissions).unwrap();
 
-    let project = Project::test(
-        Arc::new(RealFs::new(None, cx.executor())),
-        [root.path()],
-        cx,
-    )
-    .await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [root.path()], cx).await;
 
     let buffer = project
         .update(cx, |project, cx| {
@@ -16086,6 +16333,81 @@ mod disable_ai_settings_tests {
             );
         });
     }
+}
+
+#[gpui::test]
+async fn test_worktree_released_when_creation_caller_is_cancelled(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/project"), serde_json::json!({ "a.rs": "" }))
+        .await;
+    fs.insert_tree(path!("/other"), serde_json::json!({ "b.rs": "" }))
+        .await;
+    let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+    cx.run_until_parked();
+
+    // Drop the returned task immediately, as a cancelled caller would; creation
+    // still completes through the clone held by `loading_worktrees`.
+    let task = project.update(cx, |project, cx| {
+        project.find_or_create_worktree(path!("/other"), true, cx)
+    });
+    drop(task);
+    cx.run_until_parked();
+
+    let created = project.read_with(cx, |project, cx| {
+        project
+            .worktrees(cx)
+            .find(|worktree| worktree.read(cx).abs_path().ends_with("other"))
+            .map(|worktree| (worktree.read(cx).id(), worktree.downgrade()))
+    });
+
+    let Some((worktree_id, weak_worktree)) = created else {
+        panic!("worktree creation should complete even when the caller is cancelled");
+    };
+
+    project.update(cx, |project, cx| project.remove_worktree(worktree_id, cx));
+    cx.run_until_parked();
+
+    assert!(
+        weak_worktree.upgrade().is_none(),
+        "removed worktree should be released even when its creation task's caller was cancelled"
+    );
+}
+
+#[gpui::test]
+async fn test_initial_scan_completes_when_creation_caller_is_cancelled(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/project"), serde_json::json!({ "a.rs": "" }))
+        .await;
+    fs.insert_tree(path!("/other"), serde_json::json!({ "b.rs": "" }))
+        .await;
+    let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
+    cx.run_until_parked();
+
+    let task = project.update(cx, |project, cx| {
+        project.find_or_create_worktree(path!("/other"), true, cx)
+    });
+    drop(task);
+    cx.run_until_parked();
+
+    let (initial_scan_completed, loading_worktrees) = project.read_with(cx, |project, cx| {
+        let worktree_store = project.worktree_store().read(cx);
+        (
+            worktree_store.initial_scan_completed(),
+            worktree_store.diagnostics(cx).loading_worktrees,
+        )
+    });
+    assert_eq!(
+        loading_worktrees, 0,
+        "no loading entry should remain after creation resolves"
+    );
+    assert!(
+        initial_scan_completed,
+        "initial scan should complete even when the creation task's caller was cancelled"
+    );
 }
 
 /// Regression test for https://github.com/zed-industries/zed/issues/60424.

@@ -454,6 +454,7 @@
       "alt-.": "vim::RepeatFind",
       "alt-b": "editor::MoveToStartOfLargerSyntaxNode",
       "alt-e": "editor::MoveToEndOfLargerSyntaxNode",
+      "shift-g": "vim::HelixGotoLine",
 
       // Changes
       "shift-r": "editor::Paste",
@@ -485,6 +486,7 @@
       "x": "vim::HelixSelectLine",
       "*": "buffer_search::UseSelectionForFind",
       "shift-x": "editor::SelectLine",
+      "_": "vim::HelixTrimSelections",
       "ctrl-c": "editor::ToggleComments",
       "alt-o": "editor::SelectLargerSyntaxNode",
       "alt-i": "editor::SelectSmallerSyntaxNode",

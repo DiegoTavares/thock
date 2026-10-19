@@ -607,6 +607,7 @@ runtimelib = { version = "1.4.0", default-features = false, features = [
 ] }
 rust-embed = { version = "8.11", features = ["include-exclude"] }
 rustc-hash = "2.1.0"
+rustix = { version = "1.1", features = ["fs"] }
 rustls = { version = "0.23.26" }
 rustls-platform-verifier = "0.5.0"
 # WARNING: If you change this, you must also publish a new version of zed-scap to crates.io
@@ -691,6 +692,9 @@ tree-sitter-yaml = { git = "https://github.com/zed-industries/tree-sitter-yaml",
 tree-sitter-toml-ng = "0.7"
 tracing = "0.1.40"
 unicase = "2.6"
+unicode-bidi = { version = "0.3.18", default-features = false, features = [
+    "hardcoded-data",
+] }
 unicode-script = "0.5.7"
 unicode-segmentation = "1.10"
 unicode-width = "0.2"
@@ -712,7 +716,7 @@ wasmtime = { version = "36", default-features = false, features = [
     "incremental-cache",
     "parallel-compilation",
 ] }
-wasmtime-wasi = "36"
+wasmtime-wasi = "36.0.14"
 wax = "0.7"
 which = "6.0.0"
 wasm-bindgen = "0.2.120"
@@ -791,8 +795,8 @@ async-process = { git = "https://github.com/zed-industries/async-process.git", r
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }
 calloop = { git = "https://github.com/zed-industries/calloop" }
-notify = { git = "https://github.com/zed-industries/notify", rev = "0890bbb8ca40a4b5d1f67031698dd7918b37d991" }
-notify-types = { git = "https://github.com/zed-industries/notify", rev = "0890bbb8ca40a4b5d1f67031698dd7918b37d991" }
+notify = { git = "https://github.com/zed-industries/notify", rev = "d842f16b2716bd60f09caf3ae3a894237ab38f54" }
+notify-types = { git = "https://github.com/zed-industries/notify", rev = "d842f16b2716bd60f09caf3ae3a894237ab38f54" }
 
 [profile.dev]
 split-debuginfo = "unpacked"

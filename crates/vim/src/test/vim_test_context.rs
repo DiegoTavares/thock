@@ -30,6 +30,13 @@ impl VimTestContext {
             settings_ui::init(cx);
             markdown_preview::init(cx);
             zed_actions::init();
+            // The tests assume upstream's `autosave: off`. Thock's default saves, and adds the
+            // final newline, whenever focus leaves the editor, such as for the search bar.
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.workspace.autosave = Some(workspace::AutosaveSetting::Off);
+                });
+            });
         });
     }
 

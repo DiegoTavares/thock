@@ -754,7 +754,7 @@ mod mac_os {
         ffi::OsStr,
         fs, io,
         path::{Path, PathBuf},
-        process::{Command, ExitStatus},
+        process::ExitStatus,
         ptr,
     };
 

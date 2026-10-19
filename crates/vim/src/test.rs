@@ -31,7 +31,10 @@ use search::{ProjectSearchView, project_search};
 use serde_json::json;
 use workspace::{DeploySearch, MultiWorkspace};
 
-use crate::{PushSneak, PushSneakBackward, VimAddon, insert::NormalBefore, motion, state::Mode};
+use crate::{
+    PushSneak, PushSneakBackward, SwitchToNormalMode, VimAddon, insert::NormalBefore, motion,
+    state::Mode,
+};
 
 use util_macros::perf;
 
@@ -41,6 +44,72 @@ async fn test_initially_disabled(cx: &mut gpui::TestAppContext) {
     let mut cx = VimTestContext::new(cx, false).await;
     cx.simulate_keystrokes("h j k l");
     cx.assert_editor_state("hjklˇ");
+}
+
+#[gpui::test]
+async fn test_unbound_standalone_modifiers_preserve_operator(cx: &mut TestAppContext) {
+    let mut cx = VimTestContext::new(cx, true).await;
+    cx.update_editor(|_, window, _| window.activate_window());
+    cx.run_until_parked();
+
+    for temporary_normal in [false, true] {
+        let expected_mode = if temporary_normal {
+            Mode::Insert
+        } else {
+            Mode::Normal
+        };
+        for modifiers in [
+            Modifiers::shift(),
+            Modifiers::control(),
+            Modifiers::alt(),
+            Modifiers::command(),
+            Modifiers::function(),
+        ] {
+            if temporary_normal {
+                cx.set_state("ˇone two", Mode::Insert);
+                cx.simulate_keystrokes("ctrl-o");
+            } else {
+                cx.set_state("ˇone two", Mode::Normal);
+            }
+            cx.simulate_keystrokes("d");
+            assert_eq!(cx.active_operator(), Some(crate::state::Operator::Delete));
+
+            cx.simulate_modifiers_change(modifiers);
+            cx.simulate_modifiers_change(Modifiers::none());
+            assert_eq!(
+                cx.active_operator(),
+                Some(crate::state::Operator::Delete),
+                "modifier tap with {modifiers:?}"
+            );
+            assert_eq!(cx.mode(), Mode::Normal);
+
+            cx.simulate_keystrokes("w");
+            cx.assert_editor_state("ˇtwo");
+            assert_eq!(cx.mode(), expected_mode);
+        }
+    }
+}
+
+#[gpui::test]
+async fn test_bound_standalone_modifier_updates_operator(cx: &mut TestAppContext) {
+    let mut cx = VimTestContext::new(cx, true).await;
+    cx.update_editor(|_, window, cx| {
+        window.activate_window();
+        cx.bind_keys([KeyBinding::new(
+            "shift",
+            editor::actions::MoveRight,
+            Some("Editor"),
+        )]);
+    });
+    cx.run_until_parked();
+    cx.set_state("ˇone two", Mode::Normal);
+    cx.simulate_keystrokes("d");
+    assert_eq!(cx.active_operator(), Some(crate::state::Operator::Delete));
+
+    cx.simulate_modifiers_change(Modifiers::shift());
+    cx.simulate_modifiers_change(Modifiers::none());
+    assert_eq!(cx.active_operator(), None);
+    cx.assert_editor_state("oˇne two");
 }
 
 #[perf]
@@ -72,7 +141,7 @@ async fn test_toggle_through_settings(cx: &mut gpui::TestAppContext) {
     // Selections aren't changed if editor is blurred but vim-mode is still disabled.
     cx.cx.set_state("«hjklˇ»");
     cx.assert_editor_state("«hjklˇ»");
-    cx.update_editor(|_, window, _cx| window.blur());
+    cx.update_editor(|_, window, cx| window.blur(cx));
     cx.assert_editor_state("«hjklˇ»");
     cx.update_editor(|_, window, cx| cx.focus_self(window));
     cx.assert_editor_state("«hjklˇ»");
@@ -381,6 +450,25 @@ async fn test_escape_cancels(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("escape");
 
     cx.assert_state("aˇbc", Mode::Normal);
+}
+
+#[gpui::test]
+async fn test_insert_line_with_multi_keybinding_to_normal(cx: &mut gpui::TestAppContext) {
+    let mut cx = VimTestContext::new(cx, true).await;
+
+    cx.update(|_, cx| {
+        cx.bind_keys([KeyBinding::new(
+            "j j",
+            SwitchToNormalMode,
+            Some("vim_mode == insert"),
+        )]);
+    });
+
+    cx.set_state("hello worldˇ\n", Mode::Insert);
+    cx.simulate_keystrokes("j j");
+    cx.assert_state("hello worldˇ\n", Mode::Normal);
+    cx.simulate_keystrokes("o");
+    cx.assert_state("hello world\nˇ\n", Mode::Insert);
 }
 
 #[perf]
@@ -1056,6 +1144,32 @@ async fn test_jk_multi(cx: &mut gpui::TestAppContext) {
     cx.assert_state("jkˇoone jkˇoone jkˇoone", Mode::Normal);
 }
 
+#[gpui::test]
+async fn test_jk_pending_input_at_end_of_read_only_buffer(cx: &mut gpui::TestAppContext) {
+    let mut cx = VimTestContext::new(cx, true).await;
+
+    cx.update(|_, cx| {
+        cx.bind_keys([KeyBinding::new(
+            "j k",
+            NormalBefore,
+            Some("vim_mode == insert"),
+        )])
+    });
+
+    cx.set_state("helˇloˇ", Mode::Insert);
+    cx.update_editor(|editor, _window, cx| {
+        let buffer = editor.buffer().read(cx).as_singleton().unwrap();
+        buffer.update(cx, |buffer, cx| {
+            buffer.set_capability(language::Capability::Read, cx)
+        });
+    });
+    cx.run_until_parked();
+    cx.update_editor(|editor, _window, cx| assert!(editor.read_only(cx)));
+
+    cx.simulate_keystrokes("j");
+    cx.assert_state("helˇloˇ", Mode::Insert);
+}
+
 #[perf]
 #[gpui::test]
 async fn test_jk_delay(cx: &mut gpui::TestAppContext) {
@@ -1366,7 +1480,7 @@ async fn test_remap(cx: &mut gpui::TestAppContext) {
     cx.update(|_, cx| {
         cx.bind_keys([KeyBinding::new(
             "g w",
-            workspace::SendKeystrokes(": j enter".to_string()),
+            workspace::SendKeystrokes(": j o i n space l i n e s enter".to_string()),
             None,
         )])
     });

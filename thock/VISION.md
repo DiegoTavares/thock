@@ -338,17 +338,16 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   as labels on the resources, `budget-guard restore <project>` puts it back, and a restore holds for the
   rest of the billing month. Spec `specs/v36-budget-guard.md`. _(in progress: built, not yet deployed)_
 - [ ] **BYO-LLM cost visibility** — key/model choice, local vs cloud, graceful failure. _(planned)_
-- [ ] **A hard fork, and only what Thock uses** — upstream Zed stops being merged and becomes a source
+- [x] **A hard fork, and only what Thock uses** — upstream Zed stops being merged and becomes a source
   of fixes, found by the `zed-upstream-review` skill from git history alone (an `Upstream-Reviewed-Through`
   trailer marks how far each review got, and every port carries its upstream sha). The code V12 hid is
   deleted: the AI providers, Copilot, edit prediction, collaboration, the debugger, the REPL, remote
   development, Open Recent and the extension store, with their keymap entries, plus Zed's own repo
   tooling. The app shell becomes Thock's: `crates/zed` → `crates/thock_app`, `zed:` palette actions →
   `thock:` (old names still bind), and a title bar without the collab and git chrome. The target is
-  at most 150 compiled workspace crates, down from 206. Spec `specs/v42-hard-fork.md`. _(in progress:
-  declared, the repository cleaned, the pruning done at 149 compiled crates on Linux, the title bar
-  rewritten, `crates/thock_app` and `thock:` actions in place, the `thock` command and `thock://`
-  handling Thock's own; the first upstream review remains)_
+  at most 150 compiled workspace crates, down from 206. Spec `specs/v42-hard-fork.md`. _(shipped: 149
+  compiled crates on Linux, the shell Thock's own, and the first upstream review ported 200 fixes
+  from Zed v1.24.3; bundle size and build time are recorded when v1.20.0 ships)_
 
 ### Milestone 5: Thock Plus & the hosted agent
 - [x] **Subscription core, billing-agnostic:** a small backend (`thock/services/plus`, Go on Postgres with embedded migrations) with plans as hot-changeable rows (allowance in normalized units, model-tier mapping, per-plan limits, edited through the admin API and live on the next request), its own users/entitlements tables and usage ledger, per-user budget-capped OpenRouter keys minted and disabled through the provisioning API (a fake gateway stands in when no management key is set), and dev entitlements via admin-minted invite codes. The allowance loop runs end to end without Polar: usage syncs from the gateway, 80% warns, zero disables the key, and admin endpoints reset, top up, or revoke any user. Spec `specs/v25-thock-plus-hosted-agent.md`. _(shipped, Stage 1)_

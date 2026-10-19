@@ -1,6 +1,6 @@
 # Thock V42 — Hard fork from Zed: prune what Thock never uses, own the app shell
 
-**Status:** In progress (steps 1–5 of §9 landed; step 6, the first upstream review, next)
+**Status:** Steps 1–6 of §9 landed; the §3.2 release measurements wait for v1.20.0 (decision 20)
 **Owner:** Diego · **Date:** 2026-10-15
 **Companion docs:** `v12-de-zed-ification.md` (the hide-don't-delete pass this replaces with deletion),
 `v35-app-identity.md` (bundle id and `thock://`, whose upstream-preserving rewrite this simplifies),
@@ -566,6 +566,13 @@ Each step is its own PR, and `main` stays shippable between them.
 Each PR's body records crate counts before and after, and each pruning PR is preceded by
 `cargo check -p zed` and the darwin `cargo tree` on palloma (decision 15). PR 5 records the
 measurements in §3.2; bundle size and release build time wait for the v1.20.0 release (decision 20).
+
+Step 6 landed as PR #143. The range `97d854b89b5b..v1.24.3` held 1117 upstream commits: 216 only
+touched deleted crates, 5 were already carried, and 896 were triaged. 200 were ported (197
+cherry-picked, 3 hand-ported) in seven groups by file ownership, plus Thock-side commits for
+defaults, tests and small fixes (a vault is indexed whole: `file_scan_depth` is 0, because
+upstream's new default of 5 applies to any folder without `.git`). The review closed with
+`Upstream-Reviewed-Through: 2a857f5f2ec368745c1af5209d49836968fe75b8`.
 
 ## 10. Not in this spec
 

@@ -2023,8 +2023,17 @@ impl Pane {
                 }
 
                 if should_save {
-                    match Self::save_item(project.clone(), &pane, &*item_to_close, save_intent, cx)
-                        .await
+                    let Some(pane_handle) = pane.upgrade() else {
+                        return Ok(());
+                    };
+                    match Self::save_item(
+                        project.clone(),
+                        pane_handle,
+                        &*item_to_close,
+                        save_intent,
+                        cx,
+                    )
+                    .await
                     {
                         Ok(success) => {
                             if !success {
@@ -2235,7 +2244,7 @@ impl Pane {
 
     pub async fn save_item(
         project: Entity<Project>,
-        pane: &WeakEntity<Pane>,
+        pane: Entity<Pane>,
         item: &dyn ItemHandle,
         save_intent: SaveIntent,
         cx: &mut AsyncWindowContext,
@@ -2256,13 +2265,17 @@ impl Pane {
             }
             return Ok(true);
         };
-        let Some(item_ix) = pane
-            .read_with(cx, |pane, _| pane.index_for_item(item))
-            .ok()
-            .flatten()
-        else {
+        let Some(item_ix) = pane.read_with(cx, |pane, _| pane.index_for_item(item)) else {
             return Ok(true);
         };
+
+        if (save_intent == SaveIntent::Save
+            || save_intent == SaveIntent::FormatAndSave
+            || save_intent == SaveIntent::SaveWithoutFormat)
+            && cx.update(|_window, cx| !item.capability(cx).editable())?
+        {
+            return Ok(true);
+        }
 
         let (
             mut has_conflict,
@@ -2404,7 +2417,7 @@ impl Pane {
                                     "save modal was not present in spawned modals after awaiting for its answer"
                                 )
                             }
-                        })?;
+                        });
                         match answer {
                             Ok(0) => {}
                             Ok(1) => {
@@ -2469,16 +2482,13 @@ impl Pane {
                     return Ok(false);
                 };
 
-                let project_path = pane
-                    .update(cx, |pane, cx| {
-                        pane.project
-                            .update(cx, |project, cx| {
-                                project.find_or_create_worktree(new_path, true, cx)
-                            })
-                            .ok()
-                    })
-                    .ok()
-                    .flatten();
+                let project_path = pane.update(cx, |pane, cx| {
+                    pane.project
+                        .update(cx, |project, cx| {
+                            project.find_or_create_worktree(new_path, true, cx)
+                        })
+                        .ok()
+                });
                 let save_task = if let Some(project_path) = project_path {
                     let (worktree, path) = project_path.await?;
                     let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
@@ -2516,13 +2526,13 @@ impl Pane {
             }
         }
 
-        pane.update(cx, |_, cx| {
+        Ok(pane.update(cx, |_, cx| {
             cx.emit(Event::UserSavedItem {
                 item: item.downgrade_item(),
                 save_intent,
             });
             true
-        })
+        }))
     }
 
     pub fn autosave_item(
@@ -8881,6 +8891,45 @@ mod tests {
             pane.activate_next_item(&ActivateNextItem { wrap_around: false }, window, cx);
         });
         assert_item_labels(&pane, ["A", "B", "C*"], cx);
+    }
+
+    #[gpui::test]
+    async fn test_save_intents_are_noops_for_read_only_items(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+
+        let item = pane.update_in(cx, |pane, window, cx| {
+            let item = cx.new(|cx| {
+                TestItem::new(cx)
+                    .with_dirty(true)
+                    .with_capability(Capability::ReadOnly)
+                    .with_project_items(&[TestProjectItem::new(1, "read_only.txt", cx)])
+            });
+            pane.add_item(Box::new(item.clone()), true, true, None, window, cx);
+            item
+        });
+
+        for save_intent in [
+            SaveIntent::Save,
+            SaveIntent::FormatAndSave,
+            SaveIntent::SaveWithoutFormat,
+        ] {
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.save_active_item(save_intent, window, cx)
+                })
+                .await
+                .unwrap();
+        }
+
+        item.read_with(cx, |item, _| {
+            assert_eq!(item.save_count, 0);
+            assert_eq!(item.save_as_count, 0);
+        });
     }
 
     fn init_test(cx: &mut TestAppContext) {

@@ -4373,8 +4373,9 @@ impl AcpThread {
         };
         let env = cx.spawn(async move |_, _| {
             let mut env = env.await.unwrap_or_default();
-            // Disables paging for `git` and hopefully other commands
-            env.insert("PAGER".into(), "".into());
+
+            disable_pagers_through_env(&mut env);
+
             for var in extra_env {
                 env.insert(var.name, var.value);
             }
@@ -5296,17 +5297,21 @@ mod tests {
 
         // Create a real PTY terminal that runs a command which prints output then sleeps
         // We use printf instead of echo and chain with && sleep to ensure proper execution
-        let (completion_tx, _completion_rx) = async_channel::unbounded();
         let (program, args) = ShellBuilder::new(&Shell::System, false).build(
             Some("printf 'output_before_kill\\n' && sleep 60".to_owned()),
             &[],
         );
+        let terminal_mode = ::terminal::TerminalMode::task(task::SpawnInTerminal {
+            command: Some(program.clone()),
+            args: args.clone(),
+            ..Default::default()
+        });
 
         let builder = cx
             .update(|cx| {
                 ::terminal::TerminalBuilder::new(
                     None,
-                    None,
+                    terminal_mode,
                     task::Shell::WithArguments {
                         program,
                         args,
@@ -5320,7 +5325,6 @@ mod tests {
                     0,
                     false,
                     0,
-                    Some(completion_tx),
                     cx,
                     vec![],
                     PathStyle::local(),
