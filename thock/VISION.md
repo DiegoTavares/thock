@@ -348,6 +348,21 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   at most 150 compiled workspace crates, down from 206. Spec `specs/v42-hard-fork.md`. _(shipped: 149
   compiled crates on Linux, the shell Thock's own, and the first upstream review ported 200 fixes
   from Zed v1.24.3; bundle size and build time are recorded when v1.20.0 ships)_
+- [x] **A desk set in type:** the desk stops looking like Zed. A Thock theme, Dark and Light, built
+  from the phone's tokens, becomes the default (One Dark and One Light stay in the picker), and
+  heading colours become theme-addressable through `title.h1`–`h3`. A masthead under the window
+  title shows the viewed day in Petrona italic with back and forward buttons (`cmd-alt-[` /
+  `cmd-alt-]`, skipping days without a note so browsing never creates a past one), a two-week strip
+  that marks the days with a note (`cmd-alt-w` walks it from the keyboard) and the note's path small
+  on the right. A Desk panel in the right dock folds the Backlog and the Day Planner into three
+  tabs — Backlog, Today, Done — with a card that counts down to today's next timed entry and lanes
+  stacked under Petrona titles. Notes are set in IBM Plex Sans with `tnum`, `#` and `##` lines draw
+  as Petrona blocks that give way to the source line under the cursor, a journal's and a task's
+  times take their colours, task items lose their bullet, and line numbers are off. Everything is
+  display-only: no byte of a note changes. Design reference:
+  https://claude.ai/artifact/6TKpMJ2dQ1mi5XaScvXido. Spec `specs/v43-almanac.md`. _(shipped
+  2026-10-19; the light theme's dim and amber are one shade darker than the phone's so muted text
+  and text on amber meet the spec's contrast floors)_
 
 ### Milestone 5: Thock Plus & the hosted agent
 - [x] **Subscription core, billing-agnostic:** a small backend (`thock/services/plus`, Go on Postgres with embedded migrations) with plans as hot-changeable rows (allowance in normalized units, model-tier mapping, per-plan limits, edited through the admin API and live on the next request), its own users/entitlements tables and usage ledger, per-user budget-capped OpenRouter keys minted and disabled through the provisioning API (a fake gateway stands in when no management key is set), and dev entitlements via admin-minted invite codes. The allowance loop runs end to end without Polar: usage syncs from the gateway, 80% warns, zero disables the key, and admin endpoints reset, top up, or revoke any user. Spec `specs/v25-thock-plus-hosted-agent.md`. _(shipped, Stage 1)_
