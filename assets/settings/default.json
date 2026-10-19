@@ -6,10 +6,11 @@
   // - "system": Use the theme that corresponds to the system's appearance
   // - "light": Use the theme indicated by the "light" field
   // - "dark": Use the theme indicated by the "dark" field
+  // Thock: the desk's own palette (V43); One Dark and One Light stay in the picker.
   "theme": {
     "mode": "system",
-    "light": "One Light",
-    "dark": "One Dark",
+    "light": "Thock Light",
+    "dark": "Thock Dark",
   },
   "icon_theme": "Thock (Default)",
   // The name of a base set of key bindings to use.

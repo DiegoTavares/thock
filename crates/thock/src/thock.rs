@@ -33,6 +33,7 @@ pub mod routines;
 pub mod routines_panel;
 pub mod sync_status;
 pub mod tasks_google;
+pub mod thock_theme;
 pub mod ui;
 pub mod vault;
 pub mod vault_sync;

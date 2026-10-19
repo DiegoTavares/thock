@@ -1617,8 +1617,34 @@ fn highlight_slot(kind: SpanKind) -> Option<usize> {
     }
 }
 
+/// The style of a heading level: the theme's `title.hN` syntax style when it
+/// defines one — colour, weight and slant (V43 §5.3) — otherwise the
+/// player-palette colour the headings have always taken, so One Dark and One
+/// Light look as they did.
+pub(crate) fn heading_style(level: u8, cx: &App) -> HighlightStyle {
+    let level = level.clamp(1, 3);
+    let themed = cx
+        .theme()
+        .syntax()
+        .style_for_name(&format!("title.h{level}"))
+        .filter(|style| style.color.is_some());
+    match themed {
+        Some(style) => HighlightStyle {
+            color: style.color,
+            font_weight: style.font_weight,
+            font_style: style.font_style,
+            ..Default::default()
+        },
+        None => HighlightStyle {
+            color: Some(slot_color(HEADING_SLOT + level as usize - 1, cx)),
+            ..Default::default()
+        },
+    }
+}
+
 fn slot_style(slot: usize, cx: &App) -> HighlightStyle {
     match slot {
+        HEADING_SLOT..BOLD_SLOT => heading_style((slot - HEADING_SLOT + 1) as u8, cx),
         STRIKETHROUGH_SLOT => HighlightStyle {
             strikethrough: Some(StrikethroughStyle {
                 thickness: px(1.),
@@ -2814,6 +2840,32 @@ mod tests {
             toggle(editor, cx);
             assert!(highlighted(editor, WIKILINK_SLOT, cx).is_empty());
             assert!(highlighted(editor, HEADING_SLOT, cx).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn heading_colours_come_from_the_theme_when_it_defines_them(cx: &mut TestAppContext) {
+        let (_editor, mut cx) = setup(cx, NOTE).await;
+        cx.update(|_, cx| {
+            // The base theme defines no `title.h1`, so the player slot stands.
+            let player = cx.theme().players().0[1].cursor;
+            let style = heading_style(1, cx);
+            assert_eq!(style.color, Some(player));
+            assert_eq!(style.font_weight, None);
+            assert_eq!(heading_style(2, cx).font_style, None);
+        });
+        cx.update(|_, cx| {
+            crate::thock_theme::activate_for_tests(crate::thock_theme::THOCK_DARK, cx)
+        });
+        cx.update(|_, cx| {
+            let colors = cx.theme().colors();
+            let h1 = heading_style(1, cx);
+            assert_eq!(h1.color, Some(colors.text));
+            assert_eq!(h1.font_weight, Some(gpui::FontWeight::SEMIBOLD));
+            let h2 = heading_style(2, cx);
+            assert_eq!(h2.color, Some(colors.text_accent));
+            assert_eq!(h2.font_style, Some(gpui::FontStyle::Italic));
+            assert_eq!(heading_style(3, cx).color, Some(colors.text_muted));
         });
     }
 }
