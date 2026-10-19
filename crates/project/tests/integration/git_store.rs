@@ -2365,6 +2365,8 @@ mod repository_activation_tests {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
         });
+        // Upstream's default depth, which these tests assume; Thock's default indexes a vault whole.
+        set_file_scan_depth(cx, 5);
     }
 
     async fn build_project(
