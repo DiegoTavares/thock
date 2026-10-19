@@ -569,7 +569,7 @@ measurements in §3.2; bundle size and release build time wait for the v1.20.0 r
 
 Step 6 landed as PR #143. The range `97d854b89b5b..v1.24.3` held 1117 upstream commits: 216 only
 touched deleted crates, 5 were already carried, and 896 were triaged. 200 were ported (197
-cherry-picked, 3 hand-ported) in seven groups by file ownership, with nine Thock-side commits for
+cherry-picked, 3 hand-ported) in seven groups by file ownership, plus Thock-side commits for
 defaults, tests and small fixes (a vault is indexed whole: `file_scan_depth` is 0, because
 upstream's new default of 5 applies to any folder without `.git`). The review closed with
 `Upstream-Reviewed-Through: 2a857f5f2ec368745c1af5209d49836968fe75b8`.

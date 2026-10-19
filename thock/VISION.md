@@ -346,7 +346,7 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   tooling. The app shell becomes Thock's: `crates/zed` → `crates/thock_app`, `zed:` palette actions →
   `thock:` (old names still bind), and a title bar without the collab and git chrome. The target is
   at most 150 compiled workspace crates, down from 206. Spec `specs/v42-hard-fork.md`. _(shipped: 149
-  compiled crates on Linux, the shell Thock's own, and the first upstream review ported 199 fixes
+  compiled crates on Linux, the shell Thock's own, and the first upstream review ported 200 fixes
   from Zed v1.24.3; bundle size and build time are recorded when v1.20.0 ships)_
 
 ### Milestone 5: Thock Plus & the hosted agent
