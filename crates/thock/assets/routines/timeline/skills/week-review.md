@@ -101,7 +101,7 @@ Note: `action_name: "accepted"` means the user merged an MR (counts toward `merg
 
 ## 6. Offer unfinished tasks to the backlog
 
-The vault keeps a holding pen — the configured backlog file, `backlog.md` by default — with the sections `## Soon`, `## Someday`, and `## Completed` (the Backlog panel in the bottom dock renders it). After organizing the week you know what stayed unfinished — the unchecked (`- [ ]`) items from the weekly note's goal sections plus tasks the daily notes show lingering across the week:
+The vault keeps a holding pen — the configured backlog file, `backlog.md` by default — with the sections `## Soon`, `## Someday`, and `## Completed` (the Desk panel's Backlog tab in the right dock renders it). After organizing the week you know what stayed unfinished — the unchecked (`- [ ]`) items from the weekly note's goal sections plus tasks the daily notes show lingering across the week:
 
 1. List those unfinished tasks.
 2. Ask the user **one** question: move **all** of them to the backlog, **none**, or **some** (the user picks which)? The default destination is **Soon**; the user can say "someday" for any task. If nothing is unfinished, skip this step silently.

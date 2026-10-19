@@ -536,9 +536,10 @@ fn render_caption(label: SharedString) -> AnyElement {
         .into_any_element()
 }
 
-/// Shows the routines panel (opening the left dock) when the workspace is a
-/// vault. Called once at startup after all panels are registered, so the
-/// navigation rail — not the file tree — is what a vault opens on.
+/// Shows the routines panel (opening the left dock) and the Desk (the right
+/// dock) when the workspace is a vault. Called once at startup after all
+/// panels are registered, so the navigation rail — not the file tree — is
+/// what a vault opens on.
 pub fn show_panel_if_vault(
     workspace: &mut Workspace,
     window: &mut Window,
@@ -555,6 +556,7 @@ pub fn show_panel_if_vault(
         });
     if is_vault {
         workspace.open_panel::<RoutinesPanel>(window, cx);
+        workspace.open_panel::<crate::desk_panel::DeskPanel>(window, cx);
     }
 }
 

@@ -560,12 +560,9 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
     cx.spawn_in(window, async move |workspace_handle, cx| {
         let thock_routines_panel =
             thock::RoutinesPanel::load(workspace_handle.clone(), cx.clone());
-        let thock_day_planner_panel =
-            thock::DayPlannerPanel::load(workspace_handle.clone(), cx.clone());
+        let thock_desk_panel = thock::DeskPanel::load(workspace_handle.clone(), cx.clone());
         let thock_agent_panel =
             thock::AgentPanel::load(workspace_handle.clone(), cx.clone());
-        let thock_backlog_panel =
-            thock::BacklogPanel::load(workspace_handle.clone(), cx.clone());
         let thock_chat_panel = thock::ChatPanel::load(workspace_handle.clone(), cx.clone());
         let project_panel = ProjectPanel::load(workspace_handle.clone(), cx.clone());
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
@@ -588,17 +585,8 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
 
         futures::join!(
             add_panel_when_ready(thock_routines_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(
-                thock_day_planner_panel,
-                workspace_handle.clone(),
-                cx.clone()
-            ),
+            add_panel_when_ready(thock_desk_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(thock_agent_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(
-                thock_backlog_panel,
-                workspace_handle.clone(),
-                cx.clone()
-            ),
             add_panel_when_ready(thock_chat_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),

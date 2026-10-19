@@ -1123,8 +1123,10 @@
       "k": "vim::MenuSelectPrevious",
       "down": "vim::MenuSelectNext",
       "up": "vim::MenuSelectPrevious",
-      "h": "thock::SelectPreviousBacklogColumn",
-      "l": "thock::SelectNextBacklogColumn",
+      "h": "thock::CollapseBacklogCategory",
+      "l": "thock::ExpandBacklogCategory",
+      "[": "thock::SelectPreviousBacklogColumn",
+      "]": "thock::SelectNextBacklogColumn",
       "shift-g": "menu::SelectLast",
       "g g": "menu::SelectFirst",
       "i": "thock::EditBacklogTask",
@@ -1169,6 +1171,13 @@
       "7": ["vim::Number", 7],
       "8": ["vim::Number", 8],
       "9": ["vim::Number", 9],
+    },
+  },
+  {
+    "context": "ThockDeskPanel && !editing",
+    "bindings": {
+      "g t": "thock::ActivateNextDeskTab",
+      "g shift-t": "thock::ActivatePreviousDeskTab",
     },
   },
   {

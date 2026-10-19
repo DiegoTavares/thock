@@ -1017,8 +1017,10 @@
     "context": "ThockBacklogPanel && !editing",
     "use_key_equivalents": true,
     "bindings": {
-      "left": "thock::SelectPreviousBacklogColumn",
-      "right": "thock::SelectNextBacklogColumn",
+      "left": "thock::CollapseBacklogCategory",
+      "right": "thock::ExpandBacklogCategory",
+      "[": "thock::SelectPreviousBacklogColumn",
+      "]": "thock::SelectNextBacklogColumn",
       "space": "thock::CompleteBacklogTask",
       "x": "thock::CompleteBacklogTask",
       "t": "thock::MoveBacklogTaskToToday",
@@ -1027,8 +1029,15 @@
       "alt-left": "thock::MoveBacklogTaskLeft",
       "alt-right": "thock::MoveBacklogTaskRight",
       "cmd-c": "thock::CopyBacklogTask",
-      "shift-left": "thock::CollapseBacklogCategory",
-      "shift-right": "thock::ExpandBacklogCategory",
+    },
+  },
+  {
+    "context": "ThockDeskPanel && !editing",
+    "use_key_equivalents": true,
+    "bindings": {
+      "1": ["thock::ActivateDeskTab", { "tab": "backlog" }],
+      "2": ["thock::ActivateDeskTab", { "tab": "today" }],
+      "3": ["thock::ActivateDeskTab", { "tab": "done" }],
     },
   },
   {

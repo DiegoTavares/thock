@@ -9,6 +9,7 @@ pub mod chat_panel;
 pub mod connect_phone;
 pub mod day_plan;
 pub mod day_planner_panel;
+pub mod desk_panel;
 pub mod getting_started;
 pub mod gmail;
 pub mod gmail_google;
@@ -53,16 +54,16 @@ pub use agent_panel::AgentPanel;
 pub use backlog_panel::BacklogPanel;
 pub use chat_panel::ChatPanel;
 pub use day_planner_panel::DayPlannerPanel;
+pub use desk_panel::DeskPanel;
 pub use routines_panel::{RoutinesPanel, show_panel_if_vault};
 pub use sync_status::SyncStatusIndicator;
 pub use vault::{Vault, VaultStatus, default_vault_path, scaffold_vault};
 
 pub fn init(cx: &mut App) {
     routines_panel::init(cx);
-    day_planner_panel::init(cx);
+    desk_panel::init(cx);
     agent_panel::init(cx);
     chat_panel::init(cx);
-    backlog_panel::init(cx);
     calendar_service::init(cx);
     gmail_service::init(cx);
     inbox_service::init(cx);
