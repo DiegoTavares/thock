@@ -85,8 +85,10 @@ else
 fi
 cargo build --release --target "${target_triple}" --package thock_app --package cli
 
-# Split debug symbols into a local .dbg file, then strip debug info and local
-# symbols from the shipped binaries. The .dbg file keeps symbols recoverable.
+# Strip debug info and local symbols from the shipped binaries, as bundle-mac
+# does. The debug info is first copied to thock.dbg next to the binary, which
+# only helps local builds: CI release builds carry no debug info
+# (CARGO_PROFILE_RELEASE_DEBUG=false) and do not keep the file.
 # We use llvm-objcopy because GNU objcopy on older distros (e.g. Ubuntu 20.04)
 # doesn't understand CREL sections produced by newer LLVM.
 llvm-objcopy --only-keep-debug "${target_dir}/${target_triple}/release/thock" "${target_dir}/${target_triple}/release/thock.dbg"
