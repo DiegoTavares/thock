@@ -11,7 +11,7 @@ use settings::SettingsStore;
 use std::path::Path;
 use std::sync::Arc;
 use util::rel_path::rel_path;
-use workspace::{Item, MultiWorkspace, register_project_item};
+use workspace::{AutosaveSetting, Item, MultiWorkspace, register_project_item};
 
 use crate::project_panel_tests::{self, TestProjectItemView, find_project_entry, select_path};
 use crate::{NewDirectory, NewFile, Open, ProjectPanel, Redo, Rename, Trash, Undo};
@@ -419,6 +419,14 @@ async fn undo_create_cancel_trash(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 async fn undo_create_dirty_file(cx: &mut gpui::TestAppContext) {
     let mut cx = TestContext::new(cx).await;
+    // The default autosave saves the dirty file when focus moves instead of prompting.
+    cx.update_app(|cx| {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.workspace.autosave = Some(AutosaveSetting::Off);
+            });
+        });
+    });
 
     cx.create_file("c.txt").await;
 
