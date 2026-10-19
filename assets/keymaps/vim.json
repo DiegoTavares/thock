@@ -1172,6 +1172,17 @@
     },
   },
   {
+    "context": "ThockDayStrip",
+    "bindings": {
+      "h": "thock::SelectPreviousStripDay",
+      "l": "thock::SelectNextStripDay",
+      "j": "vim::MenuSelectNext",
+      "k": "vim::MenuSelectPrevious",
+      "g g": "menu::SelectFirst",
+      "shift-g": "menu::SelectLast",
+    },
+  },
+  {
     "context": "ThockDayPlannerPanel",
     "bindings": {
       "j": "vim::MenuSelectNext",

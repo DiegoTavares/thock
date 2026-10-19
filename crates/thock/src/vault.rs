@@ -960,10 +960,21 @@ impl Vault {
     /// filename format, so formats containing `/` (nested folders per year or
     /// month) are recognized too.
     pub fn daily_note_date(&self, path: &Path) -> Option<chrono::NaiveDate> {
-        let daily_dir = self.root.join(&self.config.daily.dir);
-        let relative = path.strip_prefix(&daily_dir).ok()?.to_str()?;
+        self.note_date(NoteKind::Daily, path)
+    }
+
+    /// The Monday of the week of the weekly note at `path`, or `None` when
+    /// `path` isn't a weekly note of this vault.
+    pub fn weekly_note_week(&self, path: &Path) -> Option<chrono::NaiveDate> {
+        self.note_date(NoteKind::Weekly, path)
+    }
+
+    fn note_date(&self, kind: NoteKind, path: &Path) -> Option<chrono::NaiveDate> {
+        let config = self.notes_config(kind);
+        let notes_dir = self.root.join(&config.dir);
+        let relative = path.strip_prefix(&notes_dir).ok()?.to_str()?;
         let stem = relative.strip_suffix(".md")?;
-        crate::notes::parse_date(stem, &self.config.daily.filename)
+        crate::notes::parse_date(stem, &config.filename)
     }
 }
 
@@ -1759,6 +1770,19 @@ mod tests {
             vault.daily_note_date(&vault.note_path(NoteKind::Weekly, date)),
             None
         );
+        assert_eq!(
+            vault.weekly_note_week(&vault.note_path(NoteKind::Weekly, date)),
+            NaiveDate::from_ymd_opt(2026, 7, 20),
+            "a Monday's weekly note resolves to that Monday"
+        );
+        assert_eq!(
+            vault.weekly_note_week(&vault.note_path(
+                NoteKind::Weekly,
+                NaiveDate::from_ymd_opt(2026, 7, 23).unwrap()
+            )),
+            NaiveDate::from_ymd_opt(2026, 7, 20)
+        );
+        assert_eq!(vault.weekly_note_week(&path), None);
         assert_eq!(
             vault.daily_note_date(&dir.path().join("2026-07-20.md")),
             None

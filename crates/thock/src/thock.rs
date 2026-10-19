@@ -23,6 +23,7 @@ pub mod inbox_view;
 pub mod markdown_conceal;
 pub mod markdown_syntax;
 pub mod markdown_text;
+pub mod masthead;
 pub mod memory;
 pub mod notes;
 pub mod plus;
@@ -70,6 +71,7 @@ pub fn init(cx: &mut App) {
     sync_status::init(cx);
     vault_sync::init(cx);
     markdown_conceal::init(cx);
+    masthead::init(cx);
     wikilink_completion::init(cx);
     hide_inherited_zed_actions(cx);
 }
