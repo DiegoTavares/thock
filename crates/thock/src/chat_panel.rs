@@ -47,7 +47,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use text::{Bias, Point};
 use ui::prelude::*;
-use ui::{Button, ButtonStyle, Label, ProgressBar, SpinnerLabel};
+use ui::{KeyBinding, Label, ProgressBar, SpinnerLabel};
 use util::ResultExt as _;
 use workspace::{OpenOptions, OpenVisible, Workspace, WorkspaceSettings};
 
@@ -95,8 +95,8 @@ actions!(
         /// Shows or hides how much of the Thock Agent's allowance this
         /// cycle has used.
         ToggleChatUsage,
-        /// Puts away the "Reflect now?" suggestion until the agent has noted
-        /// more about you.
+        /// Answers "not now" to Thock's offer to file what it has noted
+        /// about you, until it has noted more.
         DismissMemoryNudge,
         /// Opens or closes the details of what the Thock Agent did in the
         /// selected step.
@@ -962,19 +962,6 @@ fn tabular_numerals() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))
 }
 
-/// A key drawn as a keycap: beside a chip, or `esc` in the composer.
-fn keycap(text: impl Into<SharedString>, cx: &App) -> Div {
-    div()
-        .px_1()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(cx.theme().colors().border_variant)
-        .text_size(rems_from_px(10.))
-        .line_height(rems_from_px(14.))
-        .text_color(cx.theme().colors().text_muted)
-        .child(text.into())
-}
-
 /// The shapes of elicitation this panel can answer inline (V26 §5.7). Pi
 /// asks single questions, so a one-property form covers the real traffic;
 /// anything richer degrades to a plain accept/decline.
@@ -1139,6 +1126,12 @@ pub struct ChatPanel {
     show_usage: bool,
     /// A launch that is waiting on the connect flow or the keychain read.
     pending_launch: Option<LaunchRequest>,
+    /// The highlighted chip of a pair without a question behind it: the
+    /// connect bubble's (§5.11) or an opener's (§5.8).
+    pair_choice: usize,
+    /// How many chips the last frame's key context gave keys to. A chip's
+    /// keycap is looked up in the frame before, so a change draws one more.
+    keyed_chips: Option<usize>,
     /// The conversation Thock wants to start, until it is answered (§5.8).
     opener: Option<Opener>,
     /// Set while the page isn't quiet enough for the opener: eight seconds
@@ -1242,6 +1235,8 @@ impl ChatPanel {
                 turn_times: BTreeMap::new(),
                 show_usage: false,
                 pending_launch: None,
+                pair_choice: 0,
+                keyed_chips: None,
                 opener: None,
                 opener_pause: None,
                 opener_linger: None,
@@ -1770,6 +1765,7 @@ impl ChatPanel {
         self.waiting = Some(waiting);
         self.waiting_generation += 1;
         self.reply_linger = None;
+        self.pair_choice = 0;
         if !self.thread_open {
             self.bubble_up = true;
         }
@@ -2187,6 +2183,7 @@ impl ChatPanel {
         self.waiting = Some(Waiting::Opener);
         self.waiting_generation += 1;
         self.bubble_up = true;
+        self.pair_choice = 0;
         self.opener_linger = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(OPENER_LINGER).await;
             this.update(cx, |this, cx| {
@@ -2274,7 +2271,7 @@ impl ChatPanel {
             .child(self.thock_bubble(div().child(opener.text()).into_any_element(), cx))
             .child(self.render_chips(
                 &opener.choices(),
-                0,
+                self.pair_choice,
                 |this, index, window, cx| this.answer_opener(index, window, cx),
                 cx,
             ))
@@ -2944,9 +2941,11 @@ impl ChatPanel {
         if positions.is_empty() {
             return;
         }
-        let current = self
-            .selected_position(&items)
-            .and_then(|position| positions.iter().position(|p| *p == position));
+        let current = self.selected_position(&items).and_then(|position| {
+            positions
+                .iter()
+                .position(|candidate| *candidate == position)
+        });
         let next = match current {
             Some(index) => {
                 (index as isize + offset).clamp(0, positions.len() as isize - 1) as usize
@@ -3036,16 +3035,16 @@ impl ChatPanel {
         match question {
             PendingQuestion::Elicitation(id) => {
                 let (_, elicitation) = thread.elicitation(id)?;
-                let ElicitationShape::Choice { options, .. } =
-                    elicitation_shape(&elicitation.request)
-                else {
-                    return None;
+                let choices: Vec<SharedString> = match elicitation_shape(&elicitation.request) {
+                    ElicitationShape::Choice { options, .. } => {
+                        options.into_iter().map(|(_, title)| title.into()).collect()
+                    }
+                    ElicitationShape::Confirm => vec!["OK".into(), "Not now".into()],
+                    ElicitationShape::Link { .. } => vec!["Open link".into()],
+                    ElicitationShape::Text { .. } => return None,
                 };
                 let chosen = self.elicitation_choices.get(id).copied().unwrap_or(0);
-                Some((
-                    options.into_iter().map(|(_, title)| title.into()).collect(),
-                    chosen,
-                ))
+                Some((choices, chosen))
             }
             PendingQuestion::Ask(id) => {
                 let (_, tool_call) = thread.tool_call(id)?;
@@ -3085,6 +3084,12 @@ impl ChatPanel {
     fn expand_or_cycle(&mut self, direction: i32, cx: &mut Context<Self>) {
         if let Some(question) = self.selected_pending_question(cx) {
             self.cycle_choice(&question, direction, cx);
+            return;
+        }
+        // A pair of chips up on its own moves its highlight too.
+        if self.pair_chips_up() {
+            self.pair_choice = (self.pair_choice as i32 + direction).clamp(0, 1) as usize;
+            cx.notify();
             return;
         }
         // `left` on a row closes its receipt and lands on it.
@@ -3231,11 +3236,7 @@ impl ChatPanel {
             .selected_pending_question(cx)
             .or_else(|| self.latest_pending_question(cx))
         else {
-            if self.opener_takes_keys() {
-                self.answer_opener(action.0, window, cx);
-            } else if self.waiting == Some(Waiting::Connect) {
-                self.pick_connect_choice(action.0, window, cx);
-            }
+            self.answer_pair(action.0, window, cx);
             return;
         };
         let Some((choices, _)) = self.question_choices(&question, cx) else {
@@ -3243,6 +3244,16 @@ impl ChatPanel {
         };
         if action.0 < choices.len() {
             self.answer_question(&question, Some(action.0), window, cx);
+        }
+    }
+
+    /// Picks a chip of the pair without a question behind it: the opener's,
+    /// or the connect bubble's.
+    fn answer_pair(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.opener_takes_keys() {
+            self.answer_opener(index, window, cx);
+        } else if self.waiting == Some(Waiting::Connect) {
+            self.pick_connect_choice(index, window, cx);
         }
     }
 
@@ -3256,6 +3267,12 @@ impl ChatPanel {
     /// connect bubble's, or the opener's.
     fn two_chips_waiting(&self) -> bool {
         self.waiting == Some(Waiting::Connect) || self.opener_takes_keys()
+    }
+
+    /// The pair's bubble is what is up, so `enter`, `left` and `right` are
+    /// its; in the thread the rows keep them.
+    fn pair_chips_up(&self) -> bool {
+        !self.thread_open && self.two_chips_waiting()
     }
 
     /// The two ways in when Thock Plus isn't connected (§5.11).
@@ -3330,9 +3347,19 @@ impl ChatPanel {
                 cx.open_url(&url);
                 return;
             }
-            ElicitationShape::Confirm => acp::CreateElicitationResponse::new(
-                acp::ElicitationAction::Accept(acp::ElicitationAcceptAction::new()),
-            ),
+            ElicitationShape::Confirm => {
+                // The second chip is "Not now" (§5.5).
+                let index = choice
+                    .or_else(|| self.elicitation_choices.get(id).copied())
+                    .unwrap_or(0);
+                if index == 1 {
+                    self.decline_elicitation(id, cx);
+                    return;
+                }
+                acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
+                    acp::ElicitationAcceptAction::new(),
+                ))
+            }
         };
         thread.update(cx, |thread, cx| {
             thread.respond_to_elicitation(id, response, cx)
@@ -3368,9 +3395,11 @@ impl ChatPanel {
                 // editor, so answering never requires the mouse.
                 if let Some(question) = self.pending_question_for_confirm(window, cx) {
                     self.answer_question(&question, None, window, cx);
+                } else if self.pair_chips_up() {
+                    self.answer_pair(self.pair_choice, window, cx);
                 } else if self.message_editor.focus_handle(cx).is_focused(window) {
                     self.send_message(&SendChatMessage, window, cx);
-                } else if !self.open_selected_entry(window, cx) {
+                } else if !self.open_selected_entry(window, cx) && self.thread_open {
                     window.focus(&self.message_editor.focus_handle(cx), cx);
                 }
             }
@@ -3899,8 +3928,9 @@ impl ChatPanel {
             .into_any_element()
     }
 
-    /// Chips for a choice (§5.5): a keycap, then the label. The highlighted
-    /// one is what `enter` picks; `pick` answers with the chip's index.
+    /// Chips for a choice (§5.5): the key that picks the chip, as the keymap
+    /// binds it right now, then the label. The highlighted one is what
+    /// `enter` picks; `pick` answers with the chip's index.
     fn render_chips(
         &self,
         choices: &[SharedString],
@@ -3908,13 +3938,6 @@ impl ChatPanel {
         pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + Clone + 'static,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let keycaps: Vec<Option<String>> = if choices.len() == 2 {
-            vec![Some("y".to_string()), Some("n".to_string())]
-        } else {
-            (1..=choices.len())
-                .map(|number| (number <= 9).then(|| number.to_string()))
-                .collect()
-        };
         let mut row = h_flex().flex_wrap().gap_1p5();
         for (index, label) in choices.iter().enumerate() {
             let pick = pick.clone();
@@ -3935,12 +3958,9 @@ impl ChatPanel {
                     })
                     .bg(cx.theme().colors().element_selected)
                     .cursor_pointer()
-                    .children(
-                        keycaps
-                            .get(index)
-                            .cloned()
-                            .flatten()
-                            .map(|key| keycap(key, cx)),
+                    .child(
+                        KeyBinding::for_action_in(&AnswerChatChoice(index), &self.focus_handle, cx)
+                            .size(rems_from_px(10.)),
                     )
                     .child(
                         div()
@@ -4219,41 +4239,27 @@ impl ChatPanel {
                         );
                 }
             }
-            ElicitationShape::Link { url } => {
-                column = column.child(
-                    h_flex().child(
-                        Button::new("thock-chat-elicit-link", "Open Link")
-                            .style(ButtonStyle::Filled)
-                            .on_click(cx.listener(move |_, _, _window, cx| {
-                                cx.open_url(&url);
-                            })),
-                    ),
-                );
-            }
-            ElicitationShape::Confirm => {
-                let accept_id = id.clone();
-                let decline_id = id.clone();
-                column = column.child(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Button::new("thock-chat-elicit-ok", "OK")
-                                .style(ButtonStyle::Filled)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.answer_question(
-                                        &PendingQuestion::Elicitation(accept_id.clone()),
-                                        None,
-                                        window,
-                                        cx,
-                                    );
-                                })),
+            // A link and a yes/no are chips too, so the keys reach them.
+            shape @ (ElicitationShape::Link { .. } | ElicitationShape::Confirm) => {
+                let choices: Vec<SharedString> = match shape {
+                    ElicitationShape::Link { .. } => vec!["Open link".into()],
+                    _ => vec!["OK".into(), "Not now".into()],
+                };
+                let chosen = self.elicitation_choices.get(id).copied().unwrap_or(0);
+                let answer_id = id.clone();
+                column = column.child(self.render_chips(
+                    &choices,
+                    chosen,
+                    move |this, index, window, cx| {
+                        this.answer_question(
+                            &PendingQuestion::Elicitation(answer_id.clone()),
+                            Some(index),
+                            window,
+                            cx,
                         )
-                        .child(Button::new("thock-chat-elicit-skip", "Not Now").on_click(
-                            cx.listener(move |this, _, _window, cx| {
-                                this.decline_elicitation(&decline_id, cx);
-                            }),
-                        )),
-                );
+                    },
+                    cx,
+                ));
             }
         }
         column.into_any_element()
@@ -4312,7 +4318,10 @@ impl ChatPanel {
                             .rounded_full()
                             .bg(cx.theme().colors().element_selected)
                             .cursor_pointer()
-                            .child(keycap("r", cx))
+                            .child(
+                                KeyBinding::for_action_in(&RetryChatTurn, &self.focus_handle, cx)
+                                    .size(rems_from_px(10.)),
+                            )
                             .child(
                                 div()
                                     .font_weight(FontWeight::SEMIBOLD)
@@ -4540,7 +4549,7 @@ impl ChatPanel {
             .child(self.thock_bubble(div().child(text).into_any_element(), cx))
             .child(self.render_chips(
                 &Self::connect_choices(),
-                0,
+                self.pair_choice,
                 |this, index, window, cx| this.pick_connect_choice(index, window, cx),
                 cx,
             ))
@@ -4621,7 +4630,16 @@ impl ChatPanel {
                     .bg(cx.theme().colors().surface_background)
                     .shadow_sm()
                     .child(div().flex_1().min_w_0().child(self.message_editor.clone()))
-                    .child(div().pb_0p5().child(keycap("esc", cx))),
+                    .child(
+                        div().pb_0p5().child(
+                            KeyBinding::for_action_in(
+                                &menu::Cancel,
+                                &self.message_editor.focus_handle(cx),
+                                cx,
+                            )
+                            .size(rems_from_px(10.)),
+                        ),
+                    ),
             )
             .when(exhausted, |this| {
                 this.child(
@@ -4746,6 +4764,7 @@ impl Render for ChatPanel {
         };
         let mut key_context = KeyContext::new_with_defaults();
         key_context.add(CHAT_PANEL_KEY);
+        let mut keyed_chips = None;
         // Single-key list navigation would shadow typing, so `editing` gates
         // it in the keymap; `menu` brings the arrow-key defaults when the
         // list has focus.
@@ -4754,17 +4773,21 @@ impl Render for ChatPanel {
         } else {
             key_context.add("menu");
             // The chips' keys: `1`–`9`, and `y`/`n` for a pair (§5.12).
-            let chips = self
+            keyed_chips = self
                 .latest_pending_question(cx)
                 .and_then(|question| self.question_choices(&question, cx))
                 .map(|(choices, _)| choices.len())
                 .or_else(|| self.two_chips_waiting().then_some(2));
-            if let Some(count) = chips {
+            if let Some(count) = keyed_chips {
                 key_context.add("choice");
                 if count == 2 {
                     key_context.add("choice_pair");
                 }
             }
+        }
+        if keyed_chips != self.keyed_chips {
+            self.keyed_chips = keyed_chips;
+            window.request_animation_frame();
         }
 
         let presence = self.presence(cx);
@@ -5648,6 +5671,34 @@ mod tests {
         connection
     }
 
+    /// Raises a yes/no from the agent, a form that asks for nothing, on the
+    /// open session. The task resolves with the answer.
+    fn raise_confirm(setup: &mut Setup) -> Task<acp::CreateElicitationResponse> {
+        let thread = setup
+            .panel
+            .read_with(&setup.cx, |panel, _| {
+                panel.session.as_ref().map(|session| session.thread.clone())
+            })
+            .expect("a session is open");
+        let session_id = thread.read_with(&setup.cx, |thread, _| thread.session_id().clone());
+        let response = thread
+            .update(&mut setup.cx, |thread, cx| {
+                thread.request_elicitation(
+                    acp::CreateElicitationRequest::new(
+                        acp::ElicitationFormMode::new(
+                            acp::ElicitationSessionScope::new(session_id),
+                            acp::ElicitationSchema::new(),
+                        ),
+                        "File what I noted about you?",
+                    ),
+                    cx,
+                )
+            })
+            .expect("a valid request");
+        setup.cx.run_until_parked();
+        response
+    }
+
     #[gpui::test]
     async fn an_ask_request_shows_chips_and_a_number_key_answers_it(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
@@ -5770,8 +5821,8 @@ mod tests {
 
     #[gpui::test]
     async fn unconnected_the_summon_key_offers_the_ways_in(cx: &mut TestAppContext) {
-        // §5.11: no credential, so the bubble asks how to connect; `n` picks
-        // your own agent and the chat folds.
+        // §5.11: no credential, so the bubble asks how to connect; `escape`
+        // folds it and focus goes back to the note.
         let mut setup = setup(cx).await;
         let editor = open_note(&mut setup).await;
         setup.cx.simulate_keystrokes("ctrl-alt-n");
@@ -5784,6 +5835,61 @@ mod tests {
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Resting);
         assert!(is_focused(&mut setup, &editor));
+    }
+
+    #[gpui::test]
+    async fn unconnected_the_arrows_and_enter_pick_a_way_in(cx: &mut TestAppContext) {
+        // §5.11: the connect bubble's chips take `left`/`right` and `enter`
+        // without folding it. `n` isn't pressed here: picking your own agent
+        // saves to the real global settings file.
+        let mut setup = setup(cx).await;
+        open_note(&mut setup).await;
+        setup.cx.simulate_keystrokes("ctrl-alt-n right");
+        setup.cx.run_until_parked();
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            assert_eq!(panel.pair_choice, 1);
+        });
+        setup.cx.simulate_keystrokes("left enter");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::NeedsYou);
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            assert!(matches!(panel.view, PanelView::Connect(_)));
+            assert_eq!(panel.waiting, Some(Waiting::Connect));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_yes_or_no_from_the_agent_is_answered_with_y_or_n(cx: &mut TestAppContext) {
+        // §5.5: a confirm is a pair of chips like any choice, so the keys
+        // answer it and focus goes back to the note.
+        let mut setup = setup(cx).await;
+        let editor = open_note(&mut setup).await;
+        start_wrap_today(
+            &mut setup,
+            Rc::new(StubAgentConnection::new()),
+            None,
+            vec![says("Done.")],
+        )
+        .await;
+
+        let declined = raise_confirm(&mut setup);
+        assert_eq!(visible_chips(&setup), ["OK", "Not now"]);
+        setup.cx.simulate_keystrokes("ctrl-alt-n n");
+        setup.cx.run_until_parked();
+        assert!(matches!(
+            declined.await.action,
+            acp::ElicitationAction::Decline
+        ));
+        assert!(visible_chips(&setup).is_empty());
+        assert!(is_focused(&mut setup, &editor));
+
+        let accepted = raise_confirm(&mut setup);
+        setup.cx.simulate_keystrokes("ctrl-alt-n y");
+        setup.cx.run_until_parked();
+        assert!(matches!(
+            accepted.await.action,
+            acp::ElicitationAction::Accept(_)
+        ));
     }
 
     #[gpui::test]

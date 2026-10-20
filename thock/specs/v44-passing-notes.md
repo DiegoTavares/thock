@@ -7,9 +7,8 @@ still open
 three directions it was chosen over: <https://claude.ai/artifact/4CyjrGC85uLuU4WfGjNsB2>. The two
 approved frames (`v44-passing-notes-needs-you.png`, `v44-passing-notes-talking.png`) live in the
 artifact and beside this file locally; they are not checked in. §6 walks through them.
-**Depends on:** `v43-almanac.md` (on the `v43-almanac` branch, not merged yet): the Thock theme tokens,
-Petrona, and the Desk panel that owns the right dock. Steps 1 and 2 of §7.4 don't need it and go to
-`main` first.
+**Depends on:** `v43-almanac.md` (merged 2026-10-19, #145): the Thock theme tokens, Petrona, and the
+Desk panel that owns the right dock.
 **Companion docs:** `v26-agent-chat-refinement.md` (the renderer this keeps: grouping, the summary
 vocabulary, elicitation shapes, the failure floor), `v25-thock-plus-hosted-agent.md` decision 16 (no
 approval gates), `v27-agent-session-prompt.md` (`SYSTEM.md` and the context block), `v28-agent-memory.md`
@@ -563,10 +562,10 @@ Each step ships alone and updates VISION.md §12 when it lands.
 5. Underlines and the quote fallback.
 6. Openers, starting with the Reflect nudge, and the `openers` setting.
 
-Steps 1 and 2 don't touch anything V43 adds and go to `main` first. Step 3 onwards needs
-`v43-almanac` merged: Petrona, the theme tokens and the Desk.
+All six shipped together on one branch after V43 merged.
 
-**Inherited crates touched:** `workspace` (§7.2), plus the macOS, Linux and vim keymaps.
+**Inherited crates touched:** `workspace` (§7.2), `settings_content` (the `openers` setting in its
+`thock.rs`), plus the macOS, Linux and vim keymaps.
 
 ## 8. Tests
 
@@ -635,8 +634,12 @@ Steps 1 and 2 don't touch anything V43 adds and go to `main` first. Step 3 onwar
 
 ## 10. Open items
 
-None. The five from the first draft were resolved on 2026-10-19 (decision log 7 to 13). Phone
-parity for the Ask sheet stays a follow-up (§4).
+1. **The Desk check on the first round of manual tests** (§5.3, R2): does the Desk collapsing and
+   returning as the thread opens and folds read well on a laptop? If not, collapse it whenever
+   Talking opens, at every width.
+
+The five from the first draft were resolved on 2026-10-19 (decision log 7 to 13). Phone parity
+for the Ask sheet stays a follow-up (§4).
 
 ## 11. Decision log (2026-10-19)
 

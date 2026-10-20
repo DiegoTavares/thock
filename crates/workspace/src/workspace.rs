@@ -8345,13 +8345,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Renders the center pane group wrapped in a `Main` landmark so assistive
-    /// technology recognizes the editor as the main region and can navigate to
-    /// it. While a screen reader is active the wrapper is also the focus target
-    /// for region navigation (it carries the landmark role and label), so
-    /// focusing it announces "Editor" instead of falling back to the whole
-    /// window. We only make it focusable in that case so it never adds a hitbox
-    /// or intercepts mouse focus for other users.
     /// The centre pane group between its centred-layout paddings, with the
     /// inset strip and the overlay a view asked for (`set_center_inset`,
     /// `set_center_overlay`). The inset widens the right padding's element,
@@ -8392,6 +8385,13 @@ impl Workspace {
             )
     }
 
+    /// Renders the center pane group wrapped in a `Main` landmark so assistive
+    /// technology recognizes the editor as the main region and can navigate to
+    /// it. While a screen reader is active the wrapper is also the focus target
+    /// for region navigation (it carries the landmark role and label), so
+    /// focusing it announces "Editor" instead of falling back to the whole
+    /// window. We only make it focusable in that case so it never adds a hitbox
+    /// or intercepts mouse focus for other users.
     fn render_center(
         &self,
         render_cx: &PaneRenderContext,
