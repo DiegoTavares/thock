@@ -3,15 +3,12 @@
 **Status:** Draft (2026-10-18)
 **Owner:** Diego · **Date:** 2026-10-18
 **Design reference:** the three directions this spec chose from (A, *Almanac*), with live mockups
-and the theme switcher: <https://claude.ai/artifact/6TKpMJ2dQ1mi5XaScvXido>. The approved frame is
-checked in beside this file as `v43-almanac-reference.png`.
+and the theme switcher: <https://claude.ai/artifact/6TKpMJ2dQ1mi5XaScvXido>.
 **Companion docs:** `v10-markdown-conceal.md` and `v24-inline-markdown-conceal.md` (the conceal
 layer the heading blocks extend), `v39-vault-images.md` §4 (the block machinery), `v4-day-planner-panel.md`
 and `v8-calendar-sync.md` (what Today shows and where the Next card reads from), `v6-backlog.md`
 and `v17-backlog-categories.md` (the Backlog model and keys this re-lays out), `v33-iphone-companion.md`
 §13 (the phone's visual language this borrows from), `v12-de-zed-ification.md` (chrome already removed)
-
-![Almanac reference frame](v43-almanac-reference.png)
 
 ---
 
