@@ -1,6 +1,7 @@
 # Thock V44 - Passing notes: a companion that floats on the page
 
-**Status:** Draft, open items resolved (2026-10-19)
+**Status:** Implemented (2026-10-20); the §5.3 Desk check on the first round of manual tests is
+still open
 **Owner:** Diego · **Date:** 2026-10-19
 **Design reference:** Direction D of the agent chat study, with live mockups of every moment and the
 three directions it was chosen over: <https://claude.ai/artifact/4CyjrGC85uLuU4WfGjNsB2>. The two
