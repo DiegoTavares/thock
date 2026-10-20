@@ -68,7 +68,7 @@ before the float:
 | 13 | Conversations Thock starts | **Same bubble as a question**, with stricter manners (§5.8). When and why Thock starts one belongs to the upcoming feature's own spec. |
 | 14 | The work, expanded | **Rows only:** a verb and a vault-relative path, with changes in amber. V26's diff previews leave the expansion, because the page now shows the change (the tick, the underline). `enter` opens a row's note at its line. This revises V26 decision 10. |
 | 15 | Scope | **The hosted chat (`chat_panel.rs`) only.** The BYO terminal panel (`agent_panel.rs`) is untouched, as in V26 decision 3. |
-| 16 | Keys | **`thock::ToggleChatFocus` (`cmd-alt-n` / `ctrl-alt-n`) stays the summon.** The key context stays `ThockChatPanel`, so existing bindings carry over. `escape` folds and no longer stops a running turn. |
+| 16 | Keys | **`thock::ToggleChatFocus` (`cmd-?` / `ctrl-?`) stays the summon.** The key context stays `ThockChatPanel`, so existing bindings carry over. `escape` folds and no longer stops a running turn. |
 | 17 | Opener frequency | **`"openers": "rare"` or `"off"` in the `thock` block of `settings.json`**, beside V43's fonts: how often a person may be interrupted is theirs, not the vault's. |
 | 18 | Keep open | **Deferred.** Talking is already a chrome-less column until it folds; a pin comes back if people miss it (R5). |
 | 19 | Motion | **The bubble rises and fades in; nothing else moves.** The pebble doesn't morph, and underlines appear at once. |
@@ -81,7 +81,7 @@ before the float:
 - **G2: Writing is undisturbed.** While you type in a note, nothing floats up. A question or an
   opener waits as a dot on the pebble until you pause, and no bubble ever covers the caret's line.
 - **G3: A question needs no navigation.** It is visible without opening anything and is answered
-  with `cmd-alt-n` and one key, after which focus is back in your note.
+  with `cmd-?` and one key, after which focus is back in your note.
 - **G4: The page shows what is meant.** A question about a line in an open note underlines that line.
 - **G5: Nothing divides the chat from the page.** No border, rule or panel background. Bubbles, chips
   and the composer are the only filled shapes.
@@ -117,7 +117,7 @@ before the float:
 │                                              │                    ╭─────────╮    │
 │                                              │                    │ Tick it │    │ ← you,
 │                                              │                    ╰─────────╯    │   Plex Sans
-│                                              │ ( Message Thock            esc )  (T)│ ← composer,
+│                                              │ ( Message Thock                )  (T)│ ← composer,
 └─────────────────────────────────────────────┴───────────────────────────────────┘   pebble
    the editor, narrowed while Talking              the room it gave up: no border
 ```
@@ -136,16 +136,16 @@ before the float:
 
 | State | On screen | Focus | Enters when | Leaves when |
 | --- | --- | --- | --- | --- |
-| **Resting** | The pebble at 70% opacity | wherever you are | the app opens; `escape`; focus goes to a note with nothing waiting | a turn starts (→ Working); `cmd-alt-n` (→ Talking); something waits for you (→ Needs you) |
+| **Resting** | The pebble at 70% opacity | wherever you are | the app opens; `escape`; focus goes to a note with nothing waiting | a turn starts (→ Working); `cmd-?` (→ Talking); something waits for you (→ Needs you) |
 | **Working** | The pebble with the typing bubble | unchanged | a turn starts: a ritual you launched, or a message you sent | the turn stops (→ Needs you if folded, or the reply appears in the thread if open) |
-| **Needs you** | A bubble floats up from the pebble, the lines it is about are underlined, and the pebble has a dot | unchanged until `cmd-alt-n` focuses the bubble | Thock asks a question, starts a conversation, or replies while you were writing | you answer (→ Working, focus back where it was); `cmd-alt-n` again (→ Talking); `escape` or typing (→ folds into the dot) |
-| **Talking** | The thread, the composer and the pebble. The editor narrows to make room | the composer | `cmd-alt-n` from Resting or Working, or from a focused bubble | `escape`, or focus goes to a note (→ Resting, or the dot if something still waits) |
+| **Needs you** | A bubble floats up from the pebble, the lines it is about are underlined, and the pebble has a dot | unchanged until `cmd-?` focuses the bubble | Thock asks a question, starts a conversation, or replies while you were writing | you answer (→ Working, focus back where it was); `cmd-?` again (→ Talking); `escape` or typing (→ folds into the dot) |
+| **Talking** | The thread, the composer and the pebble. The editor narrows to make room | the composer | `cmd-?` from Resting or Working, or from a focused bubble | `escape`, or focus goes to a note (→ Resting, or the dot if something still waits) |
 
 The pause rule keeps G2. Something that waits for you floats up only after **2 seconds without an
 edit** in any note, and an opener only after 8 (§5.8). An edit is something you typed (an editor
 transaction), not a note reloading after Thock wrote to it: Thock's own tick must never read as you
 typing (§7.1). If you start typing while a bubble is up, it
-folds into the pebble's dot, and it doesn't float up again on its own. `cmd-alt-n` brings it back.
+folds into the pebble's dot, and it doesn't float up again on its own. `cmd-?` brings it back.
 A reply that arrived while you were writing floats up once at the next pause, folds into the dot
 after 8 seconds, and the dot clears when you open the thread.
 
@@ -352,7 +352,7 @@ first turn.
 
 ### 5.11 Connection, allowance, failures, stop
 
-- **Not connected.** The pebble shows a hollow ring. `cmd-alt-n` opens a bubble: "I'm not connected
+- **Not connected.** The pebble shows a hollow ring. `cmd-?` opens a bubble: "I'm not connected
   yet." with chips **Connect Thock Plus** (`thock::ConnectThockAgent`) and **Use your own agent**
   (`thock::UseOwnAgent`). The invite-code field of today's connect flow appears inside the bubble,
   and `enter` submits it.
@@ -374,7 +374,7 @@ choice is pending and `choice_pair` when it has exactly two options.
 
 | Keys | Action (`thock::` unless noted) | Where | Change |
 | --- | --- | --- | --- |
-| `cmd-alt-n` / `ctrl-alt-n` | `ToggleChatFocus` | anywhere | Resting or Working → Talking. Needs you → focus the bubble, then a second press opens Talking. Focused → fold, focus back to the page |
+| `cmd-?` / `ctrl-?` | `ToggleChatFocus` | anywhere | Resting or Working → Talking. Needs you → focus the bubble, then a second press opens Talking. Focused → fold, focus back to the page. Hovering the pebble shows the key |
 | `escape` | `menu::Cancel` | chat | Folds and returns focus to the page. No longer stops a turn. With vim, the composer's first `escape` leaves insert mode |
 | `enter` | `menu::Confirm` | chat | Send from the composer, answer with the highlighted chip, or open the selected row |
 | `1`–`9` | `AnswerChatChoice` (index) | bubble, `choice` | new |
@@ -387,7 +387,8 @@ choice is pending and `choice_pair` when it has exactly two options.
 | `alt-enter`, `g space` | `OpenChatEntry` | chat | Opens the selected row's note, or the quoted line, at its line |
 | `cmd-.` / `ctrl-.` | `StopChatTurn` | chat, including the composer | new binding, under both `ThockChatPanel` and `ThockChatPanel > Editor`, where it shadows `editor::ToggleCodeActions` |
 | `r` | `RetryChatTurn` | chat, after a failure | new binding |
-| `o` | `NewChat` | thread, not editing | as V26 |
+| `cmd-n` / `ctrl-n` | `NewChat` | chat, including the composer | new binding, under both `ThockChatPanel` and `ThockChatPanel > Editor`, where Linux's context-free `menu::SelectNext` would shadow it. Asks before closing a conversation that has anything in it |
+| `o` | `NewChat` | thread, not editing | as V26, with the same question |
 
 Every new action has a doc comment written for a note-taker, so it reads well in the command
 palette. Keymap changes land in `default-macos.json`, `default-linux.json` and `vim.json` together.
@@ -435,14 +436,14 @@ Jonathan on OpenCue*.
 3. He pauses for 2 seconds. The bubble floats up with the caption *Thock* · Wrap Today, Thock's two
    bubbles, and the chips **`y` Tick it** and **`n` Not yet**. *09:45–10:30 Investigate John's
    report* gets an amber underline, because the reply linked it. The caret stays in his note.
-4. `cmd-alt-n` focuses the bubble and `y` answers. Focus is back in the note, and the pebble types
+4. `cmd-?` focuses the bubble and `y` answers. Focus is back in the note, and the pebble types
    again.
 
 ### 6.3 Talking
 
 _(Frame: `v44-passing-notes-talking.png`, in the artifact.)_
 
-Diego presses `cmd-alt-n` to read the whole exchange. The editor narrows, and the thread floats in
+Diego presses `cmd-?` to read the whole exchange. The editor narrows, and the thread floats in
 the room it gave up, with no border between them.
 
 - The top fades into the page: the day mark and the marker are going, and the earliest bubbles
@@ -593,8 +594,8 @@ All six shipped together on one branch after V43 merged.
 - **The rail:** a ritual's row renders the dot while its session is Working and not after the turn
   stops with nothing pending.
 - **Keys** (`VisualTestContext` + `simulate_keystrokes`, under `MultiWorkspace::test_new`):
-  `cmd-alt-n` from a note opens Talking with the composer focused. `escape` folds, returns focus to
-  the editor and removes the inset. With a pending two-option choice, `cmd-alt-n` `y` answers option
+  `cmd-?` from a note opens Talking with the composer focused. `escape` folds, returns focus to
+  the editor and removes the inset. With a pending two-option choice, `cmd-?` `y` answers option
   0 and focus is back in the editor. `1`/`2` answer. `j`/`k` move the selection, which survives a
   streaming update. `.` toggles a receipt. Typing in the note while Talking folds. Vim `j`/`k` match
   the arrows.

@@ -27,9 +27,9 @@ use editor::{
 };
 use gpui::{
     Action, AnyWindowHandle, App, Bounds, Context, Entity, EntityId, FocusHandle, Focusable,
-    FontFeatures, FontWeight, HighlightStyle, KeyContext, Pixels, ScrollHandle, SharedString,
-    Subscription, Task, TextStyleRefinement, UnderlineStyle, WeakEntity, Window, actions, div,
-    point, px, relative, size,
+    FontFeatures, FontWeight, HighlightStyle, KeyContext, Pixels, PromptLevel, ScrollHandle,
+    SharedString, Subscription, Task, TextStyleRefinement, UnderlineStyle, WeakEntity, Window,
+    actions, div, point, px, relative, size,
 };
 use language::language_settings::SoftWrap;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
@@ -47,7 +47,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use text::{Bias, Point};
 use ui::prelude::*;
-use ui::{KeyBinding, Label, ProgressBar, SpinnerLabel};
+use ui::{KeyBinding, Label, ProgressBar, SpinnerLabel, Tooltip};
 use util::ResultExt as _;
 use workspace::{OpenOptions, OpenVisible, Workspace, WorkspaceSettings};
 
@@ -319,6 +319,20 @@ fn links_in(source: &str) -> Vec<(String, String)> {
         }
     }
     links
+}
+
+/// Whether a bubble's Markdown needs the bubble's full width. List items,
+/// tables and code blocks size their text against the container, so a
+/// bubble that shrinks to its content would collapse them to a letter wide.
+fn needs_full_width(source: &str) -> bool {
+    MarkdownParser::new_ext(source, markdown::parser::PARSE_OPTIONS).any(|event| {
+        matches!(
+            event,
+            MarkdownEvent::Start(
+                Tag::List(_) | Tag::Table(_) | Tag::CodeBlock(_) | Tag::FootnoteDefinition(_)
+            )
+        )
+    })
 }
 
 /// Splits a line into its Markdown markers (indentation, a list or task
@@ -1641,7 +1655,7 @@ impl ChatPanel {
         }
     }
 
-    /// `cmd-alt-n` (§5.12): opens the thread, focuses a waiting bubble, or
+    /// `cmd-?` (§5.12): opens the thread, focuses a waiting bubble, or
     /// folds the chat when it already has focus.
     pub fn toggle_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let focused = self.focus_handle.contains_focused(window, cx);
@@ -2440,6 +2454,9 @@ impl ChatPanel {
                 self.prepare_elicitation(thread, id, window, cx);
             }
             AcpThreadEvent::Stopped(_) => {
+                // Streamed text reaches the reply after its `EntryUpdated`,
+                // and the thread flushes the rest just before stopping.
+                self.sync_bubbles(thread, cx);
                 self.refresh_entitlement(cx);
                 self.sync_mentions(cx);
                 // A reply that lands while the thread is folded floats up
@@ -2457,6 +2474,7 @@ impl ChatPanel {
             // styling or raw detail, but a turn that could not finish says
             // so in plain language. The mechanics go to the log.
             AcpThreadEvent::Error => {
+                self.sync_bubbles(thread, cx);
                 self.turn_failed("The Thock Agent couldn't finish that.", true, cx);
             }
             AcpThreadEvent::LoadError(error) => {
@@ -2464,6 +2482,7 @@ impl ChatPanel {
                 self.turn_failed("The Thock Agent couldn't finish that.", true, cx);
             }
             AcpThreadEvent::Refusal => {
+                self.sync_bubbles(thread, cx);
                 self.turn_failed("The Thock Agent decided not to do that.", false, cx);
             }
             _ => {}
@@ -2738,7 +2757,33 @@ impl ChatPanel {
         }
     }
 
+    /// Asks before setting aside a conversation that has something in it.
     fn new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
+        let has_transcript = self
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.thread.read(cx).entries().is_empty());
+        if !has_transcript {
+            self.start_new_chat(window, cx);
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Info,
+            "Start a new chat?",
+            Some("This conversation closes and Thock starts fresh."),
+            &["Start New Chat", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await? == 0 {
+                this.update_in(cx, |this, window, cx| this.start_new_chat(window, cx))?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn start_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_thread(window, cx);
         self.launch(LaunchRequest::conversation(), window, cx);
     }
@@ -2854,9 +2899,17 @@ impl ChatPanel {
             .iter()
             .map(|item| match item {
                 ChatItem::Kickoff(_) => format!("You started {}", session.title),
-                ChatItem::User(index) | ChatItem::Reply(index) | ChatItem::Question(index) => {
-                    entry_text(*index)
-                }
+                // A reply reads as its bubbles, which are what paints.
+                ChatItem::Reply(index) => match self.bubbles.get(index) {
+                    Some(bubbles) => bubbles
+                        .paragraphs
+                        .iter()
+                        .map(|markdown| markdown.read(cx).source().to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                    None => entry_text(*index),
+                },
+                ChatItem::User(index) | ChatItem::Question(index) => entry_text(*index),
                 ChatItem::Receipt { calls, .. } => {
                     summarize_activity(&summary_calls(calls, entries, vault_root.as_deref()), false)
                 }
@@ -3890,6 +3943,10 @@ impl ChatPanel {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let full_width = message
+            .content
+            .markdown()
+            .is_some_and(|markdown| needs_full_width(markdown.read(cx).source()));
         let content: AnyElement = match message.content.markdown() {
             Some(markdown) => {
                 MarkdownElement::new(markdown.clone(), self.you_markdown_style(window, cx))
@@ -3904,18 +3961,19 @@ impl ChatPanel {
             )
             .into_any_element(),
         };
-        self.render_you(content, cx)
+        self.render_you(content, full_width, cx)
     }
 
     /// Your bubble (§5.7): the selection surface, on the right, with the
     /// corner nearest you tightened.
-    fn render_you(&self, content: AnyElement, cx: &Context<Self>) -> AnyElement {
+    fn render_you(&self, content: AnyElement, full_width: bool, cx: &Context<Self>) -> AnyElement {
         h_flex()
             .w_full()
             .justify_end()
             .child(
                 div()
                     .max_w(relative(0.85))
+                    .when(full_width, |bubble| bubble.w(relative(0.85)))
                     .px_3()
                     .py_2()
                     .rounded(px(18.))
@@ -3983,7 +4041,9 @@ impl ChatPanel {
         let question = tool_call.label.read(cx).source().clone();
         let ToolCallStatus::WaitingForConfirmation { options, .. } = &tool_call.status else {
             return match self.ask_answers.get(&tool_call.id) {
-                Some(answer) => self.render_you(Label::new(answer.clone()).into_any_element(), cx),
+                Some(answer) => {
+                    self.render_you(Label::new(answer.clone()).into_any_element(), false, cx)
+                }
                 None => self.status_line(question, cx).into_any_element(),
             };
         };
@@ -4043,10 +4103,7 @@ impl ChatPanel {
         match self.bubbles.get(&index) {
             Some(bubbles) => {
                 for markdown in &bubbles.paragraphs {
-                    column = column.child(self.thock_bubble(
-                        MarkdownElement::new(markdown.clone(), style.clone()).into_any_element(),
-                        cx,
-                    ));
+                    column = column.child(self.thock_markdown_bubble(markdown, &style, cx));
                 }
             }
             None => {
@@ -4054,18 +4111,26 @@ impl ChatPanel {
                     if let AssistantMessageChunk::Message { block, .. } = chunk
                         && let Some(markdown) = block.markdown()
                     {
-                        column = column.child(
-                            self.thock_bubble(
-                                MarkdownElement::new(markdown.clone(), style.clone())
-                                    .into_any_element(),
-                                cx,
-                            ),
-                        );
+                        column = column.child(self.thock_markdown_bubble(markdown, &style, cx));
                     }
                 }
             }
         }
         column.into_any_element()
+    }
+
+    fn thock_markdown_bubble(
+        &self,
+        markdown: &Entity<Markdown>,
+        style: &MarkdownStyle,
+        cx: &Context<Self>,
+    ) -> Div {
+        let full_width = needs_full_width(markdown.read(cx).source());
+        self.thock_bubble(
+            MarkdownElement::new(markdown.clone(), style.clone()).into_any_element(),
+            cx,
+        )
+        .when(full_width, |bubble| bubble.w(relative(0.92)))
     }
 
     /// The quoted line (§5.5): the words Thock linked, and the note they are
@@ -4418,6 +4483,9 @@ impl ChatPanel {
             .bottom(px(PEBBLE_BOTTOM))
             .items_end()
             .gap_1()
+            // The folded layer is only as wide as the pebble, so the live
+            // line would wrap at every letter.
+            .whitespace_nowrap()
             .child(
                 self.thock_bubble(
                     SpinnerLabel::new()
@@ -4586,6 +4654,7 @@ impl ChatPanel {
             .items_center()
             .justify_center()
             .cursor_pointer()
+            .tooltip(Tooltip::for_action_title("Thock", &ToggleChatFocus))
             .child(
                 div()
                     .font_family(THOCK_FACE)
@@ -4613,8 +4682,7 @@ impl ChatPanel {
         let exhausted = self
             .entitlement()
             .is_some_and(|entitlement| entitlement.is_exhausted());
-        // The composer is a pill with no border (§5.1): the field, and `esc`
-        // as the way back to the page.
+        // The composer is a pill with no border (§5.1).
         v_flex()
             .w_full()
             .p_2()
@@ -4629,17 +4697,7 @@ impl ChatPanel {
                     .rounded(px(18.))
                     .bg(cx.theme().colors().surface_background)
                     .shadow_sm()
-                    .child(div().flex_1().min_w_0().child(self.message_editor.clone()))
-                    .child(
-                        div().pb_0p5().child(
-                            KeyBinding::for_action_in(
-                                &menu::Cancel,
-                                &self.message_editor.focus_handle(cx),
-                                cx,
-                            )
-                            .size(rems_from_px(10.)),
-                        ),
-                    ),
+                    .child(div().flex_1().min_w_0().child(self.message_editor.clone())),
             )
             .when(exhausted, |this| {
                 this.child(
@@ -5424,9 +5482,7 @@ mod tests {
 
         // The reply floated up; the first summon focuses it, the second opens
         // the thread, and `shift-tab` leaves the composer for the last row.
-        setup
-            .cx
-            .simulate_keystrokes("ctrl-alt-n ctrl-alt-n shift-tab");
+        setup.cx.simulate_keystrokes("ctrl-? ctrl-? shift-tab");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
         setup.cx.simulate_keystrokes("right");
@@ -5608,6 +5664,40 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    async fn a_reply_streamed_in_pieces_shows_whole_when_the_turn_stops(cx: &mut TestAppContext) {
+        // The thread buffers every piece after the first and flushes it as
+        // the turn stops, after the last `EntryUpdated`.
+        let mut setup = setup(cx).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        let session_id = start_wrap_today(&mut setup, connection.clone(), None, vec![]).await;
+        setup.cx.update(|_, cx| {
+            connection.send_update(session_id.clone(), says("I"), cx);
+            connection.send_update(
+                session_id.clone(),
+                says(" found three PRs:\n\n1. Refactor\n2. Robustness"),
+                cx,
+            );
+        });
+        setup.cx.run_until_parked();
+        connection.end_turn(session_id, acp::StopReason::EndTurn);
+        setup.cx.run_until_parked();
+        assert_eq!(
+            visible(&setup),
+            "You started Wrap Today\nI found three PRs:\n\n1. Refactor\n2. Robustness"
+        );
+    }
+
+    #[test]
+    fn lists_tables_and_code_take_the_bubble_full_width() {
+        assert!(needs_full_width("1. Refactor\n2. Robustness"));
+        assert!(needs_full_width("- one\n- two"));
+        assert!(needs_full_width("| a | b |\n|---|---|\n| 1 | 2 |"));
+        assert!(needs_full_width("```\ncode\n```"));
+        assert!(!needs_full_width("I found three PRs in today's note:"));
+        assert!(!needs_full_width("## Today\n**Seven** of eleven, `done`."));
+    }
+
     fn visible_chips(setup: &Setup) -> Vec<String> {
         setup
             .panel
@@ -5713,7 +5803,7 @@ mod tests {
         assert!(generating(&setup));
         assert_eq!(presence(&setup), Presence::NeedsYou);
 
-        setup.cx.simulate_keystrokes("ctrl-alt-n 2");
+        setup.cx.simulate_keystrokes("ctrl-? 2");
         setup.cx.run_until_parked();
         assert_eq!(
             visible(&setup),
@@ -5736,7 +5826,7 @@ mod tests {
             "a bubble takes no focus by itself"
         );
 
-        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.simulate_keystrokes("ctrl-?");
         let panel = setup.panel.clone();
         assert!(is_focused(&mut setup, &panel));
         setup.cx.simulate_keystrokes("y");
@@ -5759,7 +5849,7 @@ mod tests {
         let mut setup = setup(cx).await;
         let editor = open_note(&mut setup).await;
         ask_question(&mut setup, &["Tick it", "Not yet"]).await;
-        setup.cx.simulate_keystrokes("ctrl-alt-n escape");
+        setup.cx.simulate_keystrokes("ctrl-? escape");
         setup.cx.run_until_parked();
         // The question still waits, folded into the dot, and the turn runs.
         assert_eq!(presence(&setup), Presence::Working);
@@ -5770,7 +5860,7 @@ mod tests {
         assert!(is_focused(&mut setup, &editor));
         // It doesn't float up again by itself; the summon key brings the
         // thread, with the question in it.
-        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
         assert_eq!(visible_chips(&setup), ["Tick it", "Not yet"]);
@@ -5784,7 +5874,7 @@ mod tests {
         let width_before = editor_width(&setup, &editor);
         assert_eq!(presence(&setup), Presence::Resting);
 
-        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
         let composer = setup
@@ -5806,11 +5896,49 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn the_new_chat_key_asks_before_closing_a_conversation(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        start_wrap_today(&mut setup, connection, None, vec![says("Seven of eleven.")]).await;
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            panel.open_thread(window, cx);
+            window.focus(&panel.message_editor.focus_handle(cx), cx);
+        });
+        setup.cx.run_until_parked();
+        let composer = setup
+            .panel
+            .read_with(&setup.cx, |panel, _| panel.message_editor.clone());
+        assert!(is_focused(&mut setup, &composer));
+
+        setup.cx.simulate_keystrokes("ctrl-n");
+        setup.cx.run_until_parked();
+        assert!(setup.cx.has_pending_prompt(), "it asks first");
+        setup.cx.simulate_prompt_answer("Cancel");
+        setup.cx.run_until_parked();
+        let pending_launch = |setup: &Setup| {
+            setup
+                .panel
+                .read_with(&setup.cx, |panel, _| panel.pending_launch.is_some())
+        };
+        assert!(!pending_launch(&setup), "cancel keeps the conversation");
+        assert_eq!(visible(&setup), "You started Wrap Today\nSeven of eleven.");
+
+        setup.cx.simulate_keystrokes("ctrl-n");
+        setup.cx.run_until_parked();
+        setup.cx.simulate_prompt_answer("Start New Chat");
+        setup.cx.run_until_parked();
+        assert!(
+            pending_launch(&setup),
+            "a new chat launches, waiting on the connection"
+        );
+    }
+
+    #[gpui::test]
     async fn focus_leaving_for_a_note_folds_the_thread(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
         connect(&mut setup);
         let editor = open_note(&mut setup).await;
-        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
         setup.cx.focus(&editor);
@@ -5825,7 +5953,7 @@ mod tests {
         // folds it and focus goes back to the note.
         let mut setup = setup(cx).await;
         let editor = open_note(&mut setup).await;
-        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::NeedsYou);
         setup.panel.read_with(&setup.cx, |panel, _| {
@@ -5844,7 +5972,7 @@ mod tests {
         // saves to the real global settings file.
         let mut setup = setup(cx).await;
         open_note(&mut setup).await;
-        setup.cx.simulate_keystrokes("ctrl-alt-n right");
+        setup.cx.simulate_keystrokes("ctrl-? right");
         setup.cx.run_until_parked();
         setup.panel.read_with(&setup.cx, |panel, _| {
             assert_eq!(panel.pair_choice, 1);
@@ -5874,7 +6002,7 @@ mod tests {
 
         let declined = raise_confirm(&mut setup);
         assert_eq!(visible_chips(&setup), ["OK", "Not now"]);
-        setup.cx.simulate_keystrokes("ctrl-alt-n n");
+        setup.cx.simulate_keystrokes("ctrl-? n");
         setup.cx.run_until_parked();
         assert!(matches!(
             declined.await.action,
@@ -5884,7 +6012,7 @@ mod tests {
         assert!(is_focused(&mut setup, &editor));
 
         let accepted = raise_confirm(&mut setup);
-        setup.cx.simulate_keystrokes("ctrl-alt-n y");
+        setup.cx.simulate_keystrokes("ctrl-? y");
         setup.cx.run_until_parked();
         assert!(matches!(
             accepted.await.action,
@@ -5913,7 +6041,7 @@ mod tests {
         advance(&mut setup, Duration::from_secs(5));
         assert!(!bubble_up(&setup), "and it stays folded on its own");
         assert_eq!(waiting(&setup), Some(Waiting::Question));
-        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
         assert_eq!(visible_chips(&setup), ["Tick it", "Not yet"]);
@@ -5948,7 +6076,7 @@ mod tests {
         assert_eq!(waiting(&setup), Some(Waiting::Reply), "the dot stays");
         assert_eq!(presence(&setup), Presence::Resting);
         // Opening the thread clears the dot.
-        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
         assert_eq!(waiting(&setup), None);
@@ -5964,7 +6092,7 @@ mod tests {
         open_note(&mut setup).await;
 
         resize(&mut setup, 1440., 900.);
-        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
         assert_eq!(inset(&setup), Some(px(INSET)));
@@ -5973,7 +6101,7 @@ mod tests {
         setup.cx.run_until_parked();
 
         resize(&mut setup, 1100., 900.);
-        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(inset(&setup), Some(px(INSET)));
         assert!(!desk_open(&setup), "at 1100px the Desk gives its width");
@@ -5982,7 +6110,7 @@ mod tests {
         assert!(desk_open(&setup), "and comes back on fold");
 
         resize(&mut setup, 760., 600.);
-        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(inset(&setup), None, "at 760px the thread floats");
         assert!(desk_open(&setup));
@@ -6001,7 +6129,7 @@ mod tests {
         assert_eq!(running(&setup), None);
         ask_question(&mut setup, &["Tick it", "Not yet"]).await;
         assert_eq!(running(&setup).as_deref(), Some("Wrap Today"));
-        setup.cx.simulate_keystrokes("ctrl-alt-n y");
+        setup.cx.simulate_keystrokes("ctrl-? y");
         setup.cx.run_until_parked();
         assert_eq!(running(&setup), None);
     }
@@ -6083,7 +6211,7 @@ mod tests {
         assert!(ranges.iter().all(|(start, end)| start == end), "{ranges:?}");
 
         // Folding back to Resting clears the underlines.
-        setup.cx.simulate_keystrokes("ctrl-alt-n escape");
+        setup.cx.simulate_keystrokes("ctrl-? escape");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Resting);
         assert!(underlined(&setup, &editor, MENTION_SLOT).is_empty());
@@ -6104,9 +6232,7 @@ mod tests {
         .await;
         // A second turn from the composer, about another line.
         connection.set_next_prompt_updates(vec![says("And [line 3](daily/2026-10-19.md#L3).")]);
-        setup
-            .cx
-            .simulate_keystrokes("ctrl-alt-n ctrl-alt-n o k enter");
+        setup.cx.simulate_keystrokes("ctrl-? ctrl-? o k enter");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
         assert_eq!(
@@ -6153,7 +6279,7 @@ mod tests {
         });
         assert_eq!(quote, Some((Some("line 12".to_string()), 12)));
 
-        setup.cx.simulate_keystrokes("ctrl-alt-n alt-enter");
+        setup.cx.simulate_keystrokes("ctrl-? alt-enter");
         setup.cx.run_until_parked();
         let cursor_row = setup
             .workspace
@@ -6205,7 +6331,7 @@ mod tests {
         assert_eq!(visible_chips(&setup), ["File them", "Not now"]);
         assert!(is_focused(&mut setup, &editor), "it takes no focus");
 
-        setup.cx.simulate_keystrokes("ctrl-alt-n escape");
+        setup.cx.simulate_keystrokes("ctrl-? escape");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Resting);
         assert_eq!(waiting(&setup), None);
@@ -6246,7 +6372,7 @@ mod tests {
             Some(Waiting::Question),
             "the question keeps its bubble"
         );
-        setup.cx.simulate_keystrokes("ctrl-alt-n y");
+        setup.cx.simulate_keystrokes("ctrl-? y");
         setup.cx.run_until_parked();
         // Answered and settled, the opener gets its turn.
         assert_eq!(waiting(&setup), Some(Waiting::Opener));
@@ -6286,7 +6412,7 @@ mod tests {
         assert!(!bubble_up(&setup), "a minute alone folds it");
         assert_eq!(waiting(&setup), Some(Waiting::Opener), "the dot stays");
         // The thread shows it above the composer, and `n` answers there too.
-        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
         assert_eq!(visible_chips(&setup), ["File them", "Not now"]);
@@ -6303,7 +6429,7 @@ mod tests {
         open_note(&mut setup).await;
         offer_reflect(&mut setup);
         advance(&mut setup, Duration::from_secs(8));
-        setup.cx.simulate_keystrokes("ctrl-alt-n y");
+        setup.cx.simulate_keystrokes("ctrl-? y");
         setup.cx.run_until_parked();
         // Not connected here, so the launch waits on the connect flow, which
         // is what proves it was the Reflect ritual that got started.
@@ -6332,9 +6458,7 @@ mod tests {
             vec![read("read-1", note), says("Done.")],
         )
         .await;
-        setup
-            .cx
-            .simulate_keystrokes("ctrl-alt-n ctrl-alt-n shift-tab");
+        setup.cx.simulate_keystrokes("ctrl-? ctrl-? shift-tab");
         setup.cx.run_until_parked();
         assert!(visible(&setup).ends_with("Looked at daily/2026-10-19.md"));
         setup.cx.simulate_keystrokes(".");

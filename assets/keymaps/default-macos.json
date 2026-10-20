@@ -501,7 +501,7 @@
       "ctrl-cmd-w": "thock::FocusDayStrip",
       "cmd-alt-t": "thock::ToggleAgentFocus",
       "cmd-alt-p": "thock::ToggleDayPlannerFocus",
-      "cmd-alt-n": "thock::ToggleChatFocus",
+      "cmd-?": "thock::ToggleChatFocus",
       "cmd-alt-o": "thock::ToggleSyncStatus",
       "cmd-alt-i": "thock::OpenInbox",
       "cmd-alt-shift-p": "thock::ConnectPhone",
@@ -1132,6 +1132,7 @@
       "escape": "menu::Cancel",
       "alt-enter": "thock::OpenChatEntry",
       "cmd-.": "thock::StopChatTurn",
+      "cmd-n": "thock::NewChat",
     },
   },
   {
@@ -1143,6 +1144,7 @@
       "escape": "menu::Cancel",
       "shift-tab": "thock::FocusChatThread",
       "cmd-.": "thock::StopChatTurn",
+      "cmd-n": "thock::NewChat",
     },
   },
   {
