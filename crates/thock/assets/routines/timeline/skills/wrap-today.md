@@ -55,7 +55,7 @@ Read the previous 2–3 daily notes so the review isn't myopic — catch carried
 Some tasks probably got done today but were never checked off. Cross-reference the unchecked (`- [ ]`) tasks from the note against what actually happened — the commits from step 3 and the decisions/notes captured in step 2.
 
 1. For each unchecked task, judge whether what step 3 pulled in, or the notes captured in step 2, show it was finished.
-2. If any look done, list them (with the evidence — the commit or note that suggests completion) and ask the user to confirm which to mark done. Default to **none**; only mark what the user explicitly confirms. If nothing looks finished, skip this step silently.
+2. If any look done, confirm them one at a time with the `ask` tool: the question names the task and the evidence (the commit or note that suggests completion), and the options are **Tick it** and **Not yet**. Default to **none**; only mark what the user explicitly confirms. If nothing looks finished, skip this step silently.
 3. For each confirmed task, flip its box in place (`- [ ]` → `- [x]`) in today's note. This checkbox flip is the **only** edit this skill makes to your own text — leave the task wording and everything else untouched.
 
 A task marked done here is no longer "unfinished," so it drops out of the step 6 backlog offer.
@@ -65,7 +65,7 @@ A task marked done here is no longer "unfinished," so it drops out of the step 6
 The vault keeps a holding pen — the configured backlog file, `backlog.md` by default — with the sections `## Soon`, `## Someday`, and `## Completed` (the Desk panel's Backlog tab in the right dock renders it). Unfinished tasks shouldn't die in today's note:
 
 1. List the unfinished (`- [ ]`) tasks you found in the note.
-2. Ask the user **one** question: move **all** of them to the backlog, **none** (they stay only in the note), or **some** (the user picks which)? The default destination is **Soon**; the user can say "someday" for any task. If there are no unfinished tasks, skip this step silently.
+2. Ask the user **one** question with the `ask` tool: move them to the backlog? The options are **All of them**, **None** (they stay only in the note) and **Let me pick**. If they pick, ask once per task with the options **Soon**, **Someday** and **Leave it**. Otherwise the destination is **Soon**. If there are no unfinished tasks, skip this step silently.
 3. **Deduplicate before appending:** skip any chosen task whose text already appears in `backlog.md` — compare whitespace-insensitively and ignore any ` ✅ YYYY-MM-DD` completion suffix — in **any** section, `## Completed` included. Report skips as "already in backlog: …".
 4. Append the remaining tasks as `- [ ] <task text>` at the end of the matching section. Create `backlog.md` or a missing section heading if needed — never rewrite, reorder, or delete anything already in the file.
 

@@ -43,6 +43,9 @@ pub const SYSTEM_PROMPT: &str = include_str!("../assets/hosted-agent/SYSTEM.md")
 /// writes over a note with content, so "append, don't rewrite" holds even
 /// when the model forgets the prompt.
 pub const VAULT_GUARD_EXTENSION: &str = include_str!("../assets/hosted-agent/vault-guard.ts");
+/// The `ask` tool (V44 §5.5): a question with a few short choices, carried
+/// to the chat as chips through pi-acp's extension UI bridge.
+pub const ASK_EXTENSION: &str = include_str!("../assets/hosted-agent/ask.ts");
 
 /// Where the npm packages land, beside Zed's own registry-installed agents.
 pub fn install_dir() -> PathBuf {
@@ -201,7 +204,7 @@ pub fn compose_vault_context(
     );
     let _ = writeln!(
         context,
-        "This person's vault is the folder {}. Everything you do happens inside it.\n",
+        "The vault is the folder {}, and everything you do happens inside it.\n",
         vault.root.display(),
     );
 
@@ -234,8 +237,8 @@ pub fn compose_vault_context(
     }
     if has_profile {
         context.push_str(
-            "- `profile.md` says who this person is and what you may look at — read it \
-             before you start.\n",
+            "- `profile.md` says who they are and what you may look at — read it before \
+             you start.\n",
         );
     }
 
@@ -283,8 +286,8 @@ pub fn compose_vault_context(
     match memory_index {
         Some(index) => {
             context.push_str(
-                "This is `memory/index.md`, what past sessions learned about this person. \
-                 Treat it as things you already know. Where a line points at a page under \
+                "This is `memory/index.md`, what past sessions learned about them. Treat \
+                 it as things you already know. Where a line points at a page under \
                  `memory/`, open that page when the conversation touches it. When they tell \
                  you something that will still be true next month, or correct you, add one \
                  dated line to `memory/inbox.md`; the Reflect ritual files it. Never edit \
@@ -294,8 +297,8 @@ pub fn compose_vault_context(
             context.push('\n');
         }
         None => context.push_str(
-            "Nothing yet: no session has learned anything about this person, or the \
-             `memory/` folder is missing. When they tell you something that will still be \
+            "Nothing yet: no session has learned anything about them, or the `memory/` \
+             folder is missing. When they tell you something that will still be \
              true next month, add one dated line to `memory/inbox.md` (create it if needed); \
              the Reflect ritual files it.\n",
         ),
@@ -376,6 +379,9 @@ pub async fn write_pi_config(
     )
     .await
     .context("writing the Thock Agent vault guard")?;
+    fs.atomic_write(extensions.join("ask.ts"), ASK_EXTENSION.to_string())
+        .await
+        .context("writing the Thock Agent ask tool")?;
     let context_path = dir.join("APPEND_SYSTEM.md");
     match vault_context {
         Some(context) => fs
@@ -590,8 +596,8 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_and_the_guard_agree_on_the_tools() {
-        for tool in ["`append`", "`edit`", "`write`", "`read`"] {
+    fn the_prompt_and_the_extensions_agree_on_the_tools() {
+        for tool in ["`append`", "`edit`", "`write`", "`read`", "`ask`"] {
             assert!(
                 SYSTEM_PROMPT.contains(tool),
                 "the prompt must explain {tool}"
@@ -600,6 +606,46 @@ mod tests {
         assert!(VAULT_GUARD_EXTENSION.contains("name: \"append\""));
         assert!(VAULT_GUARD_EXTENSION.contains("pi.on(\"tool_call\""));
         assert!(VAULT_GUARD_EXTENSION.contains("export default function"));
+        assert!(ASK_EXTENSION.contains("name: \"ask\""));
+        // The adapter can carry a `select` to the chat; an `input` it only
+        // cancels, so the tool must never ask for free text.
+        assert!(ASK_EXTENSION.contains("ctx.ui.select("));
+        assert!(!ASK_EXTENSION.contains("ctx.ui.input("));
+        assert!(ASK_EXTENSION.contains("export default function"));
+    }
+
+    #[test]
+    fn the_prompt_carries_the_voice_rules() {
+        // V44 §5.9: talk to the person, not about them; no narration between
+        // steps; link the lines you mention; choices go through `ask`. The
+        // prose wraps, so the check folds whitespace.
+        let prompt = SYSTEM_PROMPT
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for rule in [
+            "Never describe them in the third person",
+            "don't narrate between steps",
+            "(daily/2026-09-14.md#L12)",
+            "Ask one question at a time",
+            "use the `ask` tool",
+        ] {
+            assert!(prompt.contains(rule), "the prompt must say {rule:?}");
+        }
+    }
+
+    #[test]
+    fn wrap_today_asks_its_choices_with_the_ask_tool() {
+        let skill = include_str!("../assets/routines/timeline/skills/wrap-today.md");
+        for expected in [
+            "`ask` tool",
+            "**Tick it** and **Not yet**",
+            "**All of them**",
+            "**Let me pick**",
+            "**Soon**, **Someday** and **Leave it**",
+        ] {
+            assert!(skill.contains(expected), "Wrap Today must say {expected}");
+        }
     }
 
     fn vault_at(root: &str) -> Vault {
@@ -649,6 +695,28 @@ mod tests {
         assert!(context.contains("`## Hoje` heading"));
         assert!(context.contains("**Portuguese (Brazil)** (`pt-BR`)"));
         assert!(context.contains("profile.md"));
+    }
+
+    #[test]
+    fn context_never_describes_the_person_in_the_third_person() {
+        // V44 §5.9: "this person" in the context came back out of the agent
+        // as "this person's patterns".
+        let index = "# What Thock has learned\n- **Ana**, your manager.";
+        for (has_profile, memory_index) in [
+            (false, None),
+            (true, None),
+            (false, Some(index)),
+            (true, Some(index)),
+        ] {
+            let context = compose_vault_context(
+                &vault_at("/Users/me/Thock"),
+                &[],
+                has_profile,
+                memory_index,
+                today(),
+            );
+            assert!(!context.to_lowercase().contains("this person"), "{context}");
+        }
     }
 
     #[test]

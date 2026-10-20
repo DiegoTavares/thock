@@ -14,8 +14,8 @@
 
 use acp_thread::{
     AcpThread, AcpThreadEvent, AgentConnection, AgentThreadEntry, AssistantMessageChunk,
-    ElicitationEntryId, ElicitationStatus, SelectedPermissionOutcome, ThreadStatus, ToolCall,
-    ToolCallStatus,
+    ElicitationEntryId, ElicitationStatus, PermissionOptions, SelectedPermissionOutcome,
+    ThreadStatus, ToolCall, ToolCallStatus,
 };
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
@@ -30,6 +30,8 @@ use language::language_settings::SoftWrap;
 use markdown::{MarkdownElement, MarkdownFont, MarkdownStyle};
 use project::Project;
 use project::project_settings::DiagnosticSeverity;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -89,6 +91,11 @@ actions!(
         DismissMemoryNudge,
     ]
 );
+
+/// Answers the Thock Agent's question with one of its choices.
+#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = thock)]
+pub struct AnswerChatChoice(pub usize);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -233,6 +240,38 @@ enum EntryShape {
     Hidden,
 }
 
+/// A question still waiting for you: an elicitation, or an `ask` request.
+#[derive(Clone)]
+enum PendingQuestion {
+    Elicitation(ElicitationEntryId),
+    Ask(acp::ToolCallId),
+}
+
+/// pi-acp carries a Pi extension's `select` as a permission request whose
+/// tool call id starts with this; the chat shows it as chips (V44 §5.5).
+const ASK_REQUEST_PREFIX: &str = "pi-ui-";
+
+fn is_ask_request(id: &acp::ToolCallId) -> bool {
+    id.0.starts_with(ASK_REQUEST_PREFIX)
+}
+
+/// The model's own `ask` tool call, which the request above answers for it.
+/// It has nothing to show and nothing to count.
+fn is_ask_call(tool_call: &ToolCall) -> bool {
+    tool_call
+        .raw_input
+        .as_ref()
+        .is_some_and(|input| input.get("question").is_some() && input.get("options").is_some())
+}
+
+/// The chips an `ask` request offers, in order.
+fn ask_options(options: &PermissionOptions) -> Vec<&acp::PermissionOption> {
+    match options {
+        PermissionOptions::Flat(options) => options.iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn entry_shape(entry: &AgentThreadEntry, thread: &AcpThread) -> EntryShape {
     match entry {
         AgentThreadEntry::UserMessage(_) => EntryShape::User,
@@ -247,6 +286,15 @@ fn entry_shape(entry: &AgentThreadEntry, thread: &AcpThread) -> EntryShape {
                 EntryShape::Hidden
             }
         }
+        AgentThreadEntry::ToolCall(tool_call) if is_ask_request(&tool_call.id) => {
+            EntryShape::Question {
+                answered: !matches!(
+                    tool_call.status,
+                    ToolCallStatus::WaitingForConfirmation { .. }
+                ),
+            }
+        }
+        AgentThreadEntry::ToolCall(tool_call) if is_ask_call(tool_call) => EntryShape::Hidden,
         AgentThreadEntry::ToolCall(tool_call) => EntryShape::Tool(tool_call.id.clone()),
         AgentThreadEntry::Elicitation(id) => EntryShape::Question {
             answered: thread.elicitation(id).is_none_or(|(_, elicitation)| {
@@ -579,6 +627,11 @@ pub struct ChatPanel {
     elicitation_choices: HashMap<ElicitationEntryId, usize>,
     /// Single-line editors for pending free-text elicitations.
     elicitation_editors: HashMap<ElicitationEntryId, Entity<Editor>>,
+    /// The highlighted chip per pending `ask` request.
+    ask_choices: HashMap<acp::ToolCallId, usize>,
+    /// The label you picked per answered `ask` request, shown as your
+    /// bubble.
+    ask_answers: HashMap<acp::ToolCallId, SharedString>,
     /// Read-only editors over the diffs tool calls produced, keyed by the
     /// diff entity so a re-render never rebuilds them.
     diff_editors: HashMap<EntityId, Entity<Editor>>,
@@ -646,6 +699,8 @@ impl ChatPanel {
                 expanded_receipts: HashSet::default(),
                 elicitation_choices: HashMap::default(),
                 elicitation_editors: HashMap::default(),
+                ask_choices: HashMap::default(),
+                ask_answers: HashMap::default(),
                 diff_editors: HashMap::default(),
                 show_usage: false,
                 pending_launch: None,
@@ -1148,6 +1203,8 @@ impl ChatPanel {
         self.expanded_receipts.clear();
         self.elicitation_choices.clear();
         self.elicitation_editors.clear();
+        self.ask_choices.clear();
+        self.ask_answers.clear();
     }
 
     fn handle_thread_event(
@@ -1159,7 +1216,11 @@ impl ChatPanel {
     ) {
         match event {
             AcpThreadEvent::ToolAuthorizationRequested(id) => {
-                self.authorize_tool_call(thread, id, cx);
+                if is_ask_request(id) {
+                    self.prepare_ask(thread, id, window, cx);
+                } else {
+                    self.authorize_tool_call(thread, id, cx);
+                }
             }
             AcpThreadEvent::NewEntry | AcpThreadEvent::EntryUpdated(_) => {
                 self.sync_diff_editors(thread, window, cx);
@@ -1240,6 +1301,38 @@ impl ChatPanel {
                 window.focus(&self.focus_handle, cx);
             }
         }
+        self.scroll_handle.scroll_to_bottom();
+    }
+
+    /// An `ask` request blocks the turn like an elicitation does, so it
+    /// arrives selected with its first chip highlighted and the list
+    /// focused; it is never answered on the person's behalf. A request
+    /// without flat options can't be shown as chips, so it falls back to
+    /// decision 16.
+    fn prepare_ask(
+        &mut self,
+        thread: &Entity<AcpThread>,
+        id: &acp::ToolCallId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entry_index = thread
+            .read(cx)
+            .tool_call(id)
+            .and_then(|(index, tool_call)| {
+                let ToolCallStatus::WaitingForConfirmation { options, .. } = &tool_call.status
+                else {
+                    return None;
+                };
+                (!ask_options(options).is_empty()).then_some(index)
+            });
+        let Some(entry_index) = entry_index else {
+            self.authorize_tool_call(thread, id, cx);
+            return;
+        };
+        self.selected = Some(ItemKey::Entry(entry_index));
+        self.ask_choices.insert(id.clone(), 0);
+        window.focus(&self.focus_handle, cx);
         self.scroll_handle.scroll_to_bottom();
     }
 
@@ -1487,6 +1580,12 @@ impl ChatPanel {
                     .elicitation(id)
                     .map(|(_, elicitation)| elicitation.request.message.clone())
                     .unwrap_or_default(),
+                Some(AgentThreadEntry::ToolCall(tool_call)) => {
+                    match self.ask_answers.get(&tool_call.id) {
+                        Some(answer) => answer.to_string(),
+                        None => tool_call.label.read(cx).source().to_string(),
+                    }
+                }
                 _ => String::new(),
             }
         };
@@ -1506,6 +1605,15 @@ impl ChatPanel {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The chips of the newest pending question, for the tests.
+    #[cfg(test)]
+    fn visible_chips(&self, cx: &App) -> Vec<String> {
+        self.latest_pending_question(cx)
+            .and_then(|question| self.question_choices(&question, cx))
+            .map(|(choices, _)| choices.iter().map(ToString::to_string).collect())
+            .unwrap_or_default()
     }
 
     /// Where the selection sits in `items`. A receipt matches when it
@@ -1591,19 +1699,83 @@ impl ChatPanel {
         }
     }
 
-    /// The pending elicitation under the selection, if that is what is
-    /// selected.
-    fn selected_pending_elicitation(&self, cx: &App) -> Option<ElicitationEntryId> {
+    /// The question under the selection, if it is still waiting for an
+    /// answer.
+    fn selected_pending_question(&self, cx: &App) -> Option<PendingQuestion> {
         let Some(ItemKey::Entry(index)) = &self.selected else {
             return None;
         };
+        self.pending_question_at(*index, cx)
+    }
+
+    /// The newest question still waiting for an answer, which the number
+    /// keys answer wherever the selection sits.
+    fn latest_pending_question(&self, cx: &App) -> Option<PendingQuestion> {
+        let session = self.session.as_ref()?;
+        let count = session.thread.read(cx).entries().len();
+        (0..count)
+            .rev()
+            .find_map(|index| self.pending_question_at(index, cx))
+    }
+
+    fn pending_question_at(&self, index: usize, cx: &App) -> Option<PendingQuestion> {
         let session = self.session.as_ref()?;
         let thread = session.thread.read(cx);
-        let AgentThreadEntry::Elicitation(id) = thread.entries().get(*index)? else {
-            return None;
-        };
-        let (_, elicitation) = thread.elicitation(id)?;
-        matches!(elicitation.status, ElicitationStatus::Pending { .. }).then(|| id.clone())
+        match thread.entries().get(index)? {
+            AgentThreadEntry::Elicitation(id) => {
+                let (_, elicitation) = thread.elicitation(id)?;
+                matches!(elicitation.status, ElicitationStatus::Pending { .. })
+                    .then(|| PendingQuestion::Elicitation(id.clone()))
+            }
+            AgentThreadEntry::ToolCall(tool_call) if is_ask_request(&tool_call.id) => matches!(
+                tool_call.status,
+                ToolCallStatus::WaitingForConfirmation { .. }
+            )
+            .then(|| PendingQuestion::Ask(tool_call.id.clone())),
+            _ => None,
+        }
+    }
+
+    /// The chips of a pending question, in order, with the highlighted one.
+    /// `None` for a question answered by typing or a click rather than a
+    /// chip.
+    fn question_choices(
+        &self,
+        question: &PendingQuestion,
+        cx: &App,
+    ) -> Option<(Vec<SharedString>, usize)> {
+        let session = self.session.as_ref()?;
+        let thread = session.thread.read(cx);
+        match question {
+            PendingQuestion::Elicitation(id) => {
+                let (_, elicitation) = thread.elicitation(id)?;
+                let ElicitationShape::Choice { options, .. } =
+                    elicitation_shape(&elicitation.request)
+                else {
+                    return None;
+                };
+                let chosen = self.elicitation_choices.get(id).copied().unwrap_or(0);
+                Some((
+                    options.into_iter().map(|(_, title)| title.into()).collect(),
+                    chosen,
+                ))
+            }
+            PendingQuestion::Ask(id) => {
+                let (_, tool_call) = thread.tool_call(id)?;
+                let ToolCallStatus::WaitingForConfirmation { options, .. } = &tool_call.status
+                else {
+                    return None;
+                };
+                let chosen = self.ask_choices.get(id).copied().unwrap_or(0);
+                Some((
+                    ask_options(options)
+                        .into_iter()
+                        .map(|option| option.name.clone().into())
+                        .collect(),
+                    chosen,
+                ))
+            }
+        }
     }
 
     /// `right`/`l`: open the selected activity's detail, or move to the next
@@ -1624,8 +1796,8 @@ impl ChatPanel {
     }
 
     fn expand_or_cycle(&mut self, direction: i32, cx: &mut Context<Self>) {
-        if let Some(id) = self.selected_pending_elicitation(cx) {
-            self.cycle_elicitation_choice(&id, direction, cx);
+        if let Some(question) = self.selected_pending_question(cx) {
+            self.cycle_choice(&question, direction, cx);
             return;
         }
         let Some(ItemKey::Receipt(selected_id)) = self.selected.clone() else {
@@ -1653,35 +1825,99 @@ impl ChatPanel {
         cx.notify();
     }
 
-    fn cycle_elicitation_choice(
-        &mut self,
-        id: &ElicitationEntryId,
-        direction: i32,
-        cx: &mut Context<Self>,
-    ) {
-        let option_count = self
-            .session
-            .as_ref()
-            .and_then(|session| {
-                let thread = session.thread.read(cx);
-                let (_, elicitation) = thread.elicitation(id)?;
-                match elicitation_shape(&elicitation.request) {
-                    ElicitationShape::Choice { options, .. } => Some(options.len()),
-                    _ => None,
-                }
-            })
-            .unwrap_or(0);
-        if option_count == 0 {
+    /// `left`/`right` move the highlighted chip of a pending question.
+    fn cycle_choice(&mut self, question: &PendingQuestion, direction: i32, cx: &mut Context<Self>) {
+        let Some((choices, current)) = self.question_choices(question, cx) else {
+            return;
+        };
+        if choices.is_empty() {
             return;
         }
-        let current = self.elicitation_choices.get(id).copied().unwrap_or(0);
         let next = if direction > 0 {
-            (current + 1).min(option_count - 1)
+            (current + 1).min(choices.len() - 1)
         } else {
             current.saturating_sub(1)
         };
-        self.elicitation_choices.insert(id.clone(), next);
+        match question {
+            PendingQuestion::Elicitation(id) => {
+                self.elicitation_choices.insert(id.clone(), next);
+            }
+            PendingQuestion::Ask(id) => {
+                self.ask_choices.insert(id.clone(), next);
+            }
+        }
         cx.notify();
+    }
+
+    fn answer_question(
+        &mut self,
+        question: &PendingQuestion,
+        choice: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        match question {
+            PendingQuestion::Elicitation(id) => self.answer_elicitation(id, choice, cx),
+            PendingQuestion::Ask(id) => self.answer_ask(id, choice, cx),
+        }
+    }
+
+    /// Answers an `ask` request by authorizing the chosen option, which is
+    /// what pi-acp hands back to the tool as the person's pick (§5.5).
+    fn answer_ask(&mut self, id: &acp::ToolCallId, choice: Option<usize>, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let thread = session.thread.clone();
+        let index = choice
+            .or_else(|| self.ask_choices.get(id).copied())
+            .unwrap_or(0);
+        let chosen = thread.read(cx).tool_call(id).and_then(|(_, tool_call)| {
+            let ToolCallStatus::WaitingForConfirmation { options, .. } = &tool_call.status else {
+                return None;
+            };
+            ask_options(options).get(index).map(|option| {
+                (
+                    option.option_id.clone(),
+                    option.kind,
+                    SharedString::from(option.name.clone()),
+                )
+            })
+        });
+        let Some((option_id, kind, name)) = chosen else {
+            return;
+        };
+        self.ask_answers.insert(id.clone(), name);
+        self.ask_choices.remove(id);
+        thread.update(cx, |thread, cx| {
+            thread.authorize_tool_call(
+                id.clone(),
+                SelectedPermissionOutcome::new(option_id, kind),
+                cx,
+            );
+        });
+        cx.notify();
+    }
+
+    /// `1`–`9`, or `y`/`n` for a pair: answers the selected question, or
+    /// the newest one waiting, with that chip.
+    fn answer_choice(
+        &mut self,
+        action: &AnswerChatChoice,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(question) = self
+            .selected_pending_question(cx)
+            .or_else(|| self.latest_pending_question(cx))
+        else {
+            return;
+        };
+        let Some((choices, _)) = self.question_choices(&question, cx) else {
+            return;
+        };
+        if action.0 < choices.len() {
+            self.answer_question(&question, Some(action.0), cx);
+        }
     }
 
     /// Answers a pending question through the thread so the turn continues.
@@ -1776,8 +2012,8 @@ impl ChatPanel {
             PanelView::Chat => {
                 // A pending answer box takes `enter` even though it is an
                 // editor, so answering never requires the mouse.
-                if let Some(id) = self.pending_elicitation_for_confirm(window, cx) {
-                    self.answer_elicitation(&id, None, cx);
+                if let Some(question) = self.pending_question_for_confirm(window, cx) {
+                    self.answer_question(&question, None, cx);
                 } else if self.message_editor.focus_handle(cx).is_focused(window) {
                     self.send_message(&SendChatMessage, window, cx);
                 } else if !self.open_selected_entry(window, cx) {
@@ -1787,22 +2023,18 @@ impl ChatPanel {
         }
     }
 
-    /// The elicitation `enter` should answer: the focused answer box, or a
+    /// The question `enter` should answer: the focused answer box, or a
     /// selected pending question.
-    fn pending_elicitation_for_confirm(
-        &self,
-        window: &Window,
-        cx: &App,
-    ) -> Option<ElicitationEntryId> {
+    fn pending_question_for_confirm(&self, window: &Window, cx: &App) -> Option<PendingQuestion> {
         for (id, editor) in self.elicitation_editors.iter() {
             if editor.focus_handle(cx).is_focused(window) {
-                return Some(id.clone());
+                return Some(PendingQuestion::Elicitation(id.clone()));
             }
         }
         if self.message_editor.focus_handle(cx).is_focused(window) {
             return None;
         }
-        self.selected_pending_elicitation(cx)
+        self.selected_pending_question(cx)
     }
 
     /// `escape`: back out of the connect flow, stop a running turn, or move
@@ -2069,6 +2301,7 @@ impl ChatPanel {
             },
             ChatItem::Question(index) => match entries.get(*index) {
                 Some(AgentThreadEntry::Elicitation(id)) => self.render_elicitation(id, cx),
+                Some(AgentThreadEntry::ToolCall(tool_call)) => self.render_ask(tool_call, cx),
                 _ => div().into_any_element(),
             },
             ChatItem::Receipt { key, calls } => {
@@ -2169,6 +2402,11 @@ impl ChatPanel {
             )
             .into_any_element(),
         };
+        self.render_you(content, cx)
+    }
+
+    /// Your side of the thread: a message you sent, or the chip you picked.
+    fn render_you(&self, content: AnyElement, cx: &Context<Self>) -> AnyElement {
         h_flex()
             .w_full()
             .justify_end()
@@ -2181,6 +2419,59 @@ impl ChatPanel {
                     .rounded_br_sm()
                     .bg(cx.theme().colors().element_selected)
                     .child(content),
+            )
+            .into_any_element()
+    }
+
+    /// A question from the `ask` tool (§5.5): the question, then one chip
+    /// per option. Once answered, the chip you picked is your bubble.
+    fn render_ask(&self, tool_call: &ToolCall, cx: &Context<Self>) -> AnyElement {
+        let question = tool_call.label.read(cx).source().clone();
+        let ToolCallStatus::WaitingForConfirmation { options, .. } = &tool_call.status else {
+            return match self.ask_answers.get(&tool_call.id) {
+                Some(answer) => self.render_you(Label::new(answer.clone()).into_any_element(), cx),
+                None => Label::new(question)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .into_any_element(),
+            };
+        };
+        let chosen = self.ask_choices.get(&tool_call.id).copied().unwrap_or(0);
+        let mut chips = h_flex().flex_wrap().gap_1();
+        for (option_index, option) in ask_options(options).into_iter().enumerate() {
+            let answer_id = tool_call.id.clone();
+            let is_chosen = option_index == chosen;
+            chips = chips.child(
+                div()
+                    .id(("thock-chat-chip", option_index))
+                    .px_2()
+                    .py_0p5()
+                    .border_1()
+                    .rounded_full()
+                    .border_color(if is_chosen {
+                        cx.theme().colors().border_focused
+                    } else {
+                        cx.theme().colors().border_variant
+                    })
+                    .when(is_chosen, |this| {
+                        this.bg(cx.theme().colors().element_selected)
+                    })
+                    .cursor_pointer()
+                    .child(Label::new(option.name.clone()).size(LabelSize::Small))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.answer_ask(&answer_id, Some(option_index), cx);
+                    })),
+            );
+        }
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(Label::new(question))
+            .child(chips)
+            .child(
+                Label::new("1–9 or ←/→ to choose · Enter to answer")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
             )
             .into_any_element()
     }
@@ -2912,6 +3203,16 @@ impl Render for ChatPanel {
             key_context.add("editing");
         } else {
             key_context.add("menu");
+            // The chips' keys: `1`–`9`, and `y`/`n` for a pair (§5.12).
+            if let Some((choices, _)) = self
+                .latest_pending_question(cx)
+                .and_then(|question| self.question_choices(&question, cx))
+            {
+                key_context.add("choice");
+                if choices.len() == 2 {
+                    key_context.add("choice_pair");
+                }
+            }
         }
 
         let content: AnyElement = match (&self.view, &self.vault_status) {
@@ -2977,6 +3278,7 @@ impl Render for ChatPanel {
             .on_action(cx.listener(Self::retry_turn))
             .on_action(cx.listener(Self::toggle_usage))
             .on_action(cx.listener(Self::dismiss_memory_nudge))
+            .on_action(cx.listener(Self::answer_choice))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::select_first))
@@ -3060,7 +3362,7 @@ mod tests {
     use fs::FakeFs;
     use gpui::{TestAppContext, VisualTestContext};
     use serde_json::json;
-    use settings::SettingsStore;
+    use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
 
     fn tool(id: &'static str) -> EntryShape {
         EntryShape::Tool(acp::ToolCallId::from(id))
@@ -3210,6 +3512,16 @@ mod tests {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             release_channel::init(semver::Version::new(0, 0, 0), cx);
             editor::init(cx);
+            // The shipped keymap, so a missing or shadowed binding fails here.
+            let bindings = match KeymapFile::load(
+                include_str!("../../../assets/keymaps/default-linux.json"),
+                cx,
+            ) {
+                KeymapFileLoadResult::Success { key_bindings }
+                | KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => key_bindings,
+                KeymapFileLoadResult::JsonParseFailure { error } => panic!("bad keymap: {error}"),
+            };
+            cx.bind_keys(bindings);
         });
     }
 
@@ -3241,6 +3553,7 @@ mod tests {
         let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
             let panel = ChatPanel::new(workspace, window, cx);
             workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<ChatPanel>(window, cx);
             panel
         });
         cx.run_until_parked();
@@ -3400,6 +3713,148 @@ mod tests {
             visible(&setup),
             "You started Wrap Today\nDone. Seven of eleven.\nLooked at daily/2026-10-19.md"
         );
+    }
+
+    fn visible_chips(setup: &Setup) -> Vec<String> {
+        setup
+            .panel
+            .read_with(&setup.cx, |panel, cx| panel.visible_chips(cx))
+    }
+
+    fn generating(setup: &Setup) -> bool {
+        setup
+            .panel
+            .read_with(&setup.cx, |panel, cx| panel.is_generating(cx))
+    }
+
+    /// The permission request pi-acp raises for an extension's `select`.
+    fn ask_request(id: &'static str, question: &str) -> acp::SessionUpdate {
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(id, question)
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .raw_input(json!({ "method": "select", "title": question })),
+        )
+    }
+
+    /// The model's own call of the `ask` tool.
+    fn ask_call(id: &'static str, question: &str, options: &[&str]) -> acp::SessionUpdate {
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(id, "ask")
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::InProgress)
+                .raw_input(json!({ "question": question, "options": options })),
+        )
+    }
+
+    fn choices(labels: &[&str]) -> PermissionOptions {
+        PermissionOptions::Flat(
+            labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    acp::PermissionOption::new(
+                        format!("choice-{index}"),
+                        *label,
+                        acp::PermissionOptionKind::AllowOnce,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// The §6.2 question, raised through the `ask` tool with `labels` as
+    /// its chips: the turn is waiting on it when this returns.
+    async fn setup_with_question(
+        cx: &mut TestAppContext,
+        labels: &[&str],
+    ) -> (Setup, Rc<StubAgentConnection>) {
+        let mut setup = setup(cx).await;
+        let connection = Rc::new(StubAgentConnection::new().with_permission_requests(
+            HashMap::from_iter([(acp::ToolCallId::from("pi-ui-1"), choices(labels))]),
+        ));
+        let updates = vec![
+            says("John's report looks handled. Shall I tick it?"),
+            ask_call("ask-1", "Tick John's report?", labels),
+            ask_request("pi-ui-1", "Tick John's report?"),
+        ];
+        start_wrap_today(&mut setup, connection.clone(), None, updates).await;
+        (setup, connection)
+    }
+
+    #[gpui::test]
+    async fn an_ask_request_shows_chips_and_a_number_key_answers_it(cx: &mut TestAppContext) {
+        let (mut setup, _connection) =
+            setup_with_question(cx, &["Tick it", "Not yet", "Later"]).await;
+        assert_eq!(
+            visible(&setup),
+            "You started Wrap Today\nJohn's report looks handled. Shall I tick it?\nTick John's report?"
+        );
+        assert_eq!(visible_chips(&setup), ["Tick it", "Not yet", "Later"]);
+        // Never granted on your behalf: the turn is still waiting.
+        assert!(generating(&setup));
+
+        setup.cx.simulate_keystrokes("2");
+        setup.cx.run_until_parked();
+        assert_eq!(
+            visible(&setup),
+            "You started Wrap Today\nJohn's report looks handled. Shall I tick it?\nNot yet"
+        );
+        assert!(visible_chips(&setup).is_empty());
+        assert!(!generating(&setup));
+    }
+
+    #[gpui::test]
+    async fn y_answers_a_two_option_question(cx: &mut TestAppContext) {
+        let (mut setup, _connection) = setup_with_question(cx, &["Tick it", "Not yet"]).await;
+        setup.cx.simulate_keystrokes("y");
+        setup.cx.run_until_parked();
+        assert!(
+            visible(&setup).ends_with("\nTick it"),
+            "{}",
+            visible(&setup)
+        );
+        assert!(!generating(&setup));
+    }
+
+    #[gpui::test]
+    async fn every_other_permission_request_is_still_granted(cx: &mut TestAppContext) {
+        // Decision 16 stands for the harness's own prompts.
+        let mut setup = setup(cx).await;
+        let connection = Rc::new(StubAgentConnection::new().with_permission_requests(
+            HashMap::from_iter([(
+                acp::ToolCallId::from("edit-1"),
+                PermissionOptions::Flat(vec![
+                    acp::PermissionOption::new(
+                        "allow",
+                        "Allow",
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
+                    acp::PermissionOption::new(
+                        "reject",
+                        "Reject",
+                        acp::PermissionOptionKind::RejectOnce,
+                    ),
+                ]),
+            )]),
+        ));
+        let note = setup.root.join("daily/2026-10-19.md");
+        let updates = vec![
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new("edit-1", "Edit")
+                    .kind(acp::ToolKind::Edit)
+                    .status(acp::ToolCallStatus::Completed)
+                    .locations(vec![acp::ToolCallLocation::new(note)]),
+            ),
+            says("Ticked."),
+        ];
+        start_wrap_today(&mut setup, connection, None, updates).await;
+        assert_eq!(
+            visible(&setup),
+            "You started Wrap Today\nTicked.\nUpdated daily/2026-10-19.md"
+        );
+        assert!(visible_chips(&setup).is_empty());
+        assert!(!generating(&setup));
     }
 
     fn call(kind: acp::ToolKind, note: Option<&str>) -> SummaryCall {
