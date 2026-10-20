@@ -12577,6 +12577,7 @@ dependencies = [
  "paths",
  "picker",
  "project",
+ "pulldown-cmark 0.13.0",
  "qrcode",
  "rand 0.9.4",
  "release_channel",

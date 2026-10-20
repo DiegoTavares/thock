@@ -22,22 +22,26 @@ use anyhow::Result;
 use chrono::{DateTime, Local, NaiveDate, TimeDelta};
 use collections::{HashMap, HashSet};
 use editor::{
-    DisplayPoint, Editor, EditorEvent, SelectionEffects, display_map::DisplayRow,
+    DisplayPoint, Editor, EditorEvent, HighlightKey, SelectionEffects, display_map::DisplayRow,
     scroll::Autoscroll,
 };
 use gpui::{
-    Action, AnyWindowHandle, App, Bounds, Context, Entity, FocusHandle, Focusable, FontFeatures,
-    FontWeight, KeyContext, Pixels, ScrollHandle, SharedString, Subscription, Task,
-    TextStyleRefinement, WeakEntity, Window, actions, div, point, px, relative, size,
+    Action, AnyWindowHandle, App, Bounds, Context, Entity, EntityId, FocusHandle, Focusable,
+    FontFeatures, FontWeight, HighlightStyle, KeyContext, Pixels, ScrollHandle, SharedString,
+    Subscription, Task, TextStyleRefinement, UnderlineStyle, WeakEntity, Window, actions, div,
+    point, px, relative, size,
 };
 use language::language_settings::SoftWrap;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
+use multi_buffer::Anchor;
 use project::Project;
+use pulldown_cmark::{Event as MarkdownEvent, Parser as MarkdownParser, Tag, TagEnd};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{CenteredPaddingSettings, Settings as _};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::ops::Range;
+use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -205,6 +209,155 @@ const EDIT_PAUSE: Duration = Duration::from_secs(2);
 const REPLY_LINGER: Duration = Duration::from_secs(8);
 /// The Desk's width when the dock doesn't say (V43 §8.1).
 const DESK_DEFAULT_WIDTH: f32 = 320.;
+/// The highlight slots the underlines take (§7.3), above the conceal
+/// layer's so it never touches them: the latest message's lines, and the
+/// earlier messages' at 35%.
+const MENTION_SLOT: usize = crate::markdown_conceal::HIGHLIGHT_SLOTS;
+const MENTION_PAST_SLOT: usize = crate::markdown_conceal::HIGHLIGHT_SLOTS + 1;
+const PAST_MENTION_ALPHA: f32 = 0.35;
+
+/// A line a message is about (§5.6): a link Thock wrote with a
+/// vault-relative path and a line, or the line a tool call changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Mention {
+    /// The entry it belongs to: a reply, or a tool call.
+    entry: usize,
+    /// The note, relative to the vault.
+    path: PathBuf,
+    /// The 1-based line Thock read or changed.
+    line: u32,
+    /// The words Thock linked, which find the line again when the note has
+    /// changed since; a tool call has none.
+    text: Option<String>,
+}
+
+/// A mention found in an open note, as anchors that follow your edits.
+struct Underline {
+    entry: usize,
+    editor: WeakEntity<Editor>,
+    range: Range<Anchor>,
+}
+
+/// `daily/2026-10-19.md#L12` → the note and the line. Anything else isn't
+/// a mention and draws nothing (§5.6).
+fn parse_mention(url: &str) -> Option<(PathBuf, u32)> {
+    let (path, line) = url.rsplit_once("#L")?;
+    let line: u32 = line.parse().ok().filter(|line| *line > 0)?;
+    Some((vault_relative(path)?, line))
+}
+
+/// A path that stays inside the vault and names a Markdown note: relative,
+/// made only of plain components, ending in `.md`.
+fn vault_relative(path: &str) -> Option<PathBuf> {
+    // A colon means a URL scheme or a drive, never a note.
+    if path.is_empty() || path.contains(':') {
+        return None;
+    }
+    let path = Path::new(path);
+    let plain = path
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)));
+    let note = path.extension().is_some_and(|extension| extension == "md");
+    (plain && note).then(|| path.to_path_buf())
+}
+
+/// The links a reply carries, as (text, url). The chat's rendered parse
+/// isn't readable outside tests, so this runs the same parser over the
+/// same source, minus the smart punctuation: the words have to match the
+/// note's straight quotes, not the chat's curly ones.
+fn links_in(source: &str) -> Vec<(String, String)> {
+    let options = markdown::parser::PARSE_OPTIONS
+        .difference(pulldown_cmark::Options::ENABLE_SMART_PUNCTUATION);
+    let mut links = Vec::new();
+    let mut open: Option<(String, String)> = None;
+    for event in MarkdownParser::new_ext(source, options) {
+        match event {
+            MarkdownEvent::Start(Tag::Link { dest_url, .. }) => {
+                open = Some((dest_url.to_string(), String::new()));
+            }
+            MarkdownEvent::Text(piece) | MarkdownEvent::Code(piece) => {
+                if let Some((_, text)) = &mut open {
+                    text.push_str(&piece);
+                }
+            }
+            MarkdownEvent::End(TagEnd::Link) => {
+                if let Some((url, text)) = open.take() {
+                    links.push((text, url));
+                }
+            }
+            _ => {}
+        }
+    }
+    links
+}
+
+/// Splits a line into its Markdown markers (indentation, a list or task
+/// marker, a heading's hashes) and the words after them: the byte offset
+/// where the words start, and the words.
+fn split_markers(line: &str) -> (usize, &str) {
+    let mut rest = line.trim_start();
+    for marker in [
+        "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "- ", "* ", "+ ", "> ",
+    ] {
+        if let Some(after) = rest.strip_prefix(marker) {
+            rest = after;
+            break;
+        }
+    }
+    let hashes = rest.trim_start_matches('#');
+    if hashes.len() < rest.len() && hashes.starts_with(' ') {
+        rest = hashes.trim_start();
+    }
+    (line.len() - rest.len(), rest)
+}
+
+/// A line's words as they compare with a link's text: markers dropped,
+/// emphasis and code marks dropped, whitespace folded, case folded.
+fn comparable(text: &str) -> String {
+    let (_, words) = split_markers(text);
+    words
+        .replace(['*', '_', '`'], "")
+        .replace(['‘', '’'], "'")
+        .replace(['“', '”'], "\"")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Finds a mention's line in `text` (§5.6), 0-based: the line Thock read
+/// when its words are still there; otherwise the one line in the note that
+/// holds them; otherwise nothing. A tool call's line is taken as it is.
+fn resolve_line(words: Option<&str>, line: u32, text: &str) -> Option<u32> {
+    let lines: Vec<&str> = text.lines().collect();
+    let index = (line as usize).checked_sub(1)?;
+    let Some(words) = words else {
+        return (index < lines.len()).then_some(index as u32);
+    };
+    let words = comparable(words);
+    if words.is_empty() {
+        return None;
+    }
+    let holds = |candidate: &&str| comparable(candidate).contains(&words);
+    if lines.get(index).is_some_and(holds) {
+        return Some(index as u32);
+    }
+    let mut matches = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| holds(candidate));
+    match (matches.next(), matches.next()) {
+        (Some((only, _)), None) => Some(only as u32),
+        _ => None,
+    }
+}
+
+/// A `#` or `##` heading is drawn as a block (V43 §7.2) and can't take a
+/// text highlight (R7); a mention of one is quoted instead.
+fn is_block_heading(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("# ") || line.starts_with("## ")
+}
 
 /// What the page gives the thread (§5.3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -907,6 +1060,20 @@ pub struct ChatPanel {
     bubble_needs_room: bool,
     /// The Desk was collapsed for the thread and comes back on fold (§5.3).
     collapsed_desk: bool,
+    /// The lines the thread is about (§5.6), from every reply and change.
+    mentions: Vec<Mention>,
+    /// Where those lines are in the open notes.
+    underlines: Vec<Underline>,
+    /// The notes open somewhere in the centre, vault-relative, so a mention
+    /// of a closed one can be quoted instead (§5.5).
+    open_notes: HashSet<PathBuf>,
+    /// The editors last told to underline, so they can be told to stop.
+    underlined_editors: Vec<WeakEntity<Editor>>,
+    /// What the editors were last told, (the entry at full strength, whether
+    /// anything shows), so they are told again only on a change.
+    underline_state: Option<(Option<usize>, bool)>,
+    /// The bubble under the mouse, whose lines light up (§5.6).
+    hovered_entry: Option<usize>,
     vault_status: VaultStatus,
     connection: PlusConnection,
     /// The explicit `[agent] mode` choice, if any.
@@ -971,10 +1138,17 @@ impl ChatPanel {
             });
             let workspace_subscription = cx.subscribe(
                 &workspace_entity,
-                |this: &mut Self, _, event: &workspace::Event, cx| {
-                    if matches!(event, workspace::Event::ActiveItemChanged) {
+                |this: &mut Self, _, event: &workspace::Event, cx| match event {
+                    workspace::Event::ActiveItemChanged => {
                         this.track_active_editor(cx);
+                        this.resolve_underlines(cx);
                     }
+                    // The set of open notes changed: the underlines follow.
+                    workspace::Event::ItemAdded { .. }
+                    | workspace::Event::ItemRemoved { .. }
+                    | workspace::Event::PaneAdded(_)
+                    | workspace::Event::PaneRemoved => this.resolve_underlines(cx),
+                    _ => {}
                 },
             );
             let message_editor = cx.new(|cx| {
@@ -1011,6 +1185,12 @@ impl ChatPanel {
                 bubble_height: px(160.),
                 bubble_needs_room: false,
                 collapsed_desk: false,
+                mentions: Vec::new(),
+                underlines: Vec::new(),
+                open_notes: HashSet::default(),
+                underlined_editors: Vec::new(),
+                underline_state: None,
+                hovered_entry: None,
                 vault_status: VaultStatus::NotAVault,
                 connection: PlusConnection::Loading,
                 mode: None,
@@ -1139,6 +1319,232 @@ impl ChatPanel {
                 point(bounds.origin.x, bounds.origin.y + top.y),
                 size(bounds.size.width, line_height),
             ))
+        })
+    }
+
+    /// Collects the lines the thread is about (§5.6): the links in every
+    /// reply, and the lines every change touched, then finds them in the
+    /// open notes.
+    fn sync_mentions(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            self.mentions.clear();
+            self.resolve_underlines(cx);
+            return;
+        };
+        let Some(vault_root) = self.vault().map(|vault| vault.root.clone()) else {
+            return;
+        };
+        let thread = session.thread.read(cx);
+        let mut mentions = Vec::new();
+        for (entry, item) in thread.entries().iter().enumerate() {
+            match item {
+                AgentThreadEntry::AssistantMessage(message) => {
+                    for chunk in &message.chunks {
+                        let AssistantMessageChunk::Message { block, .. } = chunk else {
+                            continue;
+                        };
+                        let Some(markdown) = block.markdown() else {
+                            continue;
+                        };
+                        for (text, url) in links_in(markdown.read(cx).source()) {
+                            if let Some((path, line)) = parse_mention(&url) {
+                                mentions.push(Mention {
+                                    entry,
+                                    path,
+                                    line,
+                                    text: Some(text),
+                                });
+                            }
+                        }
+                    }
+                }
+                AgentThreadEntry::ToolCall(tool_call) if row_verb(&tool_call.kind).1 => {
+                    for location in &tool_call.locations {
+                        let Some(line) = location.line else {
+                            continue;
+                        };
+                        let Ok(relative) = location.path.strip_prefix(&vault_root) else {
+                            continue;
+                        };
+                        if let Some(path) = vault_relative(&relative.to_string_lossy()) {
+                            mentions.push(Mention {
+                                entry,
+                                path,
+                                line,
+                                text: None,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.mentions = mentions;
+        self.resolve_underlines(cx);
+    }
+
+    /// Finds each mention's line in every open note that shows its path, as
+    /// anchors in that note's buffer. A deleted line's anchors collapse, so
+    /// its underline goes with it.
+    fn resolve_underlines(&mut self, cx: &mut Context<Self>) {
+        let Some(vault_root) = self.vault().map(|vault| vault.root.clone()) else {
+            return;
+        };
+        let editors: Vec<Entity<Editor>> = self
+            .workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).items_of_type::<Editor>(cx).collect())
+            .unwrap_or_default();
+        let mut underlines = Vec::new();
+        let mut open_notes = HashSet::default();
+        for editor in editors {
+            let buffer = editor.read(cx).buffer().read(cx);
+            let Some(absolute) = buffer.as_singleton().and_then(|buffer| {
+                let file = project::File::from_dyn(buffer.read(cx).file())?;
+                Some(
+                    file.worktree
+                        .read(cx)
+                        .abs_path()
+                        .join(file.path.as_std_path()),
+                )
+            }) else {
+                continue;
+            };
+            let Ok(relative) = absolute.strip_prefix(&vault_root) else {
+                continue;
+            };
+            let relative = relative.to_path_buf();
+            let snapshot = buffer.snapshot(cx);
+            let text = snapshot.text();
+            open_notes.insert(relative.clone());
+            for mention in self
+                .mentions
+                .iter()
+                .filter(|mention| mention.path == relative)
+            {
+                let Some(row) = resolve_line(mention.text.as_deref(), mention.line, &text) else {
+                    continue;
+                };
+                let Some(line) = text.lines().nth(row as usize) else {
+                    continue;
+                };
+                if is_block_heading(line) {
+                    continue;
+                }
+                let (start, _) = split_markers(line);
+                let range = snapshot.anchor_before(Point::new(row, start as u32))
+                    ..snapshot.anchor_after(Point::new(row, line.len() as u32));
+                underlines.push(Underline {
+                    entry: mention.entry,
+                    editor: editor.downgrade(),
+                    range,
+                });
+            }
+        }
+        self.underlines = underlines;
+        self.open_notes = open_notes;
+        self.underline_state = None;
+        self.apply_underlines(cx);
+    }
+
+    /// The message whose lines are at full strength (§5.6): the bubble under
+    /// the mouse, else the selected one, else the latest with lines.
+    fn underline_focus(&self) -> Option<usize> {
+        self.hovered_entry
+            .or(match self.selected {
+                Some(ItemKey::Entry(index)) => Some(index),
+                _ => None,
+            })
+            .or_else(|| {
+                self.underlines
+                    .iter()
+                    .map(|underline| underline.entry)
+                    .max()
+            })
+    }
+
+    /// Tells the open notes which lines to underline (§5.6): the focused
+    /// message's at full strength, the rest at 35%, and none while the chat
+    /// rests.
+    fn apply_underlines(&mut self, cx: &mut Context<Self>) {
+        let showing = self.thread_open || self.bubble_up;
+        let focus = self.underline_focus();
+        let state = (focus, showing);
+        if self.underline_state == Some(state) {
+            return;
+        }
+        self.underline_state = Some(state);
+        let accent = cx.theme().colors().text_accent;
+        let style = |alpha: f32| HighlightStyle {
+            underline: Some(UnderlineStyle {
+                thickness: px(1.5),
+                color: Some(accent.opacity(alpha)),
+                wavy: false,
+            }),
+            ..Default::default()
+        };
+        for editor in std::mem::take(&mut self.underlined_editors) {
+            if let Some(editor) = editor.upgrade() {
+                editor.update(cx, |editor, cx| {
+                    editor.clear_highlights(HighlightKey::ThockMarkdownConceal(MENTION_SLOT), cx);
+                    editor.clear_highlights(
+                        HighlightKey::ThockMarkdownConceal(MENTION_PAST_SLOT),
+                        cx,
+                    );
+                });
+            }
+        }
+        if !showing {
+            return;
+        }
+        let mut by_editor: HashMap<
+            EntityId,
+            (Entity<Editor>, Vec<Range<Anchor>>, Vec<Range<Anchor>>),
+        > = HashMap::default();
+        for underline in &self.underlines {
+            let Some(editor) = underline.editor.upgrade() else {
+                continue;
+            };
+            let (_, current, past) = by_editor
+                .entry(editor.entity_id())
+                .or_insert_with(|| (editor.clone(), Vec::new(), Vec::new()));
+            if Some(underline.entry) == focus {
+                current.push(underline.range.clone());
+            } else {
+                past.push(underline.range.clone());
+            }
+        }
+        for (editor, current, past) in by_editor.into_values() {
+            editor.update(cx, |editor, cx| {
+                if !current.is_empty() {
+                    editor.highlight_text(
+                        HighlightKey::ThockMarkdownConceal(MENTION_SLOT),
+                        current,
+                        style(1.),
+                        cx,
+                    );
+                }
+                if !past.is_empty() {
+                    editor.highlight_text(
+                        HighlightKey::ThockMarkdownConceal(MENTION_PAST_SLOT),
+                        past,
+                        style(PAST_MENTION_ALPHA),
+                        cx,
+                    );
+                }
+            });
+            self.underlined_editors.push(editor.downgrade());
+        }
+    }
+
+    /// The line a reply is about that isn't on screen, to quote at the top
+    /// of its bubble (§5.5): the first of its mentions whose note isn't
+    /// open.
+    fn quote_for(&self, entry: usize) -> Option<&Mention> {
+        self.mentions.iter().find(|mention| {
+            mention.entry == entry
+                && mention.text.is_some()
+                && !self.open_notes.contains(&mention.path)
         })
     }
 
@@ -1846,6 +2252,10 @@ impl ChatPanel {
     fn reset_transcript_state(&mut self) {
         self.bubbles.clear();
         self.turn_times.clear();
+        self.mentions.clear();
+        self.underlines.clear();
+        self.underline_state = None;
+        self.hovered_entry = None;
         self.selected = None;
         self.expanded_receipts.clear();
         self.elicitation_choices.clear();
@@ -1871,6 +2281,7 @@ impl ChatPanel {
             }
             AcpThreadEvent::NewEntry | AcpThreadEvent::EntryUpdated(_) => {
                 self.sync_bubbles(thread, cx);
+                self.sync_mentions(cx);
                 if thread.read(cx).status() == ThreadStatus::Generating {
                     self.scroll_handle.scroll_to_bottom();
                 }
@@ -1880,6 +2291,7 @@ impl ChatPanel {
             }
             AcpThreadEvent::Stopped(_) => {
                 self.refresh_entitlement(cx);
+                self.sync_mentions(cx);
                 // A reply that lands while the thread is folded floats up
                 // (§5.2); a turn that stopped on a question already has.
                 let replied = matches!(
@@ -2816,13 +3228,39 @@ impl ChatPanel {
         self.open_selected_entry(window, cx);
     }
 
-    /// Opens the note the selected row or receipt names: a row's note at its
-    /// line, or a receipt's first note a write touched, failing that the
-    /// first note the turn touched at all. Returns whether there was one.
+    /// Opens the note the selected row, bubble or receipt names: a row's note
+    /// at its line, a bubble's first mentioned line, or a receipt's first
+    /// note a write touched, failing that the first note the turn touched
+    /// at all. Returns whether there was one.
     fn open_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(session) = &self.session else {
             return false;
         };
+        let vault_root = self.vault().map(|vault| vault.root.clone());
+        // A bubble: the line it is about (§5.5), where `alt-enter` goes
+        // when the line is quoted. With nothing selected, the latest one.
+        let entry = match self.selected {
+            Some(ItemKey::Entry(index)) => Some(index),
+            None => self.mentions.last().map(|mention| mention.entry),
+            _ => None,
+        };
+        if let (Some(entry), Some(vault_root)) = (entry, vault_root) {
+            let mention = self
+                .mentions
+                .iter()
+                .find(|mention| mention.entry == entry)
+                .cloned();
+            let Some(mention) = mention else {
+                return false;
+            };
+            self.open_note(
+                vault_root.join(&mention.path),
+                Some(mention.line),
+                window,
+                cx,
+            );
+            return true;
+        }
         if let Some(ItemKey::Call(call_id)) = self.selected.clone() {
             let location = session
                 .thread
@@ -3127,10 +3565,24 @@ impl ChatPanel {
             _ => None,
         };
         let item_key = item.key();
+        let hover_entry = match item {
+            ChatItem::Reply(index) | ChatItem::Question(index) => Some(*index),
+            _ => None,
+        };
         v_flex()
             .id(("thock-chat-item", position))
             .w_full()
             .pt(space_above)
+            // Hovering a bubble lights the lines it is about (§5.6).
+            .when_some(hover_entry, |this, entry| {
+                this.on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                    let hovered = hovered.then_some(entry);
+                    if this.hovered_entry != hovered {
+                        this.hovered_entry = hovered;
+                        cx.notify();
+                    }
+                }))
+            })
             .children(day_mark.map(|label| self.render_day_mark(label, cx)))
             .child(
                 div()
@@ -3383,6 +3835,10 @@ impl ChatPanel {
     ) -> AnyElement {
         let style = self.thock_markdown_style(window, cx);
         let mut column = v_flex().w_full().items_start().gap(px(3.));
+        // A line in a note that isn't open is quoted at the top (§5.5).
+        if let Some(mention) = self.quote_for(index) {
+            column = column.child(self.thock_bubble(self.render_quote(mention, cx), cx));
+        }
         match self.bubbles.get(&index) {
             Some(bubbles) => {
                 for markdown in &bubbles.paragraphs {
@@ -3409,6 +3865,26 @@ impl ChatPanel {
             }
         }
         column.into_any_element()
+    }
+
+    /// The quoted line (§5.5): the words Thock linked, and the note they are
+    /// in. `alt-enter` opens the note at the line.
+    fn render_quote(&self, mention: &Mention, cx: &Context<Self>) -> AnyElement {
+        v_flex()
+            .gap_0p5()
+            .pl_2()
+            .border_l_2()
+            .border_color(cx.theme().colors().text_accent)
+            .child(div().child(mention.text.clone().unwrap_or_default()))
+            .child(
+                div()
+                    .font_family(".ZedMono")
+                    .text_size(rems_from_px(11.))
+                    .line_height(rems_from_px(16.))
+                    .text_color(cx.theme().colors().text_placeholder)
+                    .child(mention.path.to_string_lossy().into_owned()),
+            )
+            .into_any_element()
     }
 
     /// One quiet line for everything a turn did (decision 5), under the
@@ -4125,6 +4601,16 @@ impl Render for ChatPanel {
             self.bubble_needs_room = needs_room;
             self.sync_room(cx);
         }
+        // The underlines follow the selection, the hover and the presence
+        // (§5.6); the notes are told after this frame, not during it.
+        let underline_state = (self.underline_focus(), self.thread_open || self.bubble_up);
+        if self.underline_state != Some(underline_state) {
+            let chat = cx.weak_entity();
+            cx.defer(move |cx| {
+                chat.update(cx, |this, cx| this.apply_underlines(cx))
+                    .log_err();
+            });
+        }
         // BYO mode and a folder that isn't a vault have no chat (§5.11).
         let hidden = self.mode == Some(ConnectionMode::Byo)
             || !matches!(self.vault_status, VaultStatus::Valid(_));
@@ -4201,9 +4687,89 @@ mod tests {
     use chrono::TimeZone as _;
     use fs::FakeFs;
     use gpui::{TestAppContext, VisualTestContext};
+    use multi_buffer::ToPoint as _;
     use serde_json::json;
     use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
     use workspace::MultiWorkspace;
+
+    #[test]
+    fn a_mention_is_a_vault_relative_note_and_a_line() {
+        assert_eq!(
+            parse_mention("daily/2026-10-19.md#L12"),
+            Some((PathBuf::from("daily/2026-10-19.md"), 12))
+        );
+        assert_eq!(parse_mention("daily/2026-10-19.md"), None);
+        assert_eq!(parse_mention("daily/2026-10-19.md#L0"), None);
+        assert_eq!(parse_mention("daily/2026-10-19.md#Lx"), None);
+        assert_eq!(parse_mention("https://example.com/a.md#L3"), None);
+    }
+
+    #[test]
+    fn a_mention_never_leaves_the_vault() {
+        assert_eq!(vault_relative("../secrets.md"), None);
+        assert_eq!(vault_relative("/Users/me/Thock/daily/x.md"), None);
+        assert_eq!(vault_relative("daily/../../x.md"), None);
+        assert_eq!(vault_relative("./daily/x.md"), None);
+        assert_eq!(vault_relative("daily/notes.txt"), None);
+        assert_eq!(vault_relative(""), None);
+        assert_eq!(
+            vault_relative("weekly/2026-W43.md"),
+            Some(PathBuf::from("weekly/2026-W43.md"))
+        );
+    }
+
+    #[test]
+    fn links_come_out_of_the_reply_with_their_words() {
+        assert_eq!(
+            links_in(
+                "Shall I [tick it](daily/2026-10-19.md#L12)? Or [**John's** \
+                 report](daily/2026-10-19.md#L4)."
+            ),
+            [
+                ("tick it".to_string(), "daily/2026-10-19.md#L12".to_string()),
+                (
+                    "John's report".to_string(),
+                    "daily/2026-10-19.md#L4".to_string()
+                ),
+            ]
+        );
+        assert!(links_in("No links here, just `code`.").is_empty());
+    }
+
+    #[test]
+    fn a_mention_resolves_to_its_line_a_moved_line_or_nothing() {
+        let note = "# Day planner\n- [ ] Investigate John's report\nMerge Mei's PR\n- [x] **Done** thing\n";
+        // The line Thock read still holds the words.
+        assert_eq!(resolve_line(Some("John's report"), 2, note), Some(1));
+        // Case, whitespace and markers don't matter.
+        assert_eq!(
+            resolve_line(Some("investigate  JOHN'S report"), 2, note),
+            Some(1)
+        );
+        assert_eq!(resolve_line(Some("Done thing"), 4, note), Some(3));
+        // The note changed: the one line that holds the words wins.
+        assert_eq!(resolve_line(Some("John's report"), 1, note), Some(1));
+        // Two lines hold them: nothing is guessed.
+        let twice = "- [ ] Review PR\n- [ ] Review PR again\n";
+        assert_eq!(resolve_line(Some("Review PR"), 3, twice), None);
+        // No line holds them: nothing.
+        assert_eq!(resolve_line(Some("Workout"), 2, note), None);
+        // A change's line is taken as it is, when it exists.
+        assert_eq!(resolve_line(None, 3, note), Some(2));
+        assert_eq!(resolve_line(None, 9, note), None);
+        assert_eq!(resolve_line(None, 0, note), None);
+    }
+
+    #[test]
+    fn the_underline_starts_past_the_markers() {
+        assert_eq!(split_markers("  - [ ] Workout"), (8, "Workout"));
+        assert_eq!(split_markers("## Calendar"), (3, "Calendar"));
+        assert_eq!(split_markers("> quoted"), (2, "quoted"));
+        assert_eq!(split_markers("plain words"), (0, "plain words"));
+        assert!(is_block_heading("## Calendar"));
+        assert!(!is_block_heading("### Smaller"));
+        assert!(!is_block_heading("#hashtag"));
+    }
 
     #[test]
     fn the_room_cascade_matches_the_spec_numbers() {
@@ -5152,6 +5718,174 @@ mod tests {
         setup.cx.simulate_keystrokes("ctrl-alt-n y");
         setup.cx.run_until_parked();
         assert_eq!(running(&setup), None);
+    }
+
+    fn underlined(setup: &Setup, editor: &Entity<Editor>, slot: usize) -> Vec<(Point, Point)> {
+        editor.read_with(&setup.cx, |editor, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(slot), cx)
+                .map(|(_, ranges)| {
+                    ranges
+                        .iter()
+                        .map(|range| {
+                            (
+                                range.start.to_point(&snapshot),
+                                range.end.to_point(&snapshot),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    fn edit_note(setup: &mut Setup, editor: &Entity<Editor>, range: Range<Point>, text: &str) {
+        editor.update(&mut setup.cx, |editor, cx| {
+            editor.buffer().update(cx, |buffer, cx| {
+                buffer.edit([(range, text)], None, cx);
+            });
+        });
+        setup.cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn a_linked_line_is_underlined_in_the_open_note_and_follows_edits(
+        cx: &mut TestAppContext,
+    ) {
+        let mut setup = setup(cx).await;
+        let editor = open_note(&mut setup).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        start_wrap_today(
+            &mut setup,
+            connection,
+            None,
+            vec![says(
+                "John's report looks handled: [line 12](daily/2026-10-19.md#L12).",
+            )],
+        )
+        .await;
+        assert_eq!(presence(&setup), Presence::NeedsYou);
+        assert_eq!(
+            underlined(&setup, &editor, MENTION_SLOT),
+            [(Point::new(11, 0), Point::new(11, 7))],
+            "the line Thock linked, from its first word to its end"
+        );
+
+        // A line added above moves the underline; the agent's own edits
+        // don't count as typing, so the bubble stays up.
+        edit_note(
+            &mut setup,
+            &editor,
+            Point::new(0, 0)..Point::new(0, 0),
+            "top\n",
+        );
+        assert_eq!(
+            underlined(&setup, &editor, MENTION_SLOT),
+            [(Point::new(12, 0), Point::new(12, 7))]
+        );
+        assert!(bubble_up(&setup));
+        // Deleting the line takes its underline with it.
+        edit_note(
+            &mut setup,
+            &editor,
+            Point::new(12, 0)..Point::new(13, 0),
+            "",
+        );
+        // The anchors collapse, so nothing is drawn.
+        let ranges = underlined(&setup, &editor, MENTION_SLOT);
+        assert!(ranges.iter().all(|(start, end)| start == end), "{ranges:?}");
+
+        // Folding back to Resting clears the underlines.
+        setup.cx.simulate_keystrokes("ctrl-alt-n escape");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Resting);
+        assert!(underlined(&setup, &editor, MENTION_SLOT).is_empty());
+    }
+
+    #[gpui::test]
+    async fn earlier_lines_dim_and_the_selected_bubble_lights_its_own(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        connect(&mut setup);
+        let editor = open_note(&mut setup).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        start_wrap_today(
+            &mut setup,
+            connection.clone(),
+            None,
+            vec![says("See [line 12](daily/2026-10-19.md#L12).")],
+        )
+        .await;
+        // A second turn from the composer, about another line.
+        connection.set_next_prompt_updates(vec![says("And [line 3](daily/2026-10-19.md#L3).")]);
+        setup
+            .cx
+            .simulate_keystrokes("ctrl-alt-n ctrl-alt-n o k enter");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
+        assert_eq!(
+            underlined(&setup, &editor, MENTION_SLOT),
+            [(Point::new(2, 0), Point::new(2, 6))],
+            "the latest message's line is at full strength"
+        );
+        assert_eq!(
+            underlined(&setup, &editor, MENTION_PAST_SLOT),
+            [(Point::new(11, 0), Point::new(11, 7))],
+            "the earlier message's line is dimmed"
+        );
+
+        // Selecting the earlier bubble swaps them.
+        setup.cx.simulate_keystrokes("shift-tab up up");
+        setup.cx.run_until_parked();
+        assert_eq!(
+            underlined(&setup, &editor, MENTION_SLOT),
+            [(Point::new(11, 0), Point::new(11, 7))]
+        );
+        assert_eq!(
+            underlined(&setup, &editor, MENTION_PAST_SLOT),
+            [(Point::new(2, 0), Point::new(2, 6))]
+        );
+    }
+
+    #[gpui::test]
+    async fn a_line_in_a_closed_note_is_quoted_and_alt_enter_opens_it(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        start_wrap_today(
+            &mut setup,
+            connection,
+            None,
+            vec![says(
+                "This one carried over: [line 12](daily/2026-10-19.md#L12).",
+            )],
+        )
+        .await;
+        let quote = setup.panel.read_with(&setup.cx, |panel, _| {
+            panel
+                .quote_for(1)
+                .map(|mention| (mention.text.clone(), mention.line))
+        });
+        assert_eq!(quote, Some((Some("line 12".to_string()), 12)));
+
+        setup.cx.simulate_keystrokes("ctrl-alt-n alt-enter");
+        setup.cx.run_until_parked();
+        let cursor_row = setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, _, cx| {
+                let editor = workspace
+                    .active_item_as::<Editor>(cx)
+                    .expect("the note opened");
+                editor.update(cx, |editor, cx| {
+                    let snapshot = editor.display_snapshot(cx);
+                    editor.selections.newest::<Point>(&snapshot).head().row
+                })
+            });
+        assert_eq!(cursor_row, 11);
+        // Open now, the line is underlined rather than quoted.
+        let quoted = setup
+            .panel
+            .read_with(&setup.cx, |panel, _| panel.quote_for(1).is_some());
+        assert!(!quoted);
     }
 
     #[gpui::test]
