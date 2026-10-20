@@ -71,6 +71,7 @@ zed_actions.workspace = true
 zed_credentials_provider.workspace = true
 
 [dev-dependencies]
+acp_thread = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 release_channel.workspace = true

@@ -234,7 +234,16 @@ pub fn build_launch(command_line: &str, kickoff: Option<&str>) -> Result<AgentLa
 /// and a pointer, not an inline copy — the agent reads the live, user-editable
 /// file (spec §5.2).
 pub fn run_skill_kickoff(vault_relative_path: &str) -> String {
-    format!("Read and execute {vault_relative_path}")
+    format!("{RUN_SKILL_KICKOFF_PREFIX}{vault_relative_path}")
+}
+
+const RUN_SKILL_KICKOFF_PREFIX: &str = "Read and execute ";
+
+/// Whether `text` is a kickoff `run_skill_kickoff` composed: a prompt the
+/// app sent on the user's behalf, which the chat shows as a marker rather
+/// than as something they typed (V44 decision 7).
+pub fn is_run_skill_kickoff(text: &str) -> bool {
+    text.starts_with(RUN_SKILL_KICKOFF_PREFIX)
 }
 
 /// The user-level Thock settings file holding the global agent default.

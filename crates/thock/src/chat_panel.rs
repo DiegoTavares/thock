@@ -1,14 +1,16 @@
-//! The Thock Agent chat panel (V25 §3 items 3 to 7, refined by V26): a
-//! right-dock panel that hosts the hosted agent (Pi over ACP) in a chat that
-//! reads as a conversation, not a build log. Everything the agent did
-//! between two messages collapses into one quiet activity line that expands
-//! in place; paths are vault-relative; per-call failures never surface as
-//! errors (the agent's prose carries them); and the allowance balance lives
-//! in the footer. There are no per-change approval prompts (V25 decision
-//! 16): every permission the harness asks for is granted. The process is not
-//! OS-confined yet (the V25 decision 11 sandbox is Stage 2); safety is the
-//! prompt and the vault-guard extension keeping writes inside the vault and
-//! append-only, plus the checkpoint taken before each session.
+//! The Thock Agent chat (V25 §3 items 3 to 7, refined by V26 and V44): the
+//! hosted agent (Pi over ACP) in a chat that reads as a conversation, not a
+//! build log. A turn shows one reply, the last message before it stopped for
+//! you, and everything the agent said or did before that folds into one
+//! receipt that expands in place (V44 decision 5); a ritual's kickoff is a
+//! marker, not a message you typed; paths are vault-relative; per-call
+//! failures never surface as errors (the agent's prose carries them); and the
+//! allowance balance lives in the footer. There are no per-change approval
+//! prompts (V25 decision 16): every permission the harness asks for is
+//! granted. The process is not OS-confined yet (the V25 decision 11 sandbox
+//! is Stage 2); safety is the prompt and the vault-guard extension keeping
+//! writes inside the vault and append-only, plus the checkpoint taken before
+//! each session.
 
 use acp_thread::{
     AcpThread, AcpThreadEvent, AgentConnection, AgentThreadEntry, AssistantMessageChunk,
@@ -21,8 +23,8 @@ use collections::{HashMap, HashSet};
 use editor::{Editor, EditorMode, MinimapVisibility, SizingBehavior};
 use gpui::{
     Action, AnyWindowHandle, App, AsyncWindowContext, Context, Entity, EntityId, EventEmitter,
-    FocusHandle, Focusable, KeyContext, Pixels, ScrollHandle, SharedString, Subscription,
-    WeakEntity, Window, actions, div, px, relative,
+    FocusHandle, Focusable, FontWeight, KeyContext, Pixels, ScrollHandle, SharedString,
+    Subscription, WeakEntity, Window, actions, div, px, relative,
 };
 use language::language_settings::SoftWrap;
 use markdown::{MarkdownElement, MarkdownFont, MarkdownStyle};
@@ -159,6 +161,9 @@ struct ChatSession {
     turn_failure: Option<TurnFailure>,
     /// The last message sent, kept for the retry affordance.
     last_sent: Option<String>,
+    /// Whether the first message is a ritual's kickoff prompt, which shows
+    /// as a marker rather than as your bubble (V44 decision 7).
+    kickoff: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -167,24 +172,42 @@ struct TurnFailure {
     retryable: bool,
 }
 
-/// One row of the transcript after V26 grouping (§5.1): entries render
-/// one-to-one except consecutive tool calls, which collapse into a single
-/// activity line. The grouping is derived on every read — the thread stays
-/// the source of truth — and an activity is keyed by its first tool call id
-/// so expansion and selection survive re-grouping while a turn streams.
+/// One row of the thread after the fold (V44 decision 5). The rows are
+/// derived on every read — the thread stays the source of truth — and a
+/// receipt is keyed by its first tool call so expansion and selection
+/// survive a run that grows while a turn streams.
 enum ChatItem {
-    Entry(usize),
-    Activity {
+    /// "You started Wrap Today": a ritual's kickoff prompt, which you never
+    /// typed (decision 7).
+    Kickoff(usize),
+    /// Your bubble.
+    User(usize),
+    /// Thock's reply: the last message before the turn stopped for you.
+    Reply(usize),
+    /// What the turn did, as one line that expands in place.
+    Receipt {
         key: acp::ToolCallId,
+        calls: Vec<(usize, acp::ToolCallId)>,
+    },
+    /// A question that stopped the turn for you.
+    Question(usize),
+    /// The turn is still running: its calls so far feed the live line, and
+    /// its prose waits for the stop (decision 6).
+    Typing {
         calls: Vec<(usize, acp::ToolCallId)>,
     },
 }
 
 impl ChatItem {
-    fn key(&self) -> ItemKey {
+    /// The selection key; the typing bubble can't be selected.
+    fn key(&self) -> Option<ItemKey> {
         match self {
-            ChatItem::Entry(index) => ItemKey::Entry(*index),
-            ChatItem::Activity { key, .. } => ItemKey::Activity(key.clone()),
+            ChatItem::Kickoff(index)
+            | ChatItem::User(index)
+            | ChatItem::Reply(index)
+            | ChatItem::Question(index) => Some(ItemKey::Entry(*index)),
+            ChatItem::Receipt { key, .. } => Some(ItemKey::Receipt(key.clone())),
+            ChatItem::Typing { .. } => None,
         }
     }
 }
@@ -192,56 +215,136 @@ impl ChatItem {
 #[derive(Clone, PartialEq, Eq)]
 enum ItemKey {
     Entry(usize),
-    Activity(acp::ToolCallId),
+    Receipt(acp::ToolCallId),
 }
 
-/// How one thread entry participates in the grouping.
+/// How one thread entry takes part in the fold.
 enum EntryShape {
+    User,
+    /// Prose from Thock.
+    Assistant,
     Tool(acp::ToolCallId),
-    /// Renders nothing (a thought-only assistant message, per decision 7);
-    /// it neither takes a row nor splits a run of tool calls.
+    /// A question that stops the turn until it is answered.
+    Question {
+        answered: bool,
+    },
+    /// Renders nothing and folds into nothing: a thought-only message, a
+    /// plan, a compaction note.
     Hidden,
-    Visible,
 }
 
-fn entry_shape(entry: &AgentThreadEntry) -> EntryShape {
+fn entry_shape(entry: &AgentThreadEntry, thread: &AcpThread) -> EntryShape {
     match entry {
-        AgentThreadEntry::ToolCall(tool_call) => EntryShape::Tool(tool_call.id.clone()),
-        AgentThreadEntry::AssistantMessage(message)
+        AgentThreadEntry::UserMessage(_) => EntryShape::User,
+        AgentThreadEntry::AssistantMessage(message) => {
             if message
                 .chunks
                 .iter()
-                .all(|chunk| matches!(chunk, AssistantMessageChunk::Thought { .. })) =>
-        {
+                .any(|chunk| matches!(chunk, AssistantMessageChunk::Message { .. }))
+            {
+                EntryShape::Assistant
+            } else {
+                EntryShape::Hidden
+            }
+        }
+        AgentThreadEntry::ToolCall(tool_call) => EntryShape::Tool(tool_call.id.clone()),
+        AgentThreadEntry::Elicitation(id) => EntryShape::Question {
+            answered: thread.elicitation(id).is_none_or(|(_, elicitation)| {
+                !matches!(elicitation.status, ElicitationStatus::Pending { .. })
+            }),
+        },
+        AgentThreadEntry::CompletedPlan(_) | AgentThreadEntry::ContextCompaction(_) => {
             EntryShape::Hidden
         }
-        _ => EntryShape::Visible,
     }
 }
 
-fn build_items(shapes: impl IntoIterator<Item = EntryShape>) -> Vec<ChatItem> {
+/// Folds the thread into rows (V44 §5.4). A turn runs from your message (or
+/// the kickoff) until it stops for you: your next message, a question, or
+/// the end of the thread. Only its last message is the reply; every earlier
+/// message and every tool call folds into its receipt. While the thread is
+/// `live` the open turn shows the typing bubble instead, and nothing before
+/// your first message renders (decision 8).
+fn build_items(
+    shapes: impl IntoIterator<Item = EntryShape>,
+    ritual_kickoff: bool,
+    live: bool,
+) -> Vec<ChatItem> {
     let mut items = Vec::new();
-    let mut run: Vec<(usize, acp::ToolCallId)> = Vec::new();
-    let flush = |items: &mut Vec<ChatItem>, run: &mut Vec<(usize, acp::ToolCallId)>| {
-        if let Some((_, first_id)) = run.first() {
-            items.push(ChatItem::Activity {
-                key: first_id.clone(),
-                calls: std::mem::take(run),
+    let mut started = false;
+    let mut reply = None;
+    let mut calls: Vec<(usize, acp::ToolCallId)> = Vec::new();
+    let mut waiting = false;
+    let flush = |items: &mut Vec<ChatItem>,
+                 reply: &mut Option<usize>,
+                 calls: &mut Vec<(usize, acp::ToolCallId)>| {
+        if let Some(index) = reply.take() {
+            items.push(ChatItem::Reply(index));
+        }
+        if let Some((_, first)) = calls.first() {
+            items.push(ChatItem::Receipt {
+                key: first.clone(),
+                calls: std::mem::take(calls),
             });
         }
     };
     for (index, shape) in shapes.into_iter().enumerate() {
         match shape {
-            EntryShape::Tool(id) => run.push((index, id)),
-            EntryShape::Hidden => {}
-            EntryShape::Visible => {
-                flush(&mut items, &mut run);
-                items.push(ChatItem::Entry(index));
+            EntryShape::User => {
+                flush(&mut items, &mut reply, &mut calls);
+                let kickoff = ritual_kickoff && !started;
+                started = true;
+                waiting = false;
+                items.push(if kickoff {
+                    ChatItem::Kickoff(index)
+                } else {
+                    ChatItem::User(index)
+                });
             }
+            _ if !started => {}
+            EntryShape::Assistant => {
+                reply = Some(index);
+                waiting = false;
+            }
+            EntryShape::Tool(id) => {
+                calls.push((index, id));
+                waiting = false;
+            }
+            EntryShape::Question { answered } => {
+                flush(&mut items, &mut reply, &mut calls);
+                items.push(ChatItem::Question(index));
+                waiting = !answered;
+            }
+            EntryShape::Hidden => {}
         }
     }
-    flush(&mut items, &mut run);
+    if live && started && !waiting {
+        items.push(ChatItem::Typing { calls });
+    } else {
+        flush(&mut items, &mut reply, &mut calls);
+    }
     items
+}
+
+/// The tool calls of a receipt, as the summary line needs them.
+fn summary_calls(
+    calls: &[(usize, acp::ToolCallId)],
+    entries: &[AgentThreadEntry],
+    vault_root: Option<&Path>,
+) -> Vec<SummaryCall> {
+    calls
+        .iter()
+        .filter_map(|(index, _)| match entries.get(*index) {
+            Some(AgentThreadEntry::ToolCall(tool_call)) => Some(SummaryCall {
+                kind: tool_call.kind,
+                note: tool_call
+                    .locations
+                    .first()
+                    .map(|location| vault_relative_label(&location.path, vault_root)),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// What the summary line needs from one tool call: its kind and the
@@ -466,12 +569,12 @@ pub struct ChatPanel {
     starting: Option<SharedString>,
     message_editor: Entity<Editor>,
     scroll_handle: ScrollHandle,
-    /// The selected transcript row, keyed so it survives streaming
-    /// re-grouping (G4): activities by tool call id, everything else by its
-    /// entry index (entries only append while a turn streams).
+    /// The selected row, keyed so it survives the re-fold while a turn
+    /// streams: receipts by tool call id, everything else by its entry index
+    /// (entries only append while a turn streams).
     selected: Option<ItemKey>,
-    /// The activity runs whose expansion is open, by run key.
-    expanded_activities: HashSet<acp::ToolCallId>,
+    /// The receipts whose rows are open, by receipt key.
+    expanded_receipts: HashSet<acp::ToolCallId>,
     /// The highlighted option per pending choice elicitation.
     elicitation_choices: HashMap<ElicitationEntryId, usize>,
     /// Single-line editors for pending free-text elicitations.
@@ -540,7 +643,7 @@ impl ChatPanel {
                 message_editor,
                 scroll_handle: ScrollHandle::new(),
                 selected: None,
-                expanded_activities: HashSet::default(),
+                expanded_receipts: HashSet::default(),
                 elicitation_choices: HashMap::default(),
                 elicitation_editors: HashMap::default(),
                 diff_editors: HashMap::default(),
@@ -1028,6 +1131,7 @@ impl ChatPanel {
             max_turns,
             turn_failure: None,
             last_sent: None,
+            kickoff: request.is_ritual(),
             _subscriptions: vec![subscription],
         });
         if let Some(kickoff) = request.kickoff {
@@ -1041,7 +1145,7 @@ impl ChatPanel {
     fn reset_transcript_state(&mut self) {
         self.diff_editors.clear();
         self.selected = None;
-        self.expanded_activities.clear();
+        self.expanded_receipts.clear();
         self.elicitation_choices.clear();
         self.elicitation_editors.clear();
     }
@@ -1336,48 +1440,132 @@ impl ChatPanel {
         window.focus(&self.message_editor.focus_handle(cx), cx);
     }
 
-    /// The transcript as the user sees it (V26 §5.1), derived fresh from
-    /// the thread on every use so it can never desynchronize.
+    /// The thread as you see it (V44 §5.4), folded fresh from the thread on
+    /// every use so it can never desynchronize.
     fn items(&self, cx: &App) -> Vec<ChatItem> {
         let Some(session) = &self.session else {
             return Vec::new();
         };
-        build_items(session.thread.read(cx).entries().iter().map(entry_shape))
+        let thread = session.thread.read(cx);
+        build_items(
+            thread
+                .entries()
+                .iter()
+                .map(|entry| entry_shape(entry, thread)),
+            session.kickoff,
+            thread.status() == ThreadStatus::Generating,
+        )
     }
 
-    /// Where the selection sits in `items`. An activity matches when it
+    /// What the thread says, one row per line, for the tests that check
+    /// nothing mechanical leaks (G7).
+    #[cfg(test)]
+    fn visible_text(&self, cx: &App) -> String {
+        let Some(session) = &self.session else {
+            return String::new();
+        };
+        let thread = session.thread.read(cx);
+        let entries = thread.entries();
+        let vault_root = self.vault().map(|vault| vault.root.clone());
+        let entry_text = |index: usize| -> String {
+            match entries.get(index) {
+                Some(AgentThreadEntry::UserMessage(message)) => message
+                    .content
+                    .text_content(cx)
+                    .unwrap_or_default()
+                    .to_string(),
+                Some(AgentThreadEntry::AssistantMessage(message)) => message
+                    .chunks
+                    .iter()
+                    .filter_map(|chunk| match chunk {
+                        AssistantMessageChunk::Message { block, .. } => block.text_content(cx),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .concat(),
+                Some(AgentThreadEntry::Elicitation(id)) => thread
+                    .elicitation(id)
+                    .map(|(_, elicitation)| elicitation.request.message.clone())
+                    .unwrap_or_default(),
+                _ => String::new(),
+            }
+        };
+        self.items(cx)
+            .iter()
+            .map(|item| match item {
+                ChatItem::Kickoff(_) => format!("You started {}", session.title),
+                ChatItem::User(index) | ChatItem::Reply(index) | ChatItem::Question(index) => {
+                    entry_text(*index)
+                }
+                ChatItem::Receipt { calls, .. } => {
+                    summarize_activity(&summary_calls(calls, entries, vault_root.as_deref()), false)
+                }
+                ChatItem::Typing { calls } => {
+                    summarize_activity(&summary_calls(calls, entries, vault_root.as_deref()), true)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Where the selection sits in `items`. A receipt matches when it
     /// *contains* the selected call, not only when it starts with it, so a
-    /// run that merges or splits mid-turn keeps the selection (R4).
+    /// run that merges or splits mid-turn keeps the selection (V26 R4).
     fn selected_position(&self, items: &[ChatItem]) -> Option<usize> {
         let selected = self.selected.as_ref()?;
         items.iter().position(|item| match (item, selected) {
-            (ChatItem::Entry(index), ItemKey::Entry(selected_index)) => index == selected_index,
-            (ChatItem::Activity { calls, .. }, ItemKey::Activity(id)) => {
+            (ChatItem::Receipt { calls, .. }, ItemKey::Receipt(id)) => {
                 calls.iter().any(|(_, call_id)| call_id == id)
+            }
+            (item, ItemKey::Entry(selected_index)) => {
+                item.key() == Some(ItemKey::Entry(*selected_index))
             }
             _ => false,
         })
     }
 
+    /// The rows the keys can land on; the typing bubble is skipped.
+    fn selectable_positions(items: &[ChatItem]) -> Vec<usize> {
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.key().is_some())
+            .map(|(position, _)| position)
+            .collect()
+    }
+
     fn select_position(&mut self, items: &[ChatItem], position: usize, cx: &mut Context<Self>) {
-        let Some(item) = items.get(position) else {
+        let Some(key) = items.get(position).and_then(ChatItem::key) else {
             return;
         };
-        self.selected = Some(item.key());
+        self.selected = Some(key);
         self.scroll_handle.scroll_to_item(position);
         cx.notify();
     }
 
-    fn select_next(&mut self, _: &menu::SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_by_offset(&mut self, offset: isize, cx: &mut Context<Self>) {
         let items = self.items(cx);
-        if items.is_empty() {
+        let positions = Self::selectable_positions(&items);
+        if positions.is_empty() {
             return;
         }
-        let next = match self.selected_position(&items) {
-            Some(position) => (position + 1).min(items.len() - 1),
-            None => 0,
+        let current = self
+            .selected_position(&items)
+            .and_then(|position| positions.iter().position(|p| *p == position));
+        let next = match current {
+            Some(index) => {
+                (index as isize + offset).clamp(0, positions.len() as isize - 1) as usize
+            }
+            None if offset > 0 => 0,
+            None => positions.len() - 1,
         };
-        self.select_position(&items, next, cx);
+        if let Some(position) = positions.get(next) {
+            self.select_position(&items, *position, cx);
+        }
+    }
+
+    fn select_next(&mut self, _: &menu::SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_by_offset(1, cx);
     }
 
     fn select_previous(
@@ -1386,28 +1574,20 @@ impl ChatPanel {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let items = self.items(cx);
-        if items.is_empty() {
-            return;
-        }
-        let previous = match self.selected_position(&items) {
-            Some(position) => position.saturating_sub(1),
-            None => items.len() - 1,
-        };
-        self.select_position(&items, previous, cx);
+        self.select_by_offset(-1, cx);
     }
 
     fn select_first(&mut self, _: &menu::SelectFirst, _: &mut Window, cx: &mut Context<Self>) {
         let items = self.items(cx);
-        if !items.is_empty() {
-            self.select_position(&items, 0, cx);
+        if let Some(position) = Self::selectable_positions(&items).first() {
+            self.select_position(&items, *position, cx);
         }
     }
 
     fn select_last(&mut self, _: &menu::SelectLast, _: &mut Window, cx: &mut Context<Self>) {
         let items = self.items(cx);
-        if !items.is_empty() {
-            self.select_position(&items, items.len() - 1, cx);
+        if let Some(position) = Self::selectable_positions(&items).last() {
+            self.select_position(&items, *position, cx);
         }
     }
 
@@ -1448,14 +1628,14 @@ impl ChatPanel {
             self.cycle_elicitation_choice(&id, direction, cx);
             return;
         }
-        let Some(ItemKey::Activity(selected_id)) = self.selected.clone() else {
+        let Some(ItemKey::Receipt(selected_id)) = self.selected.clone() else {
             return;
         };
-        // Normalize to the run's key: the selected id may be a mid-run call
-        // after runs merged.
+        // Normalize to the receipt's key: the selected id may be a mid-run
+        // call after runs merged.
         let items = self.items(cx);
         let key = items.iter().find_map(|item| match item {
-            ChatItem::Activity { key, calls }
+            ChatItem::Receipt { key, calls }
                 if calls.iter().any(|(_, call_id)| *call_id == selected_id) =>
             {
                 Some(key.clone())
@@ -1466,9 +1646,9 @@ impl ChatPanel {
             return;
         };
         if direction > 0 {
-            self.expanded_activities.insert(key);
+            self.expanded_receipts.insert(key);
         } else {
-            self.expanded_activities.remove(&key);
+            self.expanded_receipts.remove(&key);
         }
         cx.notify();
     }
@@ -1646,11 +1826,11 @@ impl ChatPanel {
         self.open_selected_entry(window, cx);
     }
 
-    /// Opens the note the selected activity names: the first note a write
-    /// touched, or failing that the first note the run touched at all.
+    /// Opens the note the selected receipt names: the first note a write
+    /// touched, or failing that the first note the turn touched at all.
     /// Returns whether there was one.
     fn open_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(ItemKey::Activity(selected_id)) = self.selected.clone() else {
+        let Some(ItemKey::Receipt(selected_id)) = self.selected.clone() else {
             return false;
         };
         let Some(session) = &self.session else {
@@ -1658,7 +1838,7 @@ impl ChatPanel {
         };
         let items = self.items(cx);
         let calls = items.iter().find_map(|item| match item {
-            ChatItem::Activity { calls, .. }
+            ChatItem::Receipt { calls, .. }
                 if calls.iter().any(|(_, call_id)| *call_id == selected_id) =>
             {
                 Some(calls.clone())
@@ -1871,36 +2051,30 @@ impl ChatPanel {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
+        // A row whose entry isn't the kind its item promises (a stale index
+        // mid-stream) renders nothing rather than panicking.
         let body: AnyElement = match item {
-            ChatItem::Entry(index) => match entries.get(*index) {
+            ChatItem::Kickoff(_) => self.render_kickoff(cx),
+            ChatItem::User(index) => match entries.get(*index) {
                 Some(AgentThreadEntry::UserMessage(message)) => {
                     self.render_user_message(message, window, cx)
                 }
+                _ => div().into_any_element(),
+            },
+            ChatItem::Reply(index) => match entries.get(*index) {
                 Some(AgentThreadEntry::AssistantMessage(message)) => {
                     self.render_assistant_message(message, window, cx)
                 }
-                Some(AgentThreadEntry::Elicitation(id)) => self.render_elicitation(id, cx),
-                Some(AgentThreadEntry::CompletedPlan(plan_entries)) => Label::new(format!(
-                    "Finished a plan of {} step{}.",
-                    plan_entries.len(),
-                    if plan_entries.len() == 1 { "" } else { "s" }
-                ))
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .into_any_element(),
-                Some(AgentThreadEntry::ContextCompaction(_)) => {
-                    Label::new("Tidied up the conversation to keep going.")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .into_any_element()
-                }
-                // Tool calls always arrive grouped; a stale index renders
-                // nothing rather than panicking.
-                Some(AgentThreadEntry::ToolCall(_)) | None => div().into_any_element(),
+                _ => div().into_any_element(),
             },
-            ChatItem::Activity { key, calls } => {
-                self.render_activity(key, calls, entries, vault_root, cx)
+            ChatItem::Question(index) => match entries.get(*index) {
+                Some(AgentThreadEntry::Elicitation(id)) => self.render_elicitation(id, cx),
+                _ => div().into_any_element(),
+            },
+            ChatItem::Receipt { key, calls } => {
+                self.render_receipt(key, calls, entries, vault_root, cx)
             }
+            ChatItem::Typing { calls } => self.render_typing(calls, entries, vault_root, cx),
         };
         let item_key = item.key();
         div()
@@ -1914,11 +2088,61 @@ impl ChatPanel {
                     .border_l_1()
                     .border_color(cx.theme().colors().border_focused)
             })
-            .on_click(cx.listener(move |this, _, _window, cx| {
-                this.selected = Some(item_key.clone());
-                cx.notify();
-            }))
+            .when_some(item_key, |this, item_key| {
+                this.on_click(cx.listener(move |this, _, _window, cx| {
+                    this.selected = Some(item_key.clone());
+                    cx.notify();
+                }))
+            })
             .child(body)
+            .into_any_element()
+    }
+
+    /// The marker a ritual's kickoff leaves (decision 7): the prompt went to
+    /// the agent unchanged, but it isn't something you typed.
+    fn render_kickoff(&self, _cx: &Context<Self>) -> AnyElement {
+        let title = self
+            .session
+            .as_ref()
+            .map(|session| session.title.clone())
+            .unwrap_or_default();
+        h_flex()
+            .w_full()
+            .justify_center()
+            .gap_1()
+            .child(
+                Label::new("▸ You started")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new(title)
+                    .size(LabelSize::Small)
+                    .weight(FontWeight::SEMIBOLD)
+                    .color(Color::Muted),
+            )
+            .into_any_element()
+    }
+
+    /// The typing bubble: the turn is still running, and its calls so far
+    /// give the live line while the prose waits for the stop (decision 6).
+    fn render_typing(
+        &self,
+        calls: &[(usize, acp::ToolCallId)],
+        entries: &[AgentThreadEntry],
+        vault_root: Option<&Path>,
+        _cx: &Context<Self>,
+    ) -> AnyElement {
+        let summary = summarize_activity(&summary_calls(calls, entries, vault_root), true);
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(SpinnerLabel::new().size(LabelSize::Small))
+            .child(
+                Label::new(summary)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
             .into_any_element()
     }
 
@@ -1983,11 +2207,9 @@ impl ChatPanel {
         column.into_any_element()
     }
 
-    /// One quiet line for everything the agent did between two messages
-    /// (decision 4), expanding in place to per-call rows and diffs (§5.4).
-    /// While the run is still going the line reads in present tense, so a
-    /// long turn is never silent (R5).
-    fn render_activity(
+    /// One quiet line for everything a turn did (V44 decision 5), expanding
+    /// in place to per-call rows and diffs.
+    fn render_receipt(
         &self,
         key: &acp::ToolCallId,
         calls: &[(usize, acp::ToolCallId)],
@@ -2002,26 +2224,8 @@ impl ChatPanel {
                 _ => None,
             })
             .collect();
-        let summary_calls: Vec<SummaryCall> = tool_calls
-            .iter()
-            .map(|tool_call| SummaryCall {
-                kind: tool_call.kind,
-                note: tool_call
-                    .locations
-                    .first()
-                    .map(|location| vault_relative_label(&location.path, vault_root)),
-            })
-            .collect();
-        let live = tool_calls.iter().any(|tool_call| {
-            matches!(
-                tool_call.status,
-                ToolCallStatus::Pending
-                    | ToolCallStatus::InProgress
-                    | ToolCallStatus::WaitingForConfirmation { .. }
-            )
-        });
-        let summary = summarize_activity(&summary_calls, live);
-        let expanded = self.expanded_activities.contains(key);
+        let summary = summarize_activity(&summary_calls(calls, entries, vault_root), false);
+        let expanded = self.expanded_receipts.contains(key);
         let toggle_key = key.clone();
         let pill = h_flex()
             .id(SharedString::from(format!("thock-chat-activity-{key}")))
@@ -2047,9 +2251,9 @@ impl ChatPanel {
                     .color(Color::Muted),
             )
             .on_click(cx.listener(move |this, _, _window, cx| {
-                this.selected = Some(ItemKey::Activity(toggle_key.clone()));
-                if !this.expanded_activities.remove(&toggle_key) {
-                    this.expanded_activities.insert(toggle_key.clone());
+                this.selected = Some(ItemKey::Receipt(toggle_key.clone()));
+                if !this.expanded_receipts.remove(&toggle_key) {
+                    this.expanded_receipts.insert(toggle_key.clone());
                 }
                 cx.notify();
             }));
@@ -2276,7 +2480,7 @@ impl ChatPanel {
         };
         let generating = self.is_generating(cx);
         let entries = session.thread.read(cx).entries();
-        let items = build_items(entries.iter().map(entry_shape));
+        let items = self.items(cx);
         let selected_position = self.selected_position(&items);
         let vault_root = self.vault().map(|vault| vault.root.clone());
         let header = h_flex()
@@ -2335,26 +2539,8 @@ impl ChatPanel {
                     cx,
                 )
             }));
-        // §5.6: one spinner for the whole turn, only until prose streams —
-        // after that the growing answer is the signal.
-        let streaming_prose = matches!(
-            entries.last(),
-            Some(AgentThreadEntry::AssistantMessage(message))
-                if message
-                    .chunks
-                    .iter()
-                    .any(|chunk| matches!(chunk, AssistantMessageChunk::Message { .. }))
-        );
-        if generating && !streaming_prose {
-            list = list.child(
-                h_flex()
-                    .px_2()
-                    .py_1()
-                    .child(SpinnerLabel::new().size(LabelSize::Small)),
-            );
-        }
-        // §5.5: the one place a broken turn is allowed to say so — in plain
-        // language, without error styling.
+        // V26 §5.5: the one place a broken turn is allowed to say so — in
+        // plain language, without error styling.
         if let Some(failure) = &session.turn_failure {
             let retryable = failure.retryable && session.last_sent.is_some();
             list = list.child(
@@ -2869,74 +3055,351 @@ impl Panel for ChatPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use EntryShape::{Assistant, Hidden, User};
+    use acp_thread::StubAgentConnection;
+    use fs::FakeFs;
+    use gpui::{TestAppContext, VisualTestContext};
+    use serde_json::json;
+    use settings::SettingsStore;
 
     fn tool(id: &'static str) -> EntryShape {
         EntryShape::Tool(acp::ToolCallId::from(id))
+    }
+
+    fn question(answered: bool) -> EntryShape {
+        EntryShape::Question { answered }
     }
 
     fn keys(items: &[ChatItem]) -> Vec<String> {
         items
             .iter()
             .map(|item| match item {
-                ChatItem::Entry(index) => format!("entry:{index}"),
-                ChatItem::Activity { key, calls } => {
-                    format!("activity:{key}:{}", calls.len())
-                }
+                ChatItem::Kickoff(index) => format!("kickoff:{index}"),
+                ChatItem::User(index) => format!("user:{index}"),
+                ChatItem::Reply(index) => format!("reply:{index}"),
+                ChatItem::Question(index) => format!("question:{index}"),
+                ChatItem::Receipt { key, calls } => format!("receipt:{key}:{}", calls.len()),
+                ChatItem::Typing { calls } => format!("typing:{}", calls.len()),
             })
             .collect()
     }
 
     #[test]
-    fn consecutive_tool_calls_collapse_into_one_activity() {
-        let items = build_items(vec![
-            EntryShape::Visible,
-            tool("a"),
-            tool("b"),
-            tool("c"),
-            EntryShape::Visible,
-        ]);
-        assert_eq!(keys(&items), ["entry:0", "activity:a:3", "entry:4"]);
+    fn narration_between_tool_calls_folds_into_one_receipt() {
+        // §6.1: the run's entries become a marker, the reply and a receipt.
+        let items = build_items(
+            vec![
+                User,
+                tool("a"),
+                Assistant,
+                tool("b"),
+                Assistant,
+                tool("c"),
+                Assistant,
+            ],
+            true,
+            false,
+        );
+        assert_eq!(keys(&items), ["kickoff:0", "reply:6", "receipt:a:3"]);
     }
 
     #[test]
-    fn hidden_entries_neither_render_nor_split_a_run() {
-        // A thought-only assistant message between tool calls (decision 7)
-        // must not break the run into two activity lines.
-        let items = build_items(vec![
-            tool("a"),
-            EntryShape::Hidden,
-            tool("b"),
-            EntryShape::Visible,
-            EntryShape::Hidden,
-        ]);
-        assert_eq!(keys(&items), ["activity:a:2", "entry:3"]);
+    fn nothing_before_your_first_message_renders() {
+        // Decision 8: a runtime's prelude before the first turn is dropped.
+        let items = build_items(vec![Assistant, tool("x"), User, Assistant], false, false);
+        assert_eq!(keys(&items), ["user:2", "reply:3"]);
     }
 
     #[test]
-    fn a_visible_entry_splits_runs_and_a_trailing_run_flushes() {
-        let items = build_items(vec![tool("a"), EntryShape::Visible, tool("b"), tool("c")]);
-        assert_eq!(keys(&items), ["activity:a:1", "entry:1", "activity:b:2"]);
+    fn a_question_ends_the_visible_turn_and_its_answer_starts_the_next() {
+        let items = build_items(
+            vec![
+                User,
+                tool("a"),
+                Assistant,
+                question(true),
+                tool("b"),
+                Assistant,
+            ],
+            false,
+            false,
+        );
+        assert_eq!(
+            keys(&items),
+            [
+                "user:0",
+                "reply:2",
+                "receipt:a:1",
+                "question:3",
+                "reply:5",
+                "receipt:b:1"
+            ]
+        );
     }
 
     #[test]
-    fn activity_key_is_stable_while_the_run_grows() {
-        // R4: a run that grows mid-turn keeps its key, so expansion state
-        // and selection keyed by it survive the re-render.
-        let before = build_items(vec![EntryShape::Visible, tool("a")]);
-        let after = build_items(vec![EntryShape::Visible, tool("a"), tool("b"), tool("c")]);
-        let key_of = |items: &[ChatItem]| match &items[1] {
-            ChatItem::Activity { key, .. } => key.clone(),
-            _ => panic!("expected an activity"),
+    fn a_live_turn_types_instead_of_showing_its_prose() {
+        // Decision 6: the reply appears when the turn stops.
+        let items = build_items(vec![User, tool("a"), Assistant], false, true);
+        assert_eq!(keys(&items), ["user:0", "typing:1"]);
+        let items = build_items(vec![User], false, true);
+        assert_eq!(keys(&items), ["user:0", "typing:0"]);
+    }
+
+    #[test]
+    fn a_pending_question_stops_the_turn_rather_than_typing() {
+        let items = build_items(
+            vec![User, tool("a"), Assistant, question(false)],
+            false,
+            true,
+        );
+        assert_eq!(
+            keys(&items),
+            ["user:0", "reply:2", "receipt:a:1", "question:3"]
+        );
+    }
+
+    #[test]
+    fn a_turn_without_prose_still_shows_its_receipt() {
+        let items = build_items(vec![User, tool("a"), tool("b")], false, false);
+        assert_eq!(keys(&items), ["user:0", "receipt:a:2"]);
+    }
+
+    #[test]
+    fn hidden_entries_fold_into_nothing() {
+        let items = build_items(
+            vec![User, Hidden, tool("a"), Hidden, Assistant, Hidden],
+            false,
+            false,
+        );
+        assert_eq!(keys(&items), ["user:0", "reply:4", "receipt:a:1"]);
+    }
+
+    #[test]
+    fn a_receipt_keeps_its_key_while_the_run_grows() {
+        // V26 R4: expansion and selection keyed by the receipt survive the
+        // re-fold of a growing turn.
+        let before = build_items(vec![User, tool("a")], false, false);
+        let after = build_items(
+            vec![User, tool("a"), Assistant, tool("b"), tool("c")],
+            false,
+            false,
+        );
+        let key_of = |items: &[ChatItem]| {
+            items.iter().find_map(|item| match item {
+                ChatItem::Receipt { key, .. } => Some(key.clone()),
+                _ => None,
+            })
         };
         assert_eq!(key_of(&before), key_of(&after));
+        assert_eq!(key_of(&after), Some(acp::ToolCallId::from("a")));
     }
 
     #[test]
-    fn a_message_arriving_mid_run_splits_it_and_keeps_the_first_key() {
-        let before = build_items(vec![tool("a"), tool("b")]);
-        let after = build_items(vec![tool("a"), EntryShape::Visible, tool("b")]);
-        assert_eq!(keys(&before), ["activity:a:2"]);
-        assert_eq!(keys(&after), ["activity:a:1", "entry:1", "activity:b:1"]);
+    fn only_a_ritual_kickoff_becomes_a_marker() {
+        let items = build_items(vec![User, Assistant, User, Assistant], true, false);
+        assert_eq!(keys(&items), ["kickoff:0", "reply:1", "user:2", "reply:3"]);
+        let items = build_items(vec![User, Assistant], false, false);
+        assert_eq!(keys(&items), ["user:0", "reply:1"]);
+    }
+
+    fn init_test(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            editor::init(cx);
+        });
+    }
+
+    struct Setup {
+        panel: Entity<ChatPanel>,
+        project: Entity<Project>,
+        root: PathBuf,
+        cx: VisualTestContext,
+        _vault_dir: tempfile::TempDir,
+    }
+
+    /// A vault with the chat docked and no session yet.
+    async fn setup(cx: &mut TestAppContext) -> Setup {
+        init_test(cx);
+        let vault_dir = tempfile::tempdir().unwrap();
+        let root = vault_dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".thock")).unwrap();
+        std::fs::write(root.join(".thock/config.toml"), "schema = 1\n").unwrap();
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            &root,
+            json!({ ".thock": { "config.toml": "schema = 1\n" }, "daily": {} }),
+        )
+        .await;
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let mut cx = cx.clone();
+        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let panel = ChatPanel::new(workspace, window, cx);
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        cx.run_until_parked();
+        Setup {
+            panel,
+            project,
+            root,
+            cx,
+            _vault_dir: vault_dir,
+        }
+    }
+
+    /// Attaches a stub agent session to the panel as a Wrap Today launch.
+    /// `prelude` is sent before the kickoff, the way pi-acp's startup notice
+    /// is, and `updates` play during the kickoff turn, which then ends.
+    async fn start_wrap_today(
+        setup: &mut Setup,
+        connection: Rc<StubAgentConnection>,
+        prelude: Option<&str>,
+        updates: Vec<acp::SessionUpdate>,
+    ) -> acp::SessionId {
+        let work_dirs = setup
+            .project
+            .read_with(&setup.cx, |project, cx| project.default_path_list(cx));
+        let thread = setup
+            .cx
+            .update(|_, cx| {
+                connection
+                    .clone()
+                    .new_session(setup.project.clone(), work_dirs, cx)
+            })
+            .await
+            .unwrap();
+        let session_id = thread.read_with(&setup.cx, |thread, _| thread.session_id().clone());
+        if let Some(prelude) = prelude {
+            setup.cx.update(|_, cx| {
+                connection.send_update(session_id.clone(), says(prelude), cx);
+            });
+        }
+        connection.set_next_prompt_updates(updates);
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            panel.attach_session(
+                LaunchRequest::run_skill(
+                    "Wrap Today",
+                    "routines/timeline/skills/wrap-today.md",
+                    ModelTier::Default,
+                ),
+                connection,
+                thread,
+                0,
+                window,
+                cx,
+            );
+        });
+        setup.cx.run_until_parked();
+        session_id
+    }
+
+    fn visible(setup: &Setup) -> String {
+        setup
+            .panel
+            .read_with(&setup.cx, |panel, cx| panel.visible_text(cx))
+    }
+
+    fn says(text: &str) -> acp::SessionUpdate {
+        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(text.into()))
+    }
+
+    fn read(id: &'static str, path: PathBuf) -> acp::SessionUpdate {
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(id, "Read")
+                .kind(acp::ToolKind::Read)
+                .status(acp::ToolCallStatus::Completed)
+                .locations(vec![acp::ToolCallLocation::new(path)]),
+        )
+    }
+
+    fn search(id: &'static str) -> acp::SessionUpdate {
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(id, "Search")
+                .kind(acp::ToolKind::Search)
+                .status(acp::ToolCallStatus::Completed),
+        )
+    }
+
+    const NOTICE: &str = "New version available: v1.3.0 (installed v0.85.1). Run: `npm i -g \
+                          @earendil-works/pi-coding-agent`";
+
+    #[gpui::test]
+    async fn a_ritual_run_reads_as_a_marker_a_reply_and_a_receipt(cx: &mut TestAppContext) {
+        // §6.1: the twelve entries of the Wrap Today run from the screenshot.
+        let mut setup = setup(cx).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        let root = setup.root.clone();
+        let updates = vec![
+            read(
+                "read-1",
+                root.join("routines/timeline/skills/wrap-today.md"),
+            ),
+            says("I'll walk through this step by step. Step 1: Locate today's note"),
+            search("search-1"),
+            says("Now let me check the sources configuration for code repositories:"),
+            read("read-2", root.join("routines/timeline/sources.md")),
+            says("Let me pull in today's code activity and scan recent days:"),
+            search("search-2"),
+            says("Now let me check memory/index.md to understand this person's patterns:"),
+            read("read-3", root.join("memory/index.md")),
+            says(
+                "Based on what I've found, I need to ask about one task. Should I mark it as done?",
+            ),
+        ];
+        start_wrap_today(&mut setup, connection, Some(NOTICE), updates).await;
+        let text = visible(&setup);
+        assert_eq!(
+            text,
+            "You started Wrap Today\n\
+             Based on what I've found, I need to ask about one task. Should I mark it as done?\n\
+             Looked through your notes"
+        );
+        // G7: no mechanics in the default view.
+        for leak in [
+            "npm",
+            "New version",
+            "let me check",
+            "Read and execute",
+            "ENOENT",
+            "/Users",
+        ] {
+            assert!(!text.contains(leak), "{leak:?} leaked into {text:?}");
+        }
+    }
+
+    #[gpui::test]
+    async fn the_reply_waits_for_the_turn_to_stop(cx: &mut TestAppContext) {
+        // Decision 6: while Thock works the thread types, and the prose that
+        // streamed appears whole when the turn stops.
+        let mut setup = setup(cx).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        let session_id = start_wrap_today(&mut setup, connection.clone(), None, vec![]).await;
+        assert_eq!(
+            visible(&setup),
+            "You started Wrap Today\nWorking behind the scenes…"
+        );
+        let note = setup.root.join("daily/2026-10-19.md");
+        setup.cx.update(|_, cx| {
+            connection.send_update(session_id.clone(), read("read-1", note), cx);
+            connection.send_update(session_id.clone(), says("Done. Seven of eleven."), cx);
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(
+            visible(&setup),
+            "You started Wrap Today\nLooking at daily/2026-10-19.md…"
+        );
+        connection.end_turn(session_id, acp::StopReason::EndTurn);
+        setup.cx.run_until_parked();
+        assert_eq!(
+            visible(&setup),
+            "You started Wrap Today\nDone. Seven of eleven.\nLooked at daily/2026-10-19.md"
+        );
     }
 
     fn call(kind: acp::ToolKind, note: Option<&str>) -> SummaryCall {
