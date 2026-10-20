@@ -2,7 +2,7 @@
 description = "A folder of plain Markdown notes, with rituals your own AI runs."
 edition.workspace = true
 name = "thock_app"
-version = "1.19.0"
+version = "1.20.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 default-run = "thock"
