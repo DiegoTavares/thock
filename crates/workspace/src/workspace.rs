@@ -1388,6 +1388,13 @@ pub struct Workspace {
     pub(crate) modal_layer: Entity<ModalLayer>,
     toast_layer: Entity<ToastLayer>,
     titlebar_item: Option<AnyView>,
+    /// A view drawn over the centre pane group, between the docks: never
+    /// over a dock, the title bar or the status bar.
+    center_overlay: Option<AnyView>,
+    /// Width reserved on the right of the centre pane group, drawn as a
+    /// plain strip of the editor background, so something can float there
+    /// without covering the panes.
+    center_inset: Option<Pixels>,
     titlebar_focus_handle: FocusHandle,
     region_focus_handles: RegionFocusHandles,
     notifications: Notifications,
@@ -1841,6 +1848,8 @@ impl Workspace {
             modal_layer,
             toast_layer,
             titlebar_item: None,
+            center_overlay: None,
+            center_inset: None,
             titlebar_focus_handle: cx.focus_handle(),
             region_focus_handles: RegionFocusHandles::new(cx),
             notifications: Notifications::default(),
@@ -2985,6 +2994,30 @@ impl Workspace {
     pub fn set_titlebar_item(&mut self, item: AnyView, _: &mut Window, cx: &mut Context<Self>) {
         self.titlebar_item = Some(item);
         cx.notify();
+    }
+
+    /// Sets the view drawn over the centre pane group, or removes it with
+    /// `None`. It spans the group exactly: between the docks, under the
+    /// title bar, above the status bar.
+    pub fn set_center_overlay(&mut self, overlay: Option<AnyView>, cx: &mut Context<Self>) {
+        self.center_overlay = overlay;
+        cx.notify();
+    }
+
+    pub fn center_overlay(&self) -> Option<AnyView> {
+        self.center_overlay.clone()
+    }
+
+    /// Reserves `inset` on the right of the centre pane group, or gives the
+    /// width back with `None`. With centred layout on, the inset is taken
+    /// from the right padding first.
+    pub fn set_center_inset(&mut self, inset: Option<Pixels>, cx: &mut Context<Self>) {
+        self.center_inset = inset;
+        cx.notify();
+    }
+
+    pub fn center_inset(&self) -> Option<Pixels> {
+        self.center_inset
     }
 
     pub fn set_prompt_for_new_path(&mut self, prompt: PromptForNewPath) {
@@ -8314,6 +8347,46 @@ impl Workspace {
     /// focusing it announces "Editor" instead of falling back to the whole
     /// window. We only make it focusable in that case so it never adds a hitbox
     /// or intercepts mouse focus for other users.
+    /// The centre pane group between its centred-layout paddings, with the
+    /// inset strip and the overlay a view asked for (`set_center_inset`,
+    /// `set_center_overlay`). The inset widens the right padding's element,
+    /// so it is taken from the padding first without measuring anything.
+    fn render_center_group(
+        &self,
+        paddings: (Option<Div>, Option<Div>),
+        render_cx: &PaneRenderContext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let (left_padding, right_padding) = paddings;
+        let inset = self.center_inset;
+        let editor_background = cx.theme().colors().editor_background;
+        h_flex()
+            .relative()
+            .flex_1()
+            .when_some(left_padding, |this, padding| {
+                this.child(padding.border_r_1())
+            })
+            .child(self.render_center(render_cx, window, cx))
+            .map(|this| match (right_padding, inset) {
+                (Some(padding), Some(inset)) => this.child(padding.min_w(inset)),
+                (Some(padding), None) => this.child(padding.border_l_1()),
+                (None, Some(inset)) => this.child(
+                    div()
+                        .h_full()
+                        .w(inset)
+                        .flex_shrink_0()
+                        .bg(editor_background),
+                ),
+                (None, None) => this,
+            })
+            .children(
+                self.center_overlay
+                    .clone()
+                    .map(|overlay| div().absolute().inset_0().child(overlay)),
+            )
+    }
+
     fn render_center(
         &self,
         render_cx: &PaneRenderContext,
@@ -9222,24 +9295,12 @@ impl Render for Workspace {
                                                         .flex_col()
                                                         .flex_1()
                                                         .overflow_hidden()
-                                                        .child(
-                                                            h_flex()
-                                                                .flex_1()
-                                                                .when_some(paddings.0, |this, p| {
-                                                                    this.child(p.border_r_1())
-                                                                })
-                                                                .child(self.render_center(
-                                                                    &pane_render_context,
-                                                                    window,
-                                                                    cx,
-                                                                ))
-                                                                .when_some(
-                                                                    paddings.1,
-                                                                    |this, p| {
-                                                                        this.child(p.border_l_1())
-                                                                    },
-                                                                ),
-                                                        ),
+                                                        .child(self.render_center_group(
+                                                            paddings,
+                                                            &pane_render_context,
+                                                            window,
+                                                            cx,
+                                                        )),
                                                 )
                                                 .children(self.render_dock(
                                                     DockPosition::Right,
@@ -9282,31 +9343,12 @@ impl Render for Workspace {
                                                                 .flex_col()
                                                                 .flex_1()
                                                                 .overflow_hidden()
-                                                                .child(
-                                                                    h_flex()
-                                                                        .flex_1()
-                                                                        .when_some(
-                                                                            paddings.0,
-                                                                            |this, p| {
-                                                                                this.child(
-                                                                                    p.border_r_1(),
-                                                                                )
-                                                                            },
-                                                                        )
-                                                                        .child(self.render_center(
-                                                                            &pane_render_context,
-                                                                            window,
-                                                                            cx,
-                                                                        ))
-                                                                        .when_some(
-                                                                            paddings.1,
-                                                                            |this, p| {
-                                                                                this.child(
-                                                                                    p.border_l_1(),
-                                                                                )
-                                                                            },
-                                                                        ),
-                                                                ),
+                                                                .child(self.render_center_group(
+                                                                    paddings,
+                                                                    &pane_render_context,
+                                                                    window,
+                                                                    cx,
+                                                                )),
                                                         ),
                                                 )
                                                 .child(div().w_full().children(self.render_dock(
@@ -9349,31 +9391,12 @@ impl Render for Workspace {
                                                                 .flex_col()
                                                                 .flex_1()
                                                                 .overflow_hidden()
-                                                                .child(
-                                                                    h_flex()
-                                                                        .flex_1()
-                                                                        .when_some(
-                                                                            paddings.0,
-                                                                            |this, p| {
-                                                                                this.child(
-                                                                                    p.border_r_1(),
-                                                                                )
-                                                                            },
-                                                                        )
-                                                                        .child(self.render_center(
-                                                                            &pane_render_context,
-                                                                            window,
-                                                                            cx,
-                                                                        ))
-                                                                        .when_some(
-                                                                            paddings.1,
-                                                                            |this, p| {
-                                                                                this.child(
-                                                                                    p.border_l_1(),
-                                                                                )
-                                                                            },
-                                                                        ),
-                                                                ),
+                                                                .child(self.render_center_group(
+                                                                    paddings,
+                                                                    &pane_render_context,
+                                                                    window,
+                                                                    cx,
+                                                                )),
                                                         )
                                                         .children(self.render_dock(
                                                             DockPosition::Right,
@@ -9405,21 +9428,12 @@ impl Render for Workspace {
                                                 .flex_col()
                                                 .flex_1()
                                                 .overflow_hidden()
-                                                .child(
-                                                    h_flex()
-                                                        .flex_1()
-                                                        .when_some(paddings.0, |this, p| {
-                                                            this.child(p.border_r_1())
-                                                        })
-                                                        .child(self.render_center(
-                                                            &pane_render_context,
-                                                            window,
-                                                            cx,
-                                                        ))
-                                                        .when_some(paddings.1, |this, p| {
-                                                            this.child(p.border_l_1())
-                                                        }),
-                                                )
+                                                .child(self.render_center_group(
+                                                    paddings,
+                                                    &pane_render_context,
+                                                    window,
+                                                    cx,
+                                                ))
                                                 .children(self.render_dock(
                                                     DockPosition::Bottom,
                                                     &self.bottom_dock,

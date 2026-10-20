@@ -23,9 +23,9 @@ use chrono::{DateTime, Local, NaiveDate, TimeDelta};
 use collections::{HashMap, HashSet};
 use editor::{Editor, SelectionEffects, scroll::Autoscroll};
 use gpui::{
-    Action, AnyWindowHandle, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, FontFeatures, FontWeight, KeyContext, Pixels, ScrollHandle, SharedString,
-    Subscription, TextStyleRefinement, WeakEntity, Window, actions, div, px, relative,
+    Action, AnyWindowHandle, App, Bounds, Context, Entity, FocusHandle, Focusable, FontFeatures,
+    FontWeight, KeyContext, Pixels, ScrollHandle, SharedString, Subscription, TextStyleRefinement,
+    WeakEntity, Window, actions, div, px, relative,
 };
 use language::language_settings::SoftWrap;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
@@ -38,11 +38,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use text::{Bias, Point};
 use ui::prelude::*;
-use ui::{
-    Button, ButtonStyle, Divider, Icon, IconButton, Label, ProgressBar, SpinnerLabel, Tooltip,
-};
+use ui::{Button, ButtonStyle, Label, ProgressBar, SpinnerLabel};
 use util::ResultExt as _;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
 use workspace::{OpenOptions, OpenVisible, Workspace};
 
 use crate::agent::{self, ConnectionMode, ModelTier};
@@ -91,6 +88,12 @@ actions!(
         /// Puts away the "Reflect now?" suggestion until the agent has noted
         /// more about you.
         DismissMemoryNudge,
+        /// Opens or closes the details of what the Thock Agent did in the
+        /// selected step.
+        ToggleChatActivity,
+        /// Moves the keyboard focus from the message box to the chat's last
+        /// message.
+        FocusChatThread,
     ]
 );
 
@@ -99,47 +102,95 @@ actions!(
 #[action(namespace = thock)]
 pub struct AnswerChatChoice(pub usize);
 
+/// Mounts the chat over every workspace's centre (V44 §7.1) and routes its
+/// workspace-level actions to it.
 pub fn init(cx: &mut App) {
-    cx.observe_new(|workspace: &mut Workspace, _, _| {
-        workspace.register_action(|workspace, _: &ToggleChatFocus, window, cx| {
-            workspace.toggle_panel_focus::<ChatPanel>(window, cx);
+    cx.observe_new(|workspace: &mut Workspace, window, cx| {
+        let Some(window) = window else {
+            return;
+        };
+        let chat = ChatPanel::new(workspace, window, cx);
+        workspace.set_center_overlay(Some(chat.clone().into()), cx);
+        for_action::<ToggleChatFocus>(workspace, &chat, |chat, window, cx| {
+            chat.toggle_focus(window, cx)
+        });
+        for_action::<ConnectThockAgent>(workspace, &chat, |chat, window, cx| {
+            chat.open_thread(window, cx);
+            chat.open_connect(window, cx);
+        });
+        for_action::<DisconnectThockAgent>(workspace, &chat, |chat, _, cx| chat.disconnect(cx));
+        for_action::<UseThockAgent>(workspace, &chat, |chat, window, cx| {
+            chat.set_mode(ConnectionMode::Hosted, cx);
+            chat.open_thread(window, cx);
+        });
+        for_action::<UseOwnAgent>(workspace, &chat, |chat, _, cx| {
+            chat.set_mode(ConnectionMode::Byo, cx)
         });
         workspace.register_action(|workspace, _: &NewChat, window, cx| {
             ChatPanel::launch_in_workspace(workspace, LaunchRequest::conversation(), window, cx);
         });
-        workspace.register_action(|workspace, _: &ConnectThockAgent, window, cx| {
-            if let Some(panel) = workspace.focus_panel::<ChatPanel>(window, cx) {
-                panel.update(cx, |panel, cx| panel.open_connect(window, cx));
-            }
-        });
-        workspace.register_action(|workspace, _: &DisconnectThockAgent, _window, cx| {
-            if let Some(panel) = workspace.panel::<ChatPanel>(cx) {
-                panel.update(cx, |panel, cx| panel.disconnect(cx));
-            }
-        });
-        workspace.register_action(|workspace, _: &UseThockAgent, window, cx| {
-            if let Some(panel) = workspace.focus_panel::<ChatPanel>(window, cx) {
-                panel.update(cx, |panel, cx| panel.set_mode(ConnectionMode::Hosted, cx));
-            }
-        });
-        workspace.register_action(|workspace, _: &UseOwnAgent, _window, cx| {
-            if let Some(panel) = workspace.panel::<ChatPanel>(cx) {
-                panel.update(cx, |panel, cx| panel.set_mode(ConnectionMode::Byo, cx));
-            }
-        });
     })
     .detach();
+}
+
+fn for_action<A: Action>(
+    workspace: &mut Workspace,
+    chat: &Entity<ChatPanel>,
+    handler: impl Fn(&mut ChatPanel, &mut Window, &mut Context<ChatPanel>) + Copy + 'static,
+) {
+    let chat = chat.clone();
+    workspace.register_action(move |_, _: &A, window, cx| {
+        chat.update(cx, |chat, cx| handler(chat, window, cx));
+    });
 }
 
 /// True when Run actions should go to the hosted chat instead of the
 /// terminal panel: an explicit `[agent] mode`, or, when nothing was chosen,
 /// whether a Thock Plus connection exists on this machine.
 pub fn hosted_mode_active(workspace: &Workspace, cx: &App) -> bool {
-    workspace
-        .panel::<ChatPanel>(cx)
-        .map(|panel| panel.read(cx).effective_mode() == ConnectionMode::Hosted)
+    ChatPanel::in_workspace(workspace)
+        .map(|chat| chat.read(cx).effective_mode() == ConnectionMode::Hosted)
         .unwrap_or(false)
 }
+
+/// Where the chat stands (V44 §5.2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Presence {
+    /// The pebble, and nothing else.
+    Resting,
+    /// The pebble types: a turn is running.
+    Working,
+    /// A bubble floats up from the pebble.
+    NeedsYou,
+    /// The thread is open and the page has made room.
+    Talking,
+}
+
+/// What waits for you while the thread is folded (§5.2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Waiting {
+    /// An `ask` request or an elicitation.
+    Question,
+    /// A reply that arrived while the thread was folded.
+    Reply,
+    /// A turn that couldn't finish.
+    Failure,
+    /// Thock Plus isn't connected and you summoned the chat (§5.11).
+    Connect,
+}
+
+/// The pebble's size and its distance from the centre's corner (§5.1).
+const PEBBLE: f32 = 44.;
+const PEBBLE_RIGHT: f32 = 24.;
+const PEBBLE_BOTTOM: f32 = 20.;
+/// The thread's column, the composer in it, and the room they take (§5.3).
+const THREAD_WIDTH: f32 = 360.;
+const COMPOSER_WIDTH: f32 = 300.;
+const INSET: f32 = 408.;
+/// Below this the note is unreadable, so the thread floats instead (§5.3).
+const MIN_NOTE_WIDTH: f32 = 400.;
+/// How far above the bottom a Needs-you bubble sits (§5.3).
+const BUBBLE_BOTTOM: f32 = 72.;
 
 /// Where the Thock Plus connection stands, as the panel last learned it.
 enum PlusConnection {
@@ -719,7 +770,18 @@ pub struct ChatPanel {
     window_handle: AnyWindowHandle,
     project: Entity<Project>,
     focus_handle: FocusHandle,
-    position: DockPosition,
+    /// The thread is open: Talking (§5.2).
+    thread_open: bool,
+    /// What waits for you while the thread is folded (§5.2).
+    waiting: Option<Waiting>,
+    /// Whether what waits floats as a bubble, or sits folded in the
+    /// pebble's dot.
+    bubble_up: bool,
+    /// Where focus was before the chat took it, given back on fold.
+    previous_focus: Option<FocusHandle>,
+    /// The centre group's bounds from the last paint, for the room rules
+    /// (§5.3).
+    centre_bounds: Bounds<Pixels>,
     vault_status: VaultStatus,
     connection: PlusConnection,
     /// The explicit `[agent] mode` choice, if any.
@@ -763,15 +825,6 @@ pub struct ChatPanel {
 }
 
 impl ChatPanel {
-    pub async fn load(
-        workspace: WeakEntity<Workspace>,
-        mut cx: AsyncWindowContext,
-    ) -> Result<Entity<Self>> {
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            ChatPanel::new(workspace, window, cx)
-        })
-    }
-
     pub fn new(
         workspace: &mut Workspace,
         window: &mut Window,
@@ -796,12 +849,25 @@ impl ChatPanel {
                 editor.set_soft_wrap_mode(SoftWrap::EditorWidth, cx);
                 editor
             });
+            let focus_handle = cx.focus_handle();
+            // Focus leaving for a note folds the thread (§5.2). Nothing is
+            // given back then: the note has the focus already.
+            let focus_out =
+                cx.on_focus_out(&focus_handle, window, |this: &mut Self, _, window, cx| {
+                    if !this.focus_handle.contains_focused(window, cx) {
+                        this.fold_quietly(cx);
+                    }
+                });
             let mut this = Self {
                 workspace: weak_workspace,
                 window_handle: window.window_handle(),
                 project,
-                focus_handle: cx.focus_handle(),
-                position: DockPosition::Right,
+                focus_handle,
+                thread_open: false,
+                waiting: None,
+                bubble_up: false,
+                previous_focus: None,
+                centre_bounds: Bounds::default(),
                 vault_status: VaultStatus::NotAVault,
                 connection: PlusConnection::Loading,
                 mode: None,
@@ -821,7 +887,7 @@ impl ChatPanel {
                 show_usage: false,
                 pending_launch: None,
                 memory_nudge_due: false,
-                _subscriptions: vec![project_subscription],
+                _subscriptions: vec![project_subscription, focus_out],
             };
             this.refresh_vault_status(cx);
             this.load_connection(cx);
@@ -829,20 +895,30 @@ impl ChatPanel {
         })
     }
 
-    /// Opens the panel and launches `request` with the hosted agent, routing
-    /// through the connect flow first when Thock Plus isn't connected.
+    /// The chat mounted over `workspace`'s centre, once `init` has run.
+    pub fn in_workspace(workspace: &Workspace) -> Option<Entity<Self>> {
+        workspace.center_overlay()?.downcast::<Self>().ok()
+    }
+
+    /// Launches `request` with the hosted agent, routing through the connect
+    /// flow first when Thock Plus isn't connected. A ritual runs behind the
+    /// pebble; a conversation opens the thread.
     pub fn launch_in_workspace(
         workspace: &mut Workspace,
         request: LaunchRequest,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        let Some(panel) = workspace.panel::<ChatPanel>(cx) else {
-            log::warn!("Thock: the chat panel isn't registered yet; launch dropped");
+        let Some(chat) = Self::in_workspace(workspace) else {
+            log::warn!("Thock: the chat isn't mounted yet; launch dropped");
             return;
         };
-        workspace.open_panel::<ChatPanel>(window, cx);
-        panel.update(cx, |panel, cx| panel.launch(request, window, cx));
+        chat.update(cx, |chat, cx| {
+            if !request.is_ritual() {
+                chat.open_thread(window, cx);
+            }
+            chat.launch(request, window, cx);
+        });
     }
 
     pub fn effective_mode(&self) -> ConnectionMode {
@@ -853,6 +929,140 @@ impl ChatPanel {
                 _ => ConnectionMode::Byo,
             },
         }
+    }
+
+    fn presence(&self, cx: &App) -> Presence {
+        if self.thread_open {
+            Presence::Talking
+        } else if self.bubble_up && self.waiting.is_some() {
+            Presence::NeedsYou
+        } else if self.is_generating(cx) || self.starting.is_some() {
+            Presence::Working
+        } else {
+            Presence::Resting
+        }
+    }
+
+    /// `cmd-alt-n` (§5.12): opens the thread, focuses a waiting bubble, or
+    /// folds the chat when it already has focus.
+    pub fn toggle_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = self.focus_handle.contains_focused(window, cx);
+        match self.presence(cx) {
+            Presence::Talking if focused => self.fold(window, cx),
+            Presence::Talking => self.focus_thread(window, cx),
+            Presence::NeedsYou if focused => self.open_thread(window, cx),
+            Presence::NeedsYou => self.focus_bubble(window, cx),
+            Presence::Resting | Presence::Working => {
+                let unconnected = matches!(
+                    self.connection,
+                    PlusConnection::Disconnected | PlusConnection::Revoked(_)
+                );
+                if unconnected && self.session.is_none() {
+                    // Not connected (§5.11): the bubble offers the ways in.
+                    self.needs_you(Waiting::Connect, cx);
+                    self.focus_bubble(window, cx);
+                } else {
+                    self.open_thread(window, cx);
+                }
+            }
+        }
+    }
+
+    /// Opens the thread (Talking): the page makes room (§5.3) and the keys
+    /// land where they are useful, on a waiting question or in the composer.
+    pub fn open_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_focus(window, cx);
+        self.thread_open = true;
+        self.bubble_up = false;
+        if self.waiting == Some(Waiting::Connect) {
+            self.waiting = None;
+        }
+        self.sync_room(cx);
+        self.focus_thread(window, cx);
+        self.scroll_handle.scroll_to_bottom();
+        cx.notify();
+    }
+
+    fn focus_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.view {
+            PanelView::Connect(flow) => window.focus(&flow.code_editor.focus_handle(cx), cx),
+            PanelView::Chat if self.latest_pending_question(cx).is_some() => {
+                window.focus(&self.focus_handle, cx)
+            }
+            PanelView::Chat => window.focus(&self.message_editor.focus_handle(cx), cx),
+        }
+    }
+
+    fn focus_bubble(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_focus(window, cx);
+        match &self.view {
+            PanelView::Connect(flow) => window.focus(&flow.code_editor.focus_handle(cx), cx),
+            PanelView::Chat => window.focus(&self.focus_handle, cx),
+        }
+        cx.notify();
+    }
+
+    /// Where to give focus back on fold: wherever it is now, unless the chat
+    /// already has it.
+    fn remember_focus(&mut self, window: &Window, cx: &App) {
+        if !self.focus_handle.contains_focused(window, cx) {
+            self.previous_focus = window.focused(cx);
+        }
+    }
+
+    /// Folds the thread or a bubble and hands focus back to the page (§5.2).
+    fn fold(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let had_focus = self.focus_handle.contains_focused(window, cx);
+        self.fold_quietly(cx);
+        if had_focus && let Some(previous) = self.previous_focus.take() {
+            window.focus(&previous, cx);
+        }
+    }
+
+    /// Folds without touching focus: the thread closes, a bubble becomes the
+    /// pebble's dot, and the page takes its width back.
+    fn fold_quietly(&mut self, cx: &mut Context<Self>) {
+        self.thread_open = false;
+        self.bubble_up = false;
+        if self.waiting == Some(Waiting::Connect) {
+            self.waiting = None;
+        }
+        self.sync_room(cx);
+        cx.notify();
+    }
+
+    /// Something waits for you (§5.2): with the thread folded it floats up
+    /// as a bubble, and the pebble gets its dot.
+    fn needs_you(&mut self, waiting: Waiting, cx: &mut Context<Self>) {
+        self.waiting = Some(waiting);
+        if !self.thread_open {
+            self.bubble_up = true;
+        }
+        cx.notify();
+    }
+
+    /// Nothing waits any more: a turn started, or you answered.
+    fn settled(&mut self, cx: &mut Context<Self>) {
+        self.waiting = None;
+        self.bubble_up = false;
+        cx.notify();
+    }
+
+    /// Asks the page for the thread's room (§5.3). Deferred: the workspace
+    /// may be mid-update when a chat action reaches it.
+    fn sync_room(&self, cx: &mut Context<Self>) {
+        let fits = self.centre_bounds.size.width - px(INSET) >= px(MIN_NOTE_WIDTH);
+        let inset = (self.thread_open && fits).then_some(px(INSET));
+        let workspace = self.workspace.clone();
+        cx.defer(move |cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    if workspace.center_inset() != inset {
+                        workspace.set_center_inset(inset, cx);
+                    }
+                })
+                .log_err();
+        });
     }
 
     fn vault(&self) -> Option<&Vault> {
@@ -1308,7 +1518,9 @@ impl ChatPanel {
         if let Some(kickoff) = request.kickoff {
             self.send_text(kickoff, cx);
         }
-        window.focus(&self.message_editor.focus_handle(cx), cx);
+        if self.thread_open {
+            self.focus_thread(window, cx);
+        }
         cx.notify();
     }
 
@@ -1350,38 +1562,55 @@ impl ChatPanel {
             }
             AcpThreadEvent::Stopped(_) => {
                 self.refresh_entitlement(cx);
+                // A reply that lands while the thread is folded floats up
+                // (§5.2); a turn that stopped on a question already has.
+                let replied = matches!(
+                    self.items(cx).last(),
+                    Some(ChatItem::Reply(_) | ChatItem::Receipt { .. })
+                );
+                if replied && !self.thread_open && self.waiting.is_none() {
+                    self.needs_you(Waiting::Reply, cx);
+                }
             }
-            // Decision 8 has a floor (§5.5): failures never get error
+            // V26 decision 8 has a floor (§5.5): failures never get error
             // styling or raw detail, but a turn that could not finish says
             // so in plain language. The mechanics go to the log.
             AcpThreadEvent::Error => {
-                if let Some(session) = &mut self.session {
-                    session.turn_failure = Some(TurnFailure {
-                        message: "The Thock Agent couldn't finish that.".into(),
-                        retryable: true,
-                    });
-                }
+                self.turn_failed("The Thock Agent couldn't finish that.", true, cx);
             }
             AcpThreadEvent::LoadError(error) => {
                 log::error!("Thock: the agent session failed to load: {error}");
-                if let Some(session) = &mut self.session {
-                    session.turn_failure = Some(TurnFailure {
-                        message: "The Thock Agent couldn't finish that.".into(),
-                        retryable: true,
-                    });
-                }
+                self.turn_failed("The Thock Agent couldn't finish that.", true, cx);
             }
             AcpThreadEvent::Refusal => {
-                if let Some(session) = &mut self.session {
-                    session.turn_failure = Some(TurnFailure {
-                        message: "The Thock Agent decided not to do that.".into(),
-                        retryable: false,
-                    });
-                }
+                self.turn_failed("The Thock Agent decided not to do that.", false, cx);
             }
             _ => {}
         }
         cx.notify();
+    }
+
+    fn turn_failed(&mut self, message: &'static str, retryable: bool, cx: &mut Context<Self>) {
+        if let Some(session) = &mut self.session {
+            session.turn_failure = Some(TurnFailure {
+                message: message.into(),
+                retryable,
+            });
+        }
+        if !self.thread_open {
+            self.needs_you(Waiting::Failure, cx);
+        }
+    }
+
+    /// A question arrived (§5.5): it is selected and, when the chat has
+    /// focus, the list takes it so the chips' keys work. Otherwise it floats
+    /// up and focus stays where it is (§5.2).
+    fn question_arrived(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_handle.contains_focused(window, cx) {
+            window.focus(&self.focus_handle, cx);
+        }
+        self.needs_you(Waiting::Question, cx);
+        self.scroll_handle.scroll_to_bottom();
     }
 
     /// A question from the agent blocks the turn, so it arrives selected and
@@ -1403,7 +1632,6 @@ impl ChatPanel {
         match shape {
             ElicitationShape::Choice { .. } => {
                 self.elicitation_choices.insert(id.clone(), 0);
-                window.focus(&self.focus_handle, cx);
             }
             ElicitationShape::Text { .. } => {
                 let editor = cx.new(|cx| {
@@ -1411,14 +1639,14 @@ impl ChatPanel {
                     editor.set_placeholder_text("Type your answer…", window, cx);
                     editor
                 });
-                window.focus(&editor.focus_handle(cx), cx);
+                if self.focus_handle.contains_focused(window, cx) {
+                    window.focus(&editor.focus_handle(cx), cx);
+                }
                 self.elicitation_editors.insert(id.clone(), editor);
             }
-            ElicitationShape::Link { .. } | ElicitationShape::Confirm => {
-                window.focus(&self.focus_handle, cx);
-            }
+            ElicitationShape::Link { .. } | ElicitationShape::Confirm => {}
         }
-        self.scroll_handle.scroll_to_bottom();
+        self.question_arrived(window, cx);
     }
 
     /// An `ask` request blocks the turn like an elicitation does, so it
@@ -1449,8 +1677,7 @@ impl ChatPanel {
         };
         self.selected = Some(ItemKey::Entry(entry_index));
         self.ask_choices.insert(id.clone(), 0);
-        window.focus(&self.focus_handle, cx);
-        self.scroll_handle.scroll_to_bottom();
+        self.question_arrived(window, cx);
     }
 
     /// Decision 16: no approval prompts. Whatever the harness asks, the
@@ -1561,6 +1788,7 @@ impl ChatPanel {
             .thread
             .update(cx, |thread, cx| thread.send(vec![text.as_str().into()], cx));
         self.turn_times.insert(turn_start, Local::now());
+        self.settled(cx);
         self.scroll_handle.scroll_to_bottom();
         cx.spawn(async move |this, cx| {
             let result = turn.await;
@@ -1630,11 +1858,46 @@ impl ChatPanel {
     }
 
     fn new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_thread(window, cx);
         self.launch(LaunchRequest::conversation(), window, cx);
     }
 
     fn focus_input(&mut self, _: &FocusChatInput, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.message_editor.focus_handle(cx), cx);
+    }
+
+    /// `shift-tab` from the composer: the selection lands on the last row.
+    fn focus_thread_list(
+        &mut self,
+        _: &FocusChatThread,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+        self.select_last(&menu::SelectLast, window, cx);
+    }
+
+    /// `.`: opens or closes the selected receipt.
+    fn toggle_activity(&mut self, _: &ToggleChatActivity, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(ItemKey::Receipt(selected_id)) = self.selected.clone() else {
+            return;
+        };
+        let items = self.items(cx);
+        let key = items.iter().find_map(|item| match item {
+            ChatItem::Receipt { key, calls }
+                if calls.iter().any(|(_, call_id)| *call_id == selected_id) =>
+            {
+                Some(key.clone())
+            }
+            _ => None,
+        });
+        let Some(key) = key else {
+            return;
+        };
+        if !self.expanded_receipts.remove(&key) {
+            self.expanded_receipts.insert(key);
+        }
+        cx.notify();
     }
 
     /// The thread as you see it (V44 §5.4), folded fresh from the thread on
@@ -1997,12 +2260,14 @@ impl ChatPanel {
         cx.notify();
     }
 
-    /// Answers a question; the answer starts the next turn, so its time is
-    /// kept for the day marks.
+    /// Answers a question. The answer starts the next turn, so its time is
+    /// kept for the day marks, and a bubble that was answered folds, with
+    /// focus going back to where it was (§5.5).
     fn answer_question(
         &mut self,
         question: &PendingQuestion,
         choice: Option<usize>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let turn_start = self.session.as_ref().and_then(|session| {
@@ -2018,6 +2283,10 @@ impl ChatPanel {
         }
         if let Some(turn_start) = turn_start {
             self.turn_times.insert(turn_start, Local::now());
+        }
+        self.settled(cx);
+        if !self.thread_open {
+            self.fold(window, cx);
         }
     }
 
@@ -2063,20 +2332,39 @@ impl ChatPanel {
     fn answer_choice(
         &mut self,
         action: &AnswerChatChoice,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(question) = self
             .selected_pending_question(cx)
             .or_else(|| self.latest_pending_question(cx))
         else {
+            if self.waiting == Some(Waiting::Connect) {
+                self.pick_connect_choice(action.0, window, cx);
+            }
             return;
         };
         let Some((choices, _)) = self.question_choices(&question, cx) else {
             return;
         };
         if action.0 < choices.len() {
-            self.answer_question(&question, Some(action.0), cx);
+            self.answer_question(&question, Some(action.0), window, cx);
+        }
+    }
+
+    /// The two ways in when Thock Plus isn't connected (§5.11).
+    fn connect_choices() -> [SharedString; 2] {
+        ["Connect Thock Plus".into(), "Use your own agent".into()]
+    }
+
+    fn pick_connect_choice(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        match index {
+            0 => self.open_connect(window, cx),
+            1 => {
+                self.set_mode(ConnectionMode::Byo, cx);
+                self.fold(window, cx);
+            }
+            _ => {}
         }
     }
 
@@ -2173,7 +2461,7 @@ impl ChatPanel {
                 // A pending answer box takes `enter` even though it is an
                 // editor, so answering never requires the mouse.
                 if let Some(question) = self.pending_question_for_confirm(window, cx) {
-                    self.answer_question(&question, None, cx);
+                    self.answer_question(&question, None, window, cx);
                 } else if self.message_editor.focus_handle(cx).is_focused(window) {
                     self.send_message(&SendChatMessage, window, cx);
                 } else if !self.open_selected_entry(window, cx) {
@@ -2197,21 +2485,13 @@ impl ChatPanel {
         self.selected_pending_question(cx)
     }
 
-    /// `escape`: back out of the connect flow, stop a running turn, or move
-    /// focus from the message box to the list so the arrow keys work.
+    /// `escape` (§5.12): back to the page. The connect flow closes with it,
+    /// and a running turn keeps running (`StopChatTurn` is `cmd-.`).
     fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
-        match &self.view {
-            PanelView::Connect(_) => self.cancel_connect(cx),
-            PanelView::Chat => {
-                if self.is_generating(cx) {
-                    self.stop_turn(&StopChatTurn, window, cx);
-                } else if self.message_editor.focus_handle(cx).is_focused(window) {
-                    window.focus(&self.focus_handle, cx);
-                } else {
-                    cx.propagate();
-                }
-            }
+        if matches!(self.view, PanelView::Connect(_)) {
+            self.cancel_connect(cx);
         }
+        self.fold(window, cx);
     }
 
     fn open_entry(&mut self, _: &OpenChatEntry, window: &mut Window, cx: &mut Context<Self>) {
@@ -2336,7 +2616,13 @@ impl ChatPanel {
             busy: false,
             error: None,
         });
-        window.focus(&code_editor.focus_handle(cx), cx);
+        // With the thread folded the flow floats up as a bubble (§5.11).
+        if self.thread_open {
+            window.focus(&code_editor.focus_handle(cx), cx);
+        } else {
+            self.needs_you(Waiting::Connect, cx);
+            self.focus_bubble(window, cx);
+        }
         cx.notify();
     }
 
@@ -2668,7 +2954,7 @@ impl ChatPanel {
         &self,
         choices: &[SharedString],
         chosen: usize,
-        pick: impl Fn(&mut Self, usize, &mut Context<Self>) + Clone + 'static,
+        pick: impl Fn(&mut Self, usize, &mut Window, &mut Context<Self>) + Clone + 'static,
         cx: &Context<Self>,
     ) -> AnyElement {
         let keycaps: Vec<Option<String>> = if choices.len() == 2 {
@@ -2712,7 +2998,9 @@ impl ChatPanel {
                             .line_height(rems_from_px(18.))
                             .child(label.clone()),
                     )
-                    .on_click(cx.listener(move |this, _, _window, cx| pick(this, index, cx))),
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| pick(this, index, window, cx)),
+                    ),
             );
         }
         row.into_any_element()
@@ -2742,7 +3030,9 @@ impl ChatPanel {
             .child(self.render_chips(
                 &choices,
                 chosen,
-                move |this, index, cx| this.answer_ask(&id, Some(index), cx),
+                move |this, index, window, cx| {
+                    this.answer_question(&PendingQuestion::Ask(id.clone()), Some(index), window, cx)
+                },
                 cx,
             ))
             .into_any_element()
@@ -2922,7 +3212,14 @@ impl ChatPanel {
                 column = column.child(self.render_chips(
                     &titles,
                     chosen,
-                    move |this, index, cx| this.answer_elicitation(&answer_id, Some(index), cx),
+                    move |this, index, window, cx| {
+                        this.answer_question(
+                            &PendingQuestion::Elicitation(answer_id.clone()),
+                            Some(index),
+                            window,
+                            cx,
+                        )
+                    },
                     cx,
                 ));
             }
@@ -2967,8 +3264,13 @@ impl ChatPanel {
                         .child(
                             Button::new("thock-chat-elicit-ok", "OK")
                                 .style(ButtonStyle::Filled)
-                                .on_click(cx.listener(move |this, _, _window, cx| {
-                                    this.answer_elicitation(&accept_id, None, cx);
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.answer_question(
+                                        &PendingQuestion::Elicitation(accept_id.clone()),
+                                        None,
+                                        window,
+                                        cx,
+                                    );
                                 })),
                         )
                         .child(Button::new("thock-chat-elicit-skip", "Not Now").on_click(
@@ -2982,61 +3284,21 @@ impl ChatPanel {
         column.into_any_element()
     }
 
-    fn render_chat(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
+    /// The rows of the thread from `from` on, the way the thread shows them.
+    fn render_items(&self, from: usize, window: &Window, cx: &Context<Self>) -> Vec<AnyElement> {
         let Some(session) = &self.session else {
-            return self.render_empty_state(cx);
+            return Vec::new();
         };
-        let generating = self.is_generating(cx);
         let entries = session.thread.read(cx).entries();
         let items = self.items(cx);
         let selected_position = self.selected_position(&items);
         let vault_root = self.vault().map(|vault| vault.root.clone());
         let day_marks = day_marks(&self.turn_times, Local::now().date_naive());
-        let header = h_flex()
-            .w_full()
-            .px_2()
-            .py_1()
-            .gap_1()
-            .items_center()
-            .justify_between()
-            .child(Label::new(session.title.clone()).size(LabelSize::Small))
-            .child(
-                h_flex()
-                    .gap_1()
-                    .when(generating, |this| {
-                        this.child(
-                            IconButton::new("thock-chat-stop", IconName::Stop)
-                                .icon_size(IconSize::Small)
-                                .tooltip(move |_window, cx| {
-                                    Tooltip::for_action("Stop", &StopChatTurn, cx)
-                                })
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.stop_turn(&StopChatTurn, window, cx)
-                                })),
-                        )
-                    })
-                    .children(self.render_usage_button(cx))
-                    .child(
-                        IconButton::new("thock-chat-new", IconName::Plus)
-                            .icon_size(IconSize::Small)
-                            .tooltip(move |_window, cx| {
-                                Tooltip::for_action("New chat", &NewChat, cx)
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.new_chat(&NewChat, window, cx)
-                            })),
-                    ),
-            );
-        let mut list = v_flex()
-            .id("thock-chat-list")
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .px_2()
-            .py_2()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll_handle)
-            .children(items.iter().enumerate().map(|(position, item)| {
+        items
+            .iter()
+            .enumerate()
+            .skip(from)
+            .map(|(position, item)| {
                 self.render_item(
                     position,
                     item,
@@ -3047,37 +3309,293 @@ impl ChatPanel {
                     window,
                     cx,
                 )
-            }));
-        // V26 §5.5: the one place a broken turn is allowed to say so — in
-        // plain language, without error styling.
-        if let Some(failure) = &session.turn_failure {
-            let retryable = failure.retryable && session.last_sent.is_some();
-            list = list.child(
-                h_flex()
-                    .gap_2()
-                    .px_2()
-                    .items_center()
-                    .child(
-                        Label::new(failure.message.clone())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
+            })
+            .collect()
+    }
+
+    /// V26 §5.5: the one place a broken turn is allowed to say so, in plain
+    /// language without error styling, with `r` to try again.
+    fn render_failure(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let session = self.session.as_ref()?;
+        let failure = session.turn_failure.as_ref()?;
+        let retryable = failure.retryable && session.last_sent.is_some();
+        Some(
+            v_flex()
+                .w_full()
+                .items_start()
+                .gap_1p5()
+                .pt(px(10.))
+                .child(self.status_line(failure.message.clone(), cx))
+                .when(retryable, |this| {
+                    this.child(
+                        h_flex()
+                            .id("thock-chat-retry")
+                            .gap_1p5()
+                            .items_center()
+                            .px_2()
+                            .py_0p5()
+                            .rounded_full()
+                            .bg(cx.theme().colors().element_selected)
+                            .cursor_pointer()
+                            .child(keycap("r", cx))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(rems_from_px(12.5))
+                                    .child("Try again"),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.retry_turn(&RetryChatTurn, window, cx)
+                            })),
                     )
-                    .when(retryable, |this| {
-                        this.child(
-                            Button::new("thock-chat-retry", "Try Again")
-                                .style(ButtonStyle::Subtle)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.retry_turn(&RetryChatTurn, window, cx)
-                                })),
-                        )
-                    }),
-            );
-        }
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// The thread (§5.4): every row, scrolled to the end, with older rows
+    /// fading into the page at the top.
+    fn render_thread(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
+        let page = cx.theme().colors().editor_background;
+        let list = v_flex()
+            .id("thock-chat-list")
+            .max_h_full()
+            .w_full()
+            .px_1()
+            .pt(px(96.))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll_handle)
+            .children(self.render_items(0, window, cx))
+            .children(self.render_failure(cx));
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(v_flex().size_full().justify_end().child(list))
+            .child(div().absolute().top_0().left_0().right_0().h(px(96.)).bg(
+                gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(page, 0.),
+                    gpui::linear_color_stop(page.opacity(0.), 1.),
+                ),
+            ))
+            .into_any_element()
+    }
+
+    /// Talking (§5.2): the thread in its column, the composer beside the
+    /// pebble, and the lines that sit above the composer.
+    fn render_talking(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
+        let connected = matches!(self.connection, PlusConnection::Connected { .. });
         v_flex()
-            .size_full()
-            .child(header)
-            .child(Divider::horizontal())
-            .child(list)
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right(px(PEBBLE_RIGHT))
+            .w(px(THREAD_WIDTH))
+            .child(match &self.view {
+                PanelView::Connect(flow) => self.render_connect(flow, cx),
+                PanelView::Chat if !connected => self.render_unconnected(cx),
+                PanelView::Chat => self.render_thread(window, cx),
+            })
+            .when(self.memory_nudge_due && connected, |this| {
+                this.child(self.render_memory_nudge(cx))
+            })
+            .when(self.show_usage, |this| this.child(self.render_footer(cx)))
+            .child(
+                h_flex()
+                    .w_full()
+                    .pt_2()
+                    .pb(px(PEBBLE_BOTTOM))
+                    .child(div().w(px(COMPOSER_WIDTH)).child(self.render_composer(cx))),
+            )
+            .into_any_element()
+    }
+
+    /// Working with the thread folded (§5.2): the pebble types, with the
+    /// live line under the dots.
+    fn render_working(&self, cx: &Context<Self>) -> AnyElement {
+        let status: SharedString = match &self.starting {
+            Some(status) => status.clone(),
+            None => self.live_line(cx).into(),
+        };
+        v_flex()
+            .absolute()
+            .right(px(PEBBLE_RIGHT + PEBBLE + 12.))
+            .bottom(px(PEBBLE_BOTTOM))
+            .items_end()
+            .gap_1()
+            .child(
+                self.thock_bubble(
+                    SpinnerLabel::new()
+                        .size(LabelSize::Small)
+                        .into_any_element(),
+                    cx,
+                ),
+            )
+            .child(self.status_line(status, cx))
+            .into_any_element()
+    }
+
+    /// What the open turn is doing, in V26's live vocabulary.
+    fn live_line(&self, cx: &App) -> String {
+        let Some(session) = &self.session else {
+            return summarize_activity(&[], true);
+        };
+        let thread = session.thread.read(cx);
+        let vault_root = self.vault().map(|vault| vault.root.clone());
+        match self.items(cx).last() {
+            Some(ChatItem::Typing { calls }) => summarize_activity(
+                &summary_calls(calls, thread.entries(), vault_root.as_deref()),
+                true,
+            ),
+            _ => summarize_activity(&[], true),
+        }
+    }
+
+    /// Needs you (§5.2): a bubble floats up from the pebble with what waits,
+    /// under a caption saying who and which ritual.
+    fn render_needs_you(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
+        let title = self
+            .session
+            .as_ref()
+            .map(|session| session.title.clone())
+            .unwrap_or_else(|| "Thock".into());
+        let caption = h_flex()
+            .gap_1()
+            .items_baseline()
+            .child(
+                div()
+                    .font_family(THOCK_FACE)
+                    .font_weight(FontWeight::MEDIUM)
+                    .italic()
+                    .text_size(rems_from_px(13.5))
+                    .child("Thock"),
+            )
+            .child(
+                div()
+                    .text_size(rems_from_px(11.))
+                    .text_color(cx.theme().colors().text_placeholder)
+                    .child(format!("· {title}")),
+            );
+        let content: AnyElement = match (&self.view, self.waiting) {
+            (PanelView::Connect(flow), _) => self.render_connect(flow, cx),
+            (_, Some(Waiting::Connect)) => self.render_unconnected(cx),
+            (_, Some(Waiting::Failure)) => self
+                .render_failure(cx)
+                .unwrap_or_else(|| div().into_any_element()),
+            (_, Some(Waiting::Question)) => {
+                // The question, and the reply it followed when there is one.
+                let items = self.items(cx);
+                let question = items
+                    .iter()
+                    .rposition(|item| matches!(item, ChatItem::Question(_)))
+                    .unwrap_or(0);
+                let from = question
+                    .checked_sub(1)
+                    .filter(|before| matches!(items.get(*before), Some(ChatItem::Reply(_))))
+                    .unwrap_or(question);
+                v_flex()
+                    .w_full()
+                    .children(self.render_items(from, window, cx))
+                    .into_any_element()
+            }
+            (_, Some(Waiting::Reply)) => {
+                let items = self.items(cx);
+                let from = items
+                    .iter()
+                    .rposition(|item| matches!(item, ChatItem::Reply(_)))
+                    .unwrap_or(0);
+                v_flex()
+                    .w_full()
+                    .children(self.render_items(from, window, cx))
+                    .into_any_element()
+            }
+            (_, None) => div().into_any_element(),
+        };
+        v_flex()
+            .absolute()
+            .right(px(PEBBLE_RIGHT))
+            .bottom(px(BUBBLE_BOTTOM))
+            .w(px(THREAD_WIDTH))
+            .items_start()
+            .gap_1()
+            .child(caption)
+            .child(content)
+            .into_any_element()
+    }
+
+    /// Not connected (§5.11): one bubble, and the two ways in as chips.
+    fn render_unconnected(&self, cx: &Context<Self>) -> AnyElement {
+        let text: SharedString = match &self.connection {
+            PlusConnection::Revoked(message) => message.clone(),
+            PlusConnection::Loading => "Checking your Thock Plus connection…".into(),
+            _ => "I'm not connected yet.".into(),
+        };
+        v_flex()
+            .w_full()
+            .items_start()
+            .gap_2()
+            .child(self.thock_bubble(div().child(text).into_any_element(), cx))
+            .child(self.render_chips(
+                &Self::connect_choices(),
+                0,
+                |this, index, window, cx| this.pick_connect_choice(index, window, cx),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// The pebble (§5.1): always in the corner, with its dot when something
+    /// waits and a hollow ring until Thock Plus is connected.
+    fn render_pebble(&self, presence: Presence, cx: &Context<Self>) -> AnyElement {
+        let connected = matches!(self.connection, PlusConnection::Connected { .. });
+        let dot = self.waiting.is_some() && presence != Presence::NeedsYou && !self.thread_open;
+        let accent = cx.theme().colors().text_accent;
+        div()
+            .id("thock-chat-pebble")
+            .absolute()
+            .right(px(PEBBLE_RIGHT))
+            .bottom(px(PEBBLE_BOTTOM))
+            .size(px(PEBBLE))
+            .rounded_tl(px(22.))
+            .rounded_tr(px(20.))
+            .rounded_br(px(21.))
+            .rounded_bl(px(19.))
+            .bg(cx.theme().colors().text.opacity(0.06))
+            .shadow_md()
+            .when(!connected, |this| {
+                this.border_2().border_color(accent.opacity(0.6))
+            })
+            .opacity(if presence == Presence::Resting && !dot {
+                0.7
+            } else {
+                1.
+            })
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .child(
+                div()
+                    .font_family(THOCK_FACE)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(rems_from_px(22.))
+                    .text_color(accent)
+                    .child("T"),
+            )
+            .when(dot, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(-2.))
+                        .right(px(-2.))
+                        .size(px(12.))
+                        .rounded_full()
+                        .bg(accent),
+                )
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_focus(window, cx)))
             .into_any_element()
     }
 
@@ -3114,37 +3632,10 @@ impl ChatPanel {
             .into_any_element()
     }
 
-    /// The header toggle that stands in for the always-on allowance bar:
-    /// quiet while there is plenty left, amber once the warning mark is
-    /// crossed, red at zero — so the signal still arrives when it matters.
-    fn render_usage_button(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let entitlement = self.entitlement()?;
-        let (icon, color) = if entitlement.is_exhausted() {
-            (IconName::SignalLow, Color::Error)
-        } else if entitlement.is_running_low() {
-            (IconName::SignalMedium, Color::Warning)
-        } else {
-            (IconName::SignalHigh, Color::Muted)
-        };
-        let summary: SharedString = entitlement.balance_summary().into();
-        Some(
-            IconButton::new("thock-chat-usage", icon)
-                .icon_size(IconSize::Small)
-                .icon_color(color)
-                .toggle_state(self.show_usage)
-                .tooltip(move |_window, cx| {
-                    Tooltip::with_meta("Usage", Some(&ToggleChatUsage), summary.clone(), cx)
-                })
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.toggle_usage(&ToggleChatUsage, window, cx)
-                }))
-                .into_any_element(),
-        )
-    }
-
     /// The allowance, as a bar the wife test can read: how much of this
     /// cycle is used, in the plan's own words, turning amber at the warning
-    /// mark and red at zero. Hidden behind the header's usage toggle.
+    /// mark and red at zero. One line above the composer, behind
+    /// `ToggleChatUsage` (§5.11).
     fn render_footer(&self, cx: &Context<Self>) -> AnyElement {
         let Some(entitlement) = self.entitlement() else {
             return div().into_any_element();
@@ -3196,186 +3687,45 @@ impl ChatPanel {
             .into_any_element()
     }
 
-    fn render_empty_state(&self, cx: &Context<Self>) -> AnyElement {
-        let content = match &self.connection {
-            PlusConnection::Loading => v_flex().items_center().gap_1().child(
-                Label::new("Checking your Thock Plus connection…")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            ),
-            PlusConnection::Connected { .. } => v_flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    Icon::new(IconName::Sparkle)
-                        .size(IconSize::XLarge)
-                        .color(Color::Muted),
-                )
-                .child(div().mt_1().child(Label::new("Thock Agent is ready")))
-                .child(
-                    div().max_w(rems(18.)).child(
-                        Label::new(
-                            "Type below to chat, or run a skill from the Routines panel. It \
-                             works inside your notes and shows you every change as it goes.",
-                        )
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                    ),
-                )
-                .child(
-                    v_flex()
-                        .mt_3()
-                        .gap_2()
-                        .w(rems(13.))
-                        .child(
-                            Button::new("thock-chat-start", "New Chat")
-                                .style(ButtonStyle::Filled)
-                                .full_width()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.new_chat(&NewChat, window, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("thock-chat-use-own", "Use My Own Agent Instead")
-                                .style(ButtonStyle::Subtle)
-                                .full_width()
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.set_mode(ConnectionMode::Byo, cx)
-                                })),
-                        ),
-                ),
-            PlusConnection::Disconnected => v_flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    Icon::new(IconName::Sparkle)
-                        .size(IconSize::XLarge)
-                        .color(Color::Muted),
-                )
-                .child(div().mt_1().child(Label::new("Thock Agent")))
-                .child(
-                    div().max_w(rems(18.)).child(
-                        Label::new(
-                            "An assistant that works out of the box: nothing to install, no \
-                             keys to paste. Part of Thock Plus. Your own agent stays available \
-                             in the Agent panel.",
-                        )
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                    ),
-                )
-                .child(
-                    div().mt_3().w(rems(13.)).child(
-                        Button::new("thock-chat-connect", "Connect Thock Agent")
-                            .style(ButtonStyle::Filled)
-                            .full_width()
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_connect(window, cx)),
-                            ),
-                    ),
-                ),
-            PlusConnection::Revoked(message) => {
-                v_flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        Icon::new(IconName::Warning)
-                            .size(IconSize::XLarge)
-                            .color(Color::Warning),
-                    )
-                    .child(
-                        div().max_w(rems(18.)).child(
-                            Label::new(message.clone())
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        ),
-                    )
-                    .child(
-                        v_flex()
-                            .mt_3()
-                            .gap_2()
-                            .w(rems(13.))
-                            .child(
-                                Button::new("thock-chat-reconnect", "Connect Again")
-                                    .style(ButtonStyle::Filled)
-                                    .full_width()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_connect(window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("thock-chat-fallback", "Use My Own Agent")
-                                    .style(ButtonStyle::Outlined)
-                                    .full_width()
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.set_mode(ConnectionMode::Byo, cx)
-                                    })),
-                            ),
-                    )
-            }
-        };
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .p_4()
-            .child(content)
-            .into_any_element()
-    }
-
+    /// The connect flow (§5.11), inside a bubble: the invite code field,
+    /// `enter` connects and `escape` backs out.
     fn render_connect(&self, flow: &ConnectFlow, cx: &Context<Self>) -> AnyElement {
-        let editor = flow.code_editor.clone();
         v_flex()
+            .w_full()
+            .items_start()
             .gap_2()
-            .p_3()
-            .child(Label::new("Connect the Thock Agent").size(LabelSize::Large))
             .child(
-                Label::new(
-                    "Enter the invite code you were given. Thock sets everything else up: the \
-                     assistant, its model, and its allowance. No keys, no installs.",
-                )
-                .size(LabelSize::Small)
-                .color(Color::Muted),
+                self.thock_bubble(
+                    div()
+                        .child(
+                            "Enter the invite code you were given. I set everything else up: \
+                            the model and the allowance, no keys, no installs.",
+                        )
+                        .into_any_element(),
+                    cx,
+                ),
             )
             .child(
                 div()
-                    .child(editor.clone())
-                    .px_1()
-                    .py_1()
-                    .border_1()
-                    .border_color(cx.theme().colors().border)
-                    .rounded_sm(),
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .rounded(px(18.))
+                    .bg(cx.theme().colors().surface_background)
+                    .shadow_sm()
+                    .child(flow.code_editor.clone()),
             )
             .when_some(flow.error.clone(), |this, error| {
                 this.child(Label::new(error).size(LabelSize::Small).color(Color::Error))
             })
-            .child(div().mt_1().child(Divider::horizontal()))
             .child(
-                h_flex()
-                    .justify_end()
-                    .gap_1()
-                    .child(
-                        Button::new("thock-chat-connect-cancel", "Cancel")
-                            .on_click(cx.listener(|this, _, _window, cx| this.cancel_connect(cx))),
-                    )
-                    .child(
-                        Button::new(
-                            "thock-chat-connect-save",
-                            if flow.busy {
-                                "Connecting…"
-                            } else {
-                                "Connect"
-                            },
-                        )
-                        .style(ButtonStyle::Filled)
-                        .disabled(flow.busy)
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                let code = editor.read(cx).text(cx);
-                                this.submit_invite_code(code, window, cx);
-                            },
-                        )),
-                    ),
+                Label::new(if flow.busy {
+                    "Connecting…"
+                } else {
+                    "Enter to connect · Esc to go back"
+                })
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
             )
             .into_any_element()
     }
@@ -3403,66 +3753,38 @@ impl Render for ChatPanel {
         } else {
             key_context.add("menu");
             // The chips' keys: `1`–`9`, and `y`/`n` for a pair (§5.12).
-            if let Some((choices, _)) = self
+            let chips = self
                 .latest_pending_question(cx)
                 .and_then(|question| self.question_choices(&question, cx))
-            {
+                .map(|(choices, _)| choices.len())
+                .or_else(|| (self.waiting == Some(Waiting::Connect)).then_some(2));
+            if let Some(count) = chips {
                 key_context.add("choice");
-                if choices.len() == 2 {
+                if count == 2 {
                     key_context.add("choice_pair");
                 }
             }
         }
 
-        let content: AnyElement = match (&self.view, &self.vault_status) {
-            (PanelView::Connect(flow), _) => self.render_connect(flow, cx),
-            (PanelView::Chat, VaultStatus::Valid(_)) => {
-                let starting = self.starting.clone();
-                v_flex()
-                    .size_full()
-                    .child(match starting {
-                        Some(status) => v_flex()
-                            .flex_1()
-                            .min_h_0()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Label::new(status)
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .into_any_element(),
-                        None => div()
-                            .flex_1()
-                            .min_h_0()
-                            .child(self.render_chat(window, cx))
-                            .into_any_element(),
-                    })
-                    .when(
-                        matches!(self.connection, PlusConnection::Connected { .. }),
-                        |this| {
-                            this.child(Divider::horizontal())
-                                .when(self.memory_nudge_due, |this| {
-                                    this.child(self.render_memory_nudge(cx))
-                                })
-                                .child(self.render_composer(cx))
-                                .when(self.show_usage, |this| this.child(self.render_footer(cx)))
-                        },
-                    )
-                    .into_any_element()
-            }
-            (PanelView::Chat, _) => v_flex()
-                .p_3()
-                .child(
-                    Label::new("Open a Thock vault to chat with the Thock Agent.")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .into_any_element(),
+        let presence = self.presence(cx);
+        // BYO mode and a folder that isn't a vault have no chat (§5.11).
+        let hidden = self.mode == Some(ConnectionMode::Byo)
+            || !matches!(self.vault_status, VaultStatus::Valid(_));
+        let bounds_probe = {
+            let this = cx.entity();
+            gpui::canvas(
+                move |bounds, _window, cx| {
+                    this.update(cx, |this, _| this.centre_bounds = bounds);
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
         };
-
-        v_flex()
-            .id("thock-chat-panel")
+        // The layer spans the centre, but only the chat's own shapes take the
+        // mouse and the focus: the page underneath stays yours.
+        let chat = div()
+            .id("thock-chat")
             .key_context(key_context)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::confirm))
@@ -3471,9 +3793,11 @@ impl Render for ChatPanel {
             .on_action(cx.listener(Self::stop_turn))
             .on_action(cx.listener(Self::new_chat))
             .on_action(cx.listener(Self::focus_input))
+            .on_action(cx.listener(Self::focus_thread_list))
             .on_action(cx.listener(Self::open_entry))
             .on_action(cx.listener(Self::expand_activity))
             .on_action(cx.listener(Self::collapse_activity))
+            .on_action(cx.listener(Self::toggle_activity))
             .on_action(cx.listener(Self::retry_turn))
             .on_action(cx.listener(Self::toggle_usage))
             .on_action(cx.listener(Self::dismiss_memory_nudge))
@@ -3482,74 +3806,30 @@ impl Render for ChatPanel {
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::select_first))
             .on_action(cx.listener(Self::select_last))
+            .absolute()
+            .right_0()
+            .bottom_0()
+            .when(presence == Presence::Talking, |this| {
+                this.top_0().w(px(THREAD_WIDTH + PEBBLE_RIGHT))
+            })
+            .child(match presence {
+                Presence::Resting => div().into_any_element(),
+                Presence::Working => self.render_working(cx),
+                Presence::NeedsYou => self.render_needs_you(window, cx),
+                Presence::Talking => self.render_talking(window, cx),
+            })
+            .child(self.render_pebble(presence, cx));
+        div()
             .size_full()
-            .child(content)
+            .relative()
+            .child(bounds_probe)
+            .when(!hidden, |this| this.child(chat))
     }
 }
-
-impl EventEmitter<PanelEvent> for ChatPanel {}
 
 impl Focusable for ChatPanel {
-    /// Dock activation lands in whatever takes typing: the invite code field
-    /// or the message box. The list is reachable with `escape`.
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        match &self.view {
-            PanelView::Connect(flow) => flow.code_editor.focus_handle(cx),
-            PanelView::Chat => match self.connection {
-                PlusConnection::Connected { .. } => self.message_editor.focus_handle(cx),
-                _ => self.focus_handle.clone(),
-            },
-        }
-    }
-}
-
-impl Panel for ChatPanel {
-    fn persistent_name() -> &'static str {
-        "Thock Chat Panel"
-    }
-
-    fn panel_key() -> &'static str {
-        CHAT_PANEL_KEY
-    }
-
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        self.position
-    }
-
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
-    }
-
-    fn set_position(
-        &mut self,
-        position: DockPosition,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.position = position;
-        cx.notify();
-    }
-
-    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(480.)
-    }
-
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        Some(IconName::Thread)
-    }
-
-    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Thock Agent")
-    }
-
-    fn toggle_action(&self) -> Box<dyn Action> {
-        ToggleChatFocus.boxed_clone()
-    }
-
-    fn activation_priority(&self) -> u32 {
-        // Must be unique across all panels; 0-10 are taken (0-3 and 5-7
-        // upstream, 4 Timeline, 8 Day Planner, 9 Agent, 10 Backlog).
-        11
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
@@ -3563,6 +3843,7 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext};
     use serde_json::json;
     use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
+    use workspace::MultiWorkspace;
 
     fn tool(id: &'static str) -> EntryShape {
         EntryShape::Tool(acp::ToolCallId::from(id))
@@ -3755,6 +4036,7 @@ mod tests {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             release_channel::init(semver::Version::new(0, 0, 0), cx);
             editor::init(cx);
+            init(cx);
             // The shipped keymap, so a missing or shadowed binding fails here.
             let bindings = match KeymapFile::load(
                 include_str!("../../../assets/keymaps/default-linux.json"),
@@ -3781,7 +4063,8 @@ mod tests {
     const NOTE: &str = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n\
                         line 9\nline 10\nline 11\nline 12\nline 13\nline 14\n";
 
-    /// A vault with today's note, the chat docked, and no session yet.
+    /// A vault with today's note, the chat mounted over the centre by
+    /// `init`'s observer, and no session yet.
     async fn setup(cx: &mut TestAppContext) -> Setup {
         init_test(cx);
         let vault_dir = tempfile::tempdir().unwrap();
@@ -3798,16 +4081,14 @@ mod tests {
         )
         .await;
         let project = Project::test(fs, [root.as_path()], cx).await;
-        let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
-        let mut cx = cx.clone();
-        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
-            let panel = ChatPanel::new(workspace, window, cx);
-            workspace.add_panel(panel.clone(), window, cx);
-            workspace.open_panel::<ChatPanel>(window, cx);
-            panel
-        });
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let cx = cx.clone();
+        let workspace = multi_workspace.read_with(&cx, |multi, _| multi.workspace().clone());
         cx.run_until_parked();
+        let panel = workspace.read_with(&cx, |workspace, _| {
+            ChatPanel::in_workspace(workspace).expect("the chat is mounted over the centre")
+        });
         Setup {
             workspace,
             panel,
@@ -3818,10 +4099,79 @@ mod tests {
         }
     }
 
-    fn focus_list(setup: &mut Setup) {
-        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
-            window.focus(&panel.focus_handle, cx);
+    /// Opens today's note in the centre and puts the focus in it.
+    async fn open_note(setup: &mut Setup) -> Entity<Editor> {
+        let path = setup.root.join("daily/2026-10-19.md");
+        let project_path = setup
+            .project
+            .read_with(&setup.cx, |project, cx| {
+                project.find_project_path(&path, cx)
+            })
+            .expect("the note is in the vault");
+        let editor = setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.open_path(project_path, None, true, window, cx)
+            })
+            .await
+            .unwrap()
+            .downcast::<Editor>()
+            .unwrap();
+        setup.cx.focus(&editor);
+        setup.cx.run_until_parked();
+        editor
+    }
+
+    fn is_focused<V: Focusable + 'static>(setup: &mut Setup, entity: &Entity<V>) -> bool {
+        setup.cx.update(|window, cx| {
+            entity
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+        })
+    }
+
+    fn presence(setup: &Setup) -> Presence {
+        setup
+            .panel
+            .read_with(&setup.cx, |panel, cx| panel.presence(cx))
+    }
+
+    /// Pretends Thock Plus is connected, so the summon key opens the thread
+    /// rather than the connect bubble (§5.11).
+    fn connect(setup: &mut Setup) {
+        let entitlement: Entitlement = serde_json::from_value(json!({
+            "user_id": "u1",
+            "status": "active",
+            "plan_id": "plus",
+            "plan_name": "Thock Plus",
+            "allowance_units": 100,
+            "remaining_units": 100,
+        }))
+        .expect("a valid entitlement");
+        setup.panel.update(&mut setup.cx, |panel, cx| {
+            panel.connection = PlusConnection::Connected {
+                credential: "test".to_string(),
+                entitlement,
+                warned_low: false,
+            };
+            cx.notify();
         });
+    }
+
+    fn inset(setup: &Setup) -> Option<Pixels> {
+        setup
+            .workspace
+            .read_with(&setup.cx, |workspace, _| workspace.center_inset())
+    }
+
+    fn editor_width(setup: &Setup, editor: &Entity<Editor>) -> Pixels {
+        editor.read_with(&setup.cx, |editor, _| {
+            editor
+                .last_bounds()
+                .map(|bounds| bounds.size.width)
+                .unwrap_or_default()
+        })
     }
 
     fn edit(id: &'static str, path: PathBuf, line: u32) -> acp::SessionUpdate {
@@ -3851,10 +4201,13 @@ mod tests {
             "You started Wrap Today\nTicked.\nUpdated daily/2026-10-19.md"
         );
 
-        focus_list(&mut setup);
-        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
-            panel.select_last(&menu::SelectLast, window, cx);
-        });
+        // The reply floated up; the first summon focuses it, the second opens
+        // the thread, and `shift-tab` leaves the composer for the last row.
+        setup
+            .cx
+            .simulate_keystrokes("ctrl-alt-n ctrl-alt-n shift-tab");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
         setup.cx.simulate_keystrokes("right");
         // Reads before changes (§5.4), whatever order the calls came in.
         assert_eq!(
@@ -4084,11 +4437,7 @@ mod tests {
 
     /// The §6.2 question, raised through the `ask` tool with `labels` as
     /// its chips: the turn is waiting on it when this returns.
-    async fn setup_with_question(
-        cx: &mut TestAppContext,
-        labels: &[&str],
-    ) -> (Setup, Rc<StubAgentConnection>) {
-        let mut setup = setup(cx).await;
+    async fn ask_question(setup: &mut Setup, labels: &[&str]) -> Rc<StubAgentConnection> {
         let connection = Rc::new(StubAgentConnection::new().with_permission_requests(
             HashMap::from_iter([(acp::ToolCallId::from("pi-ui-1"), choices(labels))]),
         ));
@@ -4097,23 +4446,25 @@ mod tests {
             ask_call("ask-1", "Tick John's report?", labels),
             ask_request("pi-ui-1", "Tick John's report?"),
         ];
-        start_wrap_today(&mut setup, connection.clone(), None, updates).await;
-        (setup, connection)
+        start_wrap_today(setup, connection.clone(), None, updates).await;
+        connection
     }
 
     #[gpui::test]
     async fn an_ask_request_shows_chips_and_a_number_key_answers_it(cx: &mut TestAppContext) {
-        let (mut setup, _connection) =
-            setup_with_question(cx, &["Tick it", "Not yet", "Later"]).await;
+        let mut setup = setup(cx).await;
+        ask_question(&mut setup, &["Tick it", "Not yet", "Later"]).await;
         assert_eq!(
             visible(&setup),
             "You started Wrap Today\nJohn's report looks handled. Shall I tick it?\nTick John's report?"
         );
         assert_eq!(visible_chips(&setup), ["Tick it", "Not yet", "Later"]);
-        // Never granted on your behalf: the turn is still waiting.
+        // Never granted on your behalf: the turn is still waiting, as a
+        // bubble that took no focus.
         assert!(generating(&setup));
+        assert_eq!(presence(&setup), Presence::NeedsYou);
 
-        setup.cx.simulate_keystrokes("2");
+        setup.cx.simulate_keystrokes("ctrl-alt-n 2");
         setup.cx.run_until_parked();
         assert_eq!(
             visible(&setup),
@@ -4124,8 +4475,21 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn y_answers_a_two_option_question(cx: &mut TestAppContext) {
-        let (mut setup, _connection) = setup_with_question(cx, &["Tick it", "Not yet"]).await;
+    async fn a_question_floats_up_without_taking_focus_and_y_answers_it(cx: &mut TestAppContext) {
+        // §6.2 and G3: visible without opening anything, answered with the
+        // summon key and one key, and focus is back in the note after.
+        let mut setup = setup(cx).await;
+        let editor = open_note(&mut setup).await;
+        ask_question(&mut setup, &["Tick it", "Not yet"]).await;
+        assert_eq!(presence(&setup), Presence::NeedsYou);
+        assert!(
+            is_focused(&mut setup, &editor),
+            "a bubble takes no focus by itself"
+        );
+
+        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        let panel = setup.panel.clone();
+        assert!(is_focused(&mut setup, &panel));
         setup.cx.simulate_keystrokes("y");
         setup.cx.run_until_parked();
         assert!(
@@ -4134,6 +4498,117 @@ mod tests {
             visible(&setup)
         );
         assert!(!generating(&setup));
+        assert!(
+            is_focused(&mut setup, &editor),
+            "focus goes back to the note"
+        );
+        assert_eq!(presence(&setup), Presence::Resting);
+    }
+
+    #[gpui::test]
+    async fn escape_folds_a_bubble_into_the_dot(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let editor = open_note(&mut setup).await;
+        ask_question(&mut setup, &["Tick it", "Not yet"]).await;
+        setup.cx.simulate_keystrokes("ctrl-alt-n escape");
+        setup.cx.run_until_parked();
+        // The question still waits, folded into the dot, and the turn runs.
+        assert_eq!(presence(&setup), Presence::Working);
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            assert_eq!(panel.waiting, Some(Waiting::Question));
+            assert!(!panel.bubble_up);
+        });
+        assert!(is_focused(&mut setup, &editor));
+        // It doesn't float up again by itself; the summon key brings the
+        // thread, with the question in it.
+        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
+        assert_eq!(visible_chips(&setup), ["Tick it", "Not yet"]);
+    }
+
+    #[gpui::test]
+    async fn the_summon_key_opens_the_thread_and_the_page_makes_room(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        connect(&mut setup);
+        let editor = open_note(&mut setup).await;
+        let width_before = editor_width(&setup, &editor);
+        assert_eq!(presence(&setup), Presence::Resting);
+
+        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
+        let composer = setup
+            .panel
+            .read_with(&setup.cx, |panel, _| panel.message_editor.clone());
+        assert!(is_focused(&mut setup, &composer), "the composer has focus");
+        assert_eq!(inset(&setup), Some(px(INSET)));
+        assert_eq!(editor_width(&setup, &editor), width_before - px(INSET));
+
+        setup.cx.simulate_keystrokes("escape");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Resting);
+        assert!(
+            is_focused(&mut setup, &editor),
+            "focus goes back to the note"
+        );
+        assert_eq!(inset(&setup), None);
+        assert_eq!(editor_width(&setup, &editor), width_before);
+    }
+
+    #[gpui::test]
+    async fn focus_leaving_for_a_note_folds_the_thread(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        connect(&mut setup);
+        let editor = open_note(&mut setup).await;
+        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
+        setup.cx.focus(&editor);
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Resting);
+        assert_eq!(inset(&setup), None);
+    }
+
+    #[gpui::test]
+    async fn unconnected_the_summon_key_offers_the_ways_in(cx: &mut TestAppContext) {
+        // §5.11: no credential, so the bubble asks how to connect; `n` picks
+        // your own agent and the chat folds.
+        let mut setup = setup(cx).await;
+        let editor = open_note(&mut setup).await;
+        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::NeedsYou);
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            assert_eq!(panel.waiting, Some(Waiting::Connect));
+        });
+        setup.cx.simulate_keystrokes("escape");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Resting);
+        assert!(is_focused(&mut setup, &editor));
+    }
+
+    #[gpui::test]
+    async fn dot_opens_and_closes_the_selected_receipt(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        let note = setup.root.join("daily/2026-10-19.md");
+        start_wrap_today(
+            &mut setup,
+            connection,
+            None,
+            vec![read("read-1", note), says("Done.")],
+        )
+        .await;
+        setup
+            .cx
+            .simulate_keystrokes("ctrl-alt-n ctrl-alt-n shift-tab");
+        setup.cx.run_until_parked();
+        assert!(visible(&setup).ends_with("Looked at daily/2026-10-19.md"));
+        setup.cx.simulate_keystrokes(".");
+        assert!(visible(&setup).ends_with("\n  read daily/2026-10-19.md"));
+        setup.cx.simulate_keystrokes(".");
+        assert!(visible(&setup).ends_with("Looked at daily/2026-10-19.md"));
     }
 
     #[gpui::test]

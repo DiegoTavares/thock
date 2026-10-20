@@ -1086,6 +1086,7 @@
       "enter": "menu::Confirm",
       "escape": "menu::Cancel",
       "alt-enter": "thock::OpenChatEntry",
+      "ctrl-.": "thock::StopChatTurn",
     },
   },
   {
@@ -1095,6 +1096,8 @@
       "enter": "menu::Confirm",
       "shift-enter": "editor::Newline",
       "escape": "menu::Cancel",
+      "shift-tab": "thock::FocusChatThread",
+      "ctrl-.": "thock::StopChatTurn",
     },
   },
   {
@@ -1104,6 +1107,8 @@
       "tab": "thock::FocusChatInput",
       "right": "thock::ExpandChatActivity",
       "left": "thock::CollapseChatActivity",
+      ".": "thock::ToggleChatActivity",
+      "r": "thock::RetryChatTurn",
     },
   },
   {
