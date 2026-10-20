@@ -351,9 +351,9 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
 - [x] **A desk set in type:** the desk stops looking like Zed. A Thock theme, Dark and Light, built
   from the phone's tokens, becomes the default (One Dark and One Light stay in the picker), and
   heading colours become theme-addressable through `title.h1`–`h3`. A masthead under the window
-  title shows the viewed day in Petrona italic with back and forward buttons (`cmd-alt-[` /
-  `cmd-alt-]`, skipping days without a note so browsing never creates a past one), a two-week strip
-  that marks the days with a note (`cmd-alt-w` walks it from the keyboard) and the note's path small
+  title shows the viewed day in Petrona italic with back and forward buttons (`ctrl-cmd-[` /
+  `ctrl-cmd-]`, skipping days without a note so browsing never creates a past one), a two-week strip
+  that marks the days with a note (`ctrl-cmd-w` walks it from the keyboard) and the note's path small
   on the right. A Desk panel in the right dock folds the Backlog and the Day Planner into three
   tabs — Backlog, Today, Done — with a card that counts down to today's next timed entry and lanes
   stacked under Petrona titles. Notes are set in IBM Plex Sans with `tnum`, `#` and `##` lines draw

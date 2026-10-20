@@ -234,7 +234,8 @@ pub struct DeskPanel {
     position: DockPosition,
     vault: Option<Vault>,
     today: Option<TodayPlan>,
-    today_open_task: Option<Task<()>>,
+    /// The open of today's note in flight, keyed by the day it is for.
+    today_open: Option<(NaiveDate, Task<()>)>,
     /// The Next card is the first selectable row (§8.2): true while the
     /// cursor sits on it rather than in the view below.
     card_selected: bool,
@@ -311,7 +312,7 @@ impl DeskPanel {
                 position: DockPosition::Right,
                 vault: None,
                 today: None,
-                today_open_task: None,
+                today_open: None,
                 card_selected: false,
                 now: Arc::new(|| Local::now().naive_local()),
                 _tick: tick,
@@ -392,7 +393,11 @@ impl DeskPanel {
         if self.today.as_ref().is_some_and(|plan| plan.date == today) {
             return;
         }
-        if self.today_open_task.is_some() && self.today.is_none() {
+        if self
+            .today_open
+            .as_ref()
+            .is_some_and(|(date, _)| *date == today)
+        {
             return;
         }
         let note_path = vault.note_path(NoteKind::Daily, today);
@@ -407,11 +412,19 @@ impl DeskPanel {
         let open_buffer = self
             .project
             .update(cx, |project, cx| project.open_buffer(project_path, cx));
-        self.today_open_task = Some(cx.spawn(async move |this, cx| {
-            let Some(buffer) = open_buffer.await.log_err() else {
-                return;
-            };
+        // Replacing an open for an earlier day cancels it; the guard is
+        // cleared however this one ends, so a failed open is retried.
+        let task = cx.spawn(async move |this, cx| {
+            let buffer = open_buffer.await;
             this.update(cx, |this, cx| {
+                this.today_open = None;
+                let buffer = match buffer {
+                    Ok(buffer) => buffer,
+                    Err(error) => {
+                        log::error!("failed to open today's note {note_path:?}: {error:#}");
+                        return;
+                    }
+                };
                 let subscription =
                     cx.subscribe(&buffer, |this, buffer, event: &BufferEvent, cx| {
                         if matches!(event, BufferEvent::Edited { .. } | BufferEvent::Reloaded) {
@@ -425,10 +438,10 @@ impl DeskPanel {
                     _subscription: subscription,
                 });
                 this.reparse_today(&buffer, cx);
-                this.today_open_task = None;
             })
             .log_err();
-        }));
+        });
+        self.today_open = Some((today, task));
     }
 
     fn reparse_today(&mut self, buffer: &Entity<Buffer>, cx: &mut Context<Self>) {
@@ -1139,6 +1152,48 @@ mod tests {
                 })
             });
         assert_eq!(cursor_row, 4, "the cursor sits on the entry's line");
+    }
+
+    #[gpui::test]
+    async fn a_failed_open_of_today_is_retried(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        let tomorrow = Local::now().date_naive().succ_opt().unwrap();
+        let note_path = setup
+            .root
+            .join("daily")
+            .join(format!("{}.md", tomorrow.format("%Y-%m-%d")));
+        // A folder where the note should be makes the open fail.
+        setup.fs.create_dir(&note_path).await.unwrap();
+        setup.cx.run_until_parked();
+        setup.desk.update(&mut setup.cx, |desk, cx| {
+            let now = tomorrow.and_hms_opt(14, 35, 0).unwrap();
+            desk.now = Arc::new(move || now);
+            desk.refresh_vault(cx);
+        });
+        setup.cx.run_until_parked();
+        setup.desk.read_with(&setup.cx, |desk, _| {
+            assert!(desk.today.is_none(), "the open failed");
+            assert!(desk.today_open.is_none(), "nothing is left in flight");
+        });
+
+        setup
+            .fs
+            .remove_dir(&note_path, Default::default())
+            .await
+            .unwrap();
+        setup
+            .fs
+            .insert_file(&note_path, TODAY_NOTE.as_bytes().to_vec())
+            .await;
+        setup.cx.run_until_parked();
+        setup.cx.executor().advance_clock(Duration::from_secs(60));
+        setup.cx.run_until_parked();
+        let card = setup.desk.read_with(&setup.cx, |desk, _| desk.card());
+        assert_eq!(
+            card.map(|card| card.label),
+            Some("NEXT · IN 25 MIN".to_string()),
+            "a later refresh opens the note"
+        );
     }
 
     #[gpui::test]

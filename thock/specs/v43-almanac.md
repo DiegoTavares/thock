@@ -38,7 +38,7 @@ Four changes, each shippable alone:
 - Opening a vault shows the reference frame: masthead, notes in Plex Sans with Petrona headings,
   Desk panel on the right, nothing in the bottom dock.
 - The viewed day is always the largest text on screen, and moving one day back or forward is one
-  chord (`cmd-alt-[` / `cmd-alt-]`) or one click.
+  chord (`ctrl-cmd-[` / `ctrl-cmd-]`) or one click.
 - The file name is still visible, at 11px, and never competes with the date.
 - Switching to One Dark gives a coherent Zed-familiar look with the same layout. Nothing in
   V43 assumes the Thock theme is active.
@@ -210,10 +210,15 @@ So the masthead always shows a day, and the path is the only thing that changes 
 
 | Action (`thock::`) | macOS | Linux | Behaviour |
 | --- | --- | --- | --- |
-| `OpenPreviousDay` | `cmd-alt-[` | `ctrl-alt-[` | Opens the nearest existing daily note before the viewed day. Empty days are skipped, so browsing never creates past notes. |
-| `OpenNextDay` | `cmd-alt-]` | `ctrl-alt-]` | Opens the nearest existing note after the viewed day. If there is none up to today, opens today (create-if-missing). From today, opens tomorrow, like `OpenTomorrow`. |
-| `OpenToday` (exists, unbound) | `cmd-alt-d` | `ctrl-alt-home` (`ctrl-alt-d` is `editor::DeleteToNextSubwordEnd`) | Unchanged |
-| `FocusDayStrip` | `cmd-alt-w` | `ctrl-alt-w` | Focuses the strip on the viewed day |
+| `OpenPreviousDay` | `ctrl-cmd-[` | `ctrl-alt-[` | Opens the nearest existing daily note before the viewed day. Empty days are skipped, so browsing never creates past notes. |
+| `OpenNextDay` | `ctrl-cmd-]` | `ctrl-alt-]` | Opens the nearest existing note after the viewed day. If there is none up to today, opens today (create-if-missing). From today, opens tomorrow, like `OpenTomorrow`. |
+| `OpenToday` (exists, unbound) | `ctrl-cmd-t` (`cmd-alt-d` is the system's Dock toggle) | `ctrl-alt-home` (`ctrl-alt-d` is `editor::DeleteToNextSubwordEnd`) | Unchanged |
+| `FocusDayStrip` | `ctrl-cmd-w` | `ctrl-alt-w` | Focuses the strip on the viewed day |
+
+On macOS the chords use `ctrl-cmd`: inside a note `cmd-alt-[` / `cmd-alt-]` are `editor::Fold` /
+`editor::UnfoldLines` and `cmd-alt-w` is `search::ToggleWholeWord`, and the deeper context wins.
+The same reason drops the pane's `pane::CloseOtherItems` binding, which shadowed the agent's
+`cmd-alt-t` / `ctrl-alt-t` and closed the other tabs instead.
 
 In the strip (key context `ThockDayStrip`, with `menu`): `left`/`right` and `h`/`l` move by a day,
 skipping disabled cells, `up`/`down` and `k`/`j` move by a week, `enter` opens the day, and
@@ -221,11 +226,11 @@ skipping disabled cells, `up`/`down` and `k`/`j` move by a week, `enter` opens t
 
 Examples, with today Thu 15 Oct and notes on 13, 14, 15 and 18:
 
-- Viewing Thu 15, `cmd-alt-[` opens Wed 14.
-- Viewing Tue 13, `cmd-alt-[` opens Fri 9, skipping the empty Sat 10 to Mon 12.
-- Viewing Wed 14, `cmd-alt-]` opens Thu 15.
-- Viewing Thu 15, `cmd-alt-]` opens Sun 18, because that note exists.
-- With `backlog.md` active, `cmd-alt-[` opens Wed 14, because navigation starts from today.
+- Viewing Thu 15, `ctrl-cmd-[` opens Wed 14.
+- Viewing Tue 13, `ctrl-cmd-[` opens Fri 9, skipping the empty Sat 10 to Mon 12.
+- Viewing Wed 14, `ctrl-cmd-]` opens Thu 15.
+- Viewing Thu 15, `ctrl-cmd-]` opens Sun 18, because that note exists.
+- With `backlog.md` active, `ctrl-cmd-[` opens Wed 14, because navigation starts from today.
 
 ### 6.4 Narrow windows
 
@@ -428,6 +433,9 @@ three columns to stacked lanes changes what `left`/`right` do, as listed below.
 | `shift-enter`, `o` | `AddBacklogTask` | |
 | `alt-enter`, `g space` | `RevealBacklogTask` | |
 | `escape` | Back to the editor | |
+
+With vim mode on, digits stay tab switches: the Desk's views take no vim count (`3j`), so `1`–`3`
+never turn into one.
 
 The footer is a single 28px row with a `border` top. It renders the bindings for add, done,
 open, move and today with `ui::KeyBinding`, so it shows the user's actual keys (and the vim keys

@@ -174,6 +174,10 @@ pub struct MarkdownConcealAddon {
     self_applied: bool,
     /// The last repair `apply_folds` tried and the fold map did not take.
     last_attempt: Option<ApplyAttempt>,
+    /// Whether the wrap overrides were last set for the body face; `None`
+    /// until first set. Settings changes only touch the wrap when the face
+    /// switches on or off, so a soft-wrap toggle survives a theme change.
+    wrap_set_for_body_face: Option<bool>,
     reparse: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -377,6 +381,7 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         default_folds_applied: false,
         self_applied: false,
         last_attempt: None,
+        wrap_set_for_body_face: None,
         reparse: Task::ready(()),
         _subscriptions: subscriptions,
     });
@@ -390,23 +395,37 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
 /// proportional face: the wrap guide is measured in spaces and the wrap
 /// itself in `m`s, so they land in different places. While the body face is
 /// on, the note wraps at the editor width and shows no guide; the source
-/// view gets the user's wrap settings back.
+/// view gets the user's wrap settings back. The wrap is only reset when the
+/// face switches on or off, so the user's own wrap toggle outlives unrelated
+/// settings changes.
 fn apply_body_font(editor: &mut Editor, cx: &mut Context<Editor>) {
-    let (refinement, soft_wrap, show_wrap_guides) = match body_font(editor, cx) {
-        Some(family) => (
-            TextStyleRefinement {
-                font_family: Some(family),
-                font_features: Some(FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))),
-                ..Default::default()
-            },
-            Some(language_settings::SoftWrap::EditorWidth),
-            Some(false),
-        ),
-        None => (TextStyleRefinement::default(), None, None),
+    let family = body_font(editor, cx);
+    let body_face_on = family.is_some();
+    let refinement = match family {
+        Some(family) => TextStyleRefinement {
+            font_family: Some(family),
+            font_features: Some(FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))),
+            ..Default::default()
+        },
+        None => TextStyleRefinement::default(),
     };
     editor.set_text_style_refinement(refinement);
-    editor.set_soft_wrap_mode_override(soft_wrap, cx);
-    editor.set_show_wrap_guides_override(show_wrap_guides, cx);
+
+    let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() else {
+        return;
+    };
+    if addon.wrap_set_for_body_face == Some(body_face_on) {
+        cx.notify();
+        return;
+    }
+    addon.wrap_set_for_body_face = Some(body_face_on);
+    if body_face_on {
+        editor.set_soft_wrap_mode_override(Some(language_settings::SoftWrap::EditorWidth), cx);
+        editor.set_show_wrap_guides_override(Some(false), cx);
+    } else {
+        editor.set_soft_wrap_mode_override(None, cx);
+        editor.set_show_wrap_guides_override(None, cx);
+    }
 }
 
 /// The family the note's body is set in right now: the settings' face while
@@ -2535,6 +2554,59 @@ mod tests {
             wrapping(&mut cx),
             ("Bounded(100)".to_string(), vec![(100, true)]),
             "the editor's own mono font keeps column wrapping"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_soft_wrap_toggle_survives_unrelated_settings_changes(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, NOTE).await;
+        let soft_wrap = |cx: &mut VisualTestContext| {
+            editor.read_with(cx, |editor, cx| format!("{:?}", editor.soft_wrap_mode(cx)))
+        };
+        let change_settings =
+            |cx: &mut VisualTestContext, update: fn(&mut settings::SettingsContent)| {
+                cx.update(|_, cx| {
+                    cx.update_global::<SettingsStore, _>(|store, cx| {
+                        store.update_user_settings(cx, update);
+                    });
+                });
+                cx.run_until_parked();
+            };
+        change_settings(&mut cx, |settings| {
+            settings.project.all_languages.defaults.soft_wrap =
+                Some(language_settings::SoftWrap::None);
+        });
+        assert_eq!(soft_wrap(&mut cx), "EditorWidth");
+
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.toggle_soft_wrap(&editor::actions::ToggleSoftWrap, window, cx)
+        });
+        assert_eq!(soft_wrap(&mut cx), "None", "the user turned wrapping off");
+        change_settings(&mut cx, |settings| {
+            settings.thock.get_or_insert_default().body_font = Some("Lilex".to_string());
+        });
+        assert_eq!(
+            soft_wrap(&mut cx),
+            "None",
+            "a settings change that keeps the body face on leaves the toggle alone"
+        );
+        assert_eq!(
+            editor.read_with(&cx, |editor, cx| body_font(editor, cx)),
+            Some("Lilex".into()),
+            "the new face still applies"
+        );
+
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(
+            soft_wrap(&mut cx),
+            "None",
+            "the source view falls back to the settings"
+        );
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(
+            soft_wrap(&mut cx),
+            "EditorWidth",
+            "concealing again wraps at the editor width"
         );
     }
 

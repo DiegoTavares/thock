@@ -1379,6 +1379,97 @@ mod tests {
         assert_eq!(active_note(&mut setup), "daily/2026-10-14.md");
     }
 
+    /// The deepest context binding a chord wins, so a `thock::` chord on the
+    /// workspace that the editor or pane also binds (`editor::Fold` on
+    /// `cmd-alt-[`) never fires while writing. The keymaps are read raw so
+    /// bindings for actions this crate doesn't link still count.
+    #[gpui::test]
+    async fn workspace_chords_reach_past_a_focused_note(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false, "daily/2026-10-15.md").await;
+        let context_stack = setup.cx.update(|window, _| window.context_stack());
+        assert!(
+            context_stack
+                .iter()
+                .any(|context| context.contains("Editor")),
+            "the note's editor holds focus"
+        );
+
+        struct Entry {
+            context: String,
+            depth: Option<usize>,
+            chord: String,
+            keystrokes: Vec<(gpui::Modifiers, String)>,
+            action: String,
+        }
+
+        let mut shadowed = Vec::new();
+        for (platform, content) in [
+            (
+                "linux",
+                include_str!("../../../assets/keymaps/default-linux.json"),
+            ),
+            (
+                "macos",
+                include_str!("../../../assets/keymaps/default-macos.json"),
+            ),
+        ] {
+            let keymap = KeymapFile::parse(content).expect("keymap parses");
+            let mut entries = Vec::new();
+            for section in keymap.sections() {
+                let depth = if section.context.is_empty() {
+                    Some(0)
+                } else {
+                    gpui::KeyBindingContextPredicate::parse(&section.context)
+                        .expect("context parses")
+                        .depth_of(&context_stack)
+                };
+                for (chord, action) in section.bindings() {
+                    let keystrokes = chord
+                        .split_whitespace()
+                        .map(|keystroke| {
+                            let keystroke =
+                                gpui::Keystroke::parse(keystroke).expect("chord parses");
+                            (keystroke.modifiers, keystroke.key)
+                        })
+                        .collect();
+                    entries.push(Entry {
+                        context: section.context.clone(),
+                        depth,
+                        chord: chord.clone(),
+                        keystrokes,
+                        action: action.to_string(),
+                    });
+                }
+            }
+            for (index, entry) in entries.iter().enumerate() {
+                if entry.context != "Workspace" || !entry.action.starts_with("thock::") {
+                    continue;
+                }
+                // Equal depth goes to the binding defined last.
+                let winner = entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, other)| {
+                        other.depth.is_some() && other.keystrokes == entry.keystrokes
+                    })
+                    .max_by_key(|(other_index, other)| (other.depth, *other_index));
+                if let Some((winner_index, winner)) = winner
+                    && winner_index != index
+                {
+                    shadowed.push(format!(
+                        "{platform}: `{}` runs {} ({}) instead of {}",
+                        entry.chord, winner.action, winner.context, entry.action
+                    ));
+                }
+            }
+        }
+        assert!(
+            shadowed.is_empty(),
+            "chords shadowed inside a note:\n{}",
+            shadowed.join("\n")
+        );
+    }
+
     #[gpui::test]
     async fn escape_returns_focus_to_the_note(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false, "daily/2026-10-15.md").await;

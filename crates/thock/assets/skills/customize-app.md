@@ -252,11 +252,11 @@ rather than guessing from the visible name.
 | `thock::ToggleDayPlannerFocus` | The Desk, on its Today tab | `cmd-alt-p` |
 | `thock::ToggleDeskFocus` | The Desk, on whatever tab it shows | unbound |
 | `["thock::ActivateDeskTab", { "tab": "done" }]` | A Desk tab (`backlog`, `today`, `done`) | `1` `2` `3` inside the Desk; `g t` / `g T` cycle in vim mode |
-| `thock::OpenPreviousDay` / `OpenNextDay` | The daily note before or after the one you're viewing, skipping empty days | `cmd-alt-[` / `cmd-alt-]` |
-| `thock::FocusDayStrip` | The masthead's day strip (arrows or `h` `j` `k` `l`, `enter` opens, `escape` returns) | `cmd-alt-w` |
+| `thock::OpenPreviousDay` / `OpenNextDay` | The daily note before or after the one you're viewing, skipping empty days | `ctrl-cmd-[` / `ctrl-cmd-]` |
+| `thock::FocusDayStrip` | The masthead's day strip (arrows or `h` `j` `k` `l`, `enter` opens, `escape` returns) | `ctrl-cmd-w` |
 | `thock::ToggleAgentFocus` | The terminal agent panel | `cmd-alt-t` |
 | `thock::ToggleChatFocus` | The Thock Agent chat | `cmd-alt-n` |
-| `thock::OpenToday` | Today's note | `cmd-alt-d` |
+| `thock::OpenToday` | Today's note | `ctrl-cmd-t` |
 | `thock::OpenYesterday` / `OpenTomorrow` | A daily note | unbound |
 | `thock::OpenThisWeek` / `OpenLastWeek` | A weekly note | unbound |
 | `thock::OpenInbox` / `thock::OpenGuide` / `thock::OpenCustomize` | Those pages | unbound |

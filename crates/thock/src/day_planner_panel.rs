@@ -1179,6 +1179,13 @@ mod tests {
     use gpui::{KeyBinding, TestAppContext, VisualTestContext};
     use serde_json::json;
     use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
+    use workspace::MultiWorkspace;
+
+    /// Stands in for vim's count action, which this crate doesn't link, so
+    /// the vim keymap's digit bindings load here as they do in the app.
+    #[derive(Clone, PartialEq, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+    #[action(namespace = vim, name = "Number")]
+    struct VimNumber(usize);
 
     const NOTE: &str = "# Day planner\n\
         - [ ] Unscheduled thing\n\
@@ -1203,6 +1210,7 @@ mod tests {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             release_channel::init(semver::Version::new(0, 0, 0), cx);
             editor::init(cx);
+            crate::desk_panel::init(cx);
             // The shipped keymap, so a missing or shadowed binding fails here.
             let bindings = keymap_bindings(
                 include_str!("../../../assets/keymaps/default-linux.json"),
@@ -1216,6 +1224,12 @@ mod tests {
                 let bindings =
                     keymap_bindings(include_str!("../../../assets/keymaps/vim.json"), cx);
                 cx.bind_keys(bindings);
+                // Handled like the vim crate does, so a digit the vim keymap
+                // claims is swallowed as a count instead of reaching the Desk.
+                cx.observe_new(|workspace: &mut Workspace, _, _| {
+                    workspace.register_action(|_, _: &VimNumber, _, _| {});
+                })
+                .detach();
                 cx.bind_keys([
                     KeyBinding::new("j", SelectNext, Some(DAY_PLANNER_PANEL_KEY)),
                     KeyBinding::new("k", SelectPrevious, Some(DAY_PLANNER_PANEL_KEY)),
@@ -1225,6 +1239,7 @@ mod tests {
     }
 
     struct Setup {
+        desk: Entity<DeskPanel>,
         panel: Entity<DayPlannerPanel>,
         editor: Entity<Editor>,
         cx: VisualTestContext,
@@ -1250,9 +1265,10 @@ mod tests {
         )
         .await;
         let project = Project::test(fs, [root], cx).await;
-        let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let mut cx = cx.clone();
+        let workspace = multi_workspace.read_with(&cx, |multi, _| multi.workspace().clone());
         let project_path = project
             .read_with(&mut cx, |project, cx| {
                 project.find_project_path(root.join("daily/2026-01-05.md"), cx)
@@ -1266,12 +1282,13 @@ mod tests {
             .unwrap()
             .downcast::<Editor>()
             .unwrap();
-        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+        let desk = workspace.update_in(&mut cx, |workspace, window, cx| {
             let desk = DeskPanel::new(workspace, BacklogFolds::default(), window, cx);
             workspace.add_panel(desk.clone(), window, cx);
             desk.update(cx, |desk, cx| desk.show_tab(DeskTab::Today, cx));
-            desk.read(cx).planner().clone()
+            desk
         });
+        let panel = desk.read_with(&cx, |desk, _| desk.planner().clone());
         cx.run_until_parked();
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.toggle_panel_focus::<DeskPanel>(window, cx);
@@ -1286,6 +1303,7 @@ mod tests {
             "the planner mirrors the open daily note"
         );
         Setup {
+            desk,
             panel,
             editor,
             cx,
@@ -1372,6 +1390,21 @@ mod tests {
         assert_eq!(cursor_row(&mut setup), SECOND_BLOCK_ROW);
         assert!(!panel_focused(&mut setup), "revealing moves to the note");
         assert_eq!(selected_row(&setup), Some(SECOND_BLOCK_ROW));
+    }
+
+    #[gpui::test]
+    async fn vim_digits_switch_desk_tabs_from_inside_a_view(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, true).await;
+        let desk = setup.desk.clone();
+        let tab = |setup: &Setup| desk.read_with(&setup.cx, |desk, _| desk.tab());
+        assert!(panel_focused(&mut setup));
+        setup.cx.simulate_keystrokes("1");
+        assert_eq!(tab(&setup), DeskTab::Backlog, "from the Day Planner");
+        setup.cx.simulate_keystrokes("2");
+        assert_eq!(tab(&setup), DeskTab::Today, "from the Backlog");
+        assert!(panel_focused(&mut setup));
+        setup.cx.simulate_keystrokes("3");
+        assert_eq!(tab(&setup), DeskTab::Done);
     }
 
     #[gpui::test]
