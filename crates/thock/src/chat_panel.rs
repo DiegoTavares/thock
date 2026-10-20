@@ -19,22 +19,24 @@ use acp_thread::{
 };
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
+use chrono::{DateTime, Local, NaiveDate, TimeDelta};
 use collections::{HashMap, HashSet};
-use editor::{Editor, EditorMode, MinimapVisibility, SizingBehavior};
+use editor::{Editor, SelectionEffects, scroll::Autoscroll};
 use gpui::{
-    Action, AnyWindowHandle, App, AsyncWindowContext, Context, Entity, EntityId, EventEmitter,
-    FocusHandle, Focusable, FontWeight, KeyContext, Pixels, ScrollHandle, SharedString,
-    Subscription, WeakEntity, Window, actions, div, px, relative,
+    Action, AnyWindowHandle, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, FontFeatures, FontWeight, KeyContext, Pixels, ScrollHandle, SharedString,
+    Subscription, TextStyleRefinement, WeakEntity, Window, actions, div, px, relative,
 };
 use language::language_settings::SoftWrap;
-use markdown::{MarkdownElement, MarkdownFont, MarkdownStyle};
+use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use project::Project;
-use project::project_settings::DiagnosticSeverity;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
+use text::{Bias, Point};
 use ui::prelude::*;
 use ui::{
     Button, ButtonStyle, Divider, Icon, IconButton, Label, ProgressBar, SpinnerLabel, Tooltip,
@@ -196,6 +198,13 @@ enum ChatItem {
         key: acp::ToolCallId,
         calls: Vec<(usize, acp::ToolCallId)>,
     },
+    /// One row of an open receipt: a call, selectable so `enter` opens its
+    /// note at its line (decision 14).
+    Row {
+        receipt: acp::ToolCallId,
+        index: usize,
+        id: acp::ToolCallId,
+    },
     /// A question that stopped the turn for you.
     Question(usize),
     /// The turn is still running: its calls so far feed the live line, and
@@ -214,6 +223,7 @@ impl ChatItem {
             | ChatItem::Reply(index)
             | ChatItem::Question(index) => Some(ItemKey::Entry(*index)),
             ChatItem::Receipt { key, .. } => Some(ItemKey::Receipt(key.clone())),
+            ChatItem::Row { id, .. } => Some(ItemKey::Call(id.clone())),
             ChatItem::Typing { .. } => None,
         }
     }
@@ -223,6 +233,7 @@ impl ChatItem {
 enum ItemKey {
     Entry(usize),
     Receipt(acp::ToolCallId),
+    Call(acp::ToolCallId),
 }
 
 /// How one thread entry takes part in the fold.
@@ -506,19 +517,121 @@ fn vault_relative_label(path: &Path, vault_root: Option<&Path>) -> String {
         .unwrap_or_else(|| "a file".to_string())
 }
 
-fn call_verb_and_icon(kind: &acp::ToolKind) -> (&'static str, IconName) {
+/// The verb of a receipt row (V44 §5.4) and whether the call changed a
+/// note, which sets the verb in amber.
+fn row_verb(kind: &acp::ToolKind) -> (&'static str, bool) {
     match kind {
-        acp::ToolKind::Read => ("Read", IconName::ToolSearch),
-        acp::ToolKind::Edit => ("Edited", IconName::ToolPencil),
-        acp::ToolKind::Delete => ("Removed", IconName::ToolDeleteFile),
-        acp::ToolKind::Move => ("Moved", IconName::ArrowRightLeft),
-        acp::ToolKind::Search => ("Searched", IconName::ToolSearch),
-        acp::ToolKind::Execute => ("Ran", IconName::ToolTerminal),
-        acp::ToolKind::Think => ("Thought", IconName::ToolThink),
-        acp::ToolKind::Fetch => ("Looked up", IconName::ToolWeb),
-        acp::ToolKind::SwitchMode => ("Switched", IconName::ArrowRightLeft),
-        _ => ("Worked", IconName::ToolHammer),
+        acp::ToolKind::Read => ("read", false),
+        acp::ToolKind::Search => ("searched", false),
+        acp::ToolKind::Fetch => ("looked up", false),
+        acp::ToolKind::Edit => ("changed", true),
+        acp::ToolKind::Delete => ("removed", true),
+        acp::ToolKind::Move => ("moved", true),
+        acp::ToolKind::Execute => ("ran", false),
+        acp::ToolKind::Think => ("thought", false),
+        _ => ("did", false),
     }
+}
+
+fn is_change(entry: Option<&AgentThreadEntry>) -> bool {
+    matches!(
+        entry,
+        Some(AgentThreadEntry::ToolCall(tool_call)) if row_verb(&tool_call.kind).1
+    )
+}
+
+/// The face Thock speaks in (V44 §5.7); yours is the UI face.
+const THOCK_FACE: &str = "Petrona";
+
+/// The text of a reply: its prose chunks, in order.
+fn reply_text(message: &acp_thread::AssistantMessage, cx: &App) -> String {
+    message
+        .chunks
+        .iter()
+        .filter_map(|chunk| match chunk {
+            AssistantMessageChunk::Message { block, .. } => block.text_content(cx),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+/// A reply split at blank lines, one bubble each (V44 §5.4). Blank lines
+/// inside a fenced code block don't split.
+fn paragraphs(source: &str) -> Vec<String> {
+    let mut paragraphs = Vec::new();
+    let mut current = String::new();
+    let mut in_fence = false;
+    for line in source.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        }
+        if line.trim().is_empty() && !in_fence {
+            if !current.trim().is_empty() {
+                paragraphs.push(std::mem::take(&mut current));
+            }
+            current.clear();
+            continue;
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(line);
+    }
+    if !current.trim().is_empty() {
+        paragraphs.push(current);
+    }
+    paragraphs
+}
+
+/// The bubbles of one reply, rebuilt when its text changes.
+struct ReplyBubbles {
+    source: String,
+    paragraphs: Vec<Entity<Markdown>>,
+}
+
+/// The day marks above turns (V44 §5.4): the first turn, a turn more than
+/// thirty minutes after the previous one, and a turn on a new day. Turns
+/// are keyed by the entry that started them.
+fn day_marks(
+    turn_times: &BTreeMap<usize, DateTime<Local>>,
+    today: NaiveDate,
+) -> BTreeMap<usize, String> {
+    let mut marks = BTreeMap::new();
+    let mut previous: Option<DateTime<Local>> = None;
+    for (&index, &time) in turn_times {
+        let gap = previous.is_none_or(|previous| {
+            time.date_naive() != previous.date_naive() || time - previous > TimeDelta::minutes(30)
+        });
+        if gap {
+            let day = if time.date_naive() == today {
+                "TODAY".to_string()
+            } else {
+                time.format("%A").to_string().to_uppercase()
+            };
+            marks.insert(index, format!("{day} · {}", time.format("%H:%M")));
+        }
+        previous = Some(time);
+    }
+    marks
+}
+
+/// Lining-up digits for the day marks.
+fn tabular_numerals() -> FontFeatures {
+    FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))
+}
+
+/// A key drawn as a keycap: beside a chip, or `esc` in the composer.
+fn keycap(text: impl Into<SharedString>, cx: &App) -> Div {
+    div()
+        .px_1()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(cx.theme().colors().border_variant)
+        .text_size(rems_from_px(10.))
+        .line_height(rems_from_px(14.))
+        .text_color(cx.theme().colors().text_muted)
+        .child(text.into())
 }
 
 /// The shapes of elicitation this panel can answer inline (V26 §5.7). Pi
@@ -632,9 +745,11 @@ pub struct ChatPanel {
     /// The label you picked per answered `ask` request, shown as your
     /// bubble.
     ask_answers: HashMap<acp::ToolCallId, SharedString>,
-    /// Read-only editors over the diffs tool calls produced, keyed by the
-    /// diff entity so a re-render never rebuilds them.
-    diff_editors: HashMap<EntityId, Entity<Editor>>,
+    /// Thock's replies as bubbles (§5.4), by entry index.
+    bubbles: HashMap<usize, ReplyBubbles>,
+    /// When each turn started, by the entry that started it: your message,
+    /// or the question you answered. The thread keeps no times of its own.
+    turn_times: BTreeMap<usize, DateTime<Local>>,
     /// Whether the allowance bar is showing; off by default so the balance
     /// is a glance away, not a permanent fixture.
     show_usage: bool,
@@ -677,7 +792,7 @@ impl ChatPanel {
             });
             let message_editor = cx.new(|cx| {
                 let mut editor = Editor::auto_height(1, 8, window, cx);
-                editor.set_placeholder_text("Ask the Thock Agent…", window, cx);
+                editor.set_placeholder_text("Message Thock", window, cx);
                 editor.set_soft_wrap_mode(SoftWrap::EditorWidth, cx);
                 editor
             });
@@ -701,7 +816,8 @@ impl ChatPanel {
                 elicitation_editors: HashMap::default(),
                 ask_choices: HashMap::default(),
                 ask_answers: HashMap::default(),
-                diff_editors: HashMap::default(),
+                bubbles: HashMap::default(),
+                turn_times: BTreeMap::new(),
                 show_usage: false,
                 pending_launch: None,
                 memory_nudge_due: false,
@@ -1198,7 +1314,8 @@ impl ChatPanel {
 
     /// Drops everything keyed to a session's transcript when it goes away.
     fn reset_transcript_state(&mut self) {
-        self.diff_editors.clear();
+        self.bubbles.clear();
+        self.turn_times.clear();
         self.selected = None;
         self.expanded_receipts.clear();
         self.elicitation_choices.clear();
@@ -1223,7 +1340,7 @@ impl ChatPanel {
                 }
             }
             AcpThreadEvent::NewEntry | AcpThreadEvent::EntryUpdated(_) => {
-                self.sync_diff_editors(thread, window, cx);
+                self.sync_bubbles(thread, cx);
                 if thread.read(cx).status() == ThreadStatus::Generating {
                     self.scroll_handle.scroll_to_bottom();
                 }
@@ -1361,53 +1478,38 @@ impl ChatPanel {
         }
     }
 
-    fn sync_diff_editors(
-        &mut self,
-        thread: &Entity<AcpThread>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let diffs = thread
+    /// Keeps a bubble per paragraph of every reply (§5.4), rebuilt only when
+    /// a reply's text changed since the last look.
+    fn sync_bubbles(&mut self, thread: &Entity<AcpThread>, cx: &mut Context<Self>) {
+        let languages = self.project.read(cx).languages().clone();
+        let replies: Vec<(usize, String)> = thread
             .read(cx)
             .entries()
             .iter()
-            .filter_map(|entry| match entry {
-                AgentThreadEntry::ToolCall(tool_call) => Some(tool_call),
+            .enumerate()
+            .filter_map(|(index, entry)| match entry {
+                AgentThreadEntry::AssistantMessage(message) => {
+                    Some((index, reply_text(message, cx)))
+                }
                 _ => None,
             })
-            .flat_map(|tool_call| tool_call.diffs().cloned())
-            .filter(|diff| !self.diff_editors.contains_key(&diff.entity_id()))
-            .collect::<Vec<_>>();
-        for diff in diffs {
-            let editor = cx.new(|cx| {
-                let mut editor = Editor::new(
-                    EditorMode::Full {
-                        scale_ui_elements_with_buffer_font_size: false,
-                        show_active_line_background: false,
-                        sizing_behavior: SizingBehavior::SizeByContent,
-                    },
-                    diff.read(cx).multibuffer().clone(),
-                    None,
-                    window,
-                    cx,
-                );
-                editor.set_show_gutter(false, cx);
-                editor.disable_diagnostics(cx);
-                editor.set_max_diagnostics_severity(DiagnosticSeverity::Off, cx);
-                editor.disable_expand_excerpt_buttons(cx);
-                editor.set_show_vertical_scrollbar(false, cx);
-                editor.set_minimap_visibility(MinimapVisibility::Disabled, window, cx);
-                editor.set_soft_wrap_mode(SoftWrap::EditorWidth, cx);
-                editor.set_forbid_vertical_scroll(true);
-                editor.set_show_indent_guides(false, cx);
-                editor.set_read_only(true);
-                editor.set_show_breakpoints(false, cx);
-                editor.set_show_code_actions(false, cx);
-                editor.set_show_git_diff_gutter(false, cx);
-                editor.set_expand_all_diff_hunks(cx);
-                editor
-            });
-            self.diff_editors.insert(diff.entity_id(), editor);
+            .collect();
+        for (index, source) in replies {
+            if self
+                .bubbles
+                .get(&index)
+                .is_some_and(|bubbles| bubbles.source == source)
+            {
+                continue;
+            }
+            let paragraphs = paragraphs(&source)
+                .into_iter()
+                .map(|paragraph| {
+                    cx.new(|cx| Markdown::new(paragraph.into(), Some(languages.clone()), None, cx))
+                })
+                .collect();
+            self.bubbles
+                .insert(index, ReplyBubbles { source, paragraphs });
         }
     }
 
@@ -1454,9 +1556,11 @@ impl ChatPanel {
         session.turns += 1;
         session.turn_failure = None;
         session.last_sent = Some(text.clone());
+        let turn_start = session.thread.read(cx).entries().len();
         let turn = session
             .thread
             .update(cx, |thread, cx| thread.send(vec![text.as_str().into()], cx));
+        self.turn_times.insert(turn_start, Local::now());
         self.scroll_handle.scroll_to_bottom();
         cx.spawn(async move |this, cx| {
             let result = turn.await;
@@ -1540,14 +1644,35 @@ impl ChatPanel {
             return Vec::new();
         };
         let thread = session.thread.read(cx);
-        build_items(
-            thread
-                .entries()
-                .iter()
-                .map(|entry| entry_shape(entry, thread)),
+        let entries = thread.entries();
+        let mut items = build_items(
+            entries.iter().map(|entry| entry_shape(entry, thread)),
             session.kickoff,
             thread.status() == ThreadStatus::Generating,
-        )
+        );
+        // An open receipt shows its rows, reads before changes (§5.4).
+        let mut position = 0;
+        while position < items.len() {
+            if let Some(ChatItem::Receipt { key, calls }) = items.get(position)
+                && self.expanded_receipts.contains(key)
+            {
+                let receipt = key.clone();
+                let mut calls = calls.clone();
+                calls.sort_by_key(|(index, _)| is_change(entries.get(*index)));
+                let rows: Vec<ChatItem> = calls
+                    .into_iter()
+                    .map(|(index, id)| ChatItem::Row {
+                        receipt: receipt.clone(),
+                        index,
+                        id,
+                    })
+                    .collect();
+                position += rows.len();
+                items.splice(position + 1 - rows.len()..position + 1 - rows.len(), rows);
+            }
+            position += 1;
+        }
+        items
     }
 
     /// What the thread says, one row per line, for the tests that check
@@ -1567,15 +1692,7 @@ impl ChatPanel {
                     .text_content(cx)
                     .unwrap_or_default()
                     .to_string(),
-                Some(AgentThreadEntry::AssistantMessage(message)) => message
-                    .chunks
-                    .iter()
-                    .filter_map(|chunk| match chunk {
-                        AssistantMessageChunk::Message { block, .. } => block.text_content(cx),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .concat(),
+                Some(AgentThreadEntry::AssistantMessage(message)) => reply_text(message, cx),
                 Some(AgentThreadEntry::Elicitation(id)) => thread
                     .elicitation(id)
                     .map(|(_, elicitation)| elicitation.request.message.clone())
@@ -1599,6 +1716,20 @@ impl ChatPanel {
                 ChatItem::Receipt { calls, .. } => {
                     summarize_activity(&summary_calls(calls, entries, vault_root.as_deref()), false)
                 }
+                ChatItem::Row { index, .. } => match entries.get(*index) {
+                    Some(AgentThreadEntry::ToolCall(tool_call)) => {
+                        let (verb, _) = row_verb(&tool_call.kind);
+                        let note = tool_call
+                            .locations
+                            .first()
+                            .map(|location| {
+                                vault_relative_label(&location.path, vault_root.as_deref())
+                            })
+                            .unwrap_or_default();
+                        format!("  {verb} {note}").trim_end().to_string()
+                    }
+                    _ => String::new(),
+                },
                 ChatItem::Typing { calls } => {
                     summarize_activity(&summary_calls(calls, entries, vault_root.as_deref()), true)
                 }
@@ -1625,6 +1756,7 @@ impl ChatPanel {
             (ChatItem::Receipt { calls, .. }, ItemKey::Receipt(id)) => {
                 calls.iter().any(|(_, call_id)| call_id == id)
             }
+            (ChatItem::Row { id, .. }, ItemKey::Call(selected_id)) => id == selected_id,
             (item, ItemKey::Entry(selected_index)) => {
                 item.key() == Some(ItemKey::Entry(*selected_index))
             }
@@ -1800,6 +1932,22 @@ impl ChatPanel {
             self.cycle_choice(&question, direction, cx);
             return;
         }
+        // `left` on a row closes its receipt and lands on it.
+        if let Some(ItemKey::Call(call_id)) = self.selected.clone() {
+            if direction < 0 {
+                let items = self.items(cx);
+                let receipt = items.iter().find_map(|item| match item {
+                    ChatItem::Row { receipt, id, .. } if *id == call_id => Some(receipt.clone()),
+                    _ => None,
+                });
+                if let Some(receipt) = receipt {
+                    self.expanded_receipts.remove(&receipt);
+                    self.selected = Some(ItemKey::Receipt(receipt));
+                    cx.notify();
+                }
+            }
+            return;
+        }
         let Some(ItemKey::Receipt(selected_id)) = self.selected.clone() else {
             return;
         };
@@ -1849,15 +1997,27 @@ impl ChatPanel {
         cx.notify();
     }
 
+    /// Answers a question; the answer starts the next turn, so its time is
+    /// kept for the day marks.
     fn answer_question(
         &mut self,
         question: &PendingQuestion,
         choice: Option<usize>,
         cx: &mut Context<Self>,
     ) {
+        let turn_start = self.session.as_ref().and_then(|session| {
+            let thread = session.thread.read(cx);
+            match question {
+                PendingQuestion::Elicitation(id) => thread.elicitation(id).map(|(index, _)| index),
+                PendingQuestion::Ask(id) => thread.tool_call(id).map(|(index, _)| index),
+            }
+        });
         match question {
             PendingQuestion::Elicitation(id) => self.answer_elicitation(id, choice, cx),
             PendingQuestion::Ask(id) => self.answer_ask(id, choice, cx),
+        }
+        if let Some(turn_start) = turn_start {
+            self.turn_times.insert(turn_start, Local::now());
         }
     }
 
@@ -2058,14 +2218,26 @@ impl ChatPanel {
         self.open_selected_entry(window, cx);
     }
 
-    /// Opens the note the selected receipt names: the first note a write
-    /// touched, or failing that the first note the turn touched at all.
-    /// Returns whether there was one.
+    /// Opens the note the selected row or receipt names: a row's note at its
+    /// line, or a receipt's first note a write touched, failing that the
+    /// first note the turn touched at all. Returns whether there was one.
     fn open_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(ItemKey::Receipt(selected_id)) = self.selected.clone() else {
+        let Some(session) = &self.session else {
             return false;
         };
-        let Some(session) = &self.session else {
+        if let Some(ItemKey::Call(call_id)) = self.selected.clone() {
+            let location = session
+                .thread
+                .read(cx)
+                .tool_call(&call_id)
+                .and_then(|(_, tool_call)| tool_call.locations.first().cloned());
+            let Some(location) = location else {
+                return false;
+            };
+            self.open_note(location.path, location.line, window, cx);
+            return true;
+        }
+        let Some(ItemKey::Receipt(selected_id)) = self.selected.clone() else {
             return false;
         };
         let items = self.items(cx);
@@ -2107,29 +2279,50 @@ impl ChatPanel {
         let Some(path) = write_path.or(first_path) else {
             return false;
         };
-        self.open_note(path, window, cx);
+        self.open_note(path, None, window, cx);
         true
     }
 
-    fn open_note(&self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens a note, at `line` (1-based) when there is one. Deferred: the
+    /// workspace may be mid-update when a panel action reaches it.
+    fn open_note(
+        &self,
+        path: PathBuf,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let workspace = self.workspace.clone();
-        window.defer(cx, move |window, cx| {
-            workspace
-                .update(cx, |workspace, cx| {
-                    workspace
-                        .open_abs_path(
-                            path,
-                            OpenOptions {
-                                visible: Some(OpenVisible::All),
-                                ..Default::default()
-                            },
-                            window,
-                            cx,
-                        )
-                        .detach_and_log_err(cx);
-                })
-                .log_err();
-        });
+        cx.spawn_in(window, async move |_, cx| {
+            let item = workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.open_abs_path(
+                        path,
+                        OpenOptions {
+                            visible: Some(OpenVisible::All),
+                            ..Default::default()
+                        },
+                        window,
+                        cx,
+                    )
+                })?
+                .await?;
+            if let (Some(line), Some(editor)) = (line, item.downcast::<Editor>()) {
+                editor.update_in(cx, |editor, window, cx| {
+                    let snapshot = editor.buffer().read(cx).snapshot(cx);
+                    let point =
+                        snapshot.clip_point(Point::new(line.saturating_sub(1), 0), Bias::Left);
+                    editor.change_selections(
+                        SelectionEffects::scroll(Autoscroll::center()).nav_history(true),
+                        window,
+                        cx,
+                        |selections| selections.select_ranges([point..point]),
+                    );
+                })?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     pub fn open_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2255,22 +2448,30 @@ impl ChatPanel {
 
     // --- rendering ---
 
-    fn markdown_style(&self, muted: bool, window: &Window, cx: &App) -> MarkdownStyle {
+    /// Thock's bubbles are set in Petrona (§5.7). Links read as plain prose,
+    /// because the page shows where they point (§5.6).
+    fn thock_markdown_style(&self, window: &Window, cx: &App) -> MarkdownStyle {
         let mut style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
-        // Pin the prose to the same rem scale panel Labels use
-        // (`TextSize::Default`, 14px at the default rem base) — the agent
-        // style's `ui_font_size` is the 16px rem base itself, which reads
-        // oversized beside the rest of the panel chrome. Code steps down to
-        // the Small label size so commands never out-shout the prose.
+        style.base_text_style.font_family = THOCK_FACE.into();
+        style.base_text_style.font_size = rems_from_px(15.).into();
+        style.base_text_style.line_height = relative(1.42);
+        style.inline_code.font_size = Some(rems_from_px(12.5).into());
+        style.code_block.text.font_size = Some(rems_from_px(12.).into());
+        style.link = TextStyleRefinement {
+            color: Some(cx.theme().colors().text),
+            ..Default::default()
+        };
+        style
+    }
+
+    /// Your bubbles are set in the UI face (§5.7).
+    fn you_markdown_style(&self, window: &Window, cx: &App) -> MarkdownStyle {
+        let mut style = MarkdownStyle::themed(MarkdownFont::Agent, window, cx);
         style.base_text_style.font_size = rems_from_px(14.).into();
-        style.base_text_style.line_height = relative(1.55);
+        style.base_text_style.line_height = relative(1.45);
         style.inline_code.font_size = Some(rems_from_px(12.).into());
         style.code_block.text.font_size = Some(rems_from_px(12.).into());
-        if muted {
-            style.with_muted_text(cx)
-        } else {
-            style
-        }
+        style
     }
 
     fn render_item(
@@ -2280,6 +2481,7 @@ impl ChatPanel {
         entries: &[AgentThreadEntry],
         selected: bool,
         vault_root: Option<&Path>,
+        day_marks: &BTreeMap<usize, String>,
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -2295,7 +2497,7 @@ impl ChatPanel {
             },
             ChatItem::Reply(index) => match entries.get(*index) {
                 Some(AgentThreadEntry::AssistantMessage(message)) => {
-                    self.render_assistant_message(message, window, cx)
+                    self.render_reply(*index, message, window, cx)
                 }
                 _ => div().into_any_element(),
             },
@@ -2307,33 +2509,67 @@ impl ChatPanel {
             ChatItem::Receipt { key, calls } => {
                 self.render_receipt(key, calls, entries, vault_root, cx)
             }
+            ChatItem::Row { index, .. } => self.render_row(*index, entries, vault_root, cx),
             ChatItem::Typing { calls } => self.render_typing(calls, entries, vault_root, cx),
         };
+        // Bubbles of one side sit 3px apart, turns 10px (§5.4).
+        let space_above = match item {
+            ChatItem::Row { .. } => px(2.),
+            ChatItem::Receipt { .. } => px(3.),
+            _ => px(10.),
+        };
+        let day_mark = match item {
+            ChatItem::Kickoff(index) | ChatItem::User(index) => day_marks.get(index).cloned(),
+            _ => None,
+        };
         let item_key = item.key();
-        div()
+        v_flex()
             .id(("thock-chat-item", position))
             .w_full()
-            .px_2()
-            .py_1()
-            .rounded_sm()
-            .when(selected, |this| {
-                this.bg(cx.theme().colors().element_selected)
-                    .border_l_1()
-                    .border_color(cx.theme().colors().border_focused)
-            })
+            .pt(space_above)
+            .children(day_mark.map(|label| self.render_day_mark(label, cx)))
+            .child(
+                div()
+                    .w_full()
+                    .pl_1()
+                    .border_l_2()
+                    .border_color(if selected {
+                        cx.theme().colors().border_focused
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .child(body),
+            )
             .when_some(item_key, |this, item_key| {
                 this.on_click(cx.listener(move |this, _, _window, cx| {
                     this.selected = Some(item_key.clone());
                     cx.notify();
                 }))
             })
-            .child(body)
+            .into_any_element()
+    }
+
+    /// `TODAY · 17:42`, centred above a turn (§5.4).
+    fn render_day_mark(&self, label: String, cx: &Context<Self>) -> AnyElement {
+        h_flex()
+            .w_full()
+            .justify_center()
+            .pb_2()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(rems_from_px(11.))
+                    .line_height(rems_from_px(14.))
+                    .font_features(tabular_numerals())
+                    .text_color(cx.theme().colors().text_placeholder)
+                    .child(label),
+            )
             .into_any_element()
     }
 
     /// The marker a ritual's kickoff leaves (decision 7): the prompt went to
     /// the agent unchanged, but it isn't something you typed.
-    fn render_kickoff(&self, _cx: &Context<Self>) -> AnyElement {
+    fn render_kickoff(&self, cx: &Context<Self>) -> AnyElement {
         let title = self
             .session
             .as_ref()
@@ -2343,17 +2579,11 @@ impl ChatPanel {
             .w_full()
             .justify_center()
             .gap_1()
-            .child(
-                Label::new("▸ You started")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(
-                Label::new(title)
-                    .size(LabelSize::Small)
-                    .weight(FontWeight::SEMIBOLD)
-                    .color(Color::Muted),
-            )
+            .text_size(rems_from_px(12.))
+            .line_height(rems_from_px(16.))
+            .text_color(cx.theme().colors().text_muted)
+            .child("▸ You started")
+            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
             .into_any_element()
     }
 
@@ -2364,24 +2594,30 @@ impl ChatPanel {
         calls: &[(usize, acp::ToolCallId)],
         entries: &[AgentThreadEntry],
         vault_root: Option<&Path>,
-        _cx: &Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let summary = summarize_activity(&summary_calls(calls, entries, vault_root), true);
         h_flex()
             .gap_2()
             .items_center()
             .child(SpinnerLabel::new().size(LabelSize::Small))
-            .child(
-                Label::new(summary)
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
+            .child(self.status_line(summary, cx))
             .into_any_element()
     }
 
-    /// G6: the user's message sits in a container the eye can find.
-    /// `element_background` was within noise of the panel in the default
-    /// dark theme, so the bubble uses the selection surface instead.
+    /// One line in Thock's voice but not its weight: the live line, or the
+    /// settled form of a question (`chat.status`).
+    fn status_line(&self, text: impl Into<SharedString>, cx: &Context<Self>) -> Div {
+        div()
+            .font_family(THOCK_FACE)
+            .font_weight(FontWeight::MEDIUM)
+            .italic()
+            .text_size(rems_from_px(12.))
+            .line_height(rems_from_px(17.))
+            .text_color(cx.theme().colors().text_muted)
+            .child(text.into())
+    }
+
     fn render_user_message(
         &self,
         message: &acp_thread::UserMessage,
@@ -2390,7 +2626,7 @@ impl ChatPanel {
     ) -> AnyElement {
         let content: AnyElement = match message.content.markdown() {
             Some(markdown) => {
-                MarkdownElement::new(markdown.clone(), self.markdown_style(false, window, cx))
+                MarkdownElement::new(markdown.clone(), self.you_markdown_style(window, cx))
                     .into_any_element()
             }
             None => Label::new(
@@ -2405,7 +2641,8 @@ impl ChatPanel {
         self.render_you(content, cx)
     }
 
-    /// Your side of the thread: a message you sent, or the chip you picked.
+    /// Your bubble (§5.7): the selection surface, on the right, with the
+    /// corner nearest you tightened.
     fn render_you(&self, content: AnyElement, cx: &Context<Self>) -> AnyElement {
         h_flex()
             .w_full()
@@ -2415,12 +2652,70 @@ impl ChatPanel {
                     .max_w(relative(0.85))
                     .px_3()
                     .py_2()
-                    .rounded_lg()
-                    .rounded_br_sm()
+                    .rounded(px(18.))
+                    .rounded_br(px(7.))
                     .bg(cx.theme().colors().element_selected)
+                    .text_size(rems_from_px(14.))
+                    .line_height(relative(1.45))
                     .child(content),
             )
             .into_any_element()
+    }
+
+    /// Chips for a choice (§5.5): a keycap, then the label. The highlighted
+    /// one is what `enter` picks; `pick` answers with the chip's index.
+    fn render_chips(
+        &self,
+        choices: &[SharedString],
+        chosen: usize,
+        pick: impl Fn(&mut Self, usize, &mut Context<Self>) + Clone + 'static,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let keycaps: Vec<Option<String>> = if choices.len() == 2 {
+            vec![Some("y".to_string()), Some("n".to_string())]
+        } else {
+            (1..=choices.len())
+                .map(|number| (number <= 9).then(|| number.to_string()))
+                .collect()
+        };
+        let mut row = h_flex().flex_wrap().gap_1p5();
+        for (index, label) in choices.iter().enumerate() {
+            let pick = pick.clone();
+            let is_chosen = index == chosen;
+            row = row.child(
+                h_flex()
+                    .id(("thock-chat-chip", index))
+                    .gap_1p5()
+                    .items_center()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(if is_chosen {
+                        cx.theme().colors().border_focused
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .bg(cx.theme().colors().element_selected)
+                    .cursor_pointer()
+                    .children(
+                        keycaps
+                            .get(index)
+                            .cloned()
+                            .flatten()
+                            .map(|key| keycap(key, cx)),
+                    )
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(rems_from_px(12.5))
+                            .line_height(rems_from_px(18.))
+                            .child(label.clone()),
+                    )
+                    .on_click(cx.listener(move |this, _, _window, cx| pick(this, index, cx))),
+            );
+        }
+        row.into_any_element()
     }
 
     /// A question from the `ask` tool (§5.5): the question, then one chip
@@ -2430,76 +2725,86 @@ impl ChatPanel {
         let ToolCallStatus::WaitingForConfirmation { options, .. } = &tool_call.status else {
             return match self.ask_answers.get(&tool_call.id) {
                 Some(answer) => self.render_you(Label::new(answer.clone()).into_any_element(), cx),
-                None => Label::new(question)
-                    .size(LabelSize::Small)
-                    .color(Color::Muted)
-                    .into_any_element(),
+                None => self.status_line(question, cx).into_any_element(),
             };
         };
         let chosen = self.ask_choices.get(&tool_call.id).copied().unwrap_or(0);
-        let mut chips = h_flex().flex_wrap().gap_1();
-        for (option_index, option) in ask_options(options).into_iter().enumerate() {
-            let answer_id = tool_call.id.clone();
-            let is_chosen = option_index == chosen;
-            chips = chips.child(
-                div()
-                    .id(("thock-chat-chip", option_index))
-                    .px_2()
-                    .py_0p5()
-                    .border_1()
-                    .rounded_full()
-                    .border_color(if is_chosen {
-                        cx.theme().colors().border_focused
-                    } else {
-                        cx.theme().colors().border_variant
-                    })
-                    .when(is_chosen, |this| {
-                        this.bg(cx.theme().colors().element_selected)
-                    })
-                    .cursor_pointer()
-                    .child(Label::new(option.name.clone()).size(LabelSize::Small))
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.answer_ask(&answer_id, Some(option_index), cx);
-                    })),
-            );
-        }
+        let choices: Vec<SharedString> = ask_options(options)
+            .into_iter()
+            .map(|option| option.name.clone().into())
+            .collect();
+        let id = tool_call.id.clone();
         v_flex()
             .w_full()
+            .items_start()
             .gap_2()
-            .child(Label::new(question))
-            .child(chips)
-            .child(
-                Label::new("1–9 or ←/→ to choose · Enter to answer")
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            )
+            .child(self.thock_bubble(div().child(question).into_any_element(), cx))
+            .child(self.render_chips(
+                &choices,
+                chosen,
+                move |this, index, cx| this.answer_ask(&id, Some(index), cx),
+                cx,
+            ))
             .into_any_element()
     }
 
-    /// G5: the agent's prose is the largest thing on screen. Thought chunks
-    /// leave no residue (decision 7).
-    fn render_assistant_message(
+    /// One of Thock's bubbles (§5.7): ink at 8% over the page, on the left,
+    /// with the corner nearest Thock tightened.
+    fn thock_bubble(&self, content: AnyElement, cx: &Context<Self>) -> Div {
+        div()
+            .max_w(relative(0.92))
+            .px_3()
+            .py_2()
+            .rounded(px(18.))
+            .rounded_bl(px(7.))
+            .bg(cx.theme().colors().text.opacity(0.08))
+            .font_family(THOCK_FACE)
+            .text_size(rems_from_px(15.))
+            .line_height(relative(1.42))
+            .child(content)
+    }
+
+    /// Thock's reply, one bubble per paragraph (§5.4). Until the bubbles
+    /// are built the whole message is one bubble.
+    fn render_reply(
         &self,
+        index: usize,
         message: &acp_thread::AssistantMessage,
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let mut column = v_flex().w_full().gap_1();
-        for chunk in &message.chunks {
-            if let AssistantMessageChunk::Message { block, .. } = chunk
-                && let Some(markdown) = block.markdown()
-            {
-                column = column.child(MarkdownElement::new(
-                    markdown.clone(),
-                    self.markdown_style(false, window, cx),
-                ));
+        let style = self.thock_markdown_style(window, cx);
+        let mut column = v_flex().w_full().items_start().gap(px(3.));
+        match self.bubbles.get(&index) {
+            Some(bubbles) => {
+                for markdown in &bubbles.paragraphs {
+                    column = column.child(self.thock_bubble(
+                        MarkdownElement::new(markdown.clone(), style.clone()).into_any_element(),
+                        cx,
+                    ));
+                }
+            }
+            None => {
+                for chunk in &message.chunks {
+                    if let AssistantMessageChunk::Message { block, .. } = chunk
+                        && let Some(markdown) = block.markdown()
+                    {
+                        column = column.child(
+                            self.thock_bubble(
+                                MarkdownElement::new(markdown.clone(), style.clone())
+                                    .into_any_element(),
+                                cx,
+                            ),
+                        );
+                    }
+                }
             }
         }
         column.into_any_element()
     }
 
-    /// One quiet line for everything a turn did (V44 decision 5), expanding
-    /// in place to per-call rows and diffs.
+    /// One quiet line for everything a turn did (decision 5), under the
+    /// reply; `.`, `right` or a click opens its rows in place.
     fn render_receipt(
         &self,
         key: &acp::ToolCallId,
@@ -2508,151 +2813,85 @@ impl ChatPanel {
         vault_root: Option<&Path>,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let tool_calls: Vec<&ToolCall> = calls
-            .iter()
-            .filter_map(|(index, _)| match entries.get(*index) {
-                Some(AgentThreadEntry::ToolCall(tool_call)) => Some(tool_call),
-                _ => None,
-            })
-            .collect();
         let summary = summarize_activity(&summary_calls(calls, entries, vault_root), false);
         let expanded = self.expanded_receipts.contains(key);
         let toggle_key = key.clone();
-        let pill = h_flex()
-            .id(SharedString::from(format!("thock-chat-activity-{key}")))
+        h_flex()
+            .id(SharedString::from(format!("thock-chat-receipt-{key}")))
             .gap_1()
-            .px_2()
-            .py_0p5()
-            .border_1()
-            .border_color(cx.theme().colors().border_variant)
-            .rounded_full()
-            .bg(cx.theme().colors().elevated_surface_background)
-            .child(
-                Icon::new(if expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .size(IconSize::XSmall)
-                .color(Color::Muted),
-            )
-            .child(
-                Label::new(summary)
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
+            .cursor_pointer()
+            .text_size(rems_from_px(11.5))
+            .line_height(rems_from_px(16.))
+            .text_color(cx.theme().colors().text_muted)
+            .hover(|this| this.text_color(cx.theme().colors().text))
+            .child(summary)
+            .child(if expanded { "⌄" } else { "›" })
             .on_click(cx.listener(move |this, _, _window, cx| {
                 this.selected = Some(ItemKey::Receipt(toggle_key.clone()));
                 if !this.expanded_receipts.remove(&toggle_key) {
                     this.expanded_receipts.insert(toggle_key.clone());
                 }
                 cx.notify();
-            }));
-        let mut column = v_flex().w_full().gap_1().child(h_flex().child(pill));
-        if expanded {
-            let mut detail = v_flex()
-                .w_full()
-                .ml_2()
-                .pl_2()
-                .border_l_1()
-                .border_color(cx.theme().colors().border_variant)
-                .gap_0p5();
-            for tool_call in &tool_calls {
-                detail = detail.child(self.render_activity_call(tool_call, vault_root, cx));
-            }
-            column = column.child(detail);
-        }
-        column.into_any_element()
+            }))
+            .into_any_element()
     }
 
-    /// One row of the expansion: kind icon, verb, vault-relative path (with
-    /// the diff editor beneath edits). Failed calls render as ordinary rows
-    /// — no error text, no error styling (decision 8); a command shows with
-    /// no output (decision 11).
-    fn render_activity_call(
+    /// One row of an open receipt (decision 14): the verb, amber when it
+    /// changed a note, then the vault-relative path in the mono face.
+    /// Failed calls render as ordinary rows, with no error text or styling.
+    fn render_row(
         &self,
-        tool_call: &ToolCall,
+        index: usize,
+        entries: &[AgentThreadEntry],
         vault_root: Option<&Path>,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let (verb, icon) = call_verb_and_icon(&tool_call.kind);
-        let location = tool_call.locations.first().map(|location| {
-            (
-                location.path.clone(),
-                vault_relative_label(&location.path, vault_root),
-            )
-        });
-        let detail: Option<AnyElement> = match &location {
-            Some((_, label)) => Some(
-                Label::new(label.clone())
-                    .size(LabelSize::Small)
-                    .into_any_element(),
-            ),
+        let Some(AgentThreadEntry::ToolCall(tool_call)) = entries.get(index) else {
+            return div().into_any_element();
+        };
+        let (verb, change) = row_verb(&tool_call.kind);
+        let location = tool_call.locations.first().cloned();
+        let detail: Option<SharedString> = match &location {
+            Some(location) => Some(vault_relative_label(&location.path, vault_root).into()),
             None => {
-                let label_text = tool_call.label.read(cx).source().clone();
-                let matches_tool_name = tool_call
+                let label = tool_call.label.read(cx).source().clone();
+                let is_tool_name = tool_call
                     .tool_name
                     .as_ref()
-                    .is_some_and(|name| name.as_ref() == label_text.as_ref());
-                if !label_text.is_empty() && !matches_tool_name {
-                    // Plain text at row size — a command must not out-shout
-                    // the verbs beside it.
-                    let label = Label::new(label_text)
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .truncate();
-                    let label = if matches!(tool_call.kind, acp::ToolKind::Execute) {
-                        label.buffer_font(cx)
-                    } else {
-                        label
-                    };
-                    Some(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(label)
-                            .into_any_element(),
-                    )
-                } else {
-                    None
-                }
+                    .is_some_and(|name| name.as_ref() == label.as_ref());
+                (!label.is_empty() && !is_tool_name).then_some(label)
             }
         };
-        let open_path = location.as_ref().map(|(path, _)| path.clone());
-        let mut column = v_flex().w_full().gap_1().child(
-            h_flex()
-                .id(SharedString::from(format!(
-                    "thock-chat-call-{}",
-                    tool_call.id
-                )))
-                .w_full()
-                .gap_1()
-                .items_center()
-                .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
-                .child(Label::new(verb).size(LabelSize::Small).color(Color::Muted))
-                .children(detail)
-                .when_some(open_path, |this, path| {
-                    this.cursor_pointer()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_note(path.clone(), window, cx);
-                        }))
-                }),
-        );
-        for diff in tool_call.diffs() {
-            if let Some(editor) = self.diff_editors.get(&diff.entity_id()) {
-                column = column.child(
-                    div()
-                        .w_full()
-                        .border_1()
-                        .border_color(cx.theme().colors().border_variant)
-                        .rounded_sm()
-                        .overflow_hidden()
-                        .child(editor.clone()),
-                );
-            }
-        }
-        column.into_any_element()
+        h_flex()
+            .id(SharedString::from(format!(
+                "thock-chat-row-{}",
+                tool_call.id
+            )))
+            .w_full()
+            .pl_4()
+            .gap_2()
+            .items_baseline()
+            .font_family(".ZedMono")
+            .text_size(rems_from_px(11.))
+            .line_height(rems_from_px(16.))
+            .text_color(cx.theme().colors().text_muted)
+            .child(
+                div()
+                    .w(px(64.))
+                    .flex_shrink_0()
+                    .when(change, |this| {
+                        this.text_color(cx.theme().colors().text_accent)
+                    })
+                    .child(verb),
+            )
+            .children(detail.map(|detail| div().flex_1().min_w_0().truncate().child(detail)))
+            .when_some(location, |this, location| {
+                this.cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_note(location.path.clone(), location.line, window, cx);
+                    }))
+            })
+            .into_any_element()
     }
 
     /// A question from the agent, at full prose weight (decision 9: a
@@ -2667,47 +2906,25 @@ impl ChatPanel {
         };
         let message = elicitation.request.message.clone();
         if !matches!(elicitation.status, ElicitationStatus::Pending { .. }) {
-            return Label::new(message)
-                .size(LabelSize::Small)
-                .color(Color::Muted)
-                .into_any_element();
+            return self.status_line(message, cx).into_any_element();
         }
-        let mut column = v_flex().w_full().gap_2().child(Label::new(message));
+        let mut column = v_flex()
+            .w_full()
+            .items_start()
+            .gap_2()
+            .child(self.thock_bubble(div().child(message).into_any_element(), cx));
         match elicitation_shape(&elicitation.request) {
             ElicitationShape::Choice { options, .. } => {
                 let chosen = self.elicitation_choices.get(id).copied().unwrap_or(0);
-                let mut list = v_flex().w_full().gap_1();
-                for (option_index, (_, title)) in options.iter().enumerate() {
-                    let answer_id = id.clone();
-                    let is_chosen = option_index == chosen;
-                    list = list.child(
-                        div()
-                            .id(("thock-chat-elicit-option", option_index))
-                            .w_full()
-                            .px_2()
-                            .py_1()
-                            .border_1()
-                            .rounded_md()
-                            .border_color(if is_chosen {
-                                cx.theme().colors().border_focused
-                            } else {
-                                cx.theme().colors().border_variant
-                            })
-                            .when(is_chosen, |this| {
-                                this.bg(cx.theme().colors().element_selected)
-                            })
-                            .cursor_pointer()
-                            .child(Label::new(title.clone()))
-                            .on_click(cx.listener(move |this, _, _window, cx| {
-                                this.answer_elicitation(&answer_id, Some(option_index), cx);
-                            })),
-                    );
-                }
-                column = column.child(list).child(
-                    Label::new("←/→ to choose · Enter to answer")
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                );
+                let titles: Vec<SharedString> =
+                    options.into_iter().map(|(_, title)| title.into()).collect();
+                let answer_id = id.clone();
+                column = column.child(self.render_chips(
+                    &titles,
+                    chosen,
+                    move |this, index, cx| this.answer_elicitation(&answer_id, Some(index), cx),
+                    cx,
+                ));
             }
             ElicitationShape::Text { .. } => {
                 if let Some(editor) = self.elicitation_editors.get(id) {
@@ -2774,6 +2991,7 @@ impl ChatPanel {
         let items = self.items(cx);
         let selected_position = self.selected_position(&items);
         let vault_root = self.vault().map(|vault| vault.root.clone());
+        let day_marks = day_marks(&self.turn_times, Local::now().date_naive());
         let header = h_flex()
             .w_full()
             .px_2()
@@ -2814,9 +3032,8 @@ impl ChatPanel {
             .flex_1()
             .min_h_0()
             .w_full()
-            .px_3()
-            .py_3()
-            .gap_3()
+            .px_2()
+            .py_2()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
             .children(items.iter().enumerate().map(|(position, item)| {
@@ -2826,6 +3043,7 @@ impl ChatPanel {
                     entries,
                     selected_position == Some(position),
                     vault_root.as_deref(),
+                    &day_marks,
                     window,
                     cx,
                 )
@@ -2867,51 +3085,32 @@ impl ChatPanel {
         let exhausted = self
             .entitlement()
             .is_some_and(|entitlement| entitlement.is_exhausted());
+        // The composer is a pill with no border (§5.1): the field, and `esc`
+        // as the way back to the page.
         v_flex()
             .w_full()
             .p_2()
             .gap_1()
             .child(
-                div()
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .border_1()
-                    .border_color(cx.theme().colors().border)
-                    .rounded_md()
-                    .bg(cx.theme().colors().editor_background)
-                    .child(self.message_editor.clone()),
-            )
-            .child(
                 h_flex()
                     .w_full()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        Label::new(if exhausted {
-                            "Out of allowance for this cycle"
-                        } else {
-                            "Enter to send · Shift-Enter for a new line"
-                        })
-                        .size(LabelSize::XSmall)
-                        .color(if exhausted {
-                            Color::Error
-                        } else {
-                            Color::Muted
-                        }),
-                    )
-                    .child(
-                        IconButton::new("thock-chat-send", IconName::Send)
-                            .icon_size(IconSize::Small)
-                            .disabled(exhausted)
-                            .tooltip(move |_window, cx| {
-                                Tooltip::for_action("Send", &SendChatMessage, cx)
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.send_message(&SendChatMessage, window, cx)
-                            })),
-                    ),
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .items_end()
+                    .rounded(px(18.))
+                    .bg(cx.theme().colors().surface_background)
+                    .shadow_sm()
+                    .child(div().flex_1().min_w_0().child(self.message_editor.clone()))
+                    .child(div().pb_0p5().child(keycap("esc", cx))),
             )
+            .when(exhausted, |this| {
+                this.child(
+                    Label::new("Out of allowance for this cycle")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Error),
+                )
+            })
             .into_any_element()
     }
 
@@ -3359,6 +3558,7 @@ mod tests {
     use super::*;
     use EntryShape::{Assistant, Hidden, User};
     use acp_thread::StubAgentConnection;
+    use chrono::TimeZone as _;
     use fs::FakeFs;
     use gpui::{TestAppContext, VisualTestContext};
     use serde_json::json;
@@ -3381,9 +3581,52 @@ mod tests {
                 ChatItem::Reply(index) => format!("reply:{index}"),
                 ChatItem::Question(index) => format!("question:{index}"),
                 ChatItem::Receipt { key, calls } => format!("receipt:{key}:{}", calls.len()),
+                ChatItem::Row { index, .. } => format!("row:{index}"),
                 ChatItem::Typing { calls } => format!("typing:{}", calls.len()),
             })
             .collect()
+    }
+
+    #[test]
+    fn a_reply_splits_into_bubbles_at_blank_lines() {
+        assert_eq!(
+            paragraphs("Evening, Diego.\n\nSeven of eleven done.\n"),
+            ["Evening, Diego.", "Seven of eleven done."]
+        );
+        assert_eq!(
+            paragraphs("- one\n- two\n\n\n\nThree"),
+            ["- one\n- two", "Three"]
+        );
+        assert_eq!(
+            paragraphs("Before\n\n```\ncode\n\nmore code\n```\n\nAfter"),
+            ["Before", "```\ncode\n\nmore code\n```", "After"]
+        );
+        assert!(paragraphs("  \n\n").is_empty());
+    }
+
+    #[test]
+    fn day_marks_open_a_day_and_a_pause_longer_than_thirty_minutes() {
+        let at = |day: u32, hour: u32, minute: u32| {
+            Local
+                .with_ymd_and_hms(2026, 10, day, hour, minute, 0)
+                .single()
+                .unwrap()
+        };
+        let times = BTreeMap::from([
+            (0, at(19, 17, 42)),
+            (4, at(19, 17, 50)),
+            (9, at(19, 18, 25)),
+            (12, at(20, 9, 5)),
+        ]);
+        let marks = day_marks(&times, NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        assert_eq!(
+            marks,
+            BTreeMap::from([
+                (0, "TODAY · 17:42".to_string()),
+                (9, "TODAY · 18:25".to_string()),
+                (12, "TUESDAY · 09:05".to_string()),
+            ])
+        );
     }
 
     #[test]
@@ -3526,6 +3769,7 @@ mod tests {
     }
 
     struct Setup {
+        workspace: Entity<Workspace>,
         panel: Entity<ChatPanel>,
         project: Entity<Project>,
         root: PathBuf,
@@ -3533,7 +3777,11 @@ mod tests {
         _vault_dir: tempfile::TempDir,
     }
 
-    /// A vault with the chat docked and no session yet.
+    /// Fourteen numbered lines, so a row can open the note at line 12.
+    const NOTE: &str = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n\
+                        line 9\nline 10\nline 11\nline 12\nline 13\nline 14\n";
+
+    /// A vault with today's note, the chat docked, and no session yet.
     async fn setup(cx: &mut TestAppContext) -> Setup {
         init_test(cx);
         let vault_dir = tempfile::tempdir().unwrap();
@@ -3543,7 +3791,10 @@ mod tests {
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree(
             &root,
-            json!({ ".thock": { "config.toml": "schema = 1\n" }, "daily": {} }),
+            json!({
+                ".thock": { "config.toml": "schema = 1\n" },
+                "daily": { "2026-10-19.md": NOTE },
+            }),
         )
         .await;
         let project = Project::test(fs, [root.as_path()], cx).await;
@@ -3558,12 +3809,80 @@ mod tests {
         });
         cx.run_until_parked();
         Setup {
+            workspace,
             panel,
             project,
             root,
             cx,
             _vault_dir: vault_dir,
         }
+    }
+
+    fn focus_list(setup: &mut Setup) {
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            window.focus(&panel.focus_handle, cx);
+        });
+    }
+
+    fn edit(id: &'static str, path: PathBuf, line: u32) -> acp::SessionUpdate {
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(id, "Edit")
+                .kind(acp::ToolKind::Edit)
+                .status(acp::ToolCallStatus::Completed)
+                .locations(vec![acp::ToolCallLocation::new(path).line(line)]),
+        )
+    }
+
+    #[gpui::test]
+    async fn an_open_receipt_lists_its_rows_and_enter_opens_the_note_at_its_line(
+        cx: &mut TestAppContext,
+    ) {
+        let mut setup = setup(cx).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        let note = setup.root.join("daily/2026-10-19.md");
+        let updates = vec![
+            edit("edit-1", note.clone(), 12),
+            read("read-1", note.clone()),
+            says("Ticked."),
+        ];
+        start_wrap_today(&mut setup, connection, None, updates).await;
+        assert_eq!(
+            visible(&setup),
+            "You started Wrap Today\nTicked.\nUpdated daily/2026-10-19.md"
+        );
+
+        focus_list(&mut setup);
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            panel.select_last(&menu::SelectLast, window, cx);
+        });
+        setup.cx.simulate_keystrokes("right");
+        // Reads before changes (§5.4), whatever order the calls came in.
+        assert_eq!(
+            visible(&setup),
+            "You started Wrap Today\nTicked.\nUpdated daily/2026-10-19.md\n  read \
+             daily/2026-10-19.md\n  changed daily/2026-10-19.md"
+        );
+        setup.cx.simulate_keystrokes("down down left");
+        assert_eq!(
+            visible(&setup),
+            "You started Wrap Today\nTicked.\nUpdated daily/2026-10-19.md",
+            "left on a row closes its receipt"
+        );
+
+        setup.cx.simulate_keystrokes("right down down enter");
+        setup.cx.run_until_parked();
+        let cursor_row = setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, _, cx| {
+                let editor = workspace
+                    .active_item_as::<Editor>(cx)
+                    .expect("the note opened");
+                editor.update(cx, |editor, cx| {
+                    let snapshot = editor.display_snapshot(cx);
+                    editor.selections.newest::<Point>(&snapshot).head().row
+                })
+            });
+        assert_eq!(cursor_row, 11, "the cursor sits on the row's line");
     }
 
     /// Attaches a stub agent session to the panel as a Wrap Today launch.
