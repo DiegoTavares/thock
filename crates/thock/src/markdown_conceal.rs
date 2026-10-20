@@ -1973,7 +1973,7 @@ fn sender_color(own: bool, cx: &App) -> Hsla {
 /// bold and italic, inline code, two link colours, the strikethrough, the
 /// email view's sender/own/muted trio, the hidden slot, and the journal and
 /// task times.
-const HIGHLIGHT_SLOTS: usize = 16;
+pub(crate) const HIGHLIGHT_SLOTS: usize = 16;
 
 /// A later slot's style merges over an earlier one's, so the order below is
 /// priority order: the quote tint sits under everything else a quoted line

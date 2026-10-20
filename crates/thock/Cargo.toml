@@ -48,6 +48,7 @@ project.workspace = true
 schemars.workspace = true
 semver.workspace = true
 serde.workspace = true
+pulldown-cmark.workspace = true
 serde_json.workspace = true
 settings.workspace = true
 sha2.workspace = true
@@ -71,6 +72,7 @@ zed_actions.workspace = true
 zed_credentials_provider.workspace = true
 
 [dev-dependencies]
+acp_thread = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 release_channel.workspace = true

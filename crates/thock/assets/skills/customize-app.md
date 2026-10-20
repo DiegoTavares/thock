@@ -207,7 +207,8 @@ The contexts you'll want:
 | `ThockDayPlannerPanel` | The Desk's Today tab |
 | `ThockDayStrip` | The two-week day strip in the masthead, once focused |
 | `ThockAgentPanel` | The terminal agent panel |
-| `ThockChatPanel`, `ThockChatPanel > Editor` | The Thock Agent chat, and its message box |
+| `ThockChatPanel`, `ThockChatPanel > Editor`, `... && !editing` | The Thock Agent chat (the pebble, a bubble or the thread), its message box, and the chat when no box has focus |
+| `ThockChatPanel && choice`, `... && choice_pair` | The chat while a question's chips wait: `1`–`9` pick a chip; with exactly two, `y`/`n` do |
 | `Editor && ThockMarkdownConceal` | A vault note with concealed Markdown |
 
 Zed's key-context debug view (`dev::OpenKeyContextView`) is **hidden from
@@ -276,9 +277,12 @@ a lane's title to fold it), `SelectNextBacklogColumn` /
 `SelectPreviousBacklogColumn` (`]` / `[`, jump between the Soon and Someday
 titles);
 `thock::ViewSkill`, `CollapseGroup`, `ExpandGroup`;
-`thock::FocusChatInput`, `OpenChatEntry`, `SendChatMessage`,
-`StopChatTurn`, `RetryChatTurn`, `ExpandChatActivity`,
-`CollapseChatActivity`, `NewChat`.
+`thock::FocusChatInput`, `FocusChatThread`, `OpenChatEntry`,
+`SendChatMessage`, `StopChatTurn`, `RetryChatTurn`, `ExpandChatActivity`,
+`CollapseChatActivity`, `ToggleChatActivity`, `NewChat`;
+`["thock::AnswerChatChoice", 0]` picks a question's first chip (the number is
+the chip, counted from zero), bound under `ThockChatPanel && choice` and, for
+`y`/`n`, under `ThockChatPanel && choice_pair`.
 
 For a Zed action outside the `thock` namespace, the reliable way to find its
 name is **zed: open default keymap** in the command bar (`⌘ ⇧ P`) — it lists

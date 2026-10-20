@@ -563,7 +563,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let thock_desk_panel = thock::DeskPanel::load(workspace_handle.clone(), cx.clone());
         let thock_agent_panel =
             thock::AgentPanel::load(workspace_handle.clone(), cx.clone());
-        let thock_chat_panel = thock::ChatPanel::load(workspace_handle.clone(), cx.clone());
         let project_panel = ProjectPanel::load(workspace_handle.clone(), cx.clone());
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
@@ -587,7 +586,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(thock_routines_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(thock_desk_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(thock_agent_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(thock_chat_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),

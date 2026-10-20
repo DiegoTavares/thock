@@ -363,6 +363,24 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   https://claude.ai/artifact/6TKpMJ2dQ1mi5XaScvXido. Spec `specs/v43-almanac.md`. _(shipped
   2026-10-19; the light theme's dim and amber are one shade darker than the phone's so muted text
   and text on amber meet the spec's contrast floors)_
+- [x] **A companion that floats on the page:** the agent chat leaves the right dock and rests as a
+  pebble in the corner of the centre. A turn shows one reply, with everything Thock said or did
+  before it folded into a receipt that opens into rows (`enter` opens a row's note at its line); a
+  ritual's kickoff is a marker, not a bubble you typed, and nothing a runtime prints before your
+  first message renders. Thock speaks in Petrona on the left and you in the UI face on the right.
+  A question floats up from the pebble only after you pause typing, with chips answered by
+  `cmd-alt-n` and one key, after which focus is back in your note; rituals ask through an `ask`
+  tool that pi-acp's extension-UI bridge carries to the chat. `cmd-alt-n` opens the thread beside
+  the page, which makes room for it: the centred margin first, then the note down to 400px, then
+  the Desk, and only then the thread floats. The lines a message links
+  (`[the words](daily/….md#L12)`) and the lines a change touched get a straight amber underline in
+  any open note, dimmed for earlier messages, and are quoted when the note isn't open. Thock's
+  first conversation of its own is the Reflect nudge: it waits for eight quiet seconds, folds after
+  a minute alone, and obeys `thock.openers` (`rare` or `off`). The agent is told to talk to you,
+  not about you, and to work silently between steps. Design reference:
+  https://claude.ai/artifact/4CyjrGC85uLuU4WfGjNsB2. Spec `specs/v44-passing-notes.md`.
+  _(implemented 2026-10-20; the Desk collapsing and returning as the thread opens is checked on the
+  first round of manual tests, with "always collapse while Talking" as the fallback)_
 
 ### Milestone 5: Thock Plus & the hosted agent
 - [x] **Subscription core, billing-agnostic:** a small backend (`thock/services/plus`, Go on Postgres with embedded migrations) with plans as hot-changeable rows (allowance in normalized units, model-tier mapping, per-plan limits, edited through the admin API and live on the next request), its own users/entitlements tables and usage ledger, per-user budget-capped OpenRouter keys minted and disabled through the provisioning API (a fake gateway stands in when no management key is set), and dev entitlements via admin-minted invite codes. The allowance loop runs end to end without Polar: usage syncs from the gateway, 80% warns, zero disables the key, and admin endpoints reset, top up, or revoke any user. Spec `specs/v25-thock-plus-hosted-agent.md`. _(shipped, Stage 1)_

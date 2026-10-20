@@ -283,6 +283,14 @@ impl LaunchRequest {
             tier,
         }
     }
+
+    /// Whether the kickoff is a ritual the app starts for the user, as
+    /// opposed to the first message of a chat they typed themselves.
+    pub fn is_ritual(&self) -> bool {
+        self.kickoff
+            .as_deref()
+            .is_some_and(agent::is_run_skill_kickoff)
+    }
 }
 
 struct AgentSession {

@@ -17,4 +17,34 @@ pub struct ThockSettingsContent {
     ///
     /// Default: "Petrona"
     pub heading_font: Option<String>,
+    /// How often Thock may start a conversation on its own: rarely, or
+    /// never.
+    ///
+    /// Default: "rare"
+    pub openers: Option<OpenerFrequency>,
+}
+
+/// How often Thock may start a conversation on its own (V44 §5.8).
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenerFrequency {
+    /// Only when it has something worth interrupting for, and never twice
+    /// in a row.
+    #[default]
+    Rare,
+    /// Never.
+    Off,
 }

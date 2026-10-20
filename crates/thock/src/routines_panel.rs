@@ -33,6 +33,7 @@ use workspace::notifications::NotificationId;
 use workspace::{OpenOptions, OpenVisible, Toast, Workspace};
 
 use crate::agent_panel::RunSkill;
+use crate::chat_panel::ChatPanel;
 use crate::getting_started;
 use crate::notes::{EnsureNoteOutcome, NoteKind, TimelineEntry, ensure_note};
 use crate::routine_collections::{
@@ -675,6 +676,8 @@ pub struct RoutinesPanel {
     /// A check was requested while one was running; run one more when it
     /// finishes so the latest filesystem state is always observed.
     onboarding_recheck: bool,
+    /// The chat, for the running dot on a ritual's row (V44 §5.13).
+    chat: Option<Entity<ChatPanel>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -708,7 +711,12 @@ impl RoutinesPanel {
         let project = workspace.project().clone();
         let weak_workspace = workspace.weak_handle();
         let workspace_entity = cx.entity();
+        let chat = ChatPanel::in_workspace(workspace);
         cx.new(|cx| {
+            // A ritual's row shows a dot while its session runs (V44 §5.13).
+            let chat_subscription = chat
+                .as_ref()
+                .map(|chat| cx.observe(chat, |_, _, cx| cx.notify()));
             let project_subscription =
                 cx.subscribe_in(&project, window, |this: &mut Self, _, event, window, cx| {
                     if matches!(
@@ -769,11 +777,15 @@ impl RoutinesPanel {
                 position: DockPosition::Left,
                 onboarding_check_running: false,
                 onboarding_recheck: false,
+                chat,
                 _subscriptions: vec![
                     project_subscription,
                     workspace_subscription,
                     connection_subscription,
-                ],
+                ]
+                .into_iter()
+                .chain(chat_subscription)
+                .collect(),
             };
             this.refresh_vault_status(cx);
             // Startup check: a marker written while the app was closed still
@@ -2483,7 +2495,12 @@ impl RoutinesPanel {
             skill: Some(skill.id.clone()),
         };
         let title = self.skill_run_title(&manifest.id, skill);
-        ListItem::new(ElementId::Name(SharedString::from(format!(
+        let running = self.chat.as_ref().is_some_and(|chat| {
+            chat.read(cx)
+                .running_ritual(cx)
+                .is_some_and(|ritual| ritual.as_ref() == title)
+        });
+        let item = ListItem::new(ElementId::Name(SharedString::from(format!(
             "thock-skill-{}-{}",
             manifest.id, skill.id
         ))))
@@ -2500,37 +2517,51 @@ impl RoutinesPanel {
         .child(Label::new(skill.name.clone()).size(LabelSize::Small))
         .when(!skill.summary.is_empty(), |item| {
             item.tooltip(Tooltip::text(skill.summary.clone()))
-        })
-        .end_slot(KeyBinding::for_action_in(&run, &self.focus_handle, cx).size(rems_from_px(10.)))
-        // The row itself runs the ritual, so reading what it will do needs
-        // its own affordance.
-        .end_slot_on_hover(
-            IconButton::new(
-                ElementId::Name(SharedString::from(format!(
-                    "thock-view-skill-{}-{}",
-                    manifest.id, skill.id
-                ))),
-                IconName::FileDoc,
+        });
+        // While the ritual's session runs, the row wears a dot instead of its
+        // key (V44 §5.13).
+        let item = if running {
+            item.end_slot(
+                div()
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(cx.theme().colors().text_accent),
             )
-            .icon_size(IconSize::XSmall)
-            .icon_color(Color::Muted)
-            .tooltip(Tooltip::text("Open these instructions"))
+        } else {
+            item.end_slot(
+                KeyBinding::for_action_in(&run, &self.focus_handle, cx).size(rems_from_px(10.)),
+            )
+        };
+        item
+            // The row itself runs the ritual, so reading what it will do needs
+            // its own affordance.
+            .end_slot_on_hover(
+                IconButton::new(
+                    ElementId::Name(SharedString::from(format!(
+                        "thock-view-skill-{}-{}",
+                        manifest.id, skill.id
+                    ))),
+                    IconName::FileDoc,
+                )
+                .icon_size(IconSize::XSmall)
+                .icon_color(Color::Muted)
+                .tooltip(Tooltip::text("Open these instructions"))
+                .on_click(cx.listener({
+                    let routine_id = manifest.id.clone();
+                    let file = skill.file.clone();
+                    move |this, _, window, cx| {
+                        this.open_routine_file(file.clone(), routine_id.clone(), window, cx);
+                    }
+                })),
+            )
             .on_click(cx.listener({
-                let routine_id = manifest.id.clone();
                 let file = skill.file.clone();
+                let tier = skill.model;
                 move |this, _, window, cx| {
-                    this.open_routine_file(file.clone(), routine_id.clone(), window, cx);
+                    this.run_skill(title.clone(), file.clone(), tier, window, cx);
                 }
-            })),
-        )
-        .on_click(cx.listener({
-            let file = skill.file.clone();
-            let tier = skill.model;
-            move |this, _, window, cx| {
-                this.run_skill(title.clone(), file.clone(), tier, window, cx);
-            }
-        }))
-        .into_any_element()
+            }))
+            .into_any_element()
     }
 
     fn render_entry_row(

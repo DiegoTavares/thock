@@ -35,7 +35,7 @@ const appendTool = defineTool({
 	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 		const { absolute, inside } = resolveInsideVault(ctx.cwd, params.path);
 		if (!inside) {
-			throw new Error(`${params.path} is outside this person's vault. Stay inside the vault folder.`);
+			throw new Error(`${params.path} is outside the vault. Stay inside the vault folder.`);
 		}
 		let existing = "";
 		if (existsSync(absolute)) {
@@ -69,7 +69,7 @@ export default function (pi: ExtensionAPI) {
 		if (target === "") return undefined;
 		const { absolute, inside } = resolveInsideVault(ctx.cwd, target);
 		if (!inside) {
-			return { block: true, reason: `${target} is outside this person's vault. Stay inside the vault folder.` };
+			return { block: true, reason: `${target} is outside the vault. Stay inside the vault folder.` };
 		}
 		if (event.toolName === "write" && existsSync(absolute) && statSync(absolute).isFile() && statSync(absolute).size > 0) {
 			return {

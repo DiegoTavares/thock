@@ -96,7 +96,7 @@ pub async fn inbox_has_entries(fs: &Arc<dyn Fs>, vault_root: &Path) -> bool {
     }
 }
 
-fn nudge_counter_path(vault_root: &Path) -> PathBuf {
+pub(crate) fn nudge_counter_path(vault_root: &Path) -> PathBuf {
     vault_root
         .join(VAULT_MARKER_DIR)
         .join("state")

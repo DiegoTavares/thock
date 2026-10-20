@@ -547,6 +547,8 @@
     "body_font": "IBM Plex Sans",
     // The font family of # and ## headings, or "body" to use the body font.
     "heading_font": "Petrona",
+    // How often Thock may start a conversation on its own: "rare" or "off".
+    "openers": "rare",
   },
   // Titlebar related settings
   "title_bar": {

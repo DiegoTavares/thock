@@ -1094,6 +1094,27 @@
     },
   },
   {
+    "context": "ThockChatPanel && choice",
+    "bindings": {
+      "1": ["thock::AnswerChatChoice", 0],
+      "2": ["thock::AnswerChatChoice", 1],
+      "3": ["thock::AnswerChatChoice", 2],
+      "4": ["thock::AnswerChatChoice", 3],
+      "5": ["thock::AnswerChatChoice", 4],
+      "6": ["thock::AnswerChatChoice", 5],
+      "7": ["thock::AnswerChatChoice", 6],
+      "8": ["thock::AnswerChatChoice", 7],
+      "9": ["thock::AnswerChatChoice", 8],
+    },
+  },
+  {
+    "context": "ThockChatPanel && choice_pair",
+    "bindings": {
+      "y": ["thock::AnswerChatChoice", 0],
+      "n": ["thock::AnswerChatChoice", 1],
+    },
+  },
+  {
     "context": "ThockSyncStatus",
     "bindings": {
       "j": "vim::MenuSelectNext",
