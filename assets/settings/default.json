@@ -541,6 +541,13 @@
   },
   // Whether to allow windows to tab together based on the user’s tabbing preference (macOS only).
   "use_system_window_tabs": false,
+  // Thock: the faces vault notes are set in while their Markdown is concealed.
+  "thock": {
+    // The font family notes are set in, or "buffer" to use your editor font.
+    "body_font": "IBM Plex Sans",
+    // The font family of # and ## headings, or "body" to use the body font.
+    "heading_font": "Petrona",
+  },
   // Titlebar related settings
   "title_bar": {
     // Whether to show the menus in the titlebar.

@@ -50,6 +50,52 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use workspace::{AppState, OpenOptions, OpenVisible, Workspace};
 
+/// The `body_font` value that keeps the editor's own font.
+pub const BODY_FONT_BUFFER: &str = "buffer";
+/// The `heading_font` value that draws headings in the body face.
+pub const HEADING_FONT_BODY: &str = "body";
+
+/// The `thock` block of `settings.json` (V43 §7.1): the faces a vault note
+/// is set in while its Markdown is concealed. A change applies to open notes
+/// right away, like `buffer_font_family`.
+#[derive(Clone, Debug, PartialEq, settings::RegisterSetting)]
+pub struct ThockSettings {
+    /// The family notes are set in, or `BODY_FONT_BUFFER` for the editor's own.
+    pub body_font: String,
+    /// The family `#` and `##` headings are drawn in, or `HEADING_FONT_BODY`.
+    pub heading_font: String,
+}
+
+impl settings::Settings for ThockSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        let thock = content.thock.clone().unwrap_or_default();
+        Self {
+            body_font: thock
+                .body_font
+                .unwrap_or_else(|| "IBM Plex Sans".to_string()),
+            heading_font: thock.heading_font.unwrap_or_else(|| "Petrona".to_string()),
+        }
+    }
+}
+
+impl ThockSettings {
+    /// The family a concealed note's body is set in, or `None` to leave the
+    /// editor's own font through.
+    pub fn body_family(&self) -> Option<gpui::SharedString> {
+        (self.body_font != BODY_FONT_BUFFER).then(|| self.body_font.clone().into())
+    }
+
+    /// The family headings are drawn in: the heading face, or the body
+    /// face when asked for `"body"`, which may itself be the editor's own.
+    pub fn heading_family(&self) -> Option<gpui::SharedString> {
+        if self.heading_font == HEADING_FONT_BODY {
+            self.body_family()
+        } else {
+            Some(self.heading_font.clone().into())
+        }
+    }
+}
+
 pub use agent_panel::AgentPanel;
 pub use backlog_panel::BacklogPanel;
 pub use chat_panel::ChatPanel;

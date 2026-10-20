@@ -584,10 +584,12 @@ impl DeskPanel {
                 )
         };
         h_flex()
+            .flex_none()
             .h(px(28.))
             .px_3()
             .gap_3()
             .items_center()
+            .bg(colors.panel_background)
             .border_t_1()
             .border_color(colors.border)
             .child(hint(&AddBacklogTask, "add"))
@@ -630,10 +632,19 @@ impl Render for DeskPanel {
             .size_full()
             .child(self.render_tabs(cx))
             .children(card.as_ref().map(|card| self.render_card(card, cx)))
-            .child(div().flex_1().min_h_0().child(match self.tab {
-                DeskTab::Backlog | DeskTab::Done => self.backlog.clone().into_any_element(),
-                DeskTab::Today => self.planner.clone().into_any_element(),
-            }))
+            // A flex column with clipping, so the view's `size_full` resolves
+            // against this slot and a long list scrolls inside it instead of
+            // running under the footer.
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(match self.tab {
+                        DeskTab::Backlog | DeskTab::Done => self.backlog.clone().into_any_element(),
+                        DeskTab::Today => self.planner.clone().into_any_element(),
+                    }),
+            )
             .when(self.tab == DeskTab::Backlog, |this| {
                 this.child(self.render_footer(cx))
             })
@@ -703,7 +714,7 @@ mod tests {
     use crate::day_plan::DayPlannerConfig;
     use editor::Editor;
     use fs::{FakeFs, Fs as _};
-    use gpui::{KeyBinding, TestAppContext, VisualTestContext};
+    use gpui::{KeyBinding, TestAppContext, VisualTestContext, px, size};
     use menu::{SelectNext, SelectPrevious};
     use serde_json::json;
     use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
@@ -1058,6 +1069,44 @@ mod tests {
             .desk
             .read_with(&setup.cx, |desk, cx| desk.backlog.read(cx).open_count());
         assert_eq!(open, 5, "the disk change was read");
+    }
+
+    #[gpui::test]
+    async fn adding_a_task_scrolls_the_new_row_into_view(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, true).await;
+        // A Soon lane far taller than the window, so its end starts out of view.
+        let tasks: String = (0..40)
+            .map(|index| format!("- [ ] Task {index}\n"))
+            .collect();
+        setup
+            .fs
+            .save(
+                &setup.root.join("backlog.md"),
+                &BACKLOG
+                    .replace("## Soon\n\n", &format!("## Soon\n\n{tasks}"))
+                    .into(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        setup.cx.run_until_parked();
+        setup
+            .cx
+            .executor()
+            .advance_clock(Duration::from_millis(500));
+        setup.cx.run_until_parked();
+        setup.cx.simulate_resize(size(px(1000.), px(400.)));
+        setup.cx.run_until_parked();
+        setup.cx.simulate_keystrokes("j o");
+        setup.cx.run_until_parked();
+        let (in_view, scrolled) = setup
+            .desk
+            .read_with(&setup.cx, |desk, cx| {
+                desk.backlog.read(cx).new_task_row_in_view_for_tests()
+            })
+            .expect("the new-task editor is open and drawn");
+        assert!(in_view, "the editor row is scrolled into the viewport");
+        assert!(scrolled < px(0.), "the list had to scroll to show it");
     }
 
     #[gpui::test]

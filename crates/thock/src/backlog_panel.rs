@@ -292,6 +292,22 @@ impl BacklogPanel {
             .map(|selection| (selection.section.id(), selection.index))
     }
 
+    /// Whether the new-task editor's row lies inside the list's viewport
+    /// as last drawn, and how far the list is scrolled, for keystroke tests.
+    #[cfg(test)]
+    pub(crate) fn new_task_row_in_view_for_tests(&self) -> Option<(bool, gpui::Pixels)> {
+        let EditTarget::New { section, category } = &self.edit_state.as_ref()?.target else {
+            return None;
+        };
+        let handle = &self.scroll_handles[self.view.index()];
+        let row = handle.bounds_for_item(self.new_task_row_index(*section, category.as_deref()))?;
+        let viewport = handle.bounds();
+        let offset = handle.offset();
+        let in_view =
+            row.top() + offset.y >= viewport.top() && row.bottom() + offset.y <= viewport.bottom();
+        Some((in_view, offset.y))
+    }
+
     pub fn new(
         workspace: &mut Workspace,
         folds: BacklogFolds,
@@ -1142,12 +1158,33 @@ impl BacklogPanel {
             },
         );
         editor.read(cx).focus_handle(cx).focus(window, cx);
+        if let EditTarget::New { section, category } = &target {
+            let row = self.new_task_row_index(*section, category.as_deref());
+            self.scroll_handles[self.view.index()].scroll_to_item(row);
+        }
         self.edit_state = Some(EditState {
             target,
             editor,
             _subscription: subscription,
         });
         cx.notify();
+    }
+
+    /// The flat row the new-task editor renders at: after the last row of
+    /// the group it is adding to, where `render_open_view` places it.
+    fn new_task_row_index(&self, section: SectionKind, category: Option<&str>) -> usize {
+        let offset = self.flat_index(TaskSelection { section, index: 0 });
+        let rows = self.visible_rows(section);
+        let mut group: Option<&str> = None;
+        for (index, row) in rows.iter().enumerate() {
+            if let BacklogRow::Category { name, .. } = row {
+                if group == category {
+                    return offset + index;
+                }
+                group = Some(name);
+            }
+        }
+        offset + rows.len()
     }
 
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {

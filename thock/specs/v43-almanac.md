@@ -161,8 +161,8 @@ One Light don't define them, so they look exactly as they do today.
 
 ### 6.1 Layout
 
-The masthead is a 64px row directly under the platform title bar, across the full window width,
-on `title_bar.background`, with a 1px `border` below. It has three zones:
+The masthead is a 72px row directly under the platform title bar, across the full window width,
+on `title_bar.background`, with a 1px `border` below and 20px side padding. It has three zones:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
@@ -175,12 +175,13 @@ on `title_bar.background`, with a 1px `border` below. It has three zones:
 
 - **Date block:** a 24×24 nav button (`IconName::ChevronLeft`, 1px `border`, radius 5,
   `icon.muted`), the weekday (`masthead.weekday`) above the date line (`masthead.date`), then the
-  forward button. Both buttons are `IconButton`s with tooltips that name their target ("Wed 14",
-  "Fri 16").
-- **Strip:** 14 cells covering the ISO week before the viewed date's week and the viewed week
-  itself. Each cell is 36px wide with 2px between cells and 12px between the two weeks, and holds
-  the initial, the numeral and a 4px dot when a daily note exists for that day. Weekend cells are
-  drawn at 55% opacity.
+  forward button, with 16px between each. Both buttons are `IconButton`s with tooltips that name
+  their target ("Wed 14", "Fri 16").
+- **Strip:** 14 cells covering two ISO weeks: the viewed date's week and the week before it, or
+  the viewed week and the week after when today falls there, so looking at last week never
+  pushes today out of the strip. Each cell is 40px wide with 4px between cells and 20px between
+  the two weeks, and holds the initial, the numeral and a 4px dot when a daily note exists for
+  that day. Weekend cells are drawn at 55% opacity.
 - **Path:** the active item's vault-relative path, with separators shown as ` / `, in
   `masthead.path` and `text.placeholder`. Clicking it reveals the file in the project panel.
 
@@ -247,18 +248,30 @@ contents, with the window title ("Thock") centred and Zed's chrome already hidde
 ### 7.1 Body text
 
 In a vault Markdown editor with conceal on, `MarkdownConcealAddon` sets a
-`TextStyleRefinement` (`Editor::set_text_style_refinement`) with the body family and `tnum`. Two
-new keys in the vault's `[markdown]` table control the faces:
+`TextStyleRefinement` (`Editor::set_text_style_refinement`) with the body family and `tnum`. A
+`thock` block in `settings.json` controls the faces, and a change applies to open notes right
+away, like `buffer_font_family`:
 
-```toml
-[markdown]
-conceal = true
-body_font = "IBM Plex Sans"   # "buffer" uses your editor font
-heading_font = "Petrona"      # "body" draws headings in the body font
+```json
+"thock": {
+  "body_font": "IBM Plex Sans",   // "buffer" uses your editor font
+  "heading_font": "Petrona"       // "body" draws headings in the body font
+}
 ```
+
+`ThockSettings` (`crates/thock/src/thock.rs`) reads the block, the conceal addon re-applies the
+refinement on every settings change, and heading blocks read their face at render time. The
+fonts are a user preference rather than a vault property, so they are not in the vault's
+`config.toml`: a dev who wants notes in mono sets `"body_font": "buffer"` once, for every vault.
 
 With **toggle markdown source** (`cmd-alt-m`) the refinement is dropped, so the source shows in
 Lilex. That makes it obvious you are looking at source.
+
+A column count means nothing in a proportional face: the editor measures the wrap guide in
+spaces and the wrap width in `m`s, so a `bounded` soft wrap puts the guide mid-screen while the
+text wraps at the editor's edge. While the body face is on, the addon overrides soft wrap to
+`editor_width` and hides wrap guides; the source view gets the user's wrap settings back, and so
+does `"body_font": "buffer"`.
 
 Prose is laid out with `soft_wrap: "editor_width"` and centred layout on by default for vault
 workspaces, with padding chosen so that the measure is about 680px at a 1440px window
@@ -269,7 +282,7 @@ one setting.
 **Costs of a proportional buffer, accepted:**
 
 - Fenced code inside a note is also set in Plex Sans, because a highlight can't change the
-  family. Anyone who keeps code in notes can set `body_font = "buffer"`.
+  family. Anyone who keeps code in notes can set `"body_font": "buffer"`.
 - Wrapped lines start at the left edge. The reference's hanging indent under journal times isn't
   possible, because soft wrap doesn't indent continuation lines past the line's own indentation.
 - Column-based vim motions (`|`, block selection) still work by character, not by visual column.
@@ -424,9 +437,9 @@ when vim mode is on). It never hard-codes a key.
 
 - **Order:** (1) theme and fonts, (2) masthead, (3) Desk panel, (4) body font, times and task
   bullets, (5) heading blocks. Each step ships on its own and updates §12 of VISION.md.
-- **Inherited crates touched:** `title_bar` (masthead slot, §6.5), `assets/settings/default.json`
-  (default theme, line numbers), and the keymaps for macOS and Linux (new bindings, and the moved
-  Backlog bindings). The keymap also needs a `ThockDayStrip` and a `ThockDeskPanel` block in
+- **Inherited crates touched:** `title_bar` (masthead slot, §6.5), `settings_content` (the
+  `thock` block, §7.1), `assets/settings/default.json` (default theme, line numbers, fonts), and
+  the keymaps for macOS and Linux (new bindings, and the moved Backlog bindings). The keymap also needs a `ThockDayStrip` and a `ThockDeskPanel` block in
   `assets/keymaps/vim.json`. `editor` is untouched: replace blocks, creases and text-style
   refinement all exist already.
 - **Block height is whole rows.** `BlockProperties::height` counts rows, which is why §7.2 sizes
@@ -469,6 +482,10 @@ when vim mode is on). It never hard-codes a key.
 5. **One Desk panel instead of three panels.** A dock shows one panel at a time, and tabs inside
    one panel are what the reference draws.
 6. **Amber also marks where you are** (§5.2), widening the phone's rule for the desk.
-7. **Fonts live in the vault's `[markdown]` table, not in the theme.** Themes carry colour, and
-   the vault config is where conceal already lives.
+7. **Fonts live in `settings.json`, not in the theme or the vault** (revised 2026-10-19). Themes
+   carry colour. The first cut put them in the vault's `[markdown]` table, but a font is a
+   preference of the person, not of the notes, and a setting applies live while the vault config
+   is read once per open, which made a change look like it did nothing.
 8. **Accepted:** code in notes uses the body face, and wrapped lines have no hanging indent (§7.1).
+9. **The strip keeps today in view** (2026-10-19). Opening a note from last week slides the strip
+   forward to the viewed week and today's, instead of always showing the week before.

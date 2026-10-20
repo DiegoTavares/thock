@@ -17,10 +17,11 @@
 //! rows for an H1, one for an H2 — that give way to the source line while
 //! the cursor is on it.
 
+use crate::ThockSettings;
 use crate::markdown_syntax::{self, SpanKind};
 use crate::markdown_text;
 use crate::thock_theme::on_accent_color;
-use crate::vault::{BODY_FONT_BUFFER, HEADING_FONT_BODY, Vault, VaultStatus};
+use crate::vault::{Vault, VaultStatus};
 use collections::{HashMap, HashSet};
 use editor::actions::GoToDefinition;
 use editor::display_map::{
@@ -34,12 +35,13 @@ use gpui::{
     RetainAllImageCache, SharedString, SharedUri, StrikethroughStyle, Styled as _, Subscription,
     Task, TaskExt as _, TextStyleRefinement, WeakEntity, Window, div, img, px,
 };
+use language::language_settings;
 use multi_buffer::{
     Anchor, MultiBufferOffset, MultiBufferPoint, MultiBufferRow, MultiBufferSnapshot,
     ToOffset as _, ToPoint as _,
 };
 use project::{Project, ProjectPath};
-use settings::SettingsStore;
+use settings::{Settings as _, SettingsStore};
 use std::any::TypeId;
 use std::borrow::Cow;
 use std::ops::Range;
@@ -117,11 +119,6 @@ pub struct ConcealSettings {
     /// The vault's images folder, which a bare `images/x.png` resolves
     /// against the root rather than the note (V39 §4.3).
     pub images_dir: String,
-    /// The face a concealed note is set in, or `"buffer"` for the editor's
-    /// own font (V43 §7.1).
-    pub body_font: String,
-    /// The face of `#` and `##` headings, or `"body"` (V43 §7.2).
-    pub heading_font: String,
 }
 
 /// One `#` or `##` line drawn as a block (V43 §7.2): the line it stands on,
@@ -161,8 +158,6 @@ pub struct MarkdownConcealAddon {
     email_enabled: bool,
     account: Option<String>,
     images_dir: String,
-    body_font: String,
-    heading_font: String,
     spans: Vec<AnchorSpan>,
     email: Option<EmailAnchors>,
     images: Vec<ImageEntry>,
@@ -273,8 +268,6 @@ fn vault_markdown_settings(editor: &Editor, cx: &App) -> Option<ConcealSettings>
                 email_view,
                 account,
                 images_dir: vault.config.images.dir,
-                body_font: vault.config.markdown.body_font,
-                heading_font: vault.config.markdown.heading_font,
             })
         }
         _ => None,
@@ -318,9 +311,13 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         apply_heading_blocks(editor, cx);
     }));
     // Highlight styles capture theme colours, so a theme change needs a
-    // re-apply to pick up the new palette.
-    subscriptions
-        .push(cx.observe_global::<SettingsStore>(|editor, cx| apply_highlights(editor, cx)));
+    // re-apply to pick up the new palette; the body face is a setting too.
+    // Heading blocks read their face at render time, so they follow on
+    // their own.
+    subscriptions.push(cx.observe_global::<SettingsStore>(|editor, cx| {
+        apply_highlights(editor, cx);
+        apply_body_font(editor, cx);
+    }));
 
     let editor_handle = cx.weak_entity();
     subscriptions.push(
@@ -371,8 +368,6 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         email_enabled: settings.email_view,
         account: settings.account,
         images_dir: settings.images_dir,
-        body_font: settings.body_font,
-        heading_font: settings.heading_font,
         spans: Vec::new(),
         email: None,
         images: Vec::new(),
@@ -385,46 +380,43 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         reparse: Task::ready(()),
         _subscriptions: subscriptions,
     });
-    apply_body_font(editor);
+    apply_body_font(editor, cx);
     schedule_reparse(editor, cx);
 }
 
-/// Sets the note in the vault's body face with lining numerals while
+/// Sets the note in the body face from settings with lining numerals while
 /// concealed, and lets the editor's own font through otherwise, so showing
-/// the source is unmistakable (V43 §7.1).
-fn apply_body_font(editor: &mut Editor) {
-    let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
-        return;
-    };
-    let refinement = if addon.enabled && addon.body_font != BODY_FONT_BUFFER {
-        TextStyleRefinement {
-            font_family: Some(SharedString::from(addon.body_font.clone())),
-            font_features: Some(FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))),
-            ..Default::default()
-        }
-    } else {
-        TextStyleRefinement::default()
+/// the source is unmistakable (V43 §7.1). A column count means nothing in a
+/// proportional face: the wrap guide is measured in spaces and the wrap
+/// itself in `m`s, so they land in different places. While the body face is
+/// on, the note wraps at the editor width and shows no guide; the source
+/// view gets the user's wrap settings back.
+fn apply_body_font(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let (refinement, soft_wrap, show_wrap_guides) = match body_font(editor, cx) {
+        Some(family) => (
+            TextStyleRefinement {
+                font_family: Some(family),
+                font_features: Some(FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))),
+                ..Default::default()
+            },
+            Some(language_settings::SoftWrap::EditorWidth),
+            Some(false),
+        ),
+        None => (TextStyleRefinement::default(), None, None),
     };
     editor.set_text_style_refinement(refinement);
+    editor.set_soft_wrap_mode_override(soft_wrap, cx);
+    editor.set_show_wrap_guides_override(show_wrap_guides, cx);
 }
 
-/// The family the note's body is set in right now: the vault's face while
+/// The family the note's body is set in right now: the settings' face while
 /// concealed, otherwise `None` for the editor's own.
-fn body_font(editor: &Editor) -> Option<String> {
+fn body_font(editor: &Editor, cx: &App) -> Option<SharedString> {
     let addon = editor.addon::<MarkdownConcealAddon>()?;
-    (addon.enabled && addon.body_font != BODY_FONT_BUFFER).then(|| addon.body_font.clone())
-}
-
-/// The family the heading blocks are set in: the vault's heading face, or
-/// the body face when the vault asks for `"body"` — `None` leaves the
-/// editor's own font through.
-fn heading_font(editor: &Editor) -> Option<SharedString> {
-    let addon = editor.addon::<MarkdownConcealAddon>()?;
-    if addon.heading_font == HEADING_FONT_BODY {
-        body_font(editor).map(SharedString::from)
-    } else {
-        Some(SharedString::from(addon.heading_font.clone()))
-    }
+    addon
+        .enabled
+        .then(|| ThockSettings::get_global(cx).body_family())
+        .flatten()
 }
 
 /// Makes `[[wikilinks]]` act like code references: go-to-definition with the
@@ -553,7 +545,7 @@ fn toggle(editor: &mut Editor, cx: &mut Context<Editor>) {
         return;
     };
     addon.enabled = !addon.enabled;
-    apply_body_font(editor);
+    apply_body_font(editor, cx);
     apply_highlights(editor, cx);
     apply_folds(editor, cx);
     apply_image_blocks(editor, cx);
@@ -892,7 +884,6 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
         return;
     };
     let enabled = addon.enabled;
-    let family = heading_font(editor);
     let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
     let display_snapshot = editor.display_map.update(cx, |map, cx| map.snapshot(cx));
     let still_held = |id: Option<CustomBlockId>| {
@@ -930,7 +921,7 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
             (None, true) => to_insert.push((
                 index,
                 HeadingBlock::Replace,
-                heading_block(entry, family.clone(), project.clone(), workspace.clone()),
+                heading_block(entry, project.clone(), workspace.clone()),
             )),
             _ => {}
         }
@@ -1002,7 +993,6 @@ fn heading_rows(level: u8) -> u32 {
 
 fn heading_block(
     entry: &HeadingEntry,
-    family: Option<SharedString>,
     project: Option<Entity<Project>>,
     workspace: Option<WeakEntity<Workspace>>,
 ) -> BlockProperties<Anchor> {
@@ -1014,14 +1004,7 @@ fn heading_block(
         style: BlockStyle::Flex,
         priority: 0,
         render: Arc::new(move |block| {
-            render_heading_block(
-                &text,
-                level,
-                family.clone(),
-                project.as_ref(),
-                workspace.as_ref(),
-                block,
-            )
+            render_heading_block(&text, level, project.as_ref(), workspace.as_ref(), block)
         }),
     }
 }
@@ -1040,13 +1023,13 @@ fn spacer_block(line: Anchor) -> BlockProperties<Anchor> {
 /// Draws a heading in the heading face at its level's size (§4.2), aligned
 /// with the body text and coloured, weighted and slanted by the theme's
 /// `title.hN` style — SemiBold for an H1 and Medium Italic for an H2 when
-/// the theme says nothing. The text goes through `markdown_text`, so a
-/// link, `**strong**` or `` `code` `` inside a heading looks the same as in
-/// a pane row.
+/// the theme says nothing. The face is read from settings here rather than
+/// captured, so a settings change shows without rebuilding the blocks. The
+/// text goes through `markdown_text`, so a link, `**strong**` or `` `code` ``
+/// inside a heading looks the same as in a pane row.
 fn render_heading_block(
     text: &str,
     level: u8,
-    family: Option<SharedString>,
     project: Option<&Entity<Project>>,
     workspace: Option<&WeakEntity<Workspace>>,
     block: &mut BlockContext,
@@ -1062,6 +1045,7 @@ fn render_heading_block(
         (1.3, FontWeight::MEDIUM, true)
     };
     let app: &mut App = block.app;
+    let family = ThockSettings::get_global(app).heading_family();
     let style = heading_style(level, app);
     let italic = match style.font_style {
         Some(font_style) => font_style == FontStyle::Italic,
@@ -2157,10 +2141,12 @@ fn apply_highlights(editor: &mut Editor, cx: &mut Context<Editor>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{BODY_FONT_BUFFER, HEADING_FONT_BODY};
     use editor::DisplayPoint;
     use editor::display_map::DisplayRow;
     use editor::test::editor_test_context::EditorTestContext;
     use fs::FakeFs;
+    use gpui::BorrowAppContext as _;
     use gpui::{
         Entity, Modifiers, MouseButton, TestAppContext, VisualContext as _, VisualTestContext,
     };
@@ -2210,8 +2196,6 @@ mod tests {
             email_view: true,
             account: Some("diego.exodo@gmail.com".to_string()),
             images_dir: "images".to_string(),
-            body_font: "IBM Plex Sans".to_string(),
-            heading_font: "Petrona".to_string(),
         }
     }
 
@@ -2439,31 +2423,118 @@ mod tests {
     #[gpui::test]
     async fn the_body_face_applies_while_concealed(cx: &mut TestAppContext) {
         let (editor, mut cx) = setup(cx, NOTE).await;
-        assert_eq!(
-            editor.read_with(&cx, |editor, _| body_font(editor)),
-            Some("IBM Plex Sans".to_string())
-        );
+        let body_family = |cx: &mut VisualTestContext| {
+            editor.read_with(cx, |editor, cx| {
+                let applied = editor
+                    .text_style_refinement()
+                    .and_then(|refinement| refinement.font_family.clone());
+                assert_eq!(
+                    applied,
+                    body_font(editor, cx),
+                    "the refinement on the editor matches the face in effect"
+                );
+                applied
+            })
+        };
+        assert_eq!(body_family(&mut cx), Some("IBM Plex Sans".into()));
         editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
         assert_eq!(
-            editor.read_with(&cx, |editor, _| body_font(editor)),
+            body_family(&mut cx),
             None,
             "the source shows in the editor's own font"
         );
         editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(body_family(&mut cx), Some("IBM Plex Sans".into()));
+
+        let set_body_font = |cx: &mut VisualTestContext, family: &str| {
+            let family = family.to_string();
+            cx.update(|_, cx| {
+                cx.update_global::<SettingsStore, _>(|store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.thock.get_or_insert_default().body_font = Some(family);
+                    });
+                });
+            });
+            cx.run_until_parked();
+        };
+        set_body_font(&mut cx, BODY_FONT_BUFFER);
         assert_eq!(
-            editor.read_with(&cx, |editor, _| body_font(editor)),
-            Some("IBM Plex Sans".to_string())
+            body_family(&mut cx),
+            None,
+            "\"buffer\" keeps the editor's font, applied live from settings"
         );
-        editor.update_in(&mut cx, |editor, _, _| {
-            if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
-                addon.body_font = BODY_FONT_BUFFER.to_string();
-            }
-            apply_body_font(editor);
+        set_body_font(&mut cx, "Lilex");
+        assert_eq!(body_family(&mut cx), Some("Lilex".into()));
+        assert_eq!(
+            cx.update(|_, cx| ThockSettings::get_global(cx).heading_family()),
+            Some("Petrona".into()),
+            "the heading face is independent of the body face"
+        );
+        cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.thock.get_or_insert_default().heading_font =
+                        Some(HEADING_FONT_BODY.to_string());
+                });
+            });
         });
         assert_eq!(
-            editor.read_with(&cx, |editor, _| body_font(editor)),
-            None,
-            "\"buffer\" keeps the editor's font"
+            cx.update(|_, cx| ThockSettings::get_global(cx).heading_family()),
+            Some("Lilex".into()),
+            "\"body\" follows the body face"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_proportional_face_wraps_at_the_editor_width_without_a_guide(
+        cx: &mut TestAppContext,
+    ) {
+        let (editor, mut cx) = setup(cx, NOTE).await;
+        cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    let defaults = &mut settings.project.all_languages.defaults;
+                    defaults.soft_wrap = Some(language_settings::SoftWrap::Bounded);
+                    defaults.preferred_line_length = Some(100);
+                    defaults.show_wrap_guides = Some(true);
+                });
+            });
+        });
+        cx.run_until_parked();
+        let wrapping = |cx: &mut VisualTestContext| {
+            editor.read_with(cx, |editor, cx| {
+                (
+                    format!("{:?}", editor.soft_wrap_mode(cx)),
+                    editor.wrap_guides(cx).to_vec(),
+                )
+            })
+        };
+        assert_eq!(
+            wrapping(&mut cx),
+            ("EditorWidth".to_string(), vec![]),
+            "the bounded setting and its guide are set aside while the body face is on"
+        );
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(
+            wrapping(&mut cx),
+            ("Bounded(100)".to_string(), vec![(100, true)]),
+            "the source view wraps the way the user asked"
+        );
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(wrapping(&mut cx), ("EditorWidth".to_string(), vec![]));
+        cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.thock.get_or_insert_default().body_font =
+                        Some(BODY_FONT_BUFFER.to_string());
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            wrapping(&mut cx),
+            ("Bounded(100)".to_string(), vec![(100, true)]),
+            "the editor's own mono font keeps column wrapping"
         );
     }
 

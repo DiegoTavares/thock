@@ -49,6 +49,7 @@ actions!(
 const ONE_WEEK_BELOW: f32 = 1000.;
 const NO_STRIP_BELOW: f32 = 760.;
 const CELLS: usize = 14;
+const MASTHEAD_HEIGHT: f32 = 72.;
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
@@ -147,8 +148,7 @@ pub fn model(
     notes: &BTreeSet<NaiveDate>,
 ) -> MastheadModel {
     let viewed = viewed.unwrap_or(Viewed::Day(today));
-    let week_start = monday_of(viewed.anchor());
-    let strip_start = week_start - Days::new(7);
+    let strip_start = strip_start(viewed.anchor(), today);
     let tomorrow = today + Days::new(1);
     let cells = (0..CELLS as u64)
         .map(|offset| {
@@ -216,6 +216,34 @@ pub fn model(
         date_line,
         viewed,
         cells,
+    }
+}
+
+impl MastheadModel {
+    /// The seven cells of the viewed week, for windows too narrow to show
+    /// both weeks (§6.4).
+    pub fn viewed_week(&self) -> &[Cell] {
+        let week = self
+            .cells
+            .iter()
+            .position(|cell| cell.date == monday_of(self.viewed.anchor()))
+            .unwrap_or(0);
+        self.cells
+            .get(week..week + CELLS / 2)
+            .unwrap_or(&self.cells)
+    }
+}
+
+/// The Monday the strip opens on. The strip shows the viewed week and the
+/// week before it, unless today falls in the week after, in which case it
+/// shows the viewed week and today's, so clicking into last week never
+/// pushes today out of view.
+fn strip_start(viewed: NaiveDate, today: NaiveDate) -> NaiveDate {
+    let week_start = monday_of(viewed);
+    if monday_of(today) == week_start + Days::new(7) {
+        week_start
+    } else {
+        week_start - Days::new(7)
     }
 }
 
@@ -650,8 +678,8 @@ impl Masthead {
         let previous = previous_note(anchor, &self.notes);
         let next = Some(next_day(anchor, self.today(), &self.notes));
         h_flex()
-            .min_w(px(260.))
-            .gap_3()
+            .min_w(px(280.))
+            .gap_4()
             .items_center()
             .child(self.render_nav_button(
                 "thock-masthead-previous",
@@ -662,7 +690,7 @@ impl Masthead {
             ))
             .child(
                 v_flex()
-                    .gap_0p5()
+                    .gap_1()
                     .child(
                         div()
                             .font_family("Petrona")
@@ -677,6 +705,7 @@ impl Masthead {
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_size(rems(0.6875))
+                            .line_height(rems(0.875))
                             .text_color(colors.text_muted)
                             .font_features(tabular_numerals())
                             .child(SharedString::from(model.date_line.clone())),
@@ -715,10 +744,10 @@ impl Masthead {
         };
         let mut element = v_flex()
             .id(SharedString::from(format!("thock-strip-{date}")))
-            .w(px(36.))
-            .py_1()
+            .w(px(40.))
+            .py(px(6.))
             .items_center()
-            .gap_0p5()
+            .gap_1()
             .rounded(px(6.))
             .when(cell.weekend() && !cell.today, |this| this.opacity(0.55))
             .when(cell.today, |this| this.bg(colors.text_accent))
@@ -732,6 +761,7 @@ impl Masthead {
             .child(
                 div()
                     .text_size(rems(0.625))
+                    .line_height(rems(0.75))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(if cell.today {
                         on_accent
@@ -743,6 +773,7 @@ impl Masthead {
             .child(
                 div()
                     .text_size(rems(0.9375))
+                    .line_height(rems(1.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .font_features(tabular_numerals())
                     .text_color(numeral_color)
@@ -777,19 +808,22 @@ impl Masthead {
         }
         let strip_focused = self.focus_handle.is_focused(window);
         let cells: &[Cell] = if width < px(ONE_WEEK_BELOW) {
-            &model.cells[CELLS / 2..]
+            model.viewed_week()
         } else {
             &model.cells
         };
-        let mut strip = h_flex().flex_1().justify_center().items_center();
-        for week in cells.chunks(CELLS / 2) {
-            strip = strip.child(h_flex().gap(px(2.)).children(week.iter().map(|cell| {
-                let focused = strip_focused && self.strip_cursor == Some(cell.date);
-                self.render_cell(*cell, focused, cx)
-            })));
-            strip = strip.child(div().w(px(12.)));
-        }
-        strip.into_any_element()
+        h_flex()
+            .flex_1()
+            .justify_center()
+            .items_center()
+            .gap(px(20.))
+            .children(cells.chunks(CELLS / 2).map(|week| {
+                h_flex().gap(px(4.)).children(week.iter().map(|cell| {
+                    let focused = strip_focused && self.strip_cursor == Some(cell.date);
+                    self.render_cell(*cell, focused, cx)
+                }))
+            }))
+            .into_any_element()
     }
 
     fn render_path(&self, cx: &Context<Self>) -> AnyElement {
@@ -853,9 +887,9 @@ impl Render for Masthead {
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::cancel))
             .w_full()
-            .h(px(64.))
-            .px_3()
-            .gap_4()
+            .h(px(MASTHEAD_HEIGHT))
+            .px_5()
+            .gap_6()
             .items_center()
             .bg(colors.title_bar_background)
             .border_b_1()
@@ -928,6 +962,40 @@ mod tests {
         let today_cell = model.cells.iter().find(|cell| cell.today).unwrap();
         assert_eq!(today_cell.date, today());
         assert!(today_cell.enabled);
+    }
+
+    #[test]
+    fn the_strip_keeps_today_in_view_when_looking_at_last_week() {
+        let monday = date(2026, 10, 19);
+        let sunday_before = model(Some(Viewed::Day(date(2026, 10, 18))), monday, &notes(&[]));
+        assert_eq!(
+            sunday_before.cells[0].date,
+            date(2026, 10, 12),
+            "the strip slides forward to the viewed week and today's"
+        );
+        assert_eq!(sunday_before.cells[13].date, date(2026, 10, 25));
+        assert!(sunday_before.cells.iter().any(|cell| cell.today));
+        assert!(sunday_before.cells.iter().any(|cell| cell.viewed));
+        assert_eq!(
+            sunday_before.viewed_week()[0].date,
+            date(2026, 10, 12),
+            "a narrow window shows the viewed week, not today's"
+        );
+
+        let same_week = model(Some(Viewed::Day(monday)), monday, &notes(&[]));
+        assert_eq!(same_week.cells[0].date, date(2026, 10, 12));
+        assert_eq!(same_week.viewed_week()[0].date, monday);
+
+        let last_week = model(Some(Viewed::Week(date(2026, 10, 12))), monday, &notes(&[]));
+        assert_eq!(last_week.cells[0].date, date(2026, 10, 12));
+        assert!(last_week.cells.iter().any(|cell| cell.today));
+
+        let two_weeks_back = model(Some(Viewed::Day(date(2026, 10, 11))), monday, &notes(&[]));
+        assert_eq!(two_weeks_back.cells[0].date, date(2026, 9, 28));
+        assert!(
+            !two_weeks_back.cells.iter().any(|cell| cell.today),
+            "today can't fit, so the week before the viewed one shows"
+        );
     }
 
     #[test]
