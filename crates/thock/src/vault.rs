@@ -475,9 +475,10 @@ impl Default for ImagesConfig {
 
 impl MarkdownConfigContent {
     fn resolve(self) -> MarkdownConfig {
+        let defaults = MarkdownConfig::default();
         MarkdownConfig {
-            conceal: self.conceal.unwrap_or(true),
-            email_view: self.email_view.unwrap_or(true),
+            conceal: self.conceal.unwrap_or(defaults.conceal),
+            email_view: self.email_view.unwrap_or(defaults.email_view),
         }
     }
 
@@ -487,8 +488,10 @@ impl MarkdownConfigContent {
 }
 
 /// The `[markdown]` table: whether Markdown markup in vault notes is hidden
-/// while the cursor is off the line (spec V10 §9), and whether synced email
-/// notes render with the email view (spec V16 §4). Both default to on.
+/// while the cursor is off the line (spec V10 §9) and whether synced email
+/// notes render with the email view (spec V16 §4). The faces a concealed
+/// note is set in are a user preference, so they live in `settings.json`
+/// (`crate::ThockSettings`), not here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarkdownConfig {
     pub conceal: bool,
@@ -960,10 +963,21 @@ impl Vault {
     /// filename format, so formats containing `/` (nested folders per year or
     /// month) are recognized too.
     pub fn daily_note_date(&self, path: &Path) -> Option<chrono::NaiveDate> {
-        let daily_dir = self.root.join(&self.config.daily.dir);
-        let relative = path.strip_prefix(&daily_dir).ok()?.to_str()?;
+        self.note_date(NoteKind::Daily, path)
+    }
+
+    /// The Monday of the week of the weekly note at `path`, or `None` when
+    /// `path` isn't a weekly note of this vault.
+    pub fn weekly_note_week(&self, path: &Path) -> Option<chrono::NaiveDate> {
+        self.note_date(NoteKind::Weekly, path)
+    }
+
+    fn note_date(&self, kind: NoteKind, path: &Path) -> Option<chrono::NaiveDate> {
+        let config = self.notes_config(kind);
+        let notes_dir = self.root.join(&config.dir);
+        let relative = path.strip_prefix(&notes_dir).ok()?.to_str()?;
         let stem = relative.strip_suffix(".md")?;
-        crate::notes::parse_date(stem, &self.config.daily.filename)
+        crate::notes::parse_date(stem, &config.filename)
     }
 }
 
@@ -1375,8 +1389,9 @@ mod tests {
             other => panic!("expected valid vault, got {other:?}"),
         }
         // An absent section means the defaults: concealed, email view on.
-        assert!(VaultConfig::default().markdown.conceal);
-        assert!(VaultConfig::default().markdown.email_view);
+        let defaults = VaultConfig::default().markdown;
+        assert!(defaults.conceal);
+        assert!(defaults.email_view);
     }
 
     #[test]
@@ -1759,6 +1774,19 @@ mod tests {
             vault.daily_note_date(&vault.note_path(NoteKind::Weekly, date)),
             None
         );
+        assert_eq!(
+            vault.weekly_note_week(&vault.note_path(NoteKind::Weekly, date)),
+            NaiveDate::from_ymd_opt(2026, 7, 20),
+            "a Monday's weekly note resolves to that Monday"
+        );
+        assert_eq!(
+            vault.weekly_note_week(&vault.note_path(
+                NoteKind::Weekly,
+                NaiveDate::from_ymd_opt(2026, 7, 23).unwrap()
+            )),
+            NaiveDate::from_ymd_opt(2026, 7, 20)
+        );
+        assert_eq!(vault.weekly_note_week(&path), None);
         assert_eq!(
             vault.daily_note_date(&dir.path().join("2026-07-20.md")),
             None

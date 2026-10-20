@@ -62,7 +62,7 @@ A task marked done here is no longer "unfinished," so it drops out of the step 6
 
 ## 6. Offer unfinished tasks to the backlog
 
-The vault keeps a holding pen — the configured backlog file, `backlog.md` by default — with the sections `## Soon`, `## Someday`, and `## Completed` (the Backlog panel in the bottom dock renders it). Unfinished tasks shouldn't die in today's note:
+The vault keeps a holding pen — the configured backlog file, `backlog.md` by default — with the sections `## Soon`, `## Someday`, and `## Completed` (the Desk panel's Backlog tab in the right dock renders it). Unfinished tasks shouldn't die in today's note:
 
 1. List the unfinished (`- [ ]`) tasks you found in the note.
 2. Ask the user **one** question: move **all** of them to the backlog, **none** (they stay only in the note), or **some** (the user picks which)? The default destination is **Soon**; the user can say "someday" for any task. If there are no unfinished tasks, skip this step silently.

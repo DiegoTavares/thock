@@ -6,10 +6,11 @@
   // - "system": Use the theme that corresponds to the system's appearance
   // - "light": Use the theme indicated by the "light" field
   // - "dark": Use the theme indicated by the "dark" field
+  // Thock: the desk's own palette (V43); One Dark and One Light stay in the picker.
   "theme": {
     "mode": "system",
-    "light": "One Light",
-    "dark": "One Dark",
+    "light": "Thock Light",
+    "dark": "Thock Dark",
   },
   "icon_theme": "Thock (Default)",
   // The name of a base set of key bindings to use.
@@ -540,6 +541,13 @@
   },
   // Whether to allow windows to tab together based on the user’s tabbing preference (macOS only).
   "use_system_window_tabs": false,
+  // Thock: the faces vault notes are set in while their Markdown is concealed.
+  "thock": {
+    // The font family notes are set in, or "buffer" to use your editor font.
+    "body_font": "IBM Plex Sans",
+    // The font family of # and ## headings, or "body" to use the body font.
+    "heading_font": "Petrona",
+  },
   // Titlebar related settings
   "title_bar": {
     // Whether to show the menus in the titlebar.
@@ -648,7 +656,8 @@
   "double_click_in_multibuffer": "select",
   "gutter": {
     // Whether to show line numbers in the gutter.
-    "line_numbers": true,
+    // Thock: notes are prose, not code (V43 §7.1); turn them back on here.
+    "line_numbers": false,
     // Whether to show runnables buttons in the gutter.
     // Thock: no code running in a vault (V12 de-Zed-ification).
     "runnables": false,

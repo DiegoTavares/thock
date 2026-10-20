@@ -221,6 +221,7 @@ impl VsCodeSettings {
             telemetry: self.telemetry_settings_content(),
             terminal: self.terminal_settings_content(),
             theme: Box::new(self.theme_settings_content()),
+            thock: None,
             title_bar: None,
             vim: None,
             vim_mode: None,

@@ -202,8 +202,10 @@ The contexts you'll want:
 | `Editor && mode == full` | A note being written, and not the little inputs |
 | `Editor && vim_mode == normal` | Vim normal mode in a note (also `insert`, `visual`) |
 | `ThockRoutinesPanel` | The Routines rail (`⌘ 2`) |
-| `ThockBacklogPanel`, `... && !editing` | The Backlog; `!editing` excludes rows being typed into |
-| `ThockDayPlannerPanel` | The Day Planner rail |
+| `ThockDeskPanel`, `... && !editing` | The Desk panel in the right dock, whichever tab is showing |
+| `ThockBacklogPanel`, `... && !editing` | The Desk's Backlog and Done tabs; `!editing` excludes rows being typed into |
+| `ThockDayPlannerPanel` | The Desk's Today tab |
+| `ThockDayStrip` | The two-week day strip in the masthead, once focused |
 | `ThockAgentPanel` | The terminal agent panel |
 | `ThockChatPanel`, `ThockChatPanel > Editor` | The Thock Agent chat, and its message box |
 | `Editor && ThockMarkdownConceal` | A vault note with concealed Markdown |
@@ -246,11 +248,16 @@ rather than guessing from the visible name.
 | Action | Does | Ships as |
 |---|---|---|
 | `thock::ToggleFocus` | The Routines rail | `cmd-2` |
-| `thock::ToggleBacklogFocus` | The Backlog | `cmd-alt-u` |
-| `thock::ToggleDayPlannerFocus` | The Day Planner | `cmd-alt-p` |
+| `thock::ToggleBacklogFocus` | The Desk, on its Backlog tab | `cmd-alt-u` |
+| `thock::ToggleDayPlannerFocus` | The Desk, on its Today tab | `cmd-alt-p` |
+| `thock::ToggleDeskFocus` | The Desk, on whatever tab it shows | unbound |
+| `["thock::ActivateDeskTab", { "tab": "done" }]` | A Desk tab (`backlog`, `today`, `done`) | `1` `2` `3` inside the Desk; `g t` / `g T` cycle in vim mode |
+| `thock::OpenPreviousDay` / `OpenNextDay` | The daily note before or after the one you're viewing, skipping empty days | `ctrl-cmd-[` / `ctrl-cmd-]` |
+| `thock::FocusDayStrip` | The masthead's day strip (arrows or `h` `j` `k` `l`, `enter` opens, `escape` returns) | `ctrl-cmd-w` |
 | `thock::ToggleAgentFocus` | The terminal agent panel | `cmd-alt-t` |
 | `thock::ToggleChatFocus` | The Thock Agent chat | `cmd-alt-n` |
-| `thock::OpenToday` / `OpenYesterday` / `OpenTomorrow` | A daily note | unbound |
+| `thock::OpenToday` | Today's note | `ctrl-cmd-t` |
+| `thock::OpenYesterday` / `OpenTomorrow` | A daily note | unbound |
 | `thock::OpenThisWeek` / `OpenLastWeek` | A weekly note | unbound |
 | `thock::OpenInbox` / `thock::OpenGuide` / `thock::OpenCustomize` | Those pages | unbound |
 | `thock::ToggleMarkdownSource` | Show the raw `#` and `[ ]` | `cmd-alt-m` |
@@ -264,8 +271,10 @@ rather than guessing from the visible name.
 **Inside a panel** — these only work under that panel's context:
 `thock::AddBacklogTask`, `CompleteBacklogTask`, `MoveBacklogTaskLeft` /
 `Right`, `CopyBacklogTask`, `RevealBacklogTask`, `EditBacklogTask`,
-`CollapseBacklogCategory` / `ExpandBacklogCategory`,
-`SelectNextBacklogColumn` / `SelectPreviousBacklogColumn`;
+`CollapseBacklogCategory` / `ExpandBacklogCategory` (`left` / `right`, also on
+a lane's title to fold it), `SelectNextBacklogColumn` /
+`SelectPreviousBacklogColumn` (`]` / `[`, jump between the Soon and Someday
+titles);
 `thock::ViewSkill`, `CollapseGroup`, `ExpandGroup`;
 `thock::FocusChatInput`, `OpenChatEntry`, `SendChatMessage`,
 `StopChatTurn`, `RetryChatTurn`, `ExpandChatActivity`,

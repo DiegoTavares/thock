@@ -1,33 +1,34 @@
-//! The Backlog panel (spec `v6-backlog.md`): a bottom-dock checklist over the
-//! vault's `backlog.md`, grouped by Soon and Someday alongside the Completed
-//! history. Task text is editable inline; checking a task off
-//! records it as done in today's daily note and files it under Completed with
-//! the date. The file stays the single source of truth: edits go through the
-//! open buffer (so an editor tab and the panel never fight) and the panel
-//! re-parses on every buffer change.
+//! The Backlog view (spec `v6-backlog.md`, laid out by V43 §8): a checklist
+//! over the vault's `backlog.md`, shown by the Desk panel as the Soon and
+//! Someday lanes stacked on its Backlog tab and the Completed history on its
+//! Done tab. Task text is editable inline; checking a task off records it as
+//! done in today's daily note and files it under Completed with the date. The
+//! file stays the single source of truth: edits go through the open buffer
+//! (so an editor tab and the view never fight) and the view re-parses on
+//! every buffer change.
 
-use anyhow::{Context as _, Result};
-use chrono::Local;
+use anyhow::Context as _;
+use chrono::{Local, NaiveDate};
 use db::kvp::KeyValueStore;
 use editor::{Editor, EditorEvent, SelectionEffects, scroll::Autoscroll};
 use gpui::{
-    Action, AnyElement, App, AsyncWindowContext, ClipboardItem, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, Hsla, KeyContext, Pixels, ScrollHandle, Subscription, Task, WeakEntity,
-    Window, actions, div, px,
+    Action, AnyElement, App, AsyncWindowContext, ClipboardItem, Context, Entity, FocusHandle,
+    Focusable, FontWeight, Hsla, KeyContext, ScrollHandle, Subscription, Task, WeakEntity, Window,
+    actions, div, px, rems,
 };
 use language::{Buffer, BufferEvent};
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use project::Project;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 use text::{Bias, Point};
 use ui::prelude::*;
 use ui::{Checkbox, Icon, IconButton, IconSize, Label, LabelLike, ToggleState, Tooltip};
 use util::ResultExt as _;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
+use util::rel_path::RelPath;
 use workspace::{OpenOptions, OpenVisible, Workspace};
 
 use crate::backlog::{
@@ -36,7 +37,8 @@ use crate::backlog::{
 use crate::day_plan::strip_trailing_comment;
 use crate::gmail_service::{self, GmailService};
 use crate::inbox_service::{self, InboxService};
-use crate::markdown_text::render_markdown_row;
+use crate::markdown_conceal::resolve_wikilink_target;
+use crate::markdown_text::{LinkTarget, parse_inline_spans, render_markdown_row};
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
 use crate::readwise_service::{self, ReadwiseService};
 use crate::sync_status;
@@ -52,11 +54,11 @@ const COPY_FLASH_DURATION: Duration = Duration::from_millis(200);
 actions!(
     thock,
     [
-        /// Toggles focus on the Thock backlog panel.
+        /// Opens the Desk panel on its Backlog tab, or returns to the note.
         ToggleBacklogFocus,
-        /// Selects the backlog column to the right (Soon → Someday → Completed).
+        /// Jumps to the next backlog lane's title (Soon → Someday).
         SelectNextBacklogColumn,
-        /// Selects the backlog column to the left (Completed → Someday → Soon).
+        /// Jumps to the previous backlog lane's title (Someday → Soon).
         SelectPreviousBacklogColumn,
         /// Edits the selected backlog task's text in place.
         EditBacklogTask,
@@ -74,30 +76,57 @@ actions!(
         CopyBacklogTask,
         /// Opens backlog.md at the selected task's line.
         RevealBacklogTask,
-        /// Closes the backlog category the cursor is in.
+        /// Closes the backlog category or lane the cursor is in.
         CollapseBacklogCategory,
-        /// Opens the backlog category the cursor is in.
+        /// Opens the backlog category or lane the cursor is in.
         ExpandBacklogCategory
     ]
 );
 
-/// The panel state that outlives a session: which categories the user closed
-/// (V17 §5.4). Category membership itself lives in `backlog.md`.
+/// The view state that outlives a session: which categories and lanes the
+/// user closed (V17 §5.4, V43 §8.3). Category membership itself lives in
+/// `backlog.md`.
 #[derive(Default, Serialize, Deserialize)]
 struct SerializedBacklogPanel {
     /// `(section id, category name)` pairs. Keyed on `SectionKind::id()` so
     /// the state survives a language change; pre-V19 builds wrote the English
     /// headings, which `from_id` still accepts (V19 §3 #3).
     collapsed: Vec<(String, String)>,
+    /// Section ids of the folded lanes; absent in state written before V43,
+    /// which means the default of Someday folded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    folded_lanes: Option<Vec<String>>,
 }
 
-pub fn init(cx: &mut App) {
-    cx.observe_new(|workspace: &mut Workspace, _, _| {
-        workspace.register_action(|workspace, _: &ToggleBacklogFocus, window, cx| {
-            workspace.toggle_panel_focus::<BacklogPanel>(window, cx);
-        });
-    })
-    .detach();
+/// The remembered fold state, as loaded from the store.
+#[derive(Default)]
+pub struct BacklogFolds {
+    pub collapsed: HashSet<(SectionKind, String)>,
+    pub folded_lanes: Option<HashSet<SectionKind>>,
+}
+
+/// Which half of the backlog the view shows: the open lanes on the Desk's
+/// Backlog tab, or the completed history on its Done tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BacklogView {
+    Open,
+    Done,
+}
+
+impl BacklogView {
+    fn sections(self) -> &'static [SectionKind] {
+        match self {
+            Self::Open => &[SectionKind::Soon, SectionKind::Someday],
+            Self::Done => &[SectionKind::Completed],
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Open => 0,
+            Self::Done => 1,
+        }
+    }
 }
 
 /// What the inline editor is editing (spec §6.2, §9.5).
@@ -132,10 +161,16 @@ enum TodayWrite {
     Move,
 }
 
-/// A row of an open column: a category header, or a task. Both the renderer
-/// and the keyboard cursor index into this list, so there is one ordering to
-/// keep in step (V17 §5.2).
+/// A row of a column: the lane's title, a category header, or a task. Both
+/// the renderer and the keyboard cursor index into this list, so there is
+/// one ordering to keep in step (V17 §5.2). An open lane's title is its row
+/// 0, so a lane always has somewhere for the cursor to land.
 enum BacklogRow<'a> {
+    Lane {
+        /// Open tasks in the lane, whether or not it is folded.
+        count: usize,
+        folded: bool,
+    },
     Category {
         name: &'a str,
         /// Open tasks in the group, whether or not it is collapsed.
@@ -162,7 +197,10 @@ pub struct BacklogPanel {
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
     focus_handle: FocusHandle,
-    position: DockPosition,
+    view: BacklogView,
+    /// Set by the Desk while a row sits above the first lane (the Next
+    /// card): moving up from the top then releases the selection to it.
+    row_above: bool,
     vault_status: VaultStatus,
     /// The open `backlog.md` buffer — panel writes go through it so an open
     /// editor tab and the panel stay coherent (spec §6.4). `None` while the
@@ -176,11 +214,16 @@ pub struct BacklogPanel {
     /// The categories the user has closed, restored from the key-value store
     /// on load and written back on every change (V17 §5.4).
     collapsed: HashSet<(SectionKind, String)>,
+    /// The lanes the user has folded, remembered the same way (V43 §8.3).
+    folded_lanes: HashSet<SectionKind>,
     pending_serialization: Option<Task<()>>,
     selected: Option<TaskSelection>,
-    /// One scroll position per column, indexed by `SectionKind::index`, so a
-    /// keyboard motion can bring the selected row into view.
-    scroll_handles: [ScrollHandle; 3],
+    /// The folder each linked note lives in, by link target, resolved on
+    /// every reparse for the rows' meta lines.
+    link_folders: HashMap<String, Option<String>>,
+    /// One scroll position per view, so a keyboard motion can bring the
+    /// selected row into view.
+    scroll_handles: [ScrollHandle; 2],
     /// The row lit by the copy flash, if one is running.
     copy_flash: Option<TaskSelection>,
     copy_flash_task: Option<Task<()>>,
@@ -204,46 +247,70 @@ pub struct BacklogPanel {
 }
 
 impl BacklogPanel {
-    pub async fn load(
+    /// Reads the remembered fold state, for the Desk to build the view with.
+    pub async fn load_folds(
         workspace: WeakEntity<Workspace>,
-        mut cx: AsyncWindowContext,
-    ) -> Result<Entity<Self>> {
+        cx: &mut AsyncWindowContext,
+    ) -> BacklogFolds {
         let key = workspace
-            .read_with(&cx, |workspace, _| Self::serialization_key(workspace))
+            .read_with(cx, |workspace, _| Self::serialization_key(workspace))
             .ok()
             .flatten();
-        let collapsed = match key {
-            Some(key) => {
-                let store = cx.update(|_, cx| KeyValueStore::global(cx))?;
-                cx.background_spawn(async move { store.read_kvp(&key) })
-                    .await
-                    .context("loading the backlog panel's collapsed groups")
-                    .log_err()
-                    .flatten()
-                    .and_then(|value| {
-                        serde_json::from_str::<SerializedBacklogPanel>(&value).log_err()
-                    })
-                    .map(|state| {
-                        state
-                            .collapsed
-                            .into_iter()
-                            .filter_map(|(section, name)| {
-                                Some((SectionKind::from_id(&section)?, name))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            }
-            None => HashSet::default(),
+        let Some(store) = cx.update(|_, cx| KeyValueStore::global(cx)).ok() else {
+            return BacklogFolds::default();
         };
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            BacklogPanel::new(workspace, collapsed, window, cx)
-        })
+        match key {
+            Some(key) => cx
+                .background_spawn(async move { store.read_kvp(&key) })
+                .await
+                .context("loading the backlog's collapsed groups")
+                .log_err()
+                .flatten()
+                .and_then(|value| serde_json::from_str::<SerializedBacklogPanel>(&value).log_err())
+                .map(|state| BacklogFolds {
+                    collapsed: state
+                        .collapsed
+                        .into_iter()
+                        .filter_map(|(section, name)| Some((SectionKind::from_id(&section)?, name)))
+                        .collect(),
+                    folded_lanes: state.folded_lanes.map(|lanes| {
+                        lanes
+                            .iter()
+                            .filter_map(|id| SectionKind::from_id(id))
+                            .collect()
+                    }),
+                })
+                .unwrap_or_default(),
+            None => BacklogFolds::default(),
+        }
+    }
+
+    /// The selected row as `(section id, index)`, for keystroke tests.
+    #[cfg(test)]
+    pub(crate) fn selected_for_tests(&self) -> Option<(&'static str, usize)> {
+        self.selection()
+            .map(|selection| (selection.section.id(), selection.index))
+    }
+
+    /// Whether the new-task editor's row lies inside the list's viewport
+    /// as last drawn, and how far the list is scrolled, for keystroke tests.
+    #[cfg(test)]
+    pub(crate) fn new_task_row_in_view_for_tests(&self) -> Option<(bool, gpui::Pixels)> {
+        let EditTarget::New { section, category } = &self.edit_state.as_ref()?.target else {
+            return None;
+        };
+        let handle = &self.scroll_handles[self.view.index()];
+        let row = handle.bounds_for_item(self.new_task_row_index(*section, category.as_deref()))?;
+        let viewport = handle.bounds();
+        let offset = handle.offset();
+        let in_view =
+            row.top() + offset.y >= viewport.top() && row.bottom() + offset.y <= viewport.bottom();
+        Some((in_view, offset.y))
     }
 
     pub fn new(
         workspace: &mut Workspace,
-        collapsed: HashSet<(SectionKind, String)>,
+        folds: BacklogFolds,
         _window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
@@ -281,15 +348,21 @@ impl BacklogPanel {
                 workspace: weak_workspace,
                 project,
                 focus_handle: cx.focus_handle(),
-                position: DockPosition::Bottom,
+                view: BacklogView::Open,
+                row_above: false,
                 vault_status: VaultStatus::NotAVault,
                 buffer: None,
                 buffer_path: None,
                 _buffer_subscription: None,
                 backlog: Backlog::default(),
-                collapsed,
+                collapsed: folds.collapsed,
+                // Soon opens expanded and Someday starts folded (§8.3).
+                folded_lanes: folds
+                    .folded_lanes
+                    .unwrap_or_else(|| HashSet::from_iter([SectionKind::Someday])),
                 pending_serialization: None,
                 selected: None,
+                link_folders: HashMap::default(),
                 scroll_handles: std::array::from_fn(|_| ScrollHandle::new()),
                 copy_flash: None,
                 copy_flash_task: None,
@@ -332,6 +405,12 @@ impl BacklogPanel {
                 .iter()
                 .map(|(section, name)| (section.id().to_string(), name.clone()))
                 .collect(),
+            folded_lanes: Some(
+                self.folded_lanes
+                    .iter()
+                    .map(|section| section.id().to_string())
+                    .collect(),
+            ),
         };
         let Some(payload) = serde_json::to_string(&state).log_err() else {
             return;
@@ -375,6 +454,8 @@ impl BacklogPanel {
     }
 
     fn refresh_vault_status(&mut self, cx: &mut Context<Self>) {
+        // A worktree event may have moved a linked note.
+        self.refresh_link_folders(cx);
         let status = self.detect_vault_status(cx);
         if status != self.vault_status {
             self.vault_status = status;
@@ -461,6 +542,7 @@ impl BacklogPanel {
         };
         if backlog != self.backlog {
             self.backlog = backlog;
+            self.refresh_link_folders(cx);
             cx.notify();
         }
     }
@@ -518,7 +600,68 @@ impl BacklogPanel {
     }
 
     fn visible_rows(&self, section: SectionKind) -> Vec<BacklogRow<'_>> {
-        column_rows(&self.backlog, section, &self.collapsed)
+        column_rows(&self.backlog, section, &self.collapsed, &self.folded_lanes)
+    }
+
+    /// The lanes the current view lays out, in order.
+    fn sections(&self) -> &'static [SectionKind] {
+        self.view.sections()
+    }
+
+    /// Shows the open lanes or the completed history (V43 §8.1). The cursor
+    /// does not carry across: a Done row means nothing on the Backlog tab.
+    pub fn set_view(&mut self, view: BacklogView, cx: &mut Context<Self>) {
+        if self.view != view {
+            self.view = view;
+            self.selected = None;
+            self.edit_state = None;
+            cx.notify();
+        }
+    }
+
+    pub fn view(&self) -> BacklogView {
+        self.view
+    }
+
+    /// Tells the view whether a selectable row sits above its first lane.
+    pub fn set_row_above(&mut self, row_above: bool) {
+        self.row_above = row_above;
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selection().is_some()
+    }
+
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selected.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Open tasks across Soon and Someday — the Backlog tab's count.
+    pub fn open_count(&self) -> usize {
+        [SectionKind::Soon, SectionKind::Someday]
+            .into_iter()
+            .map(|section| self.open_count_in(section))
+            .sum()
+    }
+
+    fn open_count_in(&self, section: SectionKind) -> usize {
+        self.backlog
+            .section(section)
+            .iter()
+            .filter(|task| !task.checked)
+            .count()
+    }
+
+    /// Where a `(section, index)` row sits in the view's one scrolling list.
+    fn flat_index(&self, selection: TaskSelection) -> usize {
+        self.sections()
+            .iter()
+            .take_while(|section| **section != selection.section)
+            .map(|section| self.visible_rows(*section).len())
+            .sum::<usize>()
+            + selection.index
     }
 
     /// The selection resolved against the current parse: same column, index
@@ -537,12 +680,12 @@ impl BacklogPanel {
         let selection = self.selection()?;
         match self.visible_rows(selection.section).get(selection.index)? {
             BacklogRow::Task { task } => Some((selection.section, (*task).clone())),
-            BacklogRow::Category { .. } => None,
+            BacklogRow::Category { .. } | BacklogRow::Lane { .. } => None,
         }
     }
 
     /// The group the cursor is in: a selected header's own category, or the
-    /// one holding the selected task. `None` on a loose task.
+    /// one holding the selected task. `None` on a loose task or a lane title.
     fn selected_category(&self) -> Option<(SectionKind, String)> {
         let selection = self.selection()?;
         match self.visible_rows(selection.section).get(selection.index)? {
@@ -550,6 +693,7 @@ impl BacklogPanel {
             BacklogRow::Task { task } => {
                 task.category.clone().map(|name| (selection.section, name))
             }
+            BacklogRow::Lane { .. } => None,
         }
     }
 
@@ -559,8 +703,34 @@ impl BacklogPanel {
         let selection = self.selection()?;
         match self.visible_rows(selection.section).get(selection.index)? {
             BacklogRow::Category { collapsed, .. } => Some(*collapsed),
-            BacklogRow::Task { .. } => None,
+            BacklogRow::Task { .. } | BacklogRow::Lane { .. } => None,
         }
+    }
+
+    /// Whether the selected row is a lane title, and if so whether the lane
+    /// is folded.
+    fn selected_lane_folded(&self) -> Option<bool> {
+        let selection = self.selection()?;
+        match self.visible_rows(selection.section).get(selection.index)? {
+            BacklogRow::Lane { folded, .. } => Some(*folded),
+            _ => None,
+        }
+    }
+
+    fn set_lane_folded(&mut self, section: SectionKind, folded: bool, cx: &mut Context<Self>) {
+        let changed = if folded {
+            self.folded_lanes.insert(section)
+        } else {
+            self.folded_lanes.remove(&section)
+        };
+        if !changed {
+            return;
+        }
+        if folded {
+            self.select_row(section, 0, cx);
+        }
+        self.serialize(cx);
+        cx.notify();
     }
 
     fn collapse_category(
@@ -582,6 +752,12 @@ impl BacklogPanel {
     }
 
     fn set_category_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        if self.selected_lane_folded().is_some()
+            && let Some(selection) = self.selection()
+        {
+            self.set_lane_folded(selection.section, collapsed, cx);
+            return;
+        }
         let Some((section, name)) = self.selected_category() else {
             return;
         };
@@ -607,29 +783,62 @@ impl BacklogPanel {
             |row| matches!(row, BacklogRow::Category { name: header, .. } if *header == name),
         ) {
             self.selected = Some(TaskSelection { section, index });
-            self.scroll_handles[section.index()].scroll_to_item(index);
+            let flat = self.flat_index(TaskSelection { section, index });
+            self.scroll_handles[self.view.index()].scroll_to_item(flat);
         }
     }
 
     /// Where the cursor lands when a motion arrives with nothing selected: the
-    /// first column that has anything in it.
+    /// first lane of the view that has anything in it.
     fn first_populated_column(&self) -> Option<SectionKind> {
-        SectionKind::ALL
+        self.sections()
+            .iter()
+            .copied()
+            .find(|section| !self.visible_rows(*section).is_empty())
+    }
+
+    fn last_populated_column(&self) -> Option<SectionKind> {
+        self.sections()
+            .iter()
+            .rev()
+            .copied()
+            .find(|section| !self.visible_rows(*section).is_empty())
+    }
+
+    /// The populated lane after or before `section` in the view.
+    fn neighbour_column(&self, section: SectionKind, forward: bool) -> Option<SectionKind> {
+        let sections = self.sections();
+        let position = sections
+            .iter()
+            .position(|candidate| *candidate == section)?;
+        let candidates: Vec<SectionKind> = if forward {
+            sections[position + 1..].to_vec()
+        } else {
+            sections[..position].iter().rev().copied().collect()
+        };
+        candidates
             .into_iter()
             .find(|section| !self.visible_rows(*section).is_empty())
     }
 
     fn select_row(&mut self, section: SectionKind, index: usize, cx: &mut Context<Self>) {
         self.selected = Some(TaskSelection { section, index });
-        self.scroll_handles[section.index()].scroll_to_item(index);
+        let flat = self.flat_index(TaskSelection { section, index });
+        self.scroll_handles[self.view.index()].scroll_to_item(flat);
         cx.notify();
     }
 
+    /// Down moves through the lane and on into the next lane's title; the
+    /// last row of the view holds.
     fn select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
         match self.selection() {
             Some(selection) => {
                 let last = self.visible_rows(selection.section).len().saturating_sub(1);
-                self.select_row(selection.section, (selection.index + 1).min(last), cx);
+                if selection.index < last {
+                    self.select_row(selection.section, selection.index + 1, cx);
+                } else if let Some(next) = self.neighbour_column(selection.section, true) {
+                    self.select_row(next, 0, cx);
+                }
             }
             None => {
                 if let Some(section) = self.first_populated_column() {
@@ -639,6 +848,9 @@ impl BacklogPanel {
         }
     }
 
+    /// Up moves through the lane and on into the previous lane's last row.
+    /// From the very first row, the selection is released to whatever the
+    /// Desk keeps above the lanes, when it told us there is something.
     fn select_previous(
         &mut self,
         _: &SelectPrevious,
@@ -647,10 +859,19 @@ impl BacklogPanel {
     ) {
         match self.selection() {
             Some(selection) => {
-                self.select_row(selection.section, selection.index.saturating_sub(1), cx);
+                if selection.index > 0 {
+                    self.select_row(selection.section, selection.index - 1, cx);
+                } else if let Some(previous) = self.neighbour_column(selection.section, false) {
+                    let last = self.visible_rows(previous).len().saturating_sub(1);
+                    self.select_row(previous, last, cx);
+                } else if self.row_above {
+                    self.selected = None;
+                    cx.notify();
+                    cx.propagate();
+                }
             }
             None => {
-                if let Some(section) = self.first_populated_column() {
+                if let Some(section) = self.last_populated_column() {
                     let last = self.visible_rows(section).len().saturating_sub(1);
                     self.select_row(section, last, cx);
                 }
@@ -659,27 +880,15 @@ impl BacklogPanel {
     }
 
     fn select_first(&mut self, _: &SelectFirst, _window: &mut Window, cx: &mut Context<Self>) {
-        let section = self
-            .selection()
-            .map(|selection| selection.section)
-            .or_else(|| self.first_populated_column());
-        if let Some(section) = section
-            && !self.visible_rows(section).is_empty()
-        {
+        if let Some(section) = self.first_populated_column() {
             self.select_row(section, 0, cx);
         }
     }
 
     fn select_last(&mut self, _: &SelectLast, _window: &mut Window, cx: &mut Context<Self>) {
-        let section = self
-            .selection()
-            .map(|selection| selection.section)
-            .or_else(|| self.first_populated_column());
-        if let Some(section) = section {
-            let len = self.visible_rows(section).len();
-            if let Some(last) = len.checked_sub(1) {
-                self.select_row(section, last, cx);
-            }
+        if let Some(section) = self.last_populated_column() {
+            let last = self.visible_rows(section).len().saturating_sub(1);
+            self.select_row(section, last, cx);
         }
     }
 
@@ -701,9 +910,8 @@ impl BacklogPanel {
         self.select_column(false, cx);
     }
 
-    /// Moves the cursor to the nearest column in `forward`'s direction that has
-    /// rows, keeping the row index (clamped). Empty columns are skipped rather
-    /// than swallowing the selection.
+    /// Jumps to the title of the nearest lane in `forward`'s direction, or
+    /// to the current lane's own title when there is none that way.
     fn select_column(&mut self, forward: bool, cx: &mut Context<Self>) {
         let Some(current) = self.selection() else {
             if let Some(section) = self.first_populated_column() {
@@ -711,25 +919,11 @@ impl BacklogPanel {
             }
             return;
         };
-        let Some(position) = SectionKind::ALL
-            .iter()
-            .position(|section| *section == current.section)
-        else {
-            return;
-        };
-        let candidates: Vec<SectionKind> = if forward {
-            SectionKind::ALL[position + 1..].to_vec()
-        } else {
-            SectionKind::ALL[..position].iter().rev().copied().collect()
-        };
-        let Some((destination, len)) = candidates
-            .into_iter()
-            .map(|section| (section, self.visible_rows(section).len()))
-            .find(|(_, len)| *len > 0)
-        else {
-            return;
-        };
-        self.select_row(destination, current.index.min(len - 1), cx);
+        match self.neighbour_column(current.section, forward) {
+            Some(destination) => self.select_row(destination, 0, cx),
+            None if !forward => self.select_row(current.section, 0, cx),
+            None => {}
+        }
     }
 
     fn edit_selected_task(
@@ -964,6 +1158,10 @@ impl BacklogPanel {
             },
         );
         editor.read(cx).focus_handle(cx).focus(window, cx);
+        if let EditTarget::New { section, category } = &target {
+            let row = self.new_task_row_index(*section, category.as_deref());
+            self.scroll_handles[self.view.index()].scroll_to_item(row);
+        }
         self.edit_state = Some(EditState {
             target,
             editor,
@@ -972,9 +1170,37 @@ impl BacklogPanel {
         cx.notify();
     }
 
+    /// The flat row the new-task editor renders at: after the last row of
+    /// the group it is adding to, where `render_open_view` places it.
+    fn new_task_row_index(&self, section: SectionKind, category: Option<&str>) -> usize {
+        let offset = self.flat_index(TaskSelection { section, index: 0 });
+        let rows = self.visible_rows(section);
+        let mut group: Option<&str> = None;
+        for (index, row) in rows.iter().enumerate() {
+            if let BacklogRow::Category { name, .. } = row {
+                if group == category {
+                    return offset + index;
+                }
+                group = Some(name);
+            }
+        }
+        offset + rows.len()
+    }
+
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
         if self.edit_state.is_some() {
             self.commit_edit(window, cx);
+            return;
+        }
+        if self.selection().is_none() {
+            // Nothing here to act on; the Desk may have a row above.
+            cx.propagate();
+            return;
+        }
+        if let Some(folded) = self.selected_lane_folded()
+            && let Some(selection) = self.selection()
+        {
+            self.set_lane_folded(selection.section, !folded, cx);
             return;
         }
         if let Some(collapsed) = self.selected_header_collapsed() {
@@ -1429,6 +1655,76 @@ impl BacklogPanel {
         (self.selection() == Some(row)).then(|| cx.theme().colors().element_selected)
     }
 
+    /// What a task row says under its text (V43 §8.3): the date of the
+    /// linked note it came from and the folder that note lives in. Only what
+    /// the line already carries; a task without a link has no meta line.
+    fn task_meta(&self, task: &BacklogTask) -> Option<String> {
+        let link = task_link(&task.text)?;
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(date) = link.date {
+            parts.push(format!("from {}", crate::notes::format_date(date, "MMM D")));
+        }
+        if let Some(Some(folder)) = self.link_folders.get(&link.target) {
+            parts.push(folder.clone());
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(parts.join(" · "))
+    }
+
+    /// Resolves every linked note's folder in one pass over the vault's
+    /// file list, so a render never walks the worktree.
+    fn refresh_link_folders(&mut self, cx: &App) {
+        let targets: HashSet<String> = [SectionKind::Soon, SectionKind::Someday]
+            .into_iter()
+            .flat_map(|section| self.backlog.section(section))
+            .filter_map(|task| task_link(&task.text))
+            .map(|link| link.target)
+            .collect();
+        let Some(worktree) = self.project.read(cx).visible_worktrees(cx).next() else {
+            self.link_folders.clear();
+            return;
+        };
+        let snapshot = worktree.read(cx).snapshot();
+        let files: Vec<&RelPath> = snapshot
+            .files(false, 0)
+            .map(|entry| entry.path.as_ref())
+            .collect();
+        self.link_folders = targets
+            .into_iter()
+            .map(|target| {
+                let folder = resolve_wikilink_target(&target, files.iter().copied())
+                    .and_then(|path| path.parent())
+                    .and_then(|parent| parent.file_name())
+                    .map(|name| name.to_string());
+                (target, folder)
+            })
+            .collect();
+    }
+
+    /// A row's frame: the selection fill with its accent edge, or a clear
+    /// edge of the same width so rows stay aligned (V43 §8.3).
+    fn row_frame(&self, row: TaskSelection, cx: &Context<Self>) -> Div {
+        let colors = cx.theme().colors();
+        let selected = self.selection() == Some(row);
+        let background = self.row_background(row, cx);
+        h_flex()
+            .w_full()
+            .group("backlog-row")
+            .gap_2()
+            .pl(px(10.))
+            .pr_2()
+            .py_1()
+            .border_l_2()
+            .border_color(if selected {
+                colors.text_accent
+            } else {
+                gpui::transparent_black()
+            })
+            .when_some(background, |row, background| row.bg(background))
+    }
+
     fn render_open_task_row(
         &self,
         section: SectionKind,
@@ -1436,16 +1732,17 @@ impl BacklogPanel {
         task: &BacklogTask,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let indented = task.category.is_some();
         if self.is_editing(section, task.line, &task.text) {
             if let Some(editor_row) = self.render_editor_row(cx) {
                 return editor_row;
             }
         }
+        let colors = cx.theme().colors();
         let section_key = section.id();
         let task_text = task.text.clone();
         let today_task_text = task.text.clone();
         let task_line = task.line;
+        let meta = self.task_meta(task);
         // Chevrons, matching the `>` / `<` keys that do the same thing.
         let (move_icon, move_tooltip, move_action) = match section {
             SectionKind::Someday => (
@@ -1459,68 +1756,11 @@ impl BacklogPanel {
                 MoveBacklogTaskRight.boxed_clone(),
             ),
         };
-        h_flex()
-            .w_full()
-            .gap_1()
-            .px_1()
-            .py_0p5()
-            .when(indented, |row| row.pl_4())
-            .rounded_sm()
-            .when_some(
-                self.row_background(TaskSelection { section, index }, cx),
-                |row, background| row.bg(background),
-            )
-            .child(
-                Checkbox::new(
-                    ElementId::Name(format!("backlog-check-{section_key}-{index}").into()),
-                    ToggleState::Unselected,
-                )
-                .disabled(self.mark_in_flight)
-                .tooltip({
-                    let focus_handle = self.focus_handle.clone();
-                    move |_, cx| {
-                        Tooltip::for_action_in("Mark done", &CompleteBacklogTask, &focus_handle, cx)
-                    }
-                })
-                .on_click(cx.listener({
-                    let task_text = task_text.clone();
-                    move |this, _, window, cx| {
-                        this.select_row(section, index, cx);
-                        this.mark_done(section, task_line, task_text.clone(), window, cx);
-                    }
-                })),
-            )
-            .child(
-                div()
-                    .id(ElementId::Name(
-                        format!("backlog-task-{section_key}-{index}").into(),
-                    ))
-                    .flex_1()
-                    .min_w_0()
-                    .cursor_text()
-                    .child(LabelLike::new().size(LabelSize::Small).truncate().child(
-                        self.render_task_text(
-                            ElementId::Name(format!("backlog-text-{section_key}-{index}").into()),
-                            &task.text,
-                            cx,
-                        ),
-                    ))
-                    .on_click(cx.listener({
-                        move |this, _, window, cx| {
-                            this.select_row(section, index, cx);
-                            this.start_edit(
-                                EditTarget::Existing {
-                                    section,
-                                    line: task_line,
-                                    original_text: task_text.clone(),
-                                },
-                                &task_text,
-                                window,
-                                cx,
-                            );
-                        }
-                    })),
-            )
+        let tools = h_flex()
+            .flex_none()
+            .gap_0p5()
+            .opacity(0.)
+            .group_hover("backlog-row", |this| this.opacity(1.))
             .child(
                 IconButton::new(
                     ElementId::Name(format!("backlog-move-{section_key}-{index}").into()),
@@ -1606,12 +1846,92 @@ impl BacklogPanel {
                     this.select_row(section, index, cx);
                     this.reveal_task(task_line, window, cx);
                 })),
+            );
+
+        self.row_frame(TaskSelection { section, index }, cx)
+            .items_start()
+            .child(
+                div().pt_0p5().child(
+                    Checkbox::new(
+                        ElementId::Name(format!("backlog-check-{section_key}-{index}").into()),
+                        ToggleState::Unselected,
+                    )
+                    .disabled(self.mark_in_flight)
+                    .tooltip({
+                        let focus_handle = self.focus_handle.clone();
+                        move |_, cx| {
+                            Tooltip::for_action_in(
+                                "Mark done",
+                                &CompleteBacklogTask,
+                                &focus_handle,
+                                cx,
+                            )
+                        }
+                    })
+                    .on_click(cx.listener({
+                        let task_text = task_text.clone();
+                        move |this, _, window, cx| {
+                            this.select_row(section, index, cx);
+                            this.mark_done(section, task_line, task_text.clone(), window, cx);
+                        }
+                    })),
+                ),
             )
+            .child(
+                v_flex()
+                    .id(ElementId::Name(
+                        format!("backlog-task-{section_key}-{index}").into(),
+                    ))
+                    .flex_1()
+                    .min_w_0()
+                    .cursor_text()
+                    .tooltip(Tooltip::text(
+                        strip_trailing_comment(&task.text).to_string(),
+                    ))
+                    .child(
+                        div()
+                            .text_size(rems(0.875))
+                            .text_color(colors.text)
+                            .line_clamp(2)
+                            .child(self.render_task_text(
+                                ElementId::Name(
+                                    format!("backlog-text-{section_key}-{index}").into(),
+                                ),
+                                &task.text,
+                                cx,
+                            )),
+                    )
+                    .when_some(meta, |this, meta| {
+                        this.child(
+                            div()
+                                .text_size(rems(0.71875))
+                                .text_color(colors.text_placeholder)
+                                .child(SharedString::from(meta)),
+                        )
+                    })
+                    .on_click(cx.listener({
+                        move |this, _, window, cx| {
+                            this.select_row(section, index, cx);
+                            this.start_edit(
+                                EditTarget::Existing {
+                                    section,
+                                    line: task_line,
+                                    original_text: task_text.clone(),
+                                },
+                                &task_text,
+                                window,
+                                cx,
+                            );
+                        }
+                    })),
+            )
+            .child(tools)
             .into_any_element()
     }
 
-    /// A category header row: disclosure + name + open count, with its own
-    /// `+` so a task can be added straight into the group (V17 §5.1).
+    /// A category caption (V43 §8.3): the group's name and open count in
+    /// small caps, with its own `+` so a task can be added straight into the
+    /// group (V17 §5.1). Click to open or close it.
     fn render_category_row(
         &self,
         section: SectionKind,
@@ -1621,18 +1941,12 @@ impl BacklogPanel {
         collapsed: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let colors = cx.theme().colors();
         let section_key = section.id();
         let name = name.to_string();
-        h_flex()
-            .w_full()
-            .gap_1()
-            .px_1()
-            .py_0p5()
-            .rounded_sm()
-            .when_some(
-                self.row_background(TaskSelection { section, index }, cx),
-                |row, background| row.bg(background),
-            )
+        let caption = format!("{} · {count}", name.to_uppercase());
+        self.row_frame(TaskSelection { section, index }, cx)
+            .pt_2()
             .child(
                 h_flex()
                     .id(ElementId::Name(
@@ -1643,24 +1957,19 @@ impl BacklogPanel {
                     .gap_1()
                     .cursor_pointer()
                     .child(
-                        Icon::new(if collapsed {
-                            IconName::ChevronRight
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
+                        div()
+                            .text_size(rems(0.6875))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors.text_placeholder)
+                            .child(SharedString::from(caption)),
                     )
-                    .child(
-                        Label::new(name.clone())
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        Label::new(count.to_string())
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
+                    .when(collapsed, |this| {
+                        this.child(
+                            Icon::new(IconName::ChevronRight)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                    })
                     .on_click(cx.listener({
                         let name = name.clone();
                         move |this, _, _window, cx| {
@@ -1691,35 +2000,58 @@ impl BacklogPanel {
             .into_any_element()
     }
 
-    fn render_open_section(&self, section: SectionKind, cx: &Context<Self>) -> AnyElement {
+    /// A lane's title row (V43 §8.3): the heading in the display face, its
+    /// open count, and a chevron while it is folded. Click to fold or unfold.
+    fn render_lane_row(
+        &self,
+        section: SectionKind,
+        count: usize,
+        folded: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let colors = cx.theme().colors();
-        let rows = self.visible_rows(section);
-        // Counts every open task, so a closed group still reports its share.
-        let open_count = self
-            .backlog
-            .section(section)
-            .iter()
-            .filter(|task| !task.checked)
-            .count();
         let section_key = section.id();
-        let header = h_flex()
-            .justify_between()
-            .px_2()
-            .py_1()
-            .border_b_1()
-            .border_color(colors.border_variant)
+        let heading = section.heading(&self.headings()).to_string();
+        self.row_frame(TaskSelection { section, index: 0 }, cx)
+            .pt_3()
             .child(
                 h_flex()
-                    .gap_1()
+                    .id(ElementId::Name(
+                        format!("backlog-lane-{section_key}").into(),
+                    ))
+                    .flex_1()
+                    .min_w_0()
+                    .justify_between()
+                    .cursor_pointer()
                     .child(
-                        Label::new(section.heading(&self.headings()).to_string())
-                            .size(LabelSize::Small),
+                        div()
+                            .font_family("Petrona")
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(rems(1.0625))
+                            .text_color(colors.text)
+                            .child(SharedString::from(heading)),
                     )
                     .child(
-                        Label::new(open_count.to_string())
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    ),
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(rems(0.71875))
+                                    .text_color(colors.text_placeholder)
+                                    .child(SharedString::from(count.to_string())),
+                            )
+                            .when(folded, |this| {
+                                this.child(
+                                    Icon::new(IconName::ChevronRight)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                            }),
+                    )
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.select_row(section, 0, cx);
+                        this.set_lane_folded(section, !folded, cx);
+                    })),
             )
             .child(
                 IconButton::new(
@@ -1739,138 +2071,124 @@ impl BacklogPanel {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.start_add(section, None, window, cx);
                 })),
-            );
-
-        let mut list = v_flex().py_0p5().gap_0p5();
-        // The new-task editor belongs at the end of the group it is adding to,
-        // so it is flushed as each next header starts a new one.
-        let mut group: Option<&str> = None;
-        for (index, row) in rows.iter().enumerate() {
-            match row {
-                BacklogRow::Category {
-                    name,
-                    count,
-                    collapsed,
-                } => {
-                    if self.is_adding_to(section, group)
-                        && let Some(editor_row) = self.render_editor_row(cx)
-                    {
-                        list = list.child(editor_row);
-                    }
-                    group = Some(name);
-                    list = list.child(
-                        self.render_category_row(section, index, name, *count, *collapsed, cx),
-                    );
-                }
-                BacklogRow::Task { task } => {
-                    list = list.child(self.render_open_task_row(section, index, task, cx));
-                }
-            }
-        }
-        if self.is_adding_to(section, group)
-            && let Some(editor_row) = self.render_editor_row(cx)
-        {
-            list = list.child(editor_row);
-        }
-
-        v_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .border_r_1()
-            .border_color(colors.border_variant)
-            .child(header)
-            .child(
-                // The rows are direct children of the tracked element, so
-                // `scroll_to_item` indices line up with `visible_rows`; without
-                // `min_h_0` the flex child grows to its content and the tail of
-                // the list is clipped instead of scrollable.
-                list.id(ElementId::Name(
-                    format!("backlog-section-{section_key}").into(),
-                ))
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(&self.scroll_handles[section.index()]),
             )
             .into_any_element()
     }
 
-    fn render_completed_section(&self, cx: &Context<Self>) -> AnyElement {
+    /// The Backlog tab: the open lanes stacked in one scrolling list, so the
+    /// cursor's flat index and `scroll_to_item` agree.
+    fn render_open_view(&self, cx: &Context<Self>) -> AnyElement {
+        let mut list = v_flex().py_0p5();
+        for section in BacklogView::Open.sections() {
+            let section = *section;
+            let rows = self.visible_rows(section);
+            // The new-task editor belongs at the end of the group it is
+            // adding to, so it is flushed as each next header starts a new one.
+            let mut group: Option<&str> = None;
+            for (index, row) in rows.iter().enumerate() {
+                match row {
+                    BacklogRow::Lane { count, folded, .. } => {
+                        list = list.child(self.render_lane_row(section, *count, *folded, cx));
+                    }
+                    BacklogRow::Category {
+                        name,
+                        count,
+                        collapsed,
+                    } => {
+                        if self.is_adding_to(section, group)
+                            && let Some(editor_row) = self.render_editor_row(cx)
+                        {
+                            list = list.child(editor_row);
+                        }
+                        group = Some(name);
+                        list = list.child(
+                            self.render_category_row(section, index, name, *count, *collapsed, cx),
+                        );
+                    }
+                    BacklogRow::Task { task } => {
+                        list = list.child(self.render_open_task_row(section, index, task, cx));
+                    }
+                }
+            }
+            if self.is_adding_to(section, group)
+                && let Some(editor_row) = self.render_editor_row(cx)
+            {
+                list = list.child(editor_row);
+            }
+        }
+        list.id("backlog-open-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll_handles[BacklogView::Open.index()])
+            .into_any_element()
+    }
+
+    /// The Done tab: completed tasks newest first, each with its date.
+    fn render_done_view(&self, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
         let completed = self.completed_tasks();
-        let header = h_flex()
-            .justify_between()
-            .px_2()
-            .py_1()
-            .border_b_1()
-            .border_color(colors.border_variant)
-            .child(Label::new(self.headings().completed).size(LabelSize::Small));
-
-        let mut list = v_flex().py_0p5().gap_0p5();
+        let mut list = v_flex().py_1();
+        if completed.is_empty() {
+            list = list.child(self.render_hint("Nothing finished yet."));
+        }
         for (index, task) in completed.into_iter().enumerate() {
             let (label, date) = split_completion(&task.text);
-            let background = self.row_background(
-                TaskSelection {
-                    section: SectionKind::Completed,
-                    index,
-                },
-                cx,
-            );
-            let mut row = h_flex()
-                .w_full()
-                .gap_1()
-                .px_1()
-                .py_0p5()
-                .rounded_sm()
-                .when_some(background, |row, background| row.bg(background))
-                .child(
-                    Icon::new(IconName::TodoComplete)
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
-                )
-                .child(
-                    div().flex_1().min_w_0().child(
-                        LabelLike::new()
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                            .strikethrough()
-                            .truncate()
-                            .child(self.render_task_text(
-                                ElementId::Name(format!("backlog-text-completed-{index}").into()),
-                                label,
-                                cx,
-                            )),
+            let row = TaskSelection {
+                section: SectionKind::Completed,
+                index,
+            };
+            list = list.child(
+                self.row_frame(row, cx)
+                    .items_start()
+                    .child(
+                        div().pt_0p5().child(
+                            Icon::new(IconName::TodoComplete)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(rems(0.875))
+                                    .text_color(colors.text_muted)
+                                    .line_clamp(2)
+                                    .child(LabelLike::new().strikethrough().child(
+                                        self.render_task_text(
+                                            ElementId::Name(
+                                                format!("backlog-text-completed-{index}").into(),
+                                            ),
+                                            label,
+                                            cx,
+                                        ),
+                                    )),
+                            )
+                            .when_some(date, |this, date| {
+                                this.child(
+                                    div()
+                                        .text_size(rems(0.71875))
+                                        .text_color(colors.text_placeholder)
+                                        .child(SharedString::from(date.to_string())),
+                                )
+                            }),
                     ),
-                );
-            if let Some(date) = date {
-                row = row.child(
-                    Label::new(date.to_string())
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                );
-            }
-            list = list.child(row);
+            );
         }
-
-        v_flex()
+        list.id("backlog-completed-list")
             .flex_1()
-            .min_w_0()
-            .h_full()
-            .child(header)
-            .child(
-                list.id("backlog-completed-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll_handles[SectionKind::Completed.index()]),
-            )
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll_handles[BacklogView::Done.index()])
             .into_any_element()
     }
 
-    /// The connector rows kept at the top of the panel (V32 §4.2): Gmail,
-    /// Inbox, Readwise, and the phone, each only while it needs the user. Everything
-    /// else lives in the sync icon's popover.
+    /// The connector rows kept at the top of the view (V32 §4.2): Gmail,
+    /// Inbox, Readwise, and the phone, each only while it needs the user.
+    /// Everything else lives in the sync icon's popover.
     fn render_status_rows(&self, cx: &App) -> Vec<AnyElement> {
         let gmail = self.gmail_service.as_ref().map(|service| service.read(cx));
         sync_status::inline_statuses([
@@ -1909,7 +2227,7 @@ impl BacklogPanel {
                         .border_b_1()
                         .border_color(cx.theme().colors().border_variant),
                     );
-                } else if self.backlog.is_empty() {
+                } else if self.view == BacklogView::Open && self.backlog.is_empty() {
                     body = body.child(
                         self.render_hint(
                             "Nothing in the backlog. Wrap skills can move unfinished tasks here.",
@@ -1918,19 +2236,35 @@ impl BacklogPanel {
                         .border_color(cx.theme().colors().border_variant),
                     );
                 }
-                body.child(
-                    h_flex()
-                        .flex_1()
-                        .min_h_0()
-                        .items_stretch()
-                        .child(self.render_open_section(SectionKind::Soon, cx))
-                        .child(self.render_open_section(SectionKind::Someday, cx))
-                        .child(self.render_completed_section(cx)),
-                )
+                body.child(match self.view {
+                    BacklogView::Open => self.render_open_view(cx),
+                    BacklogView::Done => self.render_done_view(cx),
+                })
                 .into_any_element()
             }
         }
     }
+}
+
+/// The note a task links to, when it links one: the `[[target]]` and the
+/// date in its name, for the row's meta line.
+struct TaskLink {
+    target: String,
+    date: Option<NaiveDate>,
+}
+
+fn task_link(text: &str) -> Option<TaskLink> {
+    let target = parse_inline_spans(text)
+        .into_iter()
+        .find_map(|span| match span.target {
+            Some(LinkTarget::Note(target)) => Some(target),
+            _ => None,
+        })?;
+    let name = target.rsplit('/').next().unwrap_or(&target);
+    let date = name
+        .get(..10)
+        .and_then(|head| NaiveDate::parse_from_str(head, "%Y-%m-%d").ok());
+    Some(TaskLink { target, date })
 }
 
 /// The completed audit trail in render order. The file stays append-ordered
@@ -1942,13 +2276,15 @@ fn completed_tasks(backlog: &Backlog) -> Vec<&BacklogTask> {
     tasks
 }
 
-/// The rows a column renders, in render order: an open column shows its
-/// uncategorized open tasks in file order, then one header per category
-/// followed by that group's tasks unless it is closed. Completed is flat.
+/// The rows a lane renders, in render order: an open lane starts with its
+/// title, then — unless the lane is folded — its uncategorized open tasks in
+/// file order and one header per category followed by that group's tasks
+/// unless it is closed. Completed is flat.
 fn column_rows<'a>(
     backlog: &'a Backlog,
     section: SectionKind,
     collapsed: &HashSet<(SectionKind, String)>,
+    folded_lanes: &HashSet<SectionKind>,
 ) -> Vec<BacklogRow<'a>> {
     if section == SectionKind::Completed {
         return completed_tasks(backlog)
@@ -1961,12 +2297,20 @@ fn column_rows<'a>(
         .iter()
         .filter(|task| !task.checked)
         .collect();
-    let mut rows: Vec<BacklogRow<'a>> = open
-        .iter()
-        .copied()
-        .filter(|task| task.category.is_none())
-        .map(|task| BacklogRow::Task { task })
-        .collect();
+    let folded = folded_lanes.contains(&section);
+    let mut rows = vec![BacklogRow::Lane {
+        count: open.len(),
+        folded,
+    }];
+    if folded {
+        return rows;
+    }
+    rows.extend(
+        open.iter()
+            .copied()
+            .filter(|task| task.category.is_none())
+            .map(|task| BacklogRow::Task { task }),
+    );
     for category in backlog.categories(section) {
         let name = category.name.as_str();
         let members: Vec<&BacklogTask> = open
@@ -2003,7 +2347,7 @@ impl Render for BacklogPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut key_context = KeyContext::new_with_defaults();
         key_context.add("ThockBacklogPanel");
-        // The inline editor is a descendant of this element, so the panel's
+        // The inline editor is a descendant of this element, so the view's
         // single-key bindings would shadow typing into it; `editing` is what
         // the keymap gates them on.
         if self.edit_state.is_some() {
@@ -2038,68 +2382,17 @@ impl Render for BacklogPanel {
     }
 }
 
-impl EventEmitter<PanelEvent> for BacklogPanel {}
-
 impl Focusable for BacklogPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
-impl Panel for BacklogPanel {
-    fn persistent_name() -> &'static str {
-        "Thock Backlog Panel"
-    }
-
-    fn panel_key() -> &'static str {
-        BACKLOG_PANEL_KEY
-    }
-
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        self.position
-    }
-
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Bottom)
-    }
-
-    fn set_position(
-        &mut self,
-        position: DockPosition,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.position = position;
-        cx.notify();
-    }
-
-    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(240.)
-    }
-
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        Some(IconName::Archive)
-    }
-
-    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Backlog Panel")
-    }
-
-    fn toggle_action(&self) -> Box<dyn Action> {
-        ToggleBacklogFocus.boxed_clone()
-    }
-
-    fn activation_priority(&self) -> u32 {
-        // Must be unique across all panels; 0-9 are taken (0-3 and 5-7
-        // upstream, 4 Timeline, 8 Day Planner, 9 Agent).
-        10
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{BacklogRow, SectionKind, column_rows, restore_hidden_suffix};
+    use super::{BacklogRow, SectionKind, column_rows, restore_hidden_suffix, task_link};
     use crate::backlog::{BacklogHeadings, parse_backlog};
+    use chrono::NaiveDate;
     use std::collections::HashSet;
 
     const CATEGORIZED: &str = "\
@@ -2125,9 +2418,12 @@ mod tests {
             .iter()
             .map(|(section, name)| (*section, (*name).to_string()))
             .collect();
-        column_rows(&backlog, SectionKind::Soon, &collapsed)
+        column_rows(&backlog, SectionKind::Soon, &collapsed, &HashSet::default())
             .into_iter()
             .map(|row| match row {
+                BacklogRow::Lane { count, folded, .. } => {
+                    format!("## Soon ({count}{})", if folded { ", folded" } else { "" })
+                }
                 BacklogRow::Category { name, count, .. } => format!("# {name} ({count})"),
                 BacklogRow::Task { task } => task.text.clone(),
             })
@@ -2139,6 +2435,7 @@ mod tests {
         assert_eq!(
             labels(CATEGORIZED, &[]),
             vec![
+                "## Soon (3)",
                 "Loose task",
                 "# OpenCue (2)",
                 "Fix the scheduler",
@@ -2152,21 +2449,58 @@ mod tests {
     fn a_collapsed_group_keeps_its_header_and_count() {
         assert_eq!(
             labels(CATEGORIZED, &[(SectionKind::Soon, "OpenCue")]),
-            vec!["Loose task", "# OpenCue (2)", "# Empty group (0)"]
+            vec![
+                "## Soon (3)",
+                "Loose task",
+                "# OpenCue (2)",
+                "# Empty group (0)"
+            ]
         );
     }
 
     #[test]
     fn a_stale_collapse_entry_is_harmless() {
-        assert_eq!(labels(CATEGORIZED, &[(SectionKind::Soon, "Gone")]).len(), 5);
+        assert_eq!(labels(CATEGORIZED, &[(SectionKind::Soon, "Gone")]).len(), 6);
     }
 
     #[test]
     fn a_backlog_without_categories_renders_as_a_flat_list() {
         assert_eq!(
             labels("## Soon\n- [ ] One\n- [ ] Two\n", &[]),
-            vec!["One", "Two"]
+            vec!["## Soon (2)", "One", "Two"]
         );
+    }
+
+    #[test]
+    fn a_folded_lane_is_one_row() {
+        let backlog = parse_backlog(CATEGORIZED, &BacklogHeadings::default());
+        let rows = column_rows(
+            &backlog,
+            SectionKind::Soon,
+            &HashSet::default(),
+            &HashSet::from_iter([SectionKind::Soon]),
+        );
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(
+            rows[0],
+            BacklogRow::Lane {
+                count: 3,
+                folded: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_task_link_carries_its_date() {
+        let link = task_link("Study for DNV elections [[2026-09-28-dnv-ballot]]").unwrap();
+        assert_eq!(link.target, "2026-09-28-dnv-ballot");
+        assert_eq!(link.date, NaiveDate::from_ymd_opt(2026, 9, 28));
+        let nested = task_link("Reply [[inbox/2026-10-02 Jimmy]]").unwrap();
+        assert_eq!(nested.date, NaiveDate::from_ymd_opt(2026, 10, 2));
+        assert!(task_link("Apps to try: vorssaint").is_none());
+        assert!(task_link("See [docs](https://a.example)").is_none());
+        assert_eq!(task_link("Read [[Maestro]]").unwrap().date, None);
     }
 
     #[test]

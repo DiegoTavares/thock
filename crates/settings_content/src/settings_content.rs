@@ -10,6 +10,7 @@ mod project;
 mod serde_helper;
 mod terminal;
 mod theme;
+mod thock;
 mod title_bar;
 mod workspace;
 
@@ -29,6 +30,7 @@ pub use serde_helper::{
 use settings_json::parse_json_with_comments;
 pub use terminal::*;
 pub use theme::*;
+pub use thock::*;
 pub use title_bar::*;
 pub use workspace::*;
 
@@ -266,6 +268,9 @@ pub struct SettingsContent {
 
     /// Configuration of the terminal in Zed.
     pub terminal: Option<TerminalSettingsContent>,
+
+    /// Thock's own settings: the faces vault notes are set in.
+    pub thock: Option<ThockSettingsContent>,
 
     pub title_bar: Option<TitleBarSettingsContent>,
 

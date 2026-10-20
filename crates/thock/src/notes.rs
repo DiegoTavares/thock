@@ -115,10 +115,11 @@ fn emit_date_token(output: &mut String, date: NaiveDate, token: char, run: usize
 
 /// Parses `text` against a `format_date` format string, returning the date
 /// that formats to exactly `text` — the inverse of `format_date`, used to
-/// recognize daily notes by filename. Weekday / week-number tokens are
-/// consumed but carry no year/month/day information; a format must contain
-/// year, month, and day tokens for parsing to succeed. Every candidate is
-/// verified by formatting it back, so a `Some` result always roundtrips.
+/// recognize daily and weekly notes by filename. A format must carry year,
+/// month and day tokens, or ISO year and week tokens, in which case the
+/// Monday of that week is returned; weekday tokens are consumed but carry no
+/// information. Every candidate is verified by formatting it back, so a
+/// `Some` result always roundtrips.
 pub fn parse_date(text: &str, format: &str) -> Option<NaiveDate> {
     let tokens = format_tokens(format);
     try_match(&tokens, text, DateFields::default(), format, text)
@@ -170,6 +171,20 @@ struct DateFields {
     year: Option<i32>,
     month: Option<u32>,
     day: Option<u32>,
+    iso_year: Option<i32>,
+    week: Option<u32>,
+}
+
+impl DateFields {
+    /// The date the fields name: a calendar date when the format carries
+    /// one, otherwise the Monday of the ISO week it carries (a weekly note's
+    /// stem, `GGGG-[W]WW`).
+    fn resolve(self) -> Option<NaiveDate> {
+        match (self.year, self.month, self.day) {
+            (Some(year), Some(month), Some(day)) => NaiveDate::from_ymd_opt(year, month, day),
+            _ => NaiveDate::from_isoywd_opt(self.iso_year?, self.week?, chrono::Weekday::Mon),
+        }
+    }
 }
 
 const MONTH_NAMES: [&str; 12] = [
@@ -211,7 +226,7 @@ fn try_match(
         if !input.is_empty() {
             return None;
         }
-        let date = NaiveDate::from_ymd_opt(fields.year?, fields.month?, fields.day?)?;
+        let date = fields.resolve()?;
         return (format_date(date, format) == full_input).then_some(date);
     };
     let recurse =
@@ -297,12 +312,46 @@ fn try_match(
             let name = if *run == 3 { &name[..3] } else { name };
             recurse(input.strip_prefix(name)?, fields)
         }),
-        FormatToken::Run('W', 1) => [2, 1]
-            .iter()
-            .find_map(|&width| recurse(take_digits(input, width)?.1, fields)),
-        FormatToken::Run('W', _) => recurse(take_digits(input, 2)?.1, fields),
-        FormatToken::Run('G', 2) => recurse(take_digits(input, 2)?.1, fields),
-        FormatToken::Run('G', _) => recurse(take_digits(input, 4)?.1, fields),
+        FormatToken::Run('W', 1) => [2, 1].iter().find_map(|&width| {
+            let (value, rest) = take_digits(input, width)?;
+            recurse(
+                rest,
+                DateFields {
+                    week: Some(value),
+                    ..fields
+                },
+            )
+        }),
+        FormatToken::Run('W', _) => {
+            let (value, rest) = take_digits(input, 2)?;
+            recurse(
+                rest,
+                DateFields {
+                    week: Some(value),
+                    ..fields
+                },
+            )
+        }
+        FormatToken::Run('G', 2) => {
+            let (value, rest) = take_digits(input, 2)?;
+            recurse(
+                rest,
+                DateFields {
+                    iso_year: Some(2000 + value as i32),
+                    ..fields
+                },
+            )
+        }
+        FormatToken::Run('G', _) => {
+            let (value, rest) = take_digits(input, 4)?;
+            recurse(
+                rest,
+                DateFields {
+                    iso_year: Some(value as i32),
+                    ..fields
+                },
+            )
+        }
         FormatToken::Run(..) => None,
     }
 }
@@ -593,6 +642,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_date_resolves_a_week_to_its_monday() {
+        for (text, format, monday) in [
+            ("2026-W42", "GGGG-[W]WW", date(2026, 10, 12)),
+            ("2027-W01", "GGGG-[W]WW", date(2027, 1, 4)),
+            ("2026-W53", "GGGG-[W]WW", date(2026, 12, 28)),
+            ("26w1", "GG[w]W", date(2025, 12, 29)),
+        ] {
+            assert_eq!(parse_date(text, format), Some(monday), "{text:?}");
+        }
+        assert_eq!(parse_date("2026-W54", "GGGG-[W]WW"), None);
+        assert_eq!(
+            parse_date("2026-W4", "GGGG-[W]WW"),
+            None,
+            "two digits are required"
+        );
+    }
+
+    #[test]
     fn parse_date_rejects_non_matches() {
         assert_eq!(parse_date("not-a-date", "YYYY-MM-DD"), None);
         assert_eq!(parse_date("2026-13-40", "YYYY-MM-DD"), None);
@@ -600,8 +667,8 @@ mod tests {
         assert_eq!(parse_date("2026-07", "YYYY-MM-DD"), None);
         // A wrong weekday name fails the roundtrip check.
         assert_eq!(parse_date("Tuesday 2026-07-20", "dddd YYYY-MM-DD"), None);
-        // Week-only formats carry no year/month/day.
-        assert_eq!(parse_date("2026-W30", "GGGG-[W]WW"), None);
+        // A weekday alone names no date.
+        assert_eq!(parse_date("Monday", "dddd"), None);
     }
 
     #[test]

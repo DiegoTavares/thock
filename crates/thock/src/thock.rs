@@ -9,6 +9,7 @@ pub mod chat_panel;
 pub mod connect_phone;
 pub mod day_plan;
 pub mod day_planner_panel;
+pub mod desk_panel;
 pub mod getting_started;
 pub mod gmail;
 pub mod gmail_google;
@@ -23,6 +24,7 @@ pub mod inbox_view;
 pub mod markdown_conceal;
 pub mod markdown_syntax;
 pub mod markdown_text;
+pub mod masthead;
 pub mod memory;
 pub mod notes;
 pub mod plus;
@@ -33,6 +35,7 @@ pub mod routines;
 pub mod routines_panel;
 pub mod sync_status;
 pub mod tasks_google;
+pub mod thock_theme;
 pub mod ui;
 pub mod vault;
 pub mod vault_sync;
@@ -47,20 +50,66 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use workspace::{AppState, OpenOptions, OpenVisible, Workspace};
 
+/// The `body_font` value that keeps the editor's own font.
+pub const BODY_FONT_BUFFER: &str = "buffer";
+/// The `heading_font` value that draws headings in the body face.
+pub const HEADING_FONT_BODY: &str = "body";
+
+/// The `thock` block of `settings.json` (V43 §7.1): the faces a vault note
+/// is set in while its Markdown is concealed. A change applies to open notes
+/// right away, like `buffer_font_family`.
+#[derive(Clone, Debug, PartialEq, settings::RegisterSetting)]
+pub struct ThockSettings {
+    /// The family notes are set in, or `BODY_FONT_BUFFER` for the editor's own.
+    pub body_font: String,
+    /// The family `#` and `##` headings are drawn in, or `HEADING_FONT_BODY`.
+    pub heading_font: String,
+}
+
+impl settings::Settings for ThockSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        let thock = content.thock.clone().unwrap_or_default();
+        Self {
+            body_font: thock
+                .body_font
+                .unwrap_or_else(|| "IBM Plex Sans".to_string()),
+            heading_font: thock.heading_font.unwrap_or_else(|| "Petrona".to_string()),
+        }
+    }
+}
+
+impl ThockSettings {
+    /// The family a concealed note's body is set in, or `None` to leave the
+    /// editor's own font through.
+    pub fn body_family(&self) -> Option<gpui::SharedString> {
+        (self.body_font != BODY_FONT_BUFFER).then(|| self.body_font.clone().into())
+    }
+
+    /// The family headings are drawn in: the heading face, or the body
+    /// face when asked for `"body"`, which may itself be the editor's own.
+    pub fn heading_family(&self) -> Option<gpui::SharedString> {
+        if self.heading_font == HEADING_FONT_BODY {
+            self.body_family()
+        } else {
+            Some(self.heading_font.clone().into())
+        }
+    }
+}
+
 pub use agent_panel::AgentPanel;
 pub use backlog_panel::BacklogPanel;
 pub use chat_panel::ChatPanel;
 pub use day_planner_panel::DayPlannerPanel;
+pub use desk_panel::DeskPanel;
 pub use routines_panel::{RoutinesPanel, show_panel_if_vault};
 pub use sync_status::SyncStatusIndicator;
 pub use vault::{Vault, VaultStatus, default_vault_path, scaffold_vault};
 
 pub fn init(cx: &mut App) {
     routines_panel::init(cx);
-    day_planner_panel::init(cx);
+    desk_panel::init(cx);
     agent_panel::init(cx);
     chat_panel::init(cx);
-    backlog_panel::init(cx);
     calendar_service::init(cx);
     gmail_service::init(cx);
     inbox_service::init(cx);
@@ -69,6 +118,7 @@ pub fn init(cx: &mut App) {
     sync_status::init(cx);
     vault_sync::init(cx);
     markdown_conceal::init(cx);
+    masthead::init(cx);
     wikilink_completion::init(cx);
     hide_inherited_zed_actions(cx);
 }

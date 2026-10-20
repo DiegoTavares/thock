@@ -7,7 +7,8 @@
 //! (persisted keys, activation priority) is deliberately unchanged.
 
 use anyhow::Result;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
+use fs::Fs;
 use gpui::{
     Action, App, AsyncWindowContext, Context, ElementId, Entity, EventEmitter, FocusHandle,
     Focusable, KeyContext, Pixels, PromptLevel, SharedString, Subscription, Task, WeakEntity,
@@ -20,6 +21,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr as _;
+use std::sync::Arc;
 use ui::prelude::*;
 use ui::{
     Button, Divider, Icon, IconButton, IconSize, KeyBinding, Label, ListItem, ListSubHeader,
@@ -32,7 +34,7 @@ use workspace::{OpenOptions, OpenVisible, Toast, Workspace};
 
 use crate::agent_panel::RunSkill;
 use crate::getting_started;
-use crate::notes::{EnsureNoteOutcome, TimelineEntry, ensure_note};
+use crate::notes::{EnsureNoteOutcome, NoteKind, TimelineEntry, ensure_note};
 use crate::routine_collections::{
     CollectionEntry, CollectionItems, CollectionView, load_collection,
 };
@@ -138,6 +140,64 @@ fn register_open_action<A: Action>(workspace: &mut Workspace, entry: TimelineEnt
             panel.update(cx, |panel, cx| panel.open_note(entry, window, cx));
         }
     });
+}
+
+/// Opens the note of `kind` for `date` in `workspace`, creating it from the
+/// vault's template when it is missing. A missing template still yields a
+/// note and a toast; a failure surfaces as a workspace error.
+pub(crate) fn open_vault_note(
+    workspace: WeakEntity<Workspace>,
+    fs: Arc<dyn Fs>,
+    vault: Vault,
+    kind: NoteKind,
+    date: NaiveDate,
+    window: &mut Window,
+    cx: &mut App,
+) -> Task<Result<()>> {
+    let time = Local::now().time();
+    let ensure_note =
+        cx.background_spawn(async move { ensure_note(&fs, &vault, kind, date, time).await });
+    window.spawn(cx, async move |cx| match ensure_note.await {
+        Ok((path, outcome)) => {
+            if outcome == EnsureNoteOutcome::CreatedWithoutTemplate {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        struct TemplateMissingToast;
+                        workspace.show_toast(
+                            Toast::new(
+                                NotificationId::unique::<TemplateMissingToast>(),
+                                "The note template is missing, so an empty note was created.",
+                            )
+                            .autohide(),
+                            cx,
+                        );
+                    })
+                    .log_err();
+            }
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.open_abs_path(
+                        path,
+                        OpenOptions {
+                            visible: Some(OpenVisible::All),
+                            ..Default::default()
+                        },
+                        window,
+                        cx,
+                    )
+                })?
+                .await?;
+            Ok(())
+        }
+        Err(error) => {
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.show_error(format!("Couldn't open the note: {error}"), cx);
+                })
+                .log_err();
+            Err(error)
+        }
+    })
 }
 
 fn new_routine_launch_request() -> crate::agent_panel::LaunchRequest {
@@ -476,9 +536,10 @@ fn render_caption(label: SharedString) -> AnyElement {
         .into_any_element()
 }
 
-/// Shows the routines panel (opening the left dock) when the workspace is a
-/// vault. Called once at startup after all panels are registered, so the
-/// navigation rail — not the file tree — is what a vault opens on.
+/// Shows the routines panel (opening the left dock) and the Desk (the right
+/// dock) when the workspace is a vault. Called once at startup after all
+/// panels are registered, so the navigation rail — not the file tree — is
+/// what a vault opens on.
 pub fn show_panel_if_vault(
     workspace: &mut Workspace,
     window: &mut Window,
@@ -495,6 +556,7 @@ pub fn show_panel_if_vault(
         });
     if is_vault {
         workspace.open_panel::<RoutinesPanel>(window, cx);
+        workspace.open_panel::<crate::desk_panel::DeskPanel>(window, cx);
     }
 }
 
@@ -975,58 +1037,19 @@ impl RoutinesPanel {
             );
             return;
         };
-        let vault = vault.clone();
-        let now = Local::now();
-        let Some((kind, date)) = entry.resolve(now.date_naive()) else {
+        let Some((kind, date)) = entry.resolve(Local::now().date_naive()) else {
             return;
         };
-        let time = now.time();
-        let workspace = self.workspace.clone();
-
         let fs = self.project.read(cx).fs().clone();
-        let ensure_note =
-            cx.background_spawn(async move { ensure_note(&fs, &vault, kind, date, time).await });
-        cx.spawn_in(window, async move |_, cx| match ensure_note.await {
-            Ok((path, outcome)) => {
-                if outcome == EnsureNoteOutcome::CreatedWithoutTemplate {
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            struct TemplateMissingToast;
-                            workspace.show_toast(
-                                Toast::new(
-                                    NotificationId::unique::<TemplateMissingToast>(),
-                                    "The note template is missing, so an empty note was created.",
-                                )
-                                .autohide(),
-                                cx,
-                            );
-                        })
-                        .log_err();
-                }
-                workspace
-                    .update_in(cx, |workspace, window, cx| {
-                        workspace.open_abs_path(
-                            path,
-                            OpenOptions {
-                                visible: Some(OpenVisible::All),
-                                ..Default::default()
-                            },
-                            window,
-                            cx,
-                        )
-                    })?
-                    .await?;
-                Ok(())
-            }
-            Err(error) => {
-                workspace
-                    .update(cx, |workspace, cx| {
-                        workspace.show_error(format!("Couldn't open the note: {error}"), cx);
-                    })
-                    .log_err();
-                Err(error)
-            }
-        })
+        open_vault_note(
+            self.workspace.clone(),
+            fs,
+            vault.clone(),
+            kind,
+            date,
+            window,
+            cx,
+        )
         .detach_and_log_err(cx);
     }
 

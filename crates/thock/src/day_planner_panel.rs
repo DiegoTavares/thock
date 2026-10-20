@@ -1,5 +1,5 @@
-//! The Day Planner Context panel (spec `v4-day-planner-panel.md`): a
-//! right-dock panel that follows the active editor item. When that item is a
+//! The Day Planner view (spec `v4-day-planner-panel.md`): the Desk panel's
+//! Today tab, which follows the active editor item. When that item is a
 //! daily note of the current vault, its checklist is parsed into a vertical
 //! day grid — timed tasks as duration-scaled blocks, unscheduled tasks as
 //! chips. When no daily note is active it falls back to today's note,
@@ -10,9 +10,8 @@ use anyhow::Result;
 use chrono::{Local, NaiveDate, Timelike as _};
 use editor::{Editor, EditorEvent, RowHighlightOptions, SelectionEffects, scroll::Autoscroll};
 use gpui::{
-    Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    KeyContext, Pixels, ScrollHandle, Subscription, Task, WeakEntity, Window, actions, div, point,
-    px, relative,
+    App, AsyncWindowContext, Context, Entity, FocusHandle, Focusable, KeyContext, ScrollHandle,
+    Subscription, Task, WeakEntity, Window, actions, div, point, px, relative,
 };
 use language::{Buffer, BufferEvent};
 use menu::{Cancel, Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
@@ -24,7 +23,6 @@ use ui::prelude::*;
 use ui::{Icon, IconSize, Label, LabelLike};
 use util::ResultExt as _;
 use workspace::Workspace;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::calendar_service::{self, CalendarService};
 use crate::day_plan::{self, DayPlan, PlacedBlock, PlanItem, parse_day_plan};
@@ -51,19 +49,10 @@ enum DayPlannerHighlight {}
 actions!(
     thock,
     [
-        /// Toggles focus on the Thock day planner panel.
+        /// Opens the Desk panel on its Today tab, or returns to the note.
         ToggleDayPlannerFocus
     ]
 );
-
-pub fn init(cx: &mut App) {
-    cx.observe_new(|workspace: &mut Workspace, _, _| {
-        workspace.register_action(|workspace, _: &ToggleDayPlannerFocus, window, cx| {
-            workspace.toggle_panel_focus::<DayPlannerPanel>(window, cx);
-        });
-    })
-    .detach();
-}
 
 /// How a plan item reads in the panel. A struck-through item is finished the
 /// same way a ticked one is, but takes the dimmer disabled tone so a dropped
@@ -118,7 +107,9 @@ pub struct DayPlannerPanel {
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
     focus_handle: FocusHandle,
-    position: DockPosition,
+    /// Set by the Desk while a row sits above the grid (the Next card):
+    /// moving up from the first item then releases the selection to it.
+    row_above: bool,
     vault_status: VaultStatus,
     calendar_service: Option<Entity<CalendarService>>,
     active: Option<ActiveNote>,
@@ -193,7 +184,7 @@ impl DayPlannerPanel {
                 workspace: weak_workspace,
                 project,
                 focus_handle: cx.focus_handle(),
-                position: DockPosition::Right,
+                row_above: false,
                 vault_status: VaultStatus::NotAVault,
                 calendar_service,
                 active: None,
@@ -217,6 +208,51 @@ impl DayPlannerPanel {
             });
             this
         })
+    }
+
+    /// Tells the view whether a selectable row sits above its first item.
+    pub fn set_row_above(&mut self, row_above: bool) {
+        self.row_above = row_above;
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selected_item.is_some()
+    }
+
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selected_item.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Unchecked tasks on the shown day — the Today tab's count.
+    pub fn open_count(&self) -> usize {
+        self.active
+            .as_ref()
+            .map(|active| {
+                active
+                    .plan
+                    .items
+                    .iter()
+                    .filter(|item| !ItemState::of(item).finished())
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Opens today's note at `row` and puts the cursor there, for the Desk's
+    /// Next card.
+    pub fn reveal_today_row(&mut self, row: u32, window: &mut Window, cx: &mut Context<Self>) {
+        let today = Local::now().date_naive();
+        if let Some(active) = &self.active
+            && active.date == today
+            && let NoteSource::Editor(editor) = &active.source
+            && let Some(editor) = editor.upgrade()
+        {
+            Self::reveal_in_editor(&editor, row, window, cx);
+            return;
+        }
+        self.open_note_and_reveal(today, row, None, window, cx);
     }
 
     fn detect_vault_status(&self, cx: &App) -> VaultStatus {
@@ -474,10 +510,21 @@ impl DayPlannerPanel {
         let Some(active) = &self.active else {
             return;
         };
+        self.open_note_and_reveal(active.date, row, Some(item_index), window, cx);
+    }
+
+    fn open_note_and_reveal(
+        &mut self,
+        date: NaiveDate,
+        row: u32,
+        select: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let VaultStatus::Valid(vault) = &self.vault_status else {
             return;
         };
-        let note_path = vault.note_path(NoteKind::Daily, active.date);
+        let note_path = vault.note_path(NoteKind::Daily, date);
         let Some(project_path) = self
             .project
             .read(cx)
@@ -494,7 +541,9 @@ impl DayPlannerPanel {
             if let Some(editor) = item.downcast::<Editor>() {
                 this.update_in(cx, |this, window, cx| {
                     Self::reveal_in_editor(&editor, row, window, cx);
-                    this.selected_item = Some(item_index);
+                    if let Some(item_index) = select {
+                        this.selected_item = Some(item_index);
+                    }
                     cx.notify();
                 })?;
             }
@@ -577,6 +626,15 @@ impl DayPlannerPanel {
             .selected_item
             .and_then(|selected| order.iter().position(|index| *index == selected));
         let previous = match position {
+            // From the first item, the selection is released to whatever
+            // the Desk keeps above the grid, when it told us there is
+            // something.
+            Some(0) if self.row_above => {
+                self.selected_item = None;
+                cx.notify();
+                cx.propagate();
+                return;
+            }
             Some(position) => order.get(position.saturating_sub(1)),
             None => order.last(),
         };
@@ -598,8 +656,10 @@ impl DayPlannerPanel {
     }
 
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(item_index) = self.selected_item {
-            self.reveal_item(item_index, window, cx);
+        match self.selected_item {
+            Some(item_index) => self.reveal_item(item_index, window, cx),
+            // Nothing here to act on; the Desk may have a row above.
+            None => cx.propagate(),
         }
     }
 
@@ -1104,71 +1164,28 @@ impl Render for DayPlannerPanel {
     }
 }
 
-impl EventEmitter<PanelEvent> for DayPlannerPanel {}
-
 impl Focusable for DayPlannerPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
-impl Panel for DayPlannerPanel {
-    fn persistent_name() -> &'static str {
-        "Thock Day Planner Panel"
-    }
-
-    fn panel_key() -> &'static str {
-        DAY_PLANNER_PANEL_KEY
-    }
-
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        self.position
-    }
-
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
-    }
-
-    fn set_position(
-        &mut self,
-        position: DockPosition,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.position = position;
-        cx.notify();
-    }
-
-    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(320.)
-    }
-
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        Some(IconName::ListTodo)
-    }
-
-    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Day Planner Panel")
-    }
-
-    fn toggle_action(&self) -> Box<dyn Action> {
-        ToggleDayPlannerFocus.boxed_clone()
-    }
-
-    fn activation_priority(&self) -> u32 {
-        // Must be unique across all panels; 0-7 are taken (0-3 and 5-7
-        // upstream, 4 by the Timeline panel).
-        8
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backlog_panel::BacklogFolds;
+    use crate::desk_panel::{DeskPanel, DeskTab};
     use fs::FakeFs;
     use gpui::{KeyBinding, TestAppContext, VisualTestContext};
     use serde_json::json;
     use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
+    use workspace::MultiWorkspace;
+
+    /// Stands in for vim's count action, which this crate doesn't link, so
+    /// the vim keymap's digit bindings load here as they do in the app.
+    #[derive(Clone, PartialEq, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+    #[action(namespace = vim, name = "Number")]
+    struct VimNumber(usize);
 
     const NOTE: &str = "# Day planner\n\
         - [ ] Unscheduled thing\n\
@@ -1193,6 +1210,7 @@ mod tests {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             release_channel::init(semver::Version::new(0, 0, 0), cx);
             editor::init(cx);
+            crate::desk_panel::init(cx);
             // The shipped keymap, so a missing or shadowed binding fails here.
             let bindings = keymap_bindings(
                 include_str!("../../../assets/keymaps/default-linux.json"),
@@ -1206,6 +1224,12 @@ mod tests {
                 let bindings =
                     keymap_bindings(include_str!("../../../assets/keymaps/vim.json"), cx);
                 cx.bind_keys(bindings);
+                // Handled like the vim crate does, so a digit the vim keymap
+                // claims is swallowed as a count instead of reaching the Desk.
+                cx.observe_new(|workspace: &mut Workspace, _, _| {
+                    workspace.register_action(|_, _: &VimNumber, _, _| {});
+                })
+                .detach();
                 cx.bind_keys([
                     KeyBinding::new("j", SelectNext, Some(DAY_PLANNER_PANEL_KEY)),
                     KeyBinding::new("k", SelectPrevious, Some(DAY_PLANNER_PANEL_KEY)),
@@ -1215,6 +1239,7 @@ mod tests {
     }
 
     struct Setup {
+        desk: Entity<DeskPanel>,
         panel: Entity<DayPlannerPanel>,
         editor: Entity<Editor>,
         cx: VisualTestContext,
@@ -1240,9 +1265,10 @@ mod tests {
         )
         .await;
         let project = Project::test(fs, [root], cx).await;
-        let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let mut cx = cx.clone();
+        let workspace = multi_workspace.read_with(&cx, |multi, _| multi.workspace().clone());
         let project_path = project
             .read_with(&mut cx, |project, cx| {
                 project.find_project_path(root.join("daily/2026-01-05.md"), cx)
@@ -1256,14 +1282,16 @@ mod tests {
             .unwrap()
             .downcast::<Editor>()
             .unwrap();
-        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
-            let panel = DayPlannerPanel::new(workspace, window, cx);
-            workspace.add_panel(panel.clone(), window, cx);
-            panel
+        let desk = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let desk = DeskPanel::new(workspace, BacklogFolds::default(), window, cx);
+            workspace.add_panel(desk.clone(), window, cx);
+            desk.update(cx, |desk, cx| desk.show_tab(DeskTab::Today, cx));
+            desk
         });
+        let panel = desk.read_with(&cx, |desk, _| desk.planner().clone());
         cx.run_until_parked();
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.toggle_panel_focus::<DayPlannerPanel>(window, cx);
+            workspace.toggle_panel_focus::<DeskPanel>(window, cx);
         });
         cx.run_until_parked();
         assert_eq!(
@@ -1275,6 +1303,7 @@ mod tests {
             "the planner mirrors the open daily note"
         );
         Setup {
+            desk,
             panel,
             editor,
             cx,
@@ -1361,6 +1390,21 @@ mod tests {
         assert_eq!(cursor_row(&mut setup), SECOND_BLOCK_ROW);
         assert!(!panel_focused(&mut setup), "revealing moves to the note");
         assert_eq!(selected_row(&setup), Some(SECOND_BLOCK_ROW));
+    }
+
+    #[gpui::test]
+    async fn vim_digits_switch_desk_tabs_from_inside_a_view(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, true).await;
+        let desk = setup.desk.clone();
+        let tab = |setup: &Setup| desk.read_with(&setup.cx, |desk, _| desk.tab());
+        assert!(panel_focused(&mut setup));
+        setup.cx.simulate_keystrokes("1");
+        assert_eq!(tab(&setup), DeskTab::Backlog, "from the Day Planner");
+        setup.cx.simulate_keystrokes("2");
+        assert_eq!(tab(&setup), DeskTab::Today, "from the Backlog");
+        assert!(panel_focused(&mut setup));
+        setup.cx.simulate_keystrokes("3");
+        assert_eq!(tab(&setup), DeskTab::Done);
     }
 
     #[gpui::test]

@@ -20,6 +20,17 @@ impl Editor {
         cx.notify();
     }
 
+    /// Overrides the soft wrap mode from settings, or clears the override
+    /// with `None` so the settings apply again.
+    pub fn set_soft_wrap_mode_override(
+        &mut self,
+        mode: Option<language_settings::SoftWrap>,
+        cx: &mut Context<Self>,
+    ) {
+        self.soft_wrap_mode_override = mode;
+        cx.notify();
+    }
+
     pub fn set_hard_wrap(&mut self, hard_wrap: Option<usize>, cx: &mut Context<Self>) {
         self.hard_wrap = hard_wrap;
         cx.notify();
@@ -27,6 +38,10 @@ impl Editor {
 
     pub fn set_text_style_refinement(&mut self, style: TextStyleRefinement) {
         self.text_style_refinement = Some(style);
+    }
+
+    pub fn text_style_refinement(&self) -> Option<&TextStyleRefinement> {
+        self.text_style_refinement.as_ref()
     }
 
     /// called by the Element so we know what style we were most recently rendered with.
@@ -54,6 +69,17 @@ impl Editor {
 
     pub fn set_show_wrap_guides(&mut self, show_wrap_guides: bool, cx: &mut Context<Self>) {
         self.show_wrap_guides = Some(show_wrap_guides);
+        cx.notify();
+    }
+
+    /// Overrides whether wrap guides show, or clears the override with
+    /// `None` so the settings apply again.
+    pub fn set_show_wrap_guides_override(
+        &mut self,
+        show_wrap_guides: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_wrap_guides = show_wrap_guides;
         cx.notify();
     }
 
@@ -236,7 +262,7 @@ impl Editor {
         cx.notify();
     }
 
-    pub(super) fn wrap_guides(&self, cx: &App) -> SmallVec<[(usize, bool); 2]> {
+    pub fn wrap_guides(&self, cx: &App) -> SmallVec<[(usize, bool); 2]> {
         let mut wrap_guides = smallvec![];
 
         if self.show_wrap_guides == Some(false) {

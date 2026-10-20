@@ -17,8 +17,8 @@ use crate::application_menu::{
 };
 
 use gpui::{
-    AnyElement, App, Context, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    Render, Styled, Subscription, WeakEntity, Window, actions,
+    AnyElement, AnyView, App, Context, Entity, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Render, Styled, Subscription, WeakEntity, Window, actions,
 };
 use project::Project;
 use settings::Settings as _;
@@ -100,6 +100,10 @@ pub struct TitleBar {
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     application_menu: Option<Entity<ApplicationMenu>>,
     update_version: Entity<UpdateVersion>,
+    /// A second row drawn under the title bar across the window's width —
+    /// Thock's masthead. The title bar row itself keeps its height and
+    /// contents.
+    masthead: Option<AnyView>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -178,13 +182,21 @@ impl Render for TitleBar {
                         .w_full()
                         .children(children),
                 )
+                .children(self.masthead.clone())
                 .into_any_element()
         } else {
             self.platform_titlebar.update(cx, |this, _| {
                 this.set_button_layout(button_layout);
                 this.set_children(children);
             });
-            self.platform_titlebar.clone().into_any_element()
+            match self.masthead.clone() {
+                Some(masthead) => v_flex()
+                    .w_full()
+                    .child(self.platform_titlebar.clone().into_any_element())
+                    .child(masthead)
+                    .into_any_element(),
+                None => self.platform_titlebar.clone().into_any_element(),
+            }
         }
     }
 }
@@ -230,8 +242,20 @@ impl TitleBar {
             multi_workspace,
             application_menu,
             update_version,
+            masthead: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Sets the row drawn under the title bar, or removes it with `None`.
+    pub fn set_masthead(&mut self, masthead: Option<AnyView>, cx: &mut Context<Self>) {
+        self.masthead = masthead;
+        cx.notify();
+    }
+
+    /// The title bar of `workspace`, when it is one of these.
+    pub fn of(workspace: &Workspace) -> Option<Entity<TitleBar>> {
+        title_bar_of(workspace)
     }
 
     fn toggle_update_simulation(&mut self, cx: &mut Context<Self>) {

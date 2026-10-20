@@ -77,7 +77,7 @@ or some** of them to the backlog (Soon by default — say "someday" for the
 no-rush ones). Nothing moves without your answer, and tasks already in the
 backlog are never duplicated.
 
-> **Try it now:** open the Backlog panel and add one task to Soon.
+> **Try it now:** open the Desk's Backlog tab and add one task to Soon.
 
 ## The weekly dashboard
 

@@ -4,13 +4,23 @@
 //! and HTML comments are folded away behind an invisible placeholder,
 //! headings and link labels are coloured, struck text takes its line,
 //! emphasis takes its weight and slant, a quoted line recedes, a task list's
-//! `[ ]` draws as a checkbox, a list bullet as a `•`, and a `___` line as a
-//! rule. Putting the cursor on a line restores that whole line's source
+//! `- [ ]` draws as a checkbox alone, a plain list bullet as a `•`, a `___`
+//! line as a rule, and a journal entry's or a task's time takes its colour
+//! (V43 §7.3). Putting the cursor on a line restores that whole line's source
 //! (§4.2). Everything here is display-only: folds and highlights live in the
 //! `DisplayMap` and no code path writes to the buffer (§4.3).
+//!
+//! With conceal on, the note is also set in the vault's body face (V43
+//! §7.1) through a text-style refinement, dropped again when the source is
+//! shown, so the source reads in the editor's own font, and `#` and `##`
+//! lines are drawn as replace blocks in the heading face (V43 §7.2) — two
+//! rows for an H1, one for an H2 — that give way to the source line while
+//! the cursor is on it.
 
+use crate::ThockSettings;
 use crate::markdown_syntax::{self, SpanKind};
 use crate::markdown_text;
+use crate::thock_theme::on_accent_color;
 use crate::vault::{Vault, VaultStatus};
 use collections::{HashMap, HashSet};
 use editor::actions::GoToDefinition;
@@ -20,22 +30,25 @@ use editor::display_map::{
 };
 use editor::{Editor, EditorEvent, EditorMode, FoldPlaceholder, HighlightKey};
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Empty, Entity, HighlightStyle, Hsla, ImageSource,
-    IntoElement as _, ParentElement as _, Resource, RetainAllImageCache, SharedString, SharedUri,
-    StrikethroughStyle, Styled as _, Subscription, Task, TaskExt as _, WeakEntity, Window, div,
-    img, px,
+    AnyElement, App, AppContext as _, Context, ElementId, Empty, Entity, FontFeatures, FontStyle,
+    FontWeight, HighlightStyle, Hsla, ImageSource, IntoElement as _, ParentElement as _, Resource,
+    RetainAllImageCache, SharedString, SharedUri, StrikethroughStyle, Styled as _, Subscription,
+    Task, TaskExt as _, TextStyleRefinement, WeakEntity, Window, div, img, px,
 };
+use language::language_settings;
 use multi_buffer::{
-    Anchor, MultiBufferOffset, MultiBufferPoint, MultiBufferSnapshot, ToOffset as _, ToPoint as _,
+    Anchor, MultiBufferOffset, MultiBufferPoint, MultiBufferRow, MultiBufferSnapshot,
+    ToOffset as _, ToPoint as _,
 };
-use project::ProjectPath;
-use settings::SettingsStore;
+use project::{Project, ProjectPath};
+use settings::{Settings as _, SettingsStore};
 use std::any::TypeId;
 use std::borrow::Cow;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use ui::prelude::FluentBuilder as _;
 use ui::{ActiveTheme as _, Color, Icon, IconName, IconSize};
 use util::paths::PathStyle;
 use util::rel_path::{RelPath, RelPathBuf};
@@ -108,6 +121,25 @@ pub struct ConcealSettings {
     pub images_dir: String,
 }
 
+/// One `#` or `##` line drawn as a block (V43 §7.2): the line it stands on,
+/// its level and text, and the blocks drawn for it — the replace block
+/// while the cursor is elsewhere, or the one-row spacer that keeps an H1's
+/// height while its source shows.
+struct HeadingEntry {
+    /// The start of the heading line.
+    line: Anchor,
+    /// The end of the heading line; a replace block needs a range that
+    /// spans more than one point or the display map drops it.
+    line_end: Anchor,
+    level: u8,
+    text: String,
+    /// False once the heading is gone from the plan; the entry stays only
+    /// until its blocks are removed.
+    live: bool,
+    block: Option<CustomBlockId>,
+    spacer: Option<CustomBlockId>,
+}
+
 /// One image line's picture: the line it sits under, what it points at, and
 /// the block drawn for it (V39 §5.5).
 struct ImageEntry {
@@ -129,6 +161,7 @@ pub struct MarkdownConcealAddon {
     spans: Vec<AnchorSpan>,
     email: Option<EmailAnchors>,
     images: Vec<ImageEntry>,
+    headings: Vec<HeadingEntry>,
     /// Decoded pictures, kept for the editor's lifetime so scrolling past
     /// the same image never decodes it twice.
     image_cache: Entity<RetainAllImageCache>,
@@ -141,6 +174,10 @@ pub struct MarkdownConcealAddon {
     self_applied: bool,
     /// The last repair `apply_folds` tried and the fold map did not take.
     last_attempt: Option<ApplyAttempt>,
+    /// Whether the wrap overrides were last set for the body face; `None`
+    /// until first set. Settings changes only touch the wrap when the face
+    /// switches on or off, so a soft-wrap toggle survives a theme change.
+    wrap_set_for_body_face: Option<bool>,
     reparse: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -250,7 +287,10 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         &cx.entity(),
         |editor, _, event: &EditorEvent, cx| match event {
             EditorEvent::BufferEdited => schedule_reparse(editor, cx),
-            EditorEvent::SelectionsChanged { .. } => apply_folds(editor, cx),
+            EditorEvent::SelectionsChanged { .. } => {
+                apply_folds(editor, cx);
+                apply_heading_blocks(editor, cx);
+            }
             _ => {}
         },
     ));
@@ -271,12 +311,17 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         {
             return;
         }
-        apply_folds(editor, cx)
+        apply_folds(editor, cx);
+        apply_heading_blocks(editor, cx);
     }));
     // Highlight styles capture theme colours, so a theme change needs a
-    // re-apply to pick up the new palette.
-    subscriptions
-        .push(cx.observe_global::<SettingsStore>(|editor, cx| apply_highlights(editor, cx)));
+    // re-apply to pick up the new palette; the body face is a setting too.
+    // Heading blocks read their face at render time, so they follow on
+    // their own.
+    subscriptions.push(cx.observe_global::<SettingsStore>(|editor, cx| {
+        apply_highlights(editor, cx);
+        apply_body_font(editor, cx);
+    }));
 
     let editor_handle = cx.weak_entity();
     subscriptions.push(
@@ -330,15 +375,67 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         spans: Vec::new(),
         email: None,
         images: Vec::new(),
+        headings: Vec::new(),
         image_cache: RetainAllImageCache::new(cx),
         crease_ids: Vec::new(),
         default_folds_applied: false,
         self_applied: false,
         last_attempt: None,
+        wrap_set_for_body_face: None,
         reparse: Task::ready(()),
         _subscriptions: subscriptions,
     });
+    apply_body_font(editor, cx);
     schedule_reparse(editor, cx);
+}
+
+/// Sets the note in the body face from settings with lining numerals while
+/// concealed, and lets the editor's own font through otherwise, so showing
+/// the source is unmistakable (V43 §7.1). A column count means nothing in a
+/// proportional face: the wrap guide is measured in spaces and the wrap
+/// itself in `m`s, so they land in different places. While the body face is
+/// on, the note wraps at the editor width and shows no guide; the source
+/// view gets the user's wrap settings back. The wrap is only reset when the
+/// face switches on or off, so the user's own wrap toggle outlives unrelated
+/// settings changes.
+fn apply_body_font(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let family = body_font(editor, cx);
+    let body_face_on = family.is_some();
+    let refinement = match family {
+        Some(family) => TextStyleRefinement {
+            font_family: Some(family),
+            font_features: Some(FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))),
+            ..Default::default()
+        },
+        None => TextStyleRefinement::default(),
+    };
+    editor.set_text_style_refinement(refinement);
+
+    let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() else {
+        return;
+    };
+    if addon.wrap_set_for_body_face == Some(body_face_on) {
+        cx.notify();
+        return;
+    }
+    addon.wrap_set_for_body_face = Some(body_face_on);
+    if body_face_on {
+        editor.set_soft_wrap_mode_override(Some(language_settings::SoftWrap::EditorWidth), cx);
+        editor.set_show_wrap_guides_override(Some(false), cx);
+    } else {
+        editor.set_soft_wrap_mode_override(None, cx);
+        editor.set_show_wrap_guides_override(None, cx);
+    }
+}
+
+/// The family the note's body is set in right now: the settings' face while
+/// concealed, otherwise `None` for the editor's own.
+fn body_font(editor: &Editor, cx: &App) -> Option<SharedString> {
+    let addon = editor.addon::<MarkdownConcealAddon>()?;
+    addon
+        .enabled
+        .then(|| ThockSettings::get_global(cx).body_family())
+        .flatten()
 }
 
 /// Makes `[[wikilinks]]` act like code references: go-to-definition with the
@@ -467,9 +564,11 @@ fn toggle(editor: &mut Editor, cx: &mut Context<Editor>) {
         return;
     };
     addon.enabled = !addon.enabled;
+    apply_body_font(editor, cx);
     apply_highlights(editor, cx);
     apply_folds(editor, cx);
     apply_image_blocks(editor, cx);
+    apply_heading_blocks(editor, cx);
 }
 
 /// Rows a picture's block starts at before its size is known, and the most
@@ -709,6 +808,294 @@ fn render_image_block(
         .flex()
         .items_start()
         .child(content)
+        .into_any_element()
+}
+
+/// Rebuilds the heading entries from the span plan, keeping the blocks of a
+/// heading whose line still shows the same text at the same level.
+fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
+        return;
+    };
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let found: Vec<(Anchor, Anchor, u8, String)> = addon
+        .spans
+        .iter()
+        .filter_map(|span| match span.kind {
+            SpanKind::Heading(level @ (1 | 2)) => {
+                let row = span.range.start.to_point(&buffer_snapshot).row;
+                let line = buffer_snapshot.anchor_before(MultiBufferPoint::new(row, 0));
+                let line_end = buffer_snapshot.anchor_after(MultiBufferPoint::new(
+                    row,
+                    buffer_snapshot.line_len(MultiBufferRow(row)),
+                ));
+                let text: String = buffer_snapshot.text_for_range(span.range.clone()).collect();
+                Some((line, line_end, level, text))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut previous: Vec<HeadingEntry> = Vec::new();
+    if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        previous = std::mem::take(&mut addon.headings);
+    }
+    let previous_keys: Vec<(MultiBufferOffset, u8, String)> = previous
+        .iter()
+        .map(|entry| {
+            (
+                entry.line.to_offset(&buffer_snapshot),
+                entry.level,
+                entry.text.clone(),
+            )
+        })
+        .collect();
+    let mut carried: Vec<Option<HeadingEntry>> = previous.into_iter().map(Some).collect();
+    let headings: Vec<HeadingEntry> = found
+        .into_iter()
+        .map(|(line, line_end, level, text)| {
+            let key = (line.to_offset(&buffer_snapshot), level, text.clone());
+            let kept = previous_keys
+                .iter()
+                .position(|previous| *previous == key)
+                .and_then(|index| carried.get_mut(index).and_then(Option::take));
+            kept.unwrap_or(HeadingEntry {
+                line,
+                line_end,
+                level,
+                text,
+                live: true,
+                block: None,
+                spacer: None,
+            })
+        })
+        .collect();
+    // An entry that lost its line keeps its blocks only long enough for
+    // `apply_heading_blocks` to remove them.
+    let orphaned = carried
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.block.is_some() || entry.spacer.is_some())
+        .map(|entry| HeadingEntry {
+            live: false,
+            ..entry
+        });
+    if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        addon.headings = headings.into_iter().chain(orphaned).collect();
+    }
+}
+
+/// Which of a heading's two blocks an insertion is for.
+#[derive(Clone, Copy)]
+enum HeadingBlock {
+    Replace,
+    Spacer,
+}
+
+/// Draws every H1 and H2 the cursor is not on as a replace block, and
+/// keeps a one-row spacer above a revealed H1 so its height never changes
+/// (V43 §7.2); removes every block when the source is showing. A user fold
+/// operation (`unfold_all`, `zR`, a restored fold) sweeps intersecting
+/// replace blocks away with the folds, so a block the map no longer holds
+/// counts as missing and is drawn again, the way the folds heal (§10.2).
+fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
+        return;
+    };
+    let enabled = addon.enabled;
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let display_snapshot = editor.display_map.update(cx, |map, cx| map.snapshot(cx));
+    let still_held = |id: Option<CustomBlockId>| {
+        id.filter(|id| {
+            display_snapshot
+                .block_for_id(BlockId::Custom(*id))
+                .is_some()
+        })
+    };
+    let revealed = revealed_rows(editor, &buffer_snapshot);
+    let project = editor.project().cloned();
+    let workspace = editor.workspace().map(|workspace| workspace.downgrade());
+    let mut to_remove: HashSet<CustomBlockId> = HashSet::default();
+    let mut to_insert: Vec<(usize, HeadingBlock, BlockProperties<Anchor>)> = Vec::new();
+    let mut swept: Vec<(usize, HeadingBlock)> = Vec::new();
+    for (index, entry) in addon.headings.iter().enumerate() {
+        let row = entry.line.to_point(&buffer_snapshot).row;
+        let is_revealed = revealed
+            .iter()
+            .any(|&(first, last)| row >= first && row <= last);
+        let want_block = enabled && entry.live && !is_revealed;
+        let want_spacer = enabled && entry.live && is_revealed && entry.level == 1;
+        let block = still_held(entry.block);
+        if entry.block.is_some() && block.is_none() {
+            swept.push((index, HeadingBlock::Replace));
+        }
+        let spacer = still_held(entry.spacer);
+        if entry.spacer.is_some() && spacer.is_none() {
+            swept.push((index, HeadingBlock::Spacer));
+        }
+        match (block, want_block) {
+            (Some(id), false) => {
+                to_remove.insert(id);
+            }
+            (None, true) => to_insert.push((
+                index,
+                HeadingBlock::Replace,
+                heading_block(entry, project.clone(), workspace.clone()),
+            )),
+            _ => {}
+        }
+        match (spacer, want_spacer) {
+            (Some(id), false) => {
+                to_remove.insert(id);
+            }
+            (None, true) => to_insert.push((index, HeadingBlock::Spacer, spacer_block(entry.line))),
+            _ => {}
+        }
+    }
+    if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        for (index, which) in swept {
+            if let Some(entry) = addon.headings.get_mut(index) {
+                match which {
+                    HeadingBlock::Replace => entry.block = None,
+                    HeadingBlock::Spacer => entry.spacer = None,
+                }
+            }
+        }
+    }
+    if to_remove.is_empty() && to_insert.is_empty() {
+        if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+            addon
+                .headings
+                .retain(|entry| entry.live || entry.block.is_some() || entry.spacer.is_some());
+        }
+        return;
+    }
+    let inserted = editor.insert_blocks(
+        to_insert
+            .iter()
+            .map(|(_, _, properties)| properties.clone()),
+        None,
+        cx,
+    );
+    if !to_remove.is_empty() {
+        editor.remove_blocks(to_remove.clone(), None, cx);
+    }
+    if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        for ((index, which, _), id) in to_insert.into_iter().zip(inserted) {
+            if let Some(entry) = addon.headings.get_mut(index) {
+                match which {
+                    HeadingBlock::Replace => entry.block = Some(id),
+                    HeadingBlock::Spacer => entry.spacer = Some(id),
+                }
+            }
+        }
+        for entry in &mut addon.headings {
+            if entry.block.is_some_and(|id| to_remove.contains(&id)) {
+                entry.block = None;
+            }
+            if entry.spacer.is_some_and(|id| to_remove.contains(&id)) {
+                entry.spacer = None;
+            }
+        }
+        addon
+            .headings
+            .retain(|entry| entry.live || entry.block.is_some() || entry.spacer.is_some());
+    }
+    cx.notify();
+}
+
+/// Rows an H1 and an H2 block take (§7.2): the H1's first row is breathing
+/// room above the text.
+fn heading_rows(level: u8) -> u32 {
+    if level == 1 { 2 } else { 1 }
+}
+
+fn heading_block(
+    entry: &HeadingEntry,
+    project: Option<Entity<Project>>,
+    workspace: Option<WeakEntity<Workspace>>,
+) -> BlockProperties<Anchor> {
+    let text = entry.text.clone();
+    let level = entry.level;
+    BlockProperties {
+        placement: BlockPlacement::Replace(entry.line..=entry.line_end),
+        height: Some(heading_rows(level)),
+        style: BlockStyle::Flex,
+        priority: 0,
+        render: Arc::new(move |block| {
+            render_heading_block(&text, level, project.as_ref(), workspace.as_ref(), block)
+        }),
+    }
+}
+
+/// The empty row above a revealed H1, so the lines below never jump.
+fn spacer_block(line: Anchor) -> BlockProperties<Anchor> {
+    BlockProperties {
+        placement: BlockPlacement::Above(line),
+        height: Some(1),
+        style: BlockStyle::Flex,
+        priority: 0,
+        render: Arc::new(|_| Empty.into_any_element()),
+    }
+}
+
+/// Draws a heading in the heading face at its level's size (§4.2), aligned
+/// with the body text and coloured, weighted and slanted by the theme's
+/// `title.hN` style — SemiBold for an H1 and Medium Italic for an H2 when
+/// the theme says nothing. The face is read from settings here rather than
+/// captured, so a settings change shows without rebuilding the blocks. The
+/// text goes through `markdown_text`, so a link, `**strong**` or `` `code` ``
+/// inside a heading looks the same as in a pane row.
+fn render_heading_block(
+    text: &str,
+    level: u8,
+    project: Option<&Entity<Project>>,
+    workspace: Option<&WeakEntity<Workspace>>,
+    block: &mut BlockContext,
+) -> AnyElement {
+    let line_height = block.line_height;
+    let anchor_x = block.anchor_x;
+    let rows = block.height;
+    let rem_size = block.window.rem_size();
+    let buffer_size = block.editor_style.text.font_size.to_pixels(rem_size);
+    let (scale, default_weight, default_italic) = if level == 1 {
+        (1.75, FontWeight::SEMIBOLD, false)
+    } else {
+        (1.3, FontWeight::MEDIUM, true)
+    };
+    let app: &mut App = block.app;
+    let family = ThockSettings::get_global(app).heading_family();
+    let style = heading_style(level, app);
+    let italic = match style.font_style {
+        Some(font_style) => font_style == FontStyle::Italic,
+        None => default_italic,
+    };
+    let id = ElementId::Name(SharedString::from(format!("thock-heading-{}", text)));
+    let content = match (project, workspace) {
+        (Some(project), Some(workspace)) => {
+            markdown_text::render_markdown_row(id, text, project, workspace, app)
+        }
+        _ => SharedString::from(text.to_string()).into_any_element(),
+    };
+    let line = div()
+        .h(line_height)
+        .flex()
+        .items_center()
+        .when_some(family, |this, family| this.font_family(family))
+        .text_size(buffer_size * scale)
+        .line_height(line_height)
+        .font_weight(style.font_weight.unwrap_or(default_weight))
+        .when(italic, |this| this.italic())
+        .when_some(style.color, |this, color| this.text_color(color))
+        .child(content);
+    div()
+        .h(line_height * rows as f32)
+        .w_full()
+        .pl(anchor_x)
+        .flex()
+        .flex_col()
+        .justify_end()
+        .child(line)
         .into_any_element()
 }
 
@@ -986,10 +1373,12 @@ fn schedule_reparse(editor: &mut Editor, cx: &mut Context<Editor>) {
                     addon.email = email;
                 }
                 refresh_images(editor, cx);
+                refresh_headings(editor, cx);
                 update_email_creases(editor, cx);
                 apply_highlights(editor, cx);
                 apply_folds(editor, cx);
                 apply_image_blocks(editor, cx);
+                apply_heading_blocks(editor, cx);
                 apply_default_email_folds(editor, cx);
             })
             .ok();
@@ -1215,6 +1604,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
                 SpanKind::EmailMarker(own) => sender_dot_placeholder(own),
                 SpanKind::EmailLink => email_link_placeholder(),
                 SpanKind::ImageTail(false) => image_not_found_placeholder(),
+                SpanKind::TimeDash => time_dash_placeholder(),
                 _ => marker_placeholder(),
             };
             Crease::simple(range, placeholder)
@@ -1276,6 +1666,7 @@ fn collapsed_text_for(kind: SpanKind) -> &'static str {
         SpanKind::EmailMarker(_) => "●",
         SpanKind::EmailLink => "Open in Gmail ↗",
         SpanKind::ImageTail(false) => IMAGE_NOT_FOUND,
+        SpanKind::TimeDash => "–",
         _ => " ",
     }
 }
@@ -1297,7 +1688,29 @@ fn is_folded(kind: SpanKind) -> bool {
             | SpanKind::EmailLink
             | SpanKind::EmailMarker(_)
             | SpanKind::ImageTail(_)
+            | SpanKind::TimeDash
     )
+}
+
+/// Placeholder for the `-` between a task's two times: an en dash, set
+/// like the times around it (V43 §7.3).
+fn time_dash_placeholder() -> FoldPlaceholder {
+    FoldPlaceholder {
+        render: Arc::new(|_, _, cx| {
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .text_color(cx.theme().status().info)
+                .child("–")
+                .into_any_element()
+        }),
+        constrain_width: false,
+        merge_adjacent: false,
+        type_tag: Some(fold_type_tag()),
+        gutter_toggle: false,
+        collapsed_text: Some("–".into()),
+    }
 }
 
 /// Placeholder for the tail of an image line whose picture is missing: a
@@ -1360,8 +1773,8 @@ fn marker_placeholder() -> FoldPlaceholder {
 }
 
 /// Placeholder for a task list's `[ ]` / `[x]`: the checkbox it stands for,
-/// drawn the way the rest of the app draws checkboxes. Display-only — the
-/// box is not clickable, since ticking it would write to the buffer.
+/// a checked one filled with the accent (V43 §7.3). Display-only — the box
+/// is not clickable, since ticking it would write to the buffer.
 fn checkbox_placeholder(checked: bool) -> FoldPlaceholder {
     FoldPlaceholder {
         render: Arc::new(move |_, _, cx| {
@@ -1374,15 +1787,15 @@ fn checkbox_placeholder(checked: bool) -> FoldPlaceholder {
                 .rounded_xs()
                 .border_1()
                 .border_color(if checked {
-                    colors.border_selected
+                    colors.text_accent
                 } else {
                     colors.border
                 });
             if checked {
-                checkbox = checkbox.child(
+                checkbox = checkbox.bg(colors.text_accent).child(
                     Icon::new(IconName::Check)
                         .size(IconSize::XSmall)
-                        .color(Color::Accent),
+                        .color(Color::Custom(on_accent_color(cx))),
                 );
             }
             div()
@@ -1558,8 +1971,9 @@ fn sender_color(own: bool, cx: &App) -> Hsla {
 
 /// The number of highlight slots: the quote tint, three heading colours,
 /// bold and italic, inline code, two link colours, the strikethrough, the
-/// email view's sender/own/muted trio, and the hidden slot.
-const HIGHLIGHT_SLOTS: usize = 14;
+/// email view's sender/own/muted trio, the hidden slot, and the journal and
+/// task times.
+const HIGHLIGHT_SLOTS: usize = 16;
 
 /// A later slot's style merges over an earlier one's, so the order below is
 /// priority order: the quote tint sits under everything else a quoted line
@@ -1585,6 +1999,10 @@ const EMAIL_MUTED_SLOT: usize = 12;
 /// wide, and unseen. Only an image line's `!` takes it, which cannot fold
 /// because the editor drops a block whose row begins inside a fold.
 const HIDDEN_SLOT: usize = 13;
+/// A journal entry's time, in the accent (V43 §7.3).
+const JOURNAL_TIME_SLOT: usize = 14;
+/// A task's time, in the calendar colour.
+const TASK_TIME_SLOT: usize = 15;
 
 /// The highlight slot for a styled span, or `None` for one that folds away
 /// rather than taking a colour.
@@ -1605,6 +2023,8 @@ fn highlight_slot(kind: SpanKind) -> Option<usize> {
         SpanKind::EmailSender(true) => Some(EMAIL_OWN_SENDER_SLOT),
         SpanKind::EmailDate | SpanKind::EmailQuote => Some(EMAIL_MUTED_SLOT),
         SpanKind::ImageBang => Some(HIDDEN_SLOT),
+        SpanKind::JournalTime => Some(JOURNAL_TIME_SLOT),
+        SpanKind::TaskTime => Some(TASK_TIME_SLOT),
         SpanKind::Marker
         | SpanKind::Rule
         | SpanKind::Bullet
@@ -1613,12 +2033,39 @@ fn highlight_slot(kind: SpanKind) -> Option<usize> {
         | SpanKind::EmailLink
         | SpanKind::EmailMarker(_)
         | SpanKind::ImageTail(_)
-        | SpanKind::ImageSource => None,
+        | SpanKind::ImageSource
+        | SpanKind::TimeDash => None,
+    }
+}
+
+/// The style of a heading level: the theme's `title.hN` syntax style when it
+/// defines one — colour, weight and slant (V43 §5.3) — otherwise the
+/// player-palette colour the headings have always taken, so One Dark and One
+/// Light look as they did.
+pub(crate) fn heading_style(level: u8, cx: &App) -> HighlightStyle {
+    let level = level.clamp(1, 3);
+    let themed = cx
+        .theme()
+        .syntax()
+        .style_for_name(&format!("title.h{level}"))
+        .filter(|style| style.color.is_some());
+    match themed {
+        Some(style) => HighlightStyle {
+            color: style.color,
+            font_weight: style.font_weight,
+            font_style: style.font_style,
+            ..Default::default()
+        },
+        None => HighlightStyle {
+            color: Some(slot_color(HEADING_SLOT + level as usize - 1, cx)),
+            ..Default::default()
+        },
     }
 }
 
 fn slot_style(slot: usize, cx: &App) -> HighlightStyle {
     match slot {
+        HEADING_SLOT..BOLD_SLOT => heading_style((slot - HEADING_SLOT + 1) as u8, cx),
         STRIKETHROUGH_SLOT => HighlightStyle {
             strikethrough: Some(StrikethroughStyle {
                 thickness: px(1.),
@@ -1637,8 +2084,11 @@ fn slot_style(slot: usize, cx: &App) -> HighlightStyle {
             ..Default::default()
         },
         _ => {
-            let font_weight = matches!(slot, EMAIL_SENDER_SLOT | EMAIL_OWN_SENDER_SLOT)
-                .then_some(gpui::FontWeight::SEMIBOLD);
+            let font_weight = matches!(
+                slot,
+                EMAIL_SENDER_SLOT | EMAIL_OWN_SENDER_SLOT | JOURNAL_TIME_SLOT | TASK_TIME_SLOT
+            )
+            .then_some(gpui::FontWeight::SEMIBOLD);
             HighlightStyle {
                 color: Some(slot_color(slot, cx)),
                 font_weight,
@@ -1666,6 +2116,8 @@ fn slot_color(slot: usize, cx: &App) -> Hsla {
         EMAIL_OWN_SENDER_SLOT => sender_color(true, cx),
         EMAIL_MUTED_SLOT => colors.text_muted,
         HIDDEN_SLOT => colors.editor_background,
+        JOURNAL_TIME_SLOT => colors.text_accent,
+        TASK_TIME_SLOT => cx.theme().status().info,
         _ => {
             let players = &cx.theme().players().0;
             // Slot 0 of the player palette is the local-user colour; heading
@@ -1708,10 +2160,12 @@ fn apply_highlights(editor: &mut Editor, cx: &mut Context<Editor>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{BODY_FONT_BUFFER, HEADING_FONT_BODY};
     use editor::DisplayPoint;
     use editor::display_map::DisplayRow;
     use editor::test::editor_test_context::EditorTestContext;
     use fs::FakeFs;
+    use gpui::BorrowAppContext as _;
     use gpui::{
         Entity, Modifiers, MouseButton, TestAppContext, VisualContext as _, VisualTestContext,
     };
@@ -1790,7 +2244,7 @@ mod tests {
         move_cursor_to(&editor, 3, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            " Title\nsee  wiki  and  docs \n \nplain tail\n"
+            "\n\nsee  wiki  and  docs \n \nplain tail\n"
         );
     }
 
@@ -1800,12 +2254,12 @@ mod tests {
         move_cursor_to(&editor, 0, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            "# Title\nsee  wiki  and  docs \n \nplain tail\n"
+            "\n# Title\nsee  wiki  and  docs \n \nplain tail\n"
         );
         move_cursor_to(&editor, 1, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            " Title\nsee [[wiki]] and [docs](https://a.example)\n \nplain tail\n"
+            "\n\nsee [[wiki]] and [docs](https://a.example)\n \nplain tail\n"
         );
     }
 
@@ -1855,7 +2309,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             display_text(&editor, &mut cx),
-            "# Title\nsee [[wiki]] and [docs](https://a.example)\n___\nplain tail\n"
+            "\n# Title\nsee [[wiki]] and [docs](https://a.example)\n___\nplain tail\n"
         );
     }
 
@@ -1868,23 +2322,24 @@ mod tests {
 
         // Mouse down without a mouse up leaves only a pending selection —
         // `disjoint` excludes it — and the line under it must reveal (§5 R1).
-        let start = cx.pixel_position_for(DisplayPoint::new(DisplayRow(0), 0));
+        // Display rows 0 and 1 are the H1's block; the wikilink line is row 2.
+        let start = cx.pixel_position_for(DisplayPoint::new(DisplayRow(2), 0));
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
         cx.update_editor(|editor, _, _| {
             assert!(editor.selections.pending_anchor().is_some());
         });
         assert_eq!(
             cx.display_text(),
-            "# Title\nsee  wiki  and  docs \n \nplain tail\n"
+            "\n\nsee [[wiki]] and [docs](https://a.example)\n \nplain tail\n"
         );
 
         // Dragging extends the pending selection; every covered line must
         // reveal while the drag is still in flight (§5 R3).
-        let end = cx.pixel_position_for(DisplayPoint::new(DisplayRow(1), 0));
+        let end = cx.pixel_position_for(DisplayPoint::new(DisplayRow(3), 0));
         cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
         assert_eq!(
             cx.display_text(),
-            "# Title\nsee [[wiki]] and [docs](https://a.example)\n \nplain tail\n"
+            "\n\nsee [[wiki]] and [docs](https://a.example)\n___\nplain tail\n"
         );
     }
 
@@ -1895,23 +2350,24 @@ mod tests {
         let mut cx = EditorTestContext::for_editor_in(editor.clone(), &mut cx).await;
         cx.run_until_parked();
 
-        // Drag from line 1 up to line 0, then back down to line 1. Line 0
+        // Drag from the rule line (display row 3, under the H1's two block
+        // rows) up to the wikilink line, then back down. The wikilink line
         // leaves the pending selection, but re-concealing it mid-drag would
         // shorten a row the in-flight drag position was measured against.
-        let start = cx.pixel_position_for(DisplayPoint::new(DisplayRow(1), 0));
+        let start = cx.pixel_position_for(DisplayPoint::new(DisplayRow(3), 0));
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
-        let up = cx.pixel_position_for(DisplayPoint::new(DisplayRow(0), 0));
+        let up = cx.pixel_position_for(DisplayPoint::new(DisplayRow(2), 0));
         cx.simulate_mouse_move(up, MouseButton::Left, Modifiers::none());
         assert_eq!(
             cx.display_text(),
-            "# Title\nsee [[wiki]] and [docs](https://a.example)\n \nplain tail\n"
+            "\n\nsee [[wiki]] and [docs](https://a.example)\n___\nplain tail\n"
         );
 
         cx.simulate_mouse_move(start, MouseButton::Left, Modifiers::none());
         assert_eq!(
             cx.display_text(),
-            "# Title\nsee [[wiki]] and [docs](https://a.example)\n \nplain tail\n",
-            "line 0 must stay revealed while the drag is in flight"
+            "\n\nsee [[wiki]] and [docs](https://a.example)\n___\nplain tail\n",
+            "the wikilink line must stay revealed while the drag is in flight"
         );
 
         // Ending the gesture re-conceals what the selection no longer covers.
@@ -1919,7 +2375,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             cx.display_text(),
-            " Title\nsee [[wiki]] and [docs](https://a.example)\n \nplain tail\n"
+            "\n\nsee  wiki  and  docs \n___\nplain tail\n"
         );
     }
 
@@ -1930,14 +2386,227 @@ mod tests {
         move_cursor_to(&editor, 2, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            "• ☐ open  \n• ☑ done\nplain tail\n"
+            " ☐ open  \n ☑ done\nplain tail\n",
+            "a task's bullet folds away; the box is marker enough"
         );
 
         // The cursor's line shows the source it stands for, comment included.
         move_cursor_to(&editor, 0, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            "- [ ] open <!--id:7-->\n• ☑ done\nplain tail\n"
+            "- [ ] open <!--id:7-->\n ☑ done\nplain tail\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn times_take_their_colour_and_a_task_dash_becomes_an_en_dash(cx: &mut TestAppContext) {
+        let note = "20:29 · I'm tired\n- [ ] 09:00 - 11:00 Misc\n- [x] 15:00 Call\nplain tail\n";
+        let (editor, mut cx) = setup(cx, note).await;
+        move_cursor_to(&editor, 3, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "20:29 · I'm tired\n ☐ 09:00–11:00 Misc\n ☑ 15:00 Call\nplain tail\n"
+        );
+        let highlighted = |editor: &mut Editor, slot: usize, cx: &mut Context<Editor>| {
+            let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+            editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(slot), cx)
+                .map(|(_, ranges)| {
+                    ranges
+                        .iter()
+                        .map(|range| {
+                            let start = range.start.to_offset(&buffer_snapshot);
+                            let end = range.end.to_offset(&buffer_snapshot);
+                            note[start.0..end.0].to_string()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        editor.update_in(&mut cx, |editor, _, cx| {
+            assert_eq!(highlighted(editor, JOURNAL_TIME_SLOT, cx), vec!["20:29"]);
+            assert_eq!(
+                highlighted(editor, TASK_TIME_SLOT, cx),
+                vec!["09:00 - 11:00", "15:00"]
+            );
+        });
+        move_cursor_to(&editor, 1, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "20:29 · I'm tired\n- [ ] 09:00 - 11:00 Misc\n ☑ 15:00 Call\nplain tail\n",
+            "the cursor's line shows its source"
+        );
+        assert_eq!(editor.read_with(&cx, |editor, cx| editor.text(cx)), note);
+    }
+
+    #[gpui::test]
+    async fn the_body_face_applies_while_concealed(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, NOTE).await;
+        let body_family = |cx: &mut VisualTestContext| {
+            editor.read_with(cx, |editor, cx| {
+                let applied = editor
+                    .text_style_refinement()
+                    .and_then(|refinement| refinement.font_family.clone());
+                assert_eq!(
+                    applied,
+                    body_font(editor, cx),
+                    "the refinement on the editor matches the face in effect"
+                );
+                applied
+            })
+        };
+        assert_eq!(body_family(&mut cx), Some("IBM Plex Sans".into()));
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(
+            body_family(&mut cx),
+            None,
+            "the source shows in the editor's own font"
+        );
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(body_family(&mut cx), Some("IBM Plex Sans".into()));
+
+        let set_body_font = |cx: &mut VisualTestContext, family: &str| {
+            let family = family.to_string();
+            cx.update(|_, cx| {
+                cx.update_global::<SettingsStore, _>(|store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.thock.get_or_insert_default().body_font = Some(family);
+                    });
+                });
+            });
+            cx.run_until_parked();
+        };
+        set_body_font(&mut cx, BODY_FONT_BUFFER);
+        assert_eq!(
+            body_family(&mut cx),
+            None,
+            "\"buffer\" keeps the editor's font, applied live from settings"
+        );
+        set_body_font(&mut cx, "Lilex");
+        assert_eq!(body_family(&mut cx), Some("Lilex".into()));
+        assert_eq!(
+            cx.update(|_, cx| ThockSettings::get_global(cx).heading_family()),
+            Some("Petrona".into()),
+            "the heading face is independent of the body face"
+        );
+        cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.thock.get_or_insert_default().heading_font =
+                        Some(HEADING_FONT_BODY.to_string());
+                });
+            });
+        });
+        assert_eq!(
+            cx.update(|_, cx| ThockSettings::get_global(cx).heading_family()),
+            Some("Lilex".into()),
+            "\"body\" follows the body face"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_proportional_face_wraps_at_the_editor_width_without_a_guide(
+        cx: &mut TestAppContext,
+    ) {
+        let (editor, mut cx) = setup(cx, NOTE).await;
+        cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    let defaults = &mut settings.project.all_languages.defaults;
+                    defaults.soft_wrap = Some(language_settings::SoftWrap::Bounded);
+                    defaults.preferred_line_length = Some(100);
+                    defaults.show_wrap_guides = Some(true);
+                });
+            });
+        });
+        cx.run_until_parked();
+        let wrapping = |cx: &mut VisualTestContext| {
+            editor.read_with(cx, |editor, cx| {
+                (
+                    format!("{:?}", editor.soft_wrap_mode(cx)),
+                    editor.wrap_guides(cx).to_vec(),
+                )
+            })
+        };
+        assert_eq!(
+            wrapping(&mut cx),
+            ("EditorWidth".to_string(), vec![]),
+            "the bounded setting and its guide are set aside while the body face is on"
+        );
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(
+            wrapping(&mut cx),
+            ("Bounded(100)".to_string(), vec![(100, true)]),
+            "the source view wraps the way the user asked"
+        );
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(wrapping(&mut cx), ("EditorWidth".to_string(), vec![]));
+        cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.thock.get_or_insert_default().body_font =
+                        Some(BODY_FONT_BUFFER.to_string());
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            wrapping(&mut cx),
+            ("Bounded(100)".to_string(), vec![(100, true)]),
+            "the editor's own mono font keeps column wrapping"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_soft_wrap_toggle_survives_unrelated_settings_changes(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, NOTE).await;
+        let soft_wrap = |cx: &mut VisualTestContext| {
+            editor.read_with(cx, |editor, cx| format!("{:?}", editor.soft_wrap_mode(cx)))
+        };
+        let change_settings =
+            |cx: &mut VisualTestContext, update: fn(&mut settings::SettingsContent)| {
+                cx.update(|_, cx| {
+                    cx.update_global::<SettingsStore, _>(|store, cx| {
+                        store.update_user_settings(cx, update);
+                    });
+                });
+                cx.run_until_parked();
+            };
+        change_settings(&mut cx, |settings| {
+            settings.project.all_languages.defaults.soft_wrap =
+                Some(language_settings::SoftWrap::None);
+        });
+        assert_eq!(soft_wrap(&mut cx), "EditorWidth");
+
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.toggle_soft_wrap(&editor::actions::ToggleSoftWrap, window, cx)
+        });
+        assert_eq!(soft_wrap(&mut cx), "None", "the user turned wrapping off");
+        change_settings(&mut cx, |settings| {
+            settings.thock.get_or_insert_default().body_font = Some("Lilex".to_string());
+        });
+        assert_eq!(
+            soft_wrap(&mut cx),
+            "None",
+            "a settings change that keeps the body face on leaves the toggle alone"
+        );
+        assert_eq!(
+            editor.read_with(&cx, |editor, cx| body_font(editor, cx)),
+            Some("Lilex".into()),
+            "the new face still applies"
+        );
+
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(
+            soft_wrap(&mut cx),
+            "None",
+            "the source view falls back to the settings"
+        );
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        assert_eq!(
+            soft_wrap(&mut cx),
+            "EditorWidth",
+            "concealing again wraps at the editor width"
         );
     }
 
@@ -1948,7 +2617,7 @@ mod tests {
         move_cursor_to(&editor, 1, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            "• ☐  dropped  task\nplain tail\n"
+            " ☐  dropped  task\nplain tail\n"
         );
 
         move_cursor_to(&editor, 0, &mut cx);
@@ -2034,7 +2703,7 @@ mod tests {
         let note = "- [x] done <!--id:7-->\nplain tail\n";
         let (editor, mut cx) = setup(cx, note).await;
         move_cursor_to(&editor, 1, &mut cx);
-        assert_eq!(display_text(&editor, &mut cx), "• ☑ done  \nplain tail\n");
+        assert_eq!(display_text(&editor, &mut cx), " ☑ done  \nplain tail\n");
 
         editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
         cx.run_until_parked();
@@ -2229,7 +2898,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             display_text(&editor, &mut cx),
-            " Title\nsee  wiki  and  docs \n \nplain tail\n"
+            "\n\nsee  wiki  and  docs \n \nplain tail\n"
         );
     }
 
@@ -2248,7 +2917,7 @@ mod tests {
         move_cursor_to(&editor, 5, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            " Title\nsee  wiki  and  docs \n \nplain tail\n Two\nmore\n"
+            "\n\nsee  wiki  and  docs \n \nplain tail\n\nmore\n"
         );
     }
 
@@ -2258,16 +2927,17 @@ mod tests {
         move_cursor_to(&editor, 3, &mut cx);
         editor.update_in(&mut cx, |editor, _, cx| {
             let snapshot = editor.display_map.update(cx, |map, cx| map.snapshot(cx));
-            // "# Title" displays as " Title" — the marker fold costs one
-            // invisible column (§10.3) — so buffer column 2 is display
-            // column 1, and display column 4 lands inside "Title".
-            let display = snapshot.point_to_display_point(MultiBufferPoint::new(0, 2), Bias::Left);
-            assert_eq!(display.row().0, 0);
-            assert_eq!(display.column(), 1);
-            let display = snapshot.point_to_display_point(MultiBufferPoint::new(0, 5), Bias::Left);
-            assert_eq!(display.column(), 4);
+            // "see [[wiki]]" displays as "see  wiki " — the `[[` fold costs
+            // one invisible column (§10.3) — so buffer column 6 (the `w`) is
+            // display column 5, two rows down because the H1's block takes
+            // two rows.
+            let display = snapshot.point_to_display_point(MultiBufferPoint::new(1, 6), Bias::Left);
+            assert_eq!(display.row().0, 2);
+            assert_eq!(display.column(), 5);
+            let display = snapshot.point_to_display_point(MultiBufferPoint::new(1, 9), Bias::Left);
+            assert_eq!(display.column(), 8);
             let buffer_point = snapshot.display_point_to_point(display, Bias::Left);
-            assert_eq!(buffer_point, text::Point::new(0, 5));
+            assert_eq!(buffer_point, text::Point::new(1, 9));
         });
     }
 
@@ -2307,7 +2977,7 @@ mod tests {
         move_cursor_to(&editor, 3, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            " Title\nsee  wiki  and  docs \n \nplain tail\n"
+            "\n\nsee  wiki  and  docs \n \nplain tail\n"
         );
         editor.update_in(&mut cx, |editor, _, cx| {
             let snapshot = editor.display_map.update(cx, |map, cx| map.snapshot(cx));
@@ -2332,11 +3002,15 @@ mod tests {
                 map.unfold_intersecting([MultiBufferOffset(0)..buffer_snapshot.len()], true, cx);
             });
         });
-        assert_eq!(display_text(&editor, &mut cx), NOTE);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            NOTE,
+            "the unfold sweeps the folds and the heading block alike"
+        );
         move_cursor_to(&editor, 0, &mut cx);
         assert_eq!(
             display_text(&editor, &mut cx),
-            "# Title\nsee  wiki  and  docs \n \nplain tail\n"
+            "\n# Title\nsee  wiki  and  docs \n \nplain tail\n"
         );
     }
 
@@ -2377,7 +3051,7 @@ mod tests {
 
         assert_eq!(
             display_text(&editor, &mut cx),
-            " Title\nsee  wiki  and  docs \n \nplain tail\n"
+            "\n\nsee  wiki  and  docs \n \nplain tail\n"
         );
         editor.update(&mut cx, |editor, _| {
             assert!(
@@ -2408,9 +3082,9 @@ mod tests {
 
         // The cursor is left on the `___` line, which the reveal rule shows
         // as source; everything else re-conceals against the new offsets.
-        assert_eq!(display_text(&editor, &mut cx), " Title\n___\nplain tail\n");
+        assert_eq!(display_text(&editor, &mut cx), "\n\n___\nplain tail\n");
         move_cursor_to(&editor, 0, &mut cx);
-        assert_eq!(display_text(&editor, &mut cx), "# Title\n \nplain tail\n");
+        assert_eq!(display_text(&editor, &mut cx), "\n# Title\n \nplain tail\n");
         editor.update(&mut cx, |editor, _| {
             assert!(
                 editor
@@ -2451,7 +3125,8 @@ mod tests {
     const EMAIL_DISPLAY: &str = "     from:     Marta Reyes <marta@acmeinsure.com>\n\
         Open in Gmail ↗\n\
         \u{20}\n\
-        \u{20}Renewal quote\n\
+        \n\
+        \n\
         \n\
         ●Marta Reyes <marta@acmeinsure.com> — 2026-08-26 14:02⋯ 3 lines\n\
         ●Diego Tavares <diego.exodo@gmail.com> — 2026-08-27 08:41\n\
@@ -2814,6 +3489,150 @@ mod tests {
             toggle(editor, cx);
             assert!(highlighted(editor, WIKILINK_SLOT, cx).is_empty());
             assert!(highlighted(editor, HEADING_SLOT, cx).is_empty());
+        });
+    }
+
+    const HEADED: &str = "# Day planner\n- [ ] Workout\n## Calendar\n- [x] 09:00 - 17:00 Focus time\n### Reminder\nplain tail\n";
+
+    /// Every custom block in display order as `(replaces its line, rows)`.
+    fn custom_blocks(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> Vec<(bool, u32)> {
+        editor.update(cx, |editor, cx| {
+            let snapshot = editor.display_map.update(cx, |map, cx| map.snapshot(cx));
+            let rows = snapshot.max_point().row().0 + 1;
+            snapshot
+                .blocks_in_range(DisplayRow(0)..DisplayRow(rows))
+                .filter_map(|(_, block)| match block {
+                    editor::display_map::Block::Custom(custom) => Some((
+                        matches!(custom.placement, BlockPlacement::Replace(_)),
+                        custom.height.unwrap_or(0),
+                    )),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    fn display_rows(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> u32 {
+        editor.update(cx, |editor, cx| {
+            let snapshot = editor.display_map.update(cx, |map, cx| map.snapshot(cx));
+            snapshot.max_point().row().0 + 1
+        })
+    }
+
+    #[gpui::test]
+    async fn h1_and_h2_are_drawn_as_blocks_of_two_and_one_rows(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, HEADED).await;
+        move_cursor_to(&editor, 5, &mut cx);
+        assert_eq!(custom_blocks(&editor, &mut cx), vec![(true, 2), (true, 1)]);
+        // Six lines and the empty last row, plus the H1's extra row.
+        assert_eq!(display_rows(&editor, &mut cx), 8);
+        let text = display_text(&editor, &mut cx);
+        assert!(
+            text.contains(" Reminder"),
+            "an H3 stays a coloured line: {text:?}"
+        );
+        assert_eq!(editor.read_with(&cx, |editor, cx| editor.text(cx)), HEADED);
+    }
+
+    #[gpui::test]
+    async fn revealing_a_heading_keeps_the_row_count(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, HEADED).await;
+        move_cursor_to(&editor, 5, &mut cx);
+        let rows = display_rows(&editor, &mut cx);
+
+        move_cursor_to(&editor, 0, &mut cx);
+        assert_eq!(
+            custom_blocks(&editor, &mut cx),
+            vec![(false, 1), (true, 1)],
+            "the H1 gives way to its source under a one-row spacer"
+        );
+        assert_eq!(display_rows(&editor, &mut cx), rows);
+        assert!(
+            display_text(&editor, &mut cx).starts_with("\n# Day planner\n"),
+            "the source line shows under the spacer: {:?}",
+            display_text(&editor, &mut cx)
+        );
+
+        move_cursor_to(&editor, 2, &mut cx);
+        assert_eq!(custom_blocks(&editor, &mut cx), vec![(true, 2)]);
+        assert_eq!(display_rows(&editor, &mut cx), rows);
+
+        move_cursor_to(&editor, 5, &mut cx);
+        assert_eq!(custom_blocks(&editor, &mut cx), vec![(true, 2), (true, 1)]);
+        assert_eq!(editor.read_with(&cx, |editor, cx| editor.text(cx)), HEADED);
+    }
+
+    #[gpui::test]
+    async fn source_mode_removes_the_heading_blocks(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, HEADED).await;
+        move_cursor_to(&editor, 5, &mut cx);
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        cx.run_until_parked();
+        assert_eq!(custom_blocks(&editor, &mut cx), vec![]);
+        assert!(display_text(&editor, &mut cx).starts_with("# Day planner\n"));
+        editor.update_in(&mut cx, |editor, _, cx| toggle(editor, cx));
+        cx.run_until_parked();
+        assert_eq!(custom_blocks(&editor, &mut cx), vec![(true, 2), (true, 1)]);
+    }
+
+    #[gpui::test]
+    async fn editing_a_heading_redraws_its_block(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, HEADED).await;
+        move_cursor_to(&editor, 0, &mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                let end = MultiBufferPoint::new(0, 13);
+                selections.select_ranges([end..end]);
+            });
+            editor.insert(" now", window, cx);
+        });
+        settle(&mut cx);
+        move_cursor_to(&editor, 5, &mut cx);
+        let texts = editor.read_with(&cx, |editor, _| {
+            editor
+                .addon::<MarkdownConcealAddon>()
+                .map(|addon| {
+                    addon
+                        .headings
+                        .iter()
+                        .map(|entry| (entry.text.clone(), entry.block.is_some()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        });
+        assert_eq!(
+            texts,
+            vec![
+                ("Day planner now".to_string(), true),
+                ("Calendar".to_string(), true)
+            ]
+        );
+        assert_eq!(custom_blocks(&editor, &mut cx), vec![(true, 2), (true, 1)]);
+    }
+
+    #[gpui::test]
+    async fn heading_colours_come_from_the_theme_when_it_defines_them(cx: &mut TestAppContext) {
+        let (_editor, mut cx) = setup(cx, NOTE).await;
+        cx.update(|_, cx| {
+            // The base theme defines no `title.h1`, so the player slot stands.
+            let player = cx.theme().players().0[1].cursor;
+            let style = heading_style(1, cx);
+            assert_eq!(style.color, Some(player));
+            assert_eq!(style.font_weight, None);
+            assert_eq!(heading_style(2, cx).font_style, None);
+        });
+        cx.update(|_, cx| {
+            crate::thock_theme::activate_for_tests(crate::thock_theme::THOCK_DARK, cx)
+        });
+        cx.update(|_, cx| {
+            let colors = cx.theme().colors();
+            let h1 = heading_style(1, cx);
+            assert_eq!(h1.color, Some(colors.text));
+            assert_eq!(h1.font_weight, Some(gpui::FontWeight::SEMIBOLD));
+            let h2 = heading_style(2, cx);
+            assert_eq!(h2.color, Some(colors.text_accent));
+            assert_eq!(h2.font_style, Some(gpui::FontStyle::Italic));
+            assert_eq!(heading_style(3, cx).color, Some(colors.text_muted));
         });
     }
 }

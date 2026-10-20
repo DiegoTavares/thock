@@ -12597,6 +12597,7 @@ dependencies = [
  "theme",
  "theme_settings",
  "thock_sync_core",
+ "title_bar",
  "toml 0.8.23",
  "toml_edit 0.22.27",
  "ui",
