@@ -38,7 +38,7 @@ use project::Project;
 use pulldown_cmark::{Event as MarkdownEvent, Parser as MarkdownParser, Tag, TagEnd};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use settings::{CenteredPaddingSettings, Settings as _};
+use settings::{CenteredPaddingSettings, OpenerFrequency, Settings as _};
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -51,6 +51,7 @@ use ui::{Button, ButtonStyle, Label, ProgressBar, SpinnerLabel};
 use util::ResultExt as _;
 use workspace::{OpenOptions, OpenVisible, Workspace, WorkspaceSettings};
 
+use crate::ThockSettings;
 use crate::agent::{self, ConnectionMode, ModelTier};
 use crate::agent_panel::{AgentPanel, ConnectionEpoch, LaunchRequest};
 use crate::hosted_agent;
@@ -186,6 +187,31 @@ enum Waiting {
     Failure,
     /// Thock Plus isn't connected and you summoned the chat (§5.11).
     Connect,
+    /// A conversation Thock started (§5.8).
+    Opener,
+}
+
+/// A conversation Thock starts (§5.8): one thing it says and one question,
+/// with two chips. The first is the Reflect nudge (V28).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Opener {
+    Reflect,
+}
+
+impl Opener {
+    fn text(&self) -> SharedString {
+        match self {
+            Opener::Reflect => {
+                "I've noted a few things about you that I haven't filed yet. File them now?".into()
+            }
+        }
+    }
+
+    fn choices(&self) -> [SharedString; 2] {
+        match self {
+            Opener::Reflect => ["File them".into(), "Not now".into()],
+        }
+    }
 }
 
 /// The pebble's size and its distance from the centre's corner (§5.1).
@@ -207,6 +233,10 @@ const CARET_CLEARANCE: f32 = 8.;
 /// second.
 const EDIT_PAUSE: Duration = Duration::from_secs(2);
 const REPLY_LINGER: Duration = Duration::from_secs(8);
+/// An opener floats up only after this long without an edit, and left
+/// alone for the second it folds into the dot (§5.8).
+const OPENER_PAUSE: Duration = Duration::from_secs(8);
+const OPENER_LINGER: Duration = Duration::from_secs(60);
 /// The Desk's width when the dock doesn't say (V43 §8.1).
 const DESK_DEFAULT_WIDTH: f32 = 320.;
 /// The highlight slots the underlines take (§7.3), above the conceal
@@ -1109,10 +1139,13 @@ pub struct ChatPanel {
     show_usage: bool,
     /// A launch that is waiting on the connect flow or the keychain read.
     pending_launch: Option<LaunchRequest>,
-    /// Whether enough sessions have started with unfiled notes in
-    /// `memory/inbox.md` that the panel suggests running Reflect (V28
-    /// decision 5). Recomputed off the UI thread at every launch.
-    memory_nudge_due: bool,
+    /// The conversation Thock wants to start, until it is answered (§5.8).
+    opener: Option<Opener>,
+    /// Set while the page isn't quiet enough for the opener: eight seconds
+    /// from its offer or the last edit.
+    opener_pause: Option<Task<()>>,
+    /// Folds an opener left alone into the dot (§5.8).
+    opener_linger: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1209,7 +1242,9 @@ impl ChatPanel {
                 turn_times: BTreeMap::new(),
                 show_usage: false,
                 pending_launch: None,
-                memory_nudge_due: false,
+                opener: None,
+                opener_pause: None,
+                opener_linger: None,
                 _subscriptions: vec![project_subscription, workspace_subscription, focus_out],
             };
             this.refresh_vault_status(cx);
@@ -1267,6 +1302,8 @@ impl ChatPanel {
             cx.background_executor().timer(EDIT_PAUSE).await;
             this.update(cx, |this, cx| this.paused(cx)).ok();
         }));
+        // An opener's eight quiet seconds start over.
+        self.wait_to_open(cx);
     }
 
     fn paused(&mut self, cx: &mut Context<Self>) {
@@ -1554,9 +1591,10 @@ impl ChatPanel {
         let session = self.session.as_ref().filter(|session| session.kickoff)?;
         let busy = self.is_generating(cx)
             || self.starting.is_some()
-            || self
-                .waiting
-                .is_some_and(|waiting| waiting != Waiting::Connect);
+            || matches!(
+                self.waiting,
+                Some(Waiting::Question | Waiting::Reply | Waiting::Failure)
+            );
         busy.then(|| session.title.clone())
     }
 
@@ -1640,8 +1678,12 @@ impl ChatPanel {
         self.thread_open = true;
         self.bubble_up = false;
         self.bubble_needs_room = false;
-        // The thread shows a reply and the ways in; the dot clears (§5.2).
-        if matches!(self.waiting, Some(Waiting::Connect | Waiting::Reply)) {
+        // The thread shows a reply, the ways in and an opener; the dot
+        // clears (§5.2).
+        if matches!(
+            self.waiting,
+            Some(Waiting::Connect | Waiting::Reply | Waiting::Opener)
+        ) {
             self.waiting = None;
         }
         self.sync_room(cx);
@@ -1693,6 +1735,11 @@ impl ChatPanel {
         if self.bubble_up {
             self.suppressed = Some(self.waiting_generation);
         }
+        // An opener that was showing in the thread waits for quiet again
+        // rather than popping up the moment the thread folds (§5.8).
+        if self.thread_open && self.opener.is_some() {
+            self.wait_to_open(cx);
+        }
         self.thread_open = false;
         self.bubble_up = false;
         self.bubble_needs_room = false;
@@ -1706,6 +1753,11 @@ impl ChatPanel {
     /// Something waits for you (§5.2): the pebble gets its dot, and with the
     /// thread folded it floats up as a bubble at the next pause.
     fn needs_you(&mut self, waiting: Waiting, cx: &mut Context<Self>) {
+        // An opener up gives way; it floats again once this is settled.
+        if self.waiting == Some(Waiting::Opener) {
+            self.bubble_up = false;
+            self.opener_linger = None;
+        }
         self.waiting = Some(waiting);
         self.waiting_generation += 1;
         self.reply_linger = None;
@@ -1724,12 +1776,14 @@ impl ChatPanel {
         cx.notify();
     }
 
-    /// Nothing waits any more: a turn started, or you answered.
+    /// Nothing waits any more: a turn started, or you answered. An opener
+    /// that was waiting its turn gets another look.
     fn settled(&mut self, cx: &mut Context<Self>) {
         self.waiting = None;
         self.bubble_up = false;
         self.bubble_needs_room = false;
         self.reply_linger = None;
+        self.float_opener_if_due(cx);
         cx.notify();
     }
 
@@ -2056,9 +2110,9 @@ impl ChatPanel {
         }
     }
 
-    /// Counts this launch toward the "Reflect now?" suggestion and refreshes
-    /// whether it is due. The count lives in the vault's `.thock/state/` so
-    /// it survives restarts.
+    /// Counts this launch toward the Reflect nudge (V28 decision 5) and,
+    /// when it is due, has Thock open the conversation (§5.8). The count
+    /// lives in the vault's `.thock/state/` so it survives restarts.
     fn note_session_for_memory_nudge(&mut self, cx: &mut Context<Self>) {
         let Some(vault) = self.vault() else {
             return;
@@ -2073,23 +2127,119 @@ impl ChatPanel {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if this.memory_nudge_due != due {
-                    this.memory_nudge_due = due;
-                    cx.notify();
+                if due {
+                    this.offer_opener(Opener::Reflect, cx);
                 }
             })
         })
         .detach_and_log_err(cx);
     }
 
+    /// Thock has something to start a conversation about (§5.8). It floats
+    /// only after eight quiet seconds and with nothing else up; a newer one
+    /// replaces an unanswered older one; `openers` set to off drops it.
+    fn offer_opener(&mut self, opener: Opener, cx: &mut Context<Self>) {
+        if ThockSettings::get_global(cx).openers == OpenerFrequency::Off {
+            return;
+        }
+        if self.waiting == Some(Waiting::Opener) {
+            self.waiting = None;
+            self.bubble_up = false;
+        }
+        self.opener = Some(opener);
+        self.opener_linger = None;
+        self.wait_to_open(cx);
+        cx.notify();
+    }
+
+    /// Starts the opener's quiet time over: from its offer, or your last
+    /// edit.
+    fn wait_to_open(&mut self, cx: &mut Context<Self>) {
+        if self.opener.is_none() {
+            return;
+        }
+        self.opener_pause = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(OPENER_PAUSE).await;
+            this.update(cx, |this, cx| {
+                this.opener_pause = None;
+                this.float_opener_if_due(cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Floats the opener when the page is quiet (§5.8): the chat at rest
+    /// with nothing waiting, no typing, the quiet time over and no modal
+    /// up. Left alone for a minute it folds into the dot.
+    fn float_opener_if_due(&mut self, cx: &mut Context<Self>) {
+        if self.opener.is_none()
+            || self.waiting.is_some()
+            || self.opener_pause.is_some()
+            || self.typing.is_some()
+            || self.presence(cx) != Presence::Resting
+        {
+            return;
+        }
+        if self.modal_open(cx) {
+            self.wait_to_open(cx);
+            return;
+        }
+        self.waiting = Some(Waiting::Opener);
+        self.waiting_generation += 1;
+        self.bubble_up = true;
+        self.opener_linger = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(OPENER_LINGER).await;
+            this.update(cx, |this, cx| {
+                if this.waiting == Some(Waiting::Opener) && this.bubble_up {
+                    this.bubble_up = false;
+                    this.suppressed = Some(this.waiting_generation);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn modal_open(&self, cx: &App) -> bool {
+        self.workspace
+            .upgrade()
+            .is_some_and(|workspace| workspace.read(cx).has_modal(cx))
+    }
+
+    /// Answers the opener (§5.8): the first chip does what it offered, the
+    /// second is "not now", and either way it is gone.
+    fn answer_opener(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(opener) = self.opener.take() else {
+            return;
+        };
+        self.opener_pause = None;
+        self.opener_linger = None;
+        if self.waiting == Some(Waiting::Opener) {
+            self.settled(cx);
+        }
+        self.fold(window, cx);
+        match (opener, index) {
+            (Opener::Reflect, 0) => self.reflect_now(window, cx),
+            (Opener::Reflect, _) => self.dismiss_nudge(cx),
+        }
+    }
+
     fn dismiss_memory_nudge(
         &mut self,
         _: &DismissMemoryNudge,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.memory_nudge_due = false;
-        cx.notify();
+        if self.opener == Some(Opener::Reflect) {
+            self.answer_opener(1, window, cx);
+        } else {
+            self.dismiss_nudge(cx);
+        }
+    }
+
+    /// "Not now": the nudge starts counting sessions again from zero.
+    fn dismiss_nudge(&mut self, cx: &mut Context<Self>) {
         let Some(vault) = self.vault() else {
             return;
         };
@@ -2100,7 +2250,6 @@ impl ChatPanel {
     }
 
     fn reflect_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.memory_nudge_due = false;
         self.launch(
             LaunchRequest::run_skill(
                 "Reflect",
@@ -2112,40 +2261,44 @@ impl ChatPanel {
         );
     }
 
-    /// One quiet line above the composer: the agent has noted things it
-    /// hasn't filed, and Reflect is one click (or `thock::Reflect`) away.
-    fn render_memory_nudge(&self, cx: &Context<Self>) -> AnyElement {
-        h_flex()
+    /// A conversation Thock started (§5.8): one thing, one question, two
+    /// chips.
+    fn render_opener(&self, cx: &Context<Self>) -> AnyElement {
+        let Some(opener) = self.opener else {
+            return div().into_any_element();
+        };
+        v_flex()
             .w_full()
-            .px_2()
-            .py_1()
+            .items_start()
             .gap_2()
-            .items_center()
-            .justify_between()
+            .child(self.thock_bubble(div().child(opener.text()).into_any_element(), cx))
+            .child(self.render_chips(
+                &opener.choices(),
+                0,
+                |this, index, window, cx| this.answer_opener(index, window, cx),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// *Thock* · Wrap Today, or *Thock* · 17:40 (§5.4).
+    fn render_caption(&self, detail: SharedString, cx: &Context<Self>) -> AnyElement {
+        h_flex()
+            .gap_1()
+            .items_baseline()
             .child(
-                Label::new("Thock has a few things to file about you.")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
+                div()
+                    .font_family(THOCK_FACE)
+                    .font_weight(FontWeight::MEDIUM)
+                    .italic()
+                    .text_size(rems_from_px(13.5))
+                    .child("Thock"),
             )
             .child(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        Button::new("thock-chat-reflect-now", "Reflect now")
-                            .style(ButtonStyle::Filled)
-                            .label_size(LabelSize::Small)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.reflect_now(window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("thock-chat-nudge-dismiss", "Not now")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::Small)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.dismiss_memory_nudge(&DismissMemoryNudge, window, cx)
-                            })),
-                    ),
+                div()
+                    .text_size(rems_from_px(11.))
+                    .text_color(cx.theme().colors().text_placeholder)
+                    .child(format!("· {detail}")),
             )
             .into_any_element()
     }
@@ -2301,6 +2454,7 @@ impl ChatPanel {
                 if replied && !self.thread_open && self.waiting.is_none() {
                     self.needs_you(Waiting::Reply, cx);
                 }
+                self.float_opener_if_due(cx);
             }
             // V26 decision 8 has a floor (§5.5): failures never get error
             // styling or raw detail, but a turn that could not finish says
@@ -2731,12 +2885,20 @@ impl ChatPanel {
             .join("\n")
     }
 
-    /// The chips of the newest pending question, for the tests.
+    /// The chips of the newest pending question, or of an opener up, for
+    /// the tests.
     #[cfg(test)]
     fn visible_chips(&self, cx: &App) -> Vec<String> {
         self.latest_pending_question(cx)
             .and_then(|question| self.question_choices(&question, cx))
             .map(|(choices, _)| choices.iter().map(ToString::to_string).collect())
+            .or_else(|| {
+                self.opener_takes_keys().then(|| {
+                    self.opener
+                        .map(|opener| opener.choices().map(|choice| choice.to_string()).to_vec())
+                        .unwrap_or_default()
+                })
+            })
             .unwrap_or_default()
     }
 
@@ -3069,7 +3231,9 @@ impl ChatPanel {
             .selected_pending_question(cx)
             .or_else(|| self.latest_pending_question(cx))
         else {
-            if self.waiting == Some(Waiting::Connect) {
+            if self.opener_takes_keys() {
+                self.answer_opener(action.0, window, cx);
+            } else if self.waiting == Some(Waiting::Connect) {
                 self.pick_connect_choice(action.0, window, cx);
             }
             return;
@@ -3080,6 +3244,18 @@ impl ChatPanel {
         if action.0 < choices.len() {
             self.answer_question(&question, Some(action.0), window, cx);
         }
+    }
+
+    /// The opener's chips take `y`/`n` while its bubble is up, or while the
+    /// thread is open with it waiting above the composer.
+    fn opener_takes_keys(&self) -> bool {
+        self.opener.is_some() && (self.waiting == Some(Waiting::Opener) || self.thread_open)
+    }
+
+    /// Whether a pair of chips is up without a question behind it: the
+    /// connect bubble's, or the opener's.
+    fn two_chips_waiting(&self) -> bool {
+        self.waiting == Some(Waiting::Connect) || self.opener_takes_keys()
     }
 
     /// The two ways in when Thock Plus isn't connected (§5.11).
@@ -3220,6 +3396,11 @@ impl ChatPanel {
     fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.view, PanelView::Connect(_)) {
             self.cancel_connect(cx);
+        }
+        // On an opener, `escape` is "not now" (§5.8).
+        if self.waiting == Some(Waiting::Opener) && self.bubble_up {
+            self.answer_opener(1, window, cx);
+            return;
         }
         self.fold(window, cx);
     }
@@ -4192,8 +4373,17 @@ impl ChatPanel {
                 PanelView::Chat if !connected => self.render_unconnected(cx),
                 PanelView::Chat => self.render_thread(window, cx),
             })
-            .when(self.memory_nudge_due && connected, |this| {
-                this.child(self.render_memory_nudge(cx))
+            // An opener waits above the composer while the thread is open.
+            .when(self.opener.is_some() && connected, |this| {
+                let time: SharedString = Local::now().format("%H:%M").to_string().into();
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .pt(px(10.))
+                        .gap_1()
+                        .child(self.render_caption(time, cx))
+                        .child(self.render_opener(cx)),
+                )
             })
             .when(self.show_usage, |this| this.child(self.render_footer(cx)))
             .child(
@@ -4255,31 +4445,21 @@ impl ChatPanel {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let title = self
-            .session
-            .as_ref()
-            .map(|session| session.title.clone())
-            .unwrap_or_else(|| "Thock".into());
-        let caption = h_flex()
-            .gap_1()
-            .items_baseline()
-            .child(
-                div()
-                    .font_family(THOCK_FACE)
-                    .font_weight(FontWeight::MEDIUM)
-                    .italic()
-                    .text_size(rems_from_px(13.5))
-                    .child("Thock"),
-            )
-            .child(
-                div()
-                    .text_size(rems_from_px(11.))
-                    .text_color(cx.theme().colors().text_placeholder)
-                    .child(format!("· {title}")),
-            );
+        // The caption names the ritual, or the time for a conversation Thock
+        // started (§5.4).
+        let detail: SharedString = if self.waiting == Some(Waiting::Opener) {
+            Local::now().format("%H:%M").to_string().into()
+        } else {
+            self.session
+                .as_ref()
+                .map(|session| session.title.clone())
+                .unwrap_or_else(|| "Thock".into())
+        };
+        let caption = self.render_caption(detail, cx);
         let content: AnyElement = match (&self.view, self.waiting) {
             (PanelView::Connect(flow), _) => self.render_connect(flow, cx),
             (_, Some(Waiting::Connect)) => self.render_unconnected(cx),
+            (_, Some(Waiting::Opener)) => self.render_opener(cx),
             (_, Some(Waiting::Failure)) => self
                 .render_failure(cx)
                 .unwrap_or_else(|| div().into_any_element()),
@@ -4578,7 +4758,7 @@ impl Render for ChatPanel {
                 .latest_pending_question(cx)
                 .and_then(|question| self.question_choices(&question, cx))
                 .map(|(choices, _)| choices.len())
-                .or_else(|| (self.waiting == Some(Waiting::Connect)).then_some(2));
+                .or_else(|| self.two_chips_waiting().then_some(2));
             if let Some(count) = chips {
                 key_context.add("choice");
                 if count == 2 {
@@ -4685,7 +4865,7 @@ mod tests {
     use EntryShape::{Assistant, Hidden, User};
     use acp_thread::StubAgentConnection;
     use chrono::TimeZone as _;
-    use fs::FakeFs;
+    use fs::{FakeFs, Fs as _};
     use gpui::{TestAppContext, VisualTestContext};
     use multi_buffer::ToPoint as _;
     use serde_json::json;
@@ -5886,6 +6066,152 @@ mod tests {
             .panel
             .read_with(&setup.cx, |panel, _| panel.quote_for(1).is_some());
         assert!(!quoted);
+    }
+
+    fn offer_reflect(setup: &mut Setup) {
+        setup.panel.update(&mut setup.cx, |panel, cx| {
+            panel.offer_opener(Opener::Reflect, cx);
+        });
+        setup.cx.run_until_parked();
+    }
+
+    async fn nudge_counter(setup: &Setup) -> Option<String> {
+        setup
+            .fs
+            .load(&crate::memory::nudge_counter_path(&setup.root))
+            .await
+            .ok()
+    }
+
+    #[gpui::test]
+    async fn an_opener_floats_after_eight_quiet_seconds_and_escape_says_not_now(
+        cx: &mut TestAppContext,
+    ) {
+        let mut setup = setup(cx).await;
+        let editor = open_note(&mut setup).await;
+        offer_reflect(&mut setup);
+        assert!(!bubble_up(&setup), "it waits for the page to be quiet");
+        advance(&mut setup, Duration::from_secs(7));
+        assert!(!bubble_up(&setup));
+        advance(&mut setup, Duration::from_secs(1));
+        assert_eq!(presence(&setup), Presence::NeedsYou);
+        assert_eq!(waiting(&setup), Some(Waiting::Opener));
+        assert_eq!(visible_chips(&setup), ["File them", "Not now"]);
+        assert!(is_focused(&mut setup, &editor), "it takes no focus");
+
+        setup.cx.simulate_keystrokes("ctrl-alt-n escape");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Resting);
+        assert_eq!(waiting(&setup), None);
+        setup
+            .panel
+            .read_with(&setup.cx, |panel, _| assert_eq!(panel.opener, None));
+        assert!(is_focused(&mut setup, &editor));
+        // "Not now" starts the nudge's count again from zero.
+        assert_eq!(
+            nudge_counter(&setup).await.as_deref().map(str::trim),
+            Some("0")
+        );
+    }
+
+    #[gpui::test]
+    async fn typing_starts_the_opener_wait_over(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        open_note(&mut setup).await;
+        offer_reflect(&mut setup);
+        advance(&mut setup, Duration::from_secs(5));
+        setup.cx.simulate_keystrokes("x");
+        advance(&mut setup, Duration::from_secs(5));
+        assert!(!bubble_up(&setup), "five seconds after an edit is too soon");
+        advance(&mut setup, Duration::from_secs(3));
+        assert_eq!(waiting(&setup), Some(Waiting::Opener));
+        assert!(bubble_up(&setup));
+    }
+
+    #[gpui::test]
+    async fn an_opener_waits_while_a_question_is_up(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        open_note(&mut setup).await;
+        ask_question(&mut setup, &["Tick it", "Not yet"]).await;
+        offer_reflect(&mut setup);
+        advance(&mut setup, Duration::from_secs(8));
+        assert_eq!(
+            waiting(&setup),
+            Some(Waiting::Question),
+            "the question keeps its bubble"
+        );
+        setup.cx.simulate_keystrokes("ctrl-alt-n y");
+        setup.cx.run_until_parked();
+        // Answered and settled, the opener gets its turn.
+        assert_eq!(waiting(&setup), Some(Waiting::Opener));
+        assert!(bubble_up(&setup));
+    }
+
+    #[gpui::test]
+    async fn openers_off_keeps_thock_quiet(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        setup.cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.thock.get_or_insert_default().openers = Some(OpenerFrequency::Off);
+                });
+            });
+        });
+        open_note(&mut setup).await;
+        offer_reflect(&mut setup);
+        advance(&mut setup, Duration::from_secs(10));
+        assert_eq!(presence(&setup), Presence::Resting);
+        setup
+            .panel
+            .read_with(&setup.cx, |panel, _| assert_eq!(panel.opener, None));
+    }
+
+    #[gpui::test]
+    async fn an_opener_left_alone_folds_into_the_dot_and_shows_in_the_thread(
+        cx: &mut TestAppContext,
+    ) {
+        let mut setup = setup(cx).await;
+        connect(&mut setup);
+        open_note(&mut setup).await;
+        offer_reflect(&mut setup);
+        advance(&mut setup, Duration::from_secs(8));
+        assert!(bubble_up(&setup));
+        advance(&mut setup, Duration::from_secs(60));
+        assert!(!bubble_up(&setup), "a minute alone folds it");
+        assert_eq!(waiting(&setup), Some(Waiting::Opener), "the dot stays");
+        // The thread shows it above the composer, and `n` answers there too.
+        setup.cx.simulate_keystrokes("ctrl-alt-n");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
+        assert_eq!(visible_chips(&setup), ["File them", "Not now"]);
+        setup.cx.simulate_keystrokes("shift-tab n");
+        setup.cx.run_until_parked();
+        setup
+            .panel
+            .read_with(&setup.cx, |panel, _| assert_eq!(panel.opener, None));
+    }
+
+    #[gpui::test]
+    async fn file_them_starts_reflect(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        open_note(&mut setup).await;
+        offer_reflect(&mut setup);
+        advance(&mut setup, Duration::from_secs(8));
+        setup.cx.simulate_keystrokes("ctrl-alt-n y");
+        setup.cx.run_until_parked();
+        // Not connected here, so the launch waits on the connect flow, which
+        // is what proves it was the Reflect ritual that got started.
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            assert_eq!(panel.opener, None);
+            assert_eq!(
+                panel
+                    .pending_launch
+                    .as_ref()
+                    .map(|launch| launch.title.as_str()),
+                Some("Reflect")
+            );
+            assert!(matches!(panel.view, PanelView::Connect(_)));
+        });
     }
 
     #[gpui::test]

@@ -64,6 +64,8 @@ pub struct ThockSettings {
     pub body_font: String,
     /// The family `#` and `##` headings are drawn in, or `HEADING_FONT_BODY`.
     pub heading_font: String,
+    /// How often the chat may start a conversation on its own (V44 §5.8).
+    pub openers: settings::OpenerFrequency,
 }
 
 impl settings::Settings for ThockSettings {
@@ -74,6 +76,7 @@ impl settings::Settings for ThockSettings {
                 .body_font
                 .unwrap_or_else(|| "IBM Plex Sans".to_string()),
             heading_font: thock.heading_font.unwrap_or_else(|| "Petrona".to_string()),
+            openers: thock.openers.unwrap_or_default(),
         }
     }
 }

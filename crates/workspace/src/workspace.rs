@@ -7997,6 +7997,11 @@ impl Workspace {
         self.modal_layer.read(cx).has_active_modal()
     }
 
+    /// Whether a modal is up, for callers with no window in hand.
+    pub fn has_modal(&self, cx: &App) -> bool {
+        self.modal_layer.read(cx).has_active_modal()
+    }
+
     pub fn active_modal<V: ManagedView + 'static>(&self, cx: &App) -> Option<Entity<V>> {
         self.modal_layer.read(cx).active_modal()
     }
