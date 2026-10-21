@@ -487,13 +487,17 @@ data: {"device_id":"c41a…","revoked":true}
 
 Events are nudges, not the record: on connect and on every reconnect the phone polls
 `GET /v1/vault/files?since=<cursor>` and `GET /v1/vault` (for `acked_through_seq`) regardless of
-what it did or did not receive. The server may close the stream at any time (Cloud Run does after
-an hour); clients reconnect with backoff starting at one second, capped at a minute.
+what it did or did not receive. The server may close the stream at any time, and ends every stream
+after five minutes; clients reconnect with backoff starting at one second, capped at a minute.
 `Last-Event-ID` is not used.
 
-The desk does not hold the feed; a desk credential gets `403 role_forbidden`. An open stream keeps a
-Cloud Run instance billed for its whole length, and a desk left open all day would hold one around
-the clock. The desk polls instead (§10.4).
+An open stream keeps a Cloud Run instance billed for its whole length. The phone holds the feed
+only in the foreground and closes it when the app leaves: iOS suspends an app without closing its
+connections, and the kernel goes on acknowledging the pings, so the server cannot tell. The
+five-minute end bounds what a stream the phone could not close costs.
+
+The desk does not hold the feed; a desk credential gets `403 role_forbidden`. A desk left open all
+day would hold an instance around the clock. The desk polls instead (§10.4).
 
 **APNs** (server internal, shape frozen for the phone). When a `file` or `ack` event has no phone
 feed to go to, the server sends one silent push per thirty-second burst:
@@ -905,6 +909,10 @@ retries reuse `client_id`; a lapsed vault goes read-only without losing the loca
 
 ## 13. Changelog
 
+- **2026-10-20** — §6.5: the server ends every feed after five minutes, and the phone closes it when
+  the app leaves the foreground. Every phone stream used to run to Cloud Run's one-hour cut, because a
+  suspended app never closes its connection, so each time the app was opened an instance stayed billed
+  for an hour. No client change is needed for the end: it is a close the contract already allowed.
 - **2026-10-10** — V39 and V40: pictures sync as bytes (§3.5, §4.1, `png jpg jpeg gif webp`, from the
   images folder on the desk's side), and two file-level write kinds, `put_file` and `move_file` (§7.3,
   §9.2). `WRITE_VERSION` stays 1: an older desk holds either kind (§10.4).

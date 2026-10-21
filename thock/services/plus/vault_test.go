@@ -552,6 +552,46 @@ func TestFeedRefusesTheDesk(t *testing.T) {
 	}
 }
 
+// A phone iOS suspends mid-stream never closes it, and the instance stays
+// billed while it is open, so the server ends every stream itself.
+func TestFeedEndsAtItsMaximumAge(t *testing.T) {
+	h := newSyncHarness(t)
+	h.server.feed.maxAge = 200 * time.Millisecond
+	request, err := http.NewRequest("GET", h.http.URL+"/v1/vault/feed", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+h.phone)
+	opened := time.Now()
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 200 {
+		t.Fatalf("phone opening the feed: %d", response.StatusCode)
+	}
+	ended := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, response.Body)
+		ended <- err
+	}()
+	select {
+	case err := <-ended:
+		if err != nil {
+			t.Fatalf("the stream should end cleanly: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream outlived its maximum age")
+	}
+	if lived := time.Since(opened); lived < 200*time.Millisecond {
+		t.Fatalf("the stream ended after %v, before its maximum age", lived)
+	}
+	if h.server.feed.phoneListening(h.vault) {
+		t.Fatal("an ended stream still counts as the phone listening")
+	}
+}
+
 func TestPushCoalescesWhenThePhoneIsAbsent(t *testing.T) {
 	h := newSyncHarness(t)
 	pusher := h.server.pusher.(*loggingPusher)

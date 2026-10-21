@@ -353,7 +353,9 @@ final class AppModel {
     func becameActive() {
         guard phase == .ready else { return }
         revision += 1
-        Task { await engine?.sync() }
+        // Reopens the feed the background let go of, starting with a round;
+        // back from inactive with the feed still held, the round alone.
+        Task { await engine?.start() }
         guard needsGreeting else { return }
         needsGreeting = false
         // Every launch is today (V33 §5, H1); so is every return.
@@ -379,6 +381,8 @@ final class AppModel {
         commitPendingRemoval()
         isUnlocked = false
         needsGreeting = true
+        // A suspended app would hold the stream open (SyncEngine.start).
+        Task { await engine?.stop() }
     }
 
     // MARK: Entry points

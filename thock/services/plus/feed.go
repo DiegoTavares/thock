@@ -17,7 +17,12 @@ import (
 
 const (
 	feedPingInterval = 25 * time.Second
-	pushBurstWindow  = 30 * time.Second
+	// An open stream keeps the Cloud Run instance billed, and a phone iOS
+	// suspends mid-stream never closes it: the kernel still acknowledges the
+	// pings. Ending every stream after a few minutes bounds what one costs;
+	// a phone still in the foreground reconnects.
+	feedMaxAge      = 5 * time.Minute
+	pushBurstWindow = 30 * time.Second
 )
 
 type feedEvent struct {
@@ -38,10 +43,12 @@ type feedHub struct {
 	subscribers map[string]map[*feedSubscriber]struct{}
 	// Called when a file or ack event finds no phone listening.
 	onPhoneAbsent func(vaultID string)
+	// How long one stream lives; feedMaxAge outside tests.
+	maxAge time.Duration
 }
 
 func newFeedHub() *feedHub {
-	return &feedHub{subscribers: map[string]map[*feedSubscriber]struct{}{}}
+	return &feedHub{subscribers: map[string]map[*feedSubscriber]struct{}{}, maxAge: feedMaxAge}
 }
 
 func (h *feedHub) subscribe(vaultID string, role deviceRole) (*feedSubscriber, func()) {
@@ -100,12 +107,12 @@ func (h *feedHub) publish(vaultID string, event feedEvent) {
 	}
 }
 
-// serve writes the stream until the client goes away or the server closes
-// it. Cloud Run ends every request at the service's timeout, 3600 s (its
-// maximum), set by --timeout in deploy.sh and deploy-services.yml; clients
-// reconnect.
+// serve writes the stream until the client goes away or maxAge passes;
+// clients reconnect. Cloud Run's own cut, --timeout in deploy.sh and
+// deploy-services.yml, sits well above maxAge.
 // stillAllowed is asked at every ping, so a credential revoked, replaced or
-// reset stops receiving events within one interval instead of an hour.
+// reset stops receiving events within one interval instead of at the end of
+// the stream.
 func (h *feedHub) serve(w http.ResponseWriter, r *http.Request, vaultID string, role deviceRole, stillAllowed func(context.Context) bool) {
 	controller := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -123,9 +130,13 @@ func (h *feedHub) serve(w http.ResponseWriter, r *http.Request, vaultID string, 
 	defer unsubscribe()
 	ping := time.NewTicker(feedPingInterval)
 	defer ping.Stop()
+	expired := time.NewTimer(h.maxAge)
+	defer expired.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-expired.C:
 			return
 		case <-ping.C:
 			if stillAllowed != nil && !stillAllowed(r.Context()) {
