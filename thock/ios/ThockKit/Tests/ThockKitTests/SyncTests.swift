@@ -107,6 +107,65 @@ final class LossyTransport: SyncTransport, @unchecked Sendable {
     func feed(credential: String) -> AsyncThrowingStream<FeedEvent, Error> { inner.feed(credential: credential) }
 }
 
+/// Counts the feeds the phone opens and still holds, and its rounds (each
+/// ends reading `GET /v1/vault`).
+final class FeedCountingTransport: SyncTransport, @unchecked Sendable {
+    let inner: LocalBackend
+    private let lock = NSLock()
+    private var counts = (opened: 0, held: 0, rounds: 0)
+
+    var opened: Int { lock.withLock { counts.opened } }
+    var held: Int { lock.withLock { counts.held } }
+    var rounds: Int { lock.withLock { counts.rounds } }
+
+    init(_ inner: LocalBackend) {
+        self.inner = inner
+    }
+
+    func send(method: String, path: String, query: [String: String], body: Data?, credential: String?) async throws -> HTTPResult {
+        if method == "GET", path == "/v1/vault" {
+            lock.withLock { counts.rounds += 1 }
+        }
+        return try await inner.send(method: method, path: path, query: query, body: body, credential: credential)
+    }
+
+    func download(_ url: String) async throws -> Data { try await inner.download(url) }
+    func upload(_ url: String, body: Data, headers: [String: String]) async throws { try await inner.upload(url, body: body, headers: headers) }
+
+    func feed(credential: String) -> AsyncThrowingStream<FeedEvent, Error> {
+        lock.withLock {
+            counts.opened += 1
+            counts.held += 1
+        }
+        let stream = inner.feed(credential: credential)
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await event in stream {
+                        continuation.yield(event)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { [weak self] _ in
+                task.cancel()
+                self?.lock.withLock { self?.counts.held -= 1 }
+            }
+        }
+    }
+}
+
+/// Polls `condition` for up to two seconds.
+func waitUntil(_ what: String, file: StaticString = #filePath, line: UInt = #line, _ condition: () async -> Bool) async throws {
+    for _ in 0..<200 {
+        if await condition() { return }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTFail("timed out waiting until \(what)", file: file, line: line)
+}
+
 final class SyncTests: XCTestCase {
     // MARK: Pairing
 
@@ -531,6 +590,34 @@ final class SyncTests: XCTestCase {
         XCTAssertEqual(state, .disconnected)
         // What the phone already had stays readable.
         XCTAssertNotNil(harness.store.content(harness.todayPath))
+    }
+
+    // MARK: The feed
+
+    /// iOS suspends the app without closing the stream, and an open stream
+    /// keeps the server's instance billed: the app lets go of it on the way
+    /// out and takes it back on return.
+    func testTheFeedIsHeldOnlyBetweenStartAndStop() async throws {
+        let harness = try Harness { FeedCountingTransport($0) }
+        let transport = try XCTUnwrap(harness.transport as? FeedCountingTransport)
+        try await harness.pair()
+
+        await harness.engine.start()
+        try await waitUntil("the feed is held") { transport.held == 1 }
+        let rounds = transport.rounds
+
+        // Back from inactive, the feed still held: a round, not a second feed.
+        await harness.engine.start()
+        try await waitUntil("a round ran") { transport.rounds > rounds }
+        XCTAssertEqual(transport.opened, 1)
+
+        await harness.engine.stop()
+        try await waitUntil("the feed is let go") { transport.held == 0 }
+
+        await harness.engine.start()
+        try await waitUntil("the feed is held again") { transport.held == 1 }
+        XCTAssertEqual(transport.opened, 2)
+        await harness.engine.stop()
     }
 
     // MARK: The local server keeps the contract

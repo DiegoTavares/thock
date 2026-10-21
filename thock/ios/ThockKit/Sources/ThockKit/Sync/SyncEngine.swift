@@ -169,10 +169,17 @@ public actor SyncEngine {
 
     // MARK: The loop
 
-    /// Holds the feed while the app is in the foreground. Events are nudges:
-    /// every connect and reconnect starts with a full round regardless.
+    /// Holds the feed while the app is in the foreground; the app calls
+    /// `stop()` on the way out, because iOS suspends it without closing the
+    /// stream and an open stream keeps the server's instance billed. Events
+    /// are nudges: every connect and reconnect starts with a full round
+    /// regardless, and a start while the feed is already held runs one.
     public func start() {
-        guard feedTask == nil, store.isConnected else { return }
+        guard store.isConnected else { return }
+        guard feedTask == nil else {
+            Task { await sync() }
+            return
+        }
         feedTask = Task { [weak self] in
             var delay: UInt64 = 1
             while !Task.isCancelled {

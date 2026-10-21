@@ -230,10 +230,12 @@ every write idempotent against its own effect, so this is safe.
 
 `GET /v1/vault/feed` is a one-way stream (server-sent events) that emits `file` and `ack` events
 whenever the desk changed something, plus vault-level `vault` and `device` events (contract §6.5).
-The phone holds it open while in the foreground and reconnects on drop (Cloud Run closes connections
-after an hour; that is fine). When the phone is not connected and a snapshot arrives, the backend
-sends one **APNs silent push** per burst; iOS wakes the app briefly to pull. This is the "seconds in
-the foreground, Apple's schedule in the background" promise of §2.
+The phone holds it open only while in the foreground, closing it on the way out, and reconnects on
+drop; the server ends every stream after five minutes. Both bound the cost: an open stream keeps a
+Cloud Run instance billed, and iOS suspends an app without closing its connections. When the phone
+is not connected and a snapshot arrives, the backend sends one **APNs silent push** per burst; iOS
+wakes the app briefly to pull. This is the "seconds in the foreground, Apple's schedule in the
+background" promise of §2.
 
 The desk is never pushed and does not hold the feed: an open stream keeps a Cloud Run instance
 billed for its whole length, so a desk left open all day would cost an instance around the clock. It
