@@ -116,6 +116,19 @@ func main() {
 	} else {
 		log.Print("FEEDBACK_REPO or FEEDBACK_GITHUB_TOKEN is not set; phone problem reports are refused")
 	}
+	switch config, err := apnsConfigFromEnv(os.Getenv); {
+	case err != nil:
+		log.Fatalf("apns: %v", err)
+	case config == nil:
+		log.Print("APNS_KEY is not set; silent pushes to the phone are logged, not sent")
+	default:
+		apns, err := newAPNSPusher(*config, nil)
+		if err != nil {
+			log.Fatalf("apns: %v", err)
+		}
+		s.pusher = apns
+		log.Printf("sending silent pushes through %s for %s", config.BaseURL, config.Topic)
+	}
 	if publicURL := os.Getenv("PUBLIC_URL"); publicURL != "" {
 		s.publicURL = strings.TrimRight(publicURL, "/")
 	} else {

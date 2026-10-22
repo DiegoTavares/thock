@@ -90,6 +90,22 @@ else
   log "no feedback-github-token secret: phone problem reports will be refused"
 fi
 
+# Silent push to the phone: the .p8 auth key's contents and its key id, both
+# kept as secrets so a code-only redeploy keeps them.
+if [[ -n "${APNS_KEY:-}" || -n "${APNS_KEY_ID:-}" ]]; then
+  if [[ -z "${APNS_KEY:-}" || -z "${APNS_KEY_ID:-}" ]]; then
+    log "APNS_KEY and APNS_KEY_ID go together (the .p8 contents and its 10-character key id)."
+    exit 1
+  fi
+  put_secret apns-auth-key "$APNS_KEY"
+  put_secret apns-key-id "$APNS_KEY_ID"
+fi
+if has_secret apns-auth-key && has_secret apns-key-id; then
+  SECRETS="$SECRETS,APNS_KEY=apns-auth-key:latest,APNS_KEY_ID=apns-key-id:latest"
+else
+  log "no apns-auth-key secret: pushes to the phone will be logged, not sent"
+fi
+
 # The vault feed is a long-lived SSE request, and Cloud Run cuts every request
 # at --timeout (5 minutes by default). Keep it in step with deploy-services.yml.
 gcloud run deploy "$SERVICE" \
