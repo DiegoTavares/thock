@@ -31,6 +31,7 @@ pub mod plus;
 pub mod readwise;
 pub mod readwise_service;
 pub mod reminder_reading;
+pub mod reminders;
 pub mod routine_collections;
 pub mod routines;
 pub mod routines_panel;
@@ -119,6 +120,7 @@ pub fn init(cx: &mut App) {
     inbox_service::init(cx);
     inbox_view::init(cx);
     readwise_service::init(cx);
+    reminders::init(cx);
     sync_status::init(cx);
     vault_sync::init(cx);
     markdown_conceal::init(cx);

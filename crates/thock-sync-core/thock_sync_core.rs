@@ -5,18 +5,27 @@
 //! the same code compiles for iOS.
 
 mod apply;
+mod dates;
 mod envelope;
 mod inbox;
 mod markdown;
+mod reminder;
 mod write;
 
 pub use apply::{Applied, Outcome, apply, effect_present};
+pub use dates::{format_date, parse_date};
 pub use envelope::{Context, SealError, content_hash, key_check, open, seal, seal_with_nonce};
 pub use inbox::{
     INBOX_ARCHIVE_DIR, TRIAGE_LOG_PATH, archive_path, inbox_has_body, inbox_task_line,
     triage_log_line,
 };
 pub use markdown::{heading_key, line_hash, section_hash};
+pub use reminder::{
+    Appearance, DEFAULT_DAY_HEADING, DailyNotes, Due, Group, ID_LENGTH, LineReminder, MirrorLine,
+    MirrorMark, ReminderConfig, ReminderState, Task, Token, When, add_id, attach, close, cut_text,
+    drop_token, group, id_from_bytes, id_marker, index_link_line, is_id, is_reminder_path,
+    note_link, parse_line, parse_note, reminder_text, reopen, rewrite, token_text,
+};
 pub use write::{Heading, Operation, Place, Placement, Write, WriteError, parse_write};
 
 use unicode_normalization::is_nfc;

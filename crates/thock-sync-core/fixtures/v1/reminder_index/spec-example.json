@@ -1,0 +1,189 @@
+{
+  "name": "spec-example",
+  "description": "The index of spec §5.1 at Wednesday 21 October 14:05. Today's note is not linked, so a reader never opens it.",
+  "now": "2026-10-21T14:05",
+  "index": "reminders.md",
+  "headings": {
+    "open": [
+      "Open"
+    ],
+    "done": [
+      "Done"
+    ],
+    "day": [
+      "Reminders"
+    ]
+  },
+  "daily": {
+    "dir": "daily",
+    "filename": "YYYY-MM-DD"
+  },
+  "date_only_at": "09:00",
+  "files": {
+    "reminders.md": "# Reminders\n\n<!-- Thock keeps this index. A task here is a reminder; a link points at one that lives in another note. -->\n\n## Open\n- [[backlog]] <!--rem:2f6b08e19a5c-->\n- [ ] Send the October invoice (@2026-10-21) <!--rem:a90c1377d02e-->\n- [[projects/house]] <!--rem:7d3e55a1c0f2-->\n- [ ] Call the bank (@2026-10-22 10:00) <!--rem:3f9a1c0d4e21-->\n- [[daily/2026-10-20]] <!--rem:c41f77a8e590-->\n- [[projects/house]] <!--rem:7c11e0b4d2a9-->\n\n## Done\n- [x] Pay the nursery (@2026-10-19 09:00) ✅ 2026-10-19 <!--rem:6e1f42b07a93-->\n- [[projects/house]] ✅ 2026-10-19 <!--rem:51aa02c9d811-->\n- [[projects/house]] ✅ 2026-10-18 <!--rem:0d93be7a1c44-->\n- [[projects/house]] dropped 2026-10-20 <!--rem:9e4a21f0b388-->\n- [[daily/2026-10-14]] removed 2026-10-16 <!--rem:0b5e6d1f2a37-->\n",
+    "backlog.md": "# Backlog\n\n## Inbox\n- [ ] Buy stamps\n- [ ] Renew the car insurance (@2026-10-20 09:00) <!--rem:2f6b08e19a5c-->\n",
+    "projects/house.md": "# House\n\n- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->\nThe boiler ticks when it starts. Ask about it before the cold comes (@2026-11-02) <!--rem:7c11e0b4d2a9-->\n- [x] Pay the deposit (@2026-10-19 09:00) <!--rem:51aa02c9d811-->\nGot the quote back, it's fine. ~~(@2026-10-18 10:00)~~ <!--rem:0d93be7a1c44-->\n- [ ] Send the leak photos to the landlord <!--rem:9e4a21f0b388-->\n",
+    "daily/2026-10-20.md": "# Tuesday, October 20, 2026\n\n## Day planner\n- [x] 09:30 - 11:00 Deep work on the budget\n- [ ] 16:00 - 17:00 Dentist (@15:30) <!--rem:c41f77a8e590-->\n",
+    "daily/2026-10-21.md": "# Wednesday, October 21, 2026\n\n## Day planner\n- [ ] 09:00 Standup (@08:55) <!--rem:e5e5e5e5e5e5-->\n\n### Reminders\n- [ ] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->\n- [ ] Send the October invoice · [[reminders]] <!--rem:a90c1377d02e-->\n- [ ] Renew the car insurance · 2026-10-20 09:00 · [[backlog]] <!--rem:2f6b08e19a5c-->\n"
+  },
+  "reminders": [
+    {
+      "id": "2f6b08e19a5c",
+      "section": "open",
+      "entry": "link",
+      "stamp": null,
+      "home": "backlog.md",
+      "line": 4,
+      "text": "Renew the car insurance",
+      "due": "2026-10-20 09:00",
+      "rings_at": "2026-10-20T09:00",
+      "state": "open",
+      "group": "overdue"
+    },
+    {
+      "id": "a90c1377d02e",
+      "section": "open",
+      "entry": "loose",
+      "stamp": null,
+      "home": "reminders.md",
+      "line": 6,
+      "text": "Send the October invoice",
+      "due": "2026-10-21",
+      "rings_at": "2026-10-21T09:00",
+      "state": "open",
+      "group": "today"
+    },
+    {
+      "id": "7d3e55a1c0f2",
+      "section": "open",
+      "entry": "link",
+      "stamp": null,
+      "home": "projects/house.md",
+      "line": 2,
+      "text": "Call the plumber",
+      "due": "2026-10-21 14:30",
+      "rings_at": "2026-10-21T14:30",
+      "state": "open",
+      "group": "today"
+    },
+    {
+      "id": "3f9a1c0d4e21",
+      "section": "open",
+      "entry": "loose",
+      "stamp": null,
+      "home": "reminders.md",
+      "line": 8,
+      "text": "Call the bank",
+      "due": "2026-10-22 10:00",
+      "rings_at": "2026-10-22T10:00",
+      "state": "open",
+      "group": "upcoming"
+    },
+    {
+      "id": "c41f77a8e590",
+      "section": "open",
+      "entry": "link",
+      "stamp": null,
+      "home": "daily/2026-10-20.md",
+      "line": 4,
+      "text": "Dentist",
+      "due": "2026-10-20 15:30",
+      "rings_at": "2026-10-20T15:30",
+      "state": "open",
+      "group": "overdue"
+    },
+    {
+      "id": "7c11e0b4d2a9",
+      "section": "open",
+      "entry": "link",
+      "stamp": null,
+      "home": "projects/house.md",
+      "line": 3,
+      "text": "The boiler ticks when it starts. Ask about it before the cold comes",
+      "due": "2026-11-02",
+      "rings_at": "2026-11-02T09:00",
+      "state": "open",
+      "group": "upcoming"
+    },
+    {
+      "id": "6e1f42b07a93",
+      "section": "done",
+      "entry": "loose",
+      "stamp": {
+        "kind": "done",
+        "date": "2026-10-19"
+      },
+      "home": "reminders.md",
+      "line": 13,
+      "text": "Pay the nursery ✅ 2026-10-19",
+      "due": "2026-10-19 09:00",
+      "rings_at": "2026-10-19T09:00",
+      "state": "closed",
+      "group": "done"
+    },
+    {
+      "id": "51aa02c9d811",
+      "section": "done",
+      "entry": "link",
+      "stamp": {
+        "kind": "done",
+        "date": "2026-10-19"
+      },
+      "home": "projects/house.md",
+      "line": 4,
+      "text": "Pay the deposit",
+      "due": "2026-10-19 09:00",
+      "rings_at": "2026-10-19T09:00",
+      "state": "closed",
+      "group": "done"
+    },
+    {
+      "id": "0d93be7a1c44",
+      "section": "done",
+      "entry": "link",
+      "stamp": {
+        "kind": "done",
+        "date": "2026-10-18"
+      },
+      "home": "projects/house.md",
+      "line": 5,
+      "text": "Got the quote back, it's fine.",
+      "due": "2026-10-18 10:00",
+      "rings_at": "2026-10-18T10:00",
+      "state": "closed",
+      "group": "done"
+    },
+    {
+      "id": "9e4a21f0b388",
+      "section": "done",
+      "entry": "link",
+      "stamp": {
+        "kind": "dropped",
+        "date": "2026-10-20"
+      },
+      "home": "projects/house.md",
+      "line": 6,
+      "text": "Send the leak photos to the landlord",
+      "due": null,
+      "rings_at": null,
+      "state": "dropped",
+      "group": "done"
+    },
+    {
+      "id": "0b5e6d1f2a37",
+      "section": "done",
+      "entry": "link",
+      "stamp": {
+        "kind": "removed",
+        "date": "2026-10-16"
+      },
+      "home": "daily/2026-10-14.md",
+      "line": null,
+      "text": null,
+      "due": null,
+      "rings_at": null,
+      "state": "removed",
+      "group": "done"
+    }
+  ]
+}
