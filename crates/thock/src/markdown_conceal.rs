@@ -147,11 +147,10 @@ pub struct ReminderNote {
 /// while the cursor is elsewhere, or the one-row spacer that keeps an H1's
 /// height while its source shows.
 struct HeadingEntry {
-    /// The start of the heading line.
-    line: Anchor,
-    /// The end of the heading line; a replace block needs a range that
-    /// spans more than one point or the display map drops it.
-    line_end: Anchor,
+    /// The start of the heading's text. Line boundaries are taken fresh
+    /// from its row each pass, since anchors on them drift onto a
+    /// neighbouring line when a newline is typed at either end.
+    start: Anchor,
     level: u8,
     text: String,
     /// False once the heading is gone from the plan; the entry stays only
@@ -159,6 +158,9 @@ struct HeadingEntry {
     live: bool,
     block: Option<CustomBlockId>,
     spacer: Option<CustomBlockId>,
+    /// The row the blocks were drawn on; they are redrawn once the heading
+    /// moves off it.
+    drawn_on: Option<u32>,
 }
 
 /// One image line's picture: the line it sits under, what it points at, and
@@ -910,19 +912,13 @@ fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
         return;
     };
     let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
-    let found: Vec<(Anchor, Anchor, u8, String)> = addon
+    let found: Vec<(Anchor, u8, String)> = addon
         .spans
         .iter()
         .filter_map(|span| match span.kind {
             SpanKind::Heading(level @ (1 | 2)) => {
-                let row = span.range.start.to_point(&buffer_snapshot).row;
-                let line = buffer_snapshot.anchor_before(MultiBufferPoint::new(row, 0));
-                let line_end = buffer_snapshot.anchor_after(MultiBufferPoint::new(
-                    row,
-                    buffer_snapshot.line_len(MultiBufferRow(row)),
-                ));
                 let text: String = buffer_snapshot.text_for_range(span.range.clone()).collect();
-                Some((line, line_end, level, text))
+                Some((span.range.start, level, text))
             }
             _ => None,
         })
@@ -936,7 +932,7 @@ fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
         .iter()
         .map(|entry| {
             (
-                entry.line.to_offset(&buffer_snapshot),
+                entry.start.to_offset(&buffer_snapshot),
                 entry.level,
                 entry.text.clone(),
             )
@@ -945,20 +941,20 @@ fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
     let mut carried: Vec<Option<HeadingEntry>> = previous.into_iter().map(Some).collect();
     let headings: Vec<HeadingEntry> = found
         .into_iter()
-        .map(|(line, line_end, level, text)| {
-            let key = (line.to_offset(&buffer_snapshot), level, text.clone());
+        .map(|(start, level, text)| {
+            let key = (start.to_offset(&buffer_snapshot), level, text.clone());
             let kept = previous_keys
                 .iter()
                 .position(|previous| *previous == key)
                 .and_then(|index| carried.get_mut(index).and_then(Option::take));
             kept.unwrap_or(HeadingEntry {
-                line,
-                line_end,
+                start,
                 level,
                 text,
                 live: true,
                 block: None,
                 spacer: None,
+                drawn_on: None,
             })
         })
         .collect();
@@ -990,6 +986,7 @@ enum HeadingBlock {
 /// operation (`unfold_all`, `zR`, a restored fold) sweeps intersecting
 /// replace blocks away with the folds, so a block the map no longer holds
 /// counts as missing and is drawn again, the way the folds heal (§10.2).
+/// Blocks of a heading that moved to another row are drawn again there.
 fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
     let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
         return;
@@ -1008,23 +1005,28 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
     let project = editor.project().cloned();
     let workspace = editor.workspace().map(|workspace| workspace.downgrade());
     let mut to_remove: HashSet<CustomBlockId> = HashSet::default();
-    let mut to_insert: Vec<(usize, HeadingBlock, BlockProperties<Anchor>)> = Vec::new();
+    let mut to_insert: Vec<(usize, HeadingBlock, u32, BlockProperties<Anchor>)> = Vec::new();
     let mut swept: Vec<(usize, HeadingBlock)> = Vec::new();
     for (index, entry) in addon.headings.iter().enumerate() {
-        let row = entry.line.to_point(&buffer_snapshot).row;
+        let row = entry.start.to_point(&buffer_snapshot).row;
         let is_revealed = revealed
             .iter()
             .any(|&(first, last)| row >= first && row <= last);
         let want_block = enabled && entry.live && !is_revealed;
         let want_spacer = enabled && entry.live && is_revealed && entry.level == 1;
-        let block = still_held(entry.block);
+        let mut block = still_held(entry.block);
         if entry.block.is_some() && block.is_none() {
             swept.push((index, HeadingBlock::Replace));
         }
-        let spacer = still_held(entry.spacer);
+        let mut spacer = still_held(entry.spacer);
         if entry.spacer.is_some() && spacer.is_none() {
             swept.push((index, HeadingBlock::Spacer));
         }
+        if entry.drawn_on != Some(row) {
+            to_remove.extend(block.take());
+            to_remove.extend(spacer.take());
+        }
+        let line = line_range(row, &buffer_snapshot);
         match (block, want_block) {
             (Some(id), false) => {
                 to_remove.insert(id);
@@ -1032,7 +1034,8 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
             (None, true) => to_insert.push((
                 index,
                 HeadingBlock::Replace,
-                heading_block(entry, project.clone(), workspace.clone()),
+                row,
+                heading_block(entry, line.clone(), project.clone(), workspace.clone()),
             )),
             _ => {}
         }
@@ -1040,7 +1043,9 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
             (Some(id), false) => {
                 to_remove.insert(id);
             }
-            (None, true) => to_insert.push((index, HeadingBlock::Spacer, spacer_block(entry.line))),
+            (None, true) => {
+                to_insert.push((index, HeadingBlock::Spacer, row, spacer_block(line.start)))
+            }
             _ => {}
         }
     }
@@ -1065,7 +1070,7 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
     let inserted = editor.insert_blocks(
         to_insert
             .iter()
-            .map(|(_, _, properties)| properties.clone()),
+            .map(|(_, _, _, properties)| properties.clone()),
         None,
         cx,
     );
@@ -1073,8 +1078,9 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
         editor.remove_blocks(to_remove.clone(), None, cx);
     }
     if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
-        for ((index, which, _), id) in to_insert.into_iter().zip(inserted) {
+        for ((index, which, row, _), id) in to_insert.into_iter().zip(inserted) {
             if let Some(entry) = addon.headings.get_mut(index) {
+                entry.drawn_on = Some(row);
                 match which {
                     HeadingBlock::Replace => entry.block = Some(id),
                     HeadingBlock::Spacer => entry.spacer = Some(id),
@@ -1102,15 +1108,26 @@ fn heading_rows(level: u8) -> u32 {
     if level == 1 { 2 } else { 1 }
 }
 
+/// The text of buffer row `row`, anchored inward so an edit at either end
+/// never stretches it over a neighbouring line. A replace block needs a
+/// range that spans more than one point or the display map drops it, which
+/// a heading line always does.
+fn line_range(row: u32, buffer_snapshot: &MultiBufferSnapshot) -> Range<Anchor> {
+    let line_end = MultiBufferPoint::new(row, buffer_snapshot.line_len(MultiBufferRow(row)));
+    buffer_snapshot.anchor_after(MultiBufferPoint::new(row, 0))
+        ..buffer_snapshot.anchor_before(line_end)
+}
+
 fn heading_block(
     entry: &HeadingEntry,
+    line: Range<Anchor>,
     project: Option<Entity<Project>>,
     workspace: Option<WeakEntity<Workspace>>,
 ) -> BlockProperties<Anchor> {
     let text = entry.text.clone();
     let level = entry.level;
     BlockProperties {
-        placement: BlockPlacement::Replace(entry.line..=entry.line_end),
+        placement: BlockPlacement::Replace(line.start..=line.end),
         height: Some(heading_rows(level)),
         style: BlockStyle::Flex,
         priority: 0,
@@ -3855,6 +3872,88 @@ mod tests {
             ]
         );
         assert_eq!(custom_blocks(&editor, &mut cx), vec![(true, 2), (true, 1)]);
+    }
+
+    fn cursor_row(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> u32 {
+        editor.update(cx, |editor, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            editor
+                .selections
+                .newest_anchor()
+                .head()
+                .to_point(&snapshot)
+                .row
+        })
+    }
+
+    #[gpui::test]
+    async fn enter_after_a_new_heading_keeps_the_next_line(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "\nplain tail\n").await;
+        move_cursor_to(&editor, 0, &mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.insert("# Title", window, cx)
+        });
+        settle(&mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.newline(&editor::actions::Newline, window, cx);
+            editor.insert("next", window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            display_text(&editor, &mut cx).contains("\nnext\n"),
+            "the line under the heading shows: {:?}",
+            display_text(&editor, &mut cx)
+        );
+        settle(&mut cx);
+        assert_eq!(custom_blocks(&editor, &mut cx), vec![(true, 2)]);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "\n\nnext\nplain tail\n",
+            "the heading is a block and the line under it shows"
+        );
+    }
+
+    #[gpui::test]
+    async fn enter_before_a_heading_keeps_its_source_on_the_cursors_line(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, HEADED).await;
+        move_cursor_to(&editor, 0, &mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.newline(&editor::actions::Newline, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(cursor_row(&editor, &mut cx), 1);
+        assert!(
+            display_text(&editor, &mut cx).starts_with("\n\n# Day planner\n"),
+            "the blank line, the spacer and the source: {:?}",
+            display_text(&editor, &mut cx)
+        );
+        settle(&mut cx);
+        move_cursor_to(&editor, 6, &mut cx);
+        assert_eq!(
+            custom_blocks(&editor, &mut cx),
+            vec![(true, 2), (true, 1)],
+            "both headings are blocks again once the cursor leaves"
+        );
+    }
+
+    #[gpui::test]
+    async fn moving_down_off_a_heading_keeps_the_cursor_visible(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, HEADED).await;
+        move_cursor_to(&editor, 0, &mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.move_down(&zed_actions::editor::MoveDown, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(cursor_row(&editor, &mut cx), 1);
+        assert_eq!(custom_blocks(&editor, &mut cx), vec![(true, 2), (true, 1)]);
+        assert!(display_text(&editor, &mut cx).starts_with("\n\n- [ ] Workout\n"));
+
+        move_cursor_to(&editor, 2, &mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.move_down(&zed_actions::editor::MoveDown, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(cursor_row(&editor, &mut cx), 3);
     }
 
     #[gpui::test]
