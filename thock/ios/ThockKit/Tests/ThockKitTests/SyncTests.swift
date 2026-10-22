@@ -212,6 +212,39 @@ final class SyncTests: XCTestCase {
         }
     }
 
+    // MARK: Push
+
+    func testThePushTokenTravelsWithThePairingAndEachChangeIsSentOnce() async throws {
+        let harness = try Harness()
+        try await harness.desk.open()
+        try await harness.engine.pair(link: try await harness.desk.pairingLink(), deviceName: "Test iPhone", apnsToken: "aa11")
+        func phoneToken() async -> String? {
+            await harness.backend.state.devices.first { $0.role == "phone" }?.apnsToken
+        }
+        let paired = await phoneToken()
+        XCTAssertEqual(paired, "aa11")
+
+        // An offline service would refuse any request, so an unchanged token
+        // must not make one.
+        await harness.backend.setOffline(true)
+        await harness.engine.updatePushToken("aa11")
+        var diagnostics = await harness.engine.diagnostics
+        XCTAssertNil(diagnostics.pushTokenError)
+
+        await harness.engine.updatePushToken("bb22")
+        diagnostics = await harness.engine.diagnostics
+        XCTAssertNotNil(diagnostics.pushTokenError)
+        let refused = await phoneToken()
+        XCTAssertEqual(refused, "aa11")
+
+        await harness.backend.setOffline(false)
+        await harness.engine.updatePushToken("bb22")
+        diagnostics = await harness.engine.diagnostics
+        XCTAssertNil(diagnostics.pushTokenError)
+        let changed = await phoneToken()
+        XCTAssertEqual(changed, "bb22")
+    }
+
     // MARK: Pull
 
     func testAFullPullThenIncrementalPullsMatchTheDesk() async throws {

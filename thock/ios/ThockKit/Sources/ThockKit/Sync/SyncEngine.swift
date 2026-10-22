@@ -31,6 +31,9 @@ public struct SyncDiagnostics: Equatable, Sendable {
     /// Path and reason for every snapshot that could not be taken in the
     /// last pull.
     public var failures: [String] = []
+    /// Why the service last refused this phone's push token, until it
+    /// takes one; while it is set, desk changes wait for the app to open.
+    public var pushTokenError: String?
 
     public init() {}
 }
@@ -138,6 +141,7 @@ public actor SyncEngine {
         store.setMeta("device_name", response.device.name ?? deviceName)
         store.setMeta("backend", link.backend)
         store.setMeta("status", response.vault.status)
+        store.setMeta(Self.pushTokenName, apnsToken)
         set(.working)
         await sync()
     }
@@ -162,9 +166,21 @@ public actor SyncEngine {
         set(.notConnected)
     }
 
+    static let pushTokenName = "apns_token"
+
+    /// Tells the service where to send the silent push that wakes the phone
+    /// to sync (V34 API §6.5). The token last accepted is remembered, so the
+    /// app can offer it on every launch without a request each time; a
+    /// refused one is offered again on the next.
     public func updatePushToken(_ token: String?) async {
-        guard let credential else { return }
-        _ = try? await call("PATCH", "/v1/vault/devices/me", body: ["apns_token": token], credential: credential, as: DeviceInfo.self)
+        guard let credential, store.meta(Self.pushTokenName) != token else { return }
+        do {
+            _ = try await call("PATCH", "/v1/vault/devices/me", body: ["apns_token": token], credential: credential, as: DeviceInfo.self)
+            store.setMeta(Self.pushTokenName, token)
+            diagnostics.pushTokenError = nil
+        } catch {
+            diagnostics.pushTokenError = (error as? APIError)?.error ?? error.localizedDescription
+        }
     }
 
     // MARK: The loop

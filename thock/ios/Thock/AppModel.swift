@@ -123,6 +123,9 @@ final class AppModel {
     /// Set on launch and on every return from the background.
     private var needsGreeting = true
     private var entryAfterUnlock: EntryPoint?
+    /// The address iOS gave this launch for the service's silent push, kept
+    /// so a connection made later carries it.
+    @ObservationIgnored private var pushToken: String?
 
     init() {
         appearance = ThockEnvironment.defaults.string(forKey: "appearance").flatMap(Appearance.init(rawValue:)) ?? .dark
@@ -193,7 +196,11 @@ final class AppModel {
         } else {
             throw PairingError.badLink
         }
-        await install(SyncEngine(store: store, transport: transport, secrets: secrets))
+        let engine = SyncEngine(store: store, transport: transport, secrets: secrets)
+        await install(engine)
+        if !isPractice, let pushToken {
+            await engine.updatePushToken(pushToken)
+        }
         await refreshSyncState()
     }
 
@@ -257,7 +264,7 @@ final class AppModel {
             guard let base = URL(string: link.backend), base.scheme != nil else { throw PairingError.badLink }
             let transport = HTTPTransport(base: base)
             let engine = SyncEngine(store: store, transport: transport, secrets: secrets)
-            try await engine.pair(link: link, deviceName: UIDevice.current.name)
+            try await engine.pair(link: link, deviceName: UIDevice.current.name, apnsToken: pushToken)
             await install(engine)
             await finishConnecting()
         } catch {
@@ -375,6 +382,29 @@ final class AppModel {
         }
         entryAfterUnlock = entry
         Task { await unlock() }
+    }
+
+    // MARK: Push
+
+    func received(pushToken token: String) {
+        pushToken = token
+        guard phase == .ready, !isPractice else { return }
+        Task { await engine?.updatePushToken(token) }
+    }
+
+    /// The service's silent push says the desk changed something (V34 API
+    /// §6.5). It can launch the app with no screen, so the notebook is opened
+    /// here if nothing has opened it yet. Returns whether a round ran.
+    func syncForPush() async -> Bool {
+        await boot()
+        guard phase == .ready, let engine else { return false }
+        await engine.sync()
+        // Opening the notebook took the feed, which only the foreground
+        // holds (SyncEngine.start).
+        if UIApplication.shared.applicationState == .background {
+            await engine.stop()
+        }
+        return true
     }
 
     func wentToBackground() {

@@ -5,12 +5,13 @@ import ThockKit
 @main
 struct ThockApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
         Theme.registerFonts()
     }
+
+    private var model: AppModel { AppDelegate.model }
 
     var body: some Scene {
         WindowGroup {
@@ -19,7 +20,6 @@ struct ThockApp: App {
                 .preferredColorScheme(model.appearance.scheme)
                 .tint(Theme.amber)
                 .task {
-                    AppDelegate.model = model
                     await model.boot()
                     if let shortcut = AppDelegate.launchShortcut {
                         AppDelegate.launchShortcut = nil
@@ -38,11 +38,30 @@ struct ThockApp: App {
     }
 }
 
-/// The app icon's quick actions arrive through the scene delegate; SwiftUI
-/// has no hook of its own for them.
+/// The app icon's quick actions arrive through the scene delegate and the
+/// silent push through this one; SwiftUI has no hook of its own for either.
 final class AppDelegate: NSObject, UIApplicationDelegate {
-    @MainActor static weak var model: AppModel?
+    /// Owned here rather than by the scene: a silent push can launch the app
+    /// in the background with no scene at all.
+    @MainActor static let model = AppModel()
     @MainActor static var launchShortcut: String?
+
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // A silent push needs no permission from the person, only the token.
+        application.registerForRemoteNotifications()
+        return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        let token = deviceToken.map { String(format: "%02x", $0) }.joined()
+        Task { @MainActor in AppDelegate.model.received(pushToken: token) }
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        // A build signed without push lands here. Without a
+        // token the phone hears about desk changes when it is next opened, as
+        // it always has (V45 §10.6), so there is nothing to tell the person.
+    }
 
     func application(_ application: UIApplication, configurationForConnecting session: UISceneSession, options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         if let shortcut = options.shortcutItem {
@@ -54,10 +73,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
-        // The server's silent push is a nudge to pull (V34 API §6.5).
         Task { @MainActor in
-            AppDelegate.model?.becameActive()
-            completionHandler(.newData)
+            completionHandler(await AppDelegate.model.syncForPush() ? .newData : .noData)
         }
     }
 }
@@ -66,7 +83,7 @@ final class SceneDelegate: NSObject, UIWindowSceneDelegate {
     func windowScene(_ windowScene: UIWindowScene, performActionFor shortcutItem: UIApplicationShortcutItem, completionHandler: @escaping (Bool) -> Void) {
         let type = shortcutItem.type
         Task { @MainActor in
-            AppDelegate.model?.handle(shortcut: type)
+            AppDelegate.model.handle(shortcut: type)
             completionHandler(true)
         }
     }

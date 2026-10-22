@@ -318,7 +318,7 @@
 		00CADA6B976DEC4FB30F61E4 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
+				CODE_SIGN_ENTITLEMENTS = Config/ThockExtensions.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = KY338LSPPB;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -360,7 +360,7 @@
 		5E1F6B2DCF30F9E0B02253E8 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
+				CODE_SIGN_ENTITLEMENTS = Config/ThockExtensions.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = KY338LSPPB;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -450,7 +450,7 @@
 		D095B01E4C0E66DAA4A8E258 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
+				CODE_SIGN_ENTITLEMENTS = Config/ThockExtensions.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = KY338LSPPB;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -471,7 +471,7 @@
 		E173AF4B2E2A8A9D584E6F56 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = Config/Thock.entitlements;
+				CODE_SIGN_ENTITLEMENTS = Config/ThockExtensions.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = KY338LSPPB;
 				GENERATE_INFOPLIST_FILE = YES;
