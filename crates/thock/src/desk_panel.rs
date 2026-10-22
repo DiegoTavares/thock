@@ -1,5 +1,5 @@
-//! The Desk panel (V43 §8): the right-dock home of the Backlog, Today and
-//! Done views, with a card for today's next timed entry above whichever is
+//! The Desk panel (V43 §8): the right-dock home of the Backlog, Today,
+//! Reminders and Done views, with a card for today's next timed entry above whichever is
 //! showing. The Backlog and Day Planner views keep their models, parsing,
 //! writes and keys; the Desk only lays them out and switches between them.
 
@@ -8,9 +8,13 @@ use crate::backlog_panel::{
     RevealBacklogTask,
 };
 use crate::backlog_panel::{BacklogFolds, BacklogPanel, BacklogView, ToggleBacklogFocus};
-use crate::day_plan::{DayPlan, ItemTiming, ItemWeight, parse_day_plan};
+use crate::day_plan::{DayPlan, ItemTiming, ItemWeight, PlanItem, parse_day_plan};
 use crate::day_planner_panel::{DayPlannerPanel, ToggleDayPlannerFocus};
 use crate::notes::NoteKind;
+use crate::reminders_panel::{
+    CloseReminder, DropReminder, NewReminder, RemindersPanel, RescheduleReminder,
+    ToggleRemindersFocus,
+};
 use crate::vault::{Vault, VaultStatus};
 use anyhow::Result;
 use chrono::{Local, NaiveDate, NaiveDateTime, Timelike as _};
@@ -37,9 +41,9 @@ actions!(
     [
         /// Opens the Desk panel, or returns to the note when it is focused.
         ToggleDeskFocus,
-        /// Shows the next Desk view (Backlog → Today → Done).
+        /// Shows the next Desk view (Backlog → Today → Reminders → Done).
         ActivateNextDeskTab,
-        /// Shows the previous Desk view (Done → Today → Backlog).
+        /// Shows the previous Desk view (Done → Reminders → Today → Backlog).
         ActivatePreviousDeskTab
     ]
 );
@@ -58,16 +62,18 @@ pub struct ActivateDeskTab {
 pub enum DeskTab {
     Backlog,
     Today,
+    Reminders,
     Done,
 }
 
 impl DeskTab {
-    const ALL: [DeskTab; 3] = [Self::Backlog, Self::Today, Self::Done];
+    const ALL: [DeskTab; 4] = [Self::Backlog, Self::Today, Self::Reminders, Self::Done];
 
     fn label(self) -> &'static str {
         match self {
             Self::Backlog => "Backlog",
             Self::Today => "Today",
+            Self::Reminders => "Reminders",
             Self::Done => "Done",
         }
     }
@@ -75,7 +81,8 @@ impl DeskTab {
     fn next(self) -> Self {
         match self {
             Self::Backlog => Self::Today,
-            Self::Today => Self::Done,
+            Self::Today => Self::Reminders,
+            Self::Reminders => Self::Done,
             Self::Done => Self::Backlog,
         }
     }
@@ -84,7 +91,8 @@ impl DeskTab {
         match self {
             Self::Backlog => Self::Done,
             Self::Today => Self::Backlog,
-            Self::Done => Self::Today,
+            Self::Reminders => Self::Today,
+            Self::Done => Self::Reminders,
         }
     }
 }
@@ -102,6 +110,9 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action(|workspace, _: &ToggleDayPlannerFocus, window, cx| {
             focus_tab(workspace, DeskTab::Today, window, cx);
+        });
+        workspace.register_action(|workspace, _: &ToggleRemindersFocus, window, cx| {
+            focus_tab(workspace, DeskTab::Reminders, window, cx);
         });
         workspace.register_action(|workspace, action: &ActivateDeskTab, window, cx| {
             activate_tab(workspace, action.tab, window, cx);
@@ -143,6 +154,16 @@ fn focus_tab(
     workspace.focus_panel::<DeskPanel>(window, cx);
 }
 
+/// Shows the Reminders tab and focuses it, for a notification's *Open
+/// Reminders*. Unlike the toggle it never hands focus back.
+pub fn show_reminders(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(desk) = workspace.panel::<DeskPanel>(cx) else {
+        return;
+    };
+    desk.update(cx, |desk, cx| desk.show_tab(DeskTab::Reminders, cx));
+    workspace.focus_panel::<DeskPanel>(window, cx);
+}
+
 /// Shows `tab`, keeping focus in the panel when it was there.
 fn activate_tab(
     workspace: &mut Workspace,
@@ -172,16 +193,14 @@ pub struct NextCard {
 }
 
 /// The card for today's plan at `now` (minutes since midnight): an entry
-/// happening now, else the next one starting within three hours. All-day
+/// happening now, else the next one starting within three hours. A reminder
+/// point counts down like a block but is never *Now* (V45 §7.3). All-day
 /// and unscheduled entries, finished ones, and calendar status blocks (focus
 /// time, out of office) never make the card.
 pub fn next_card(plan: &DayPlan, now: u32) -> Option<NextCard> {
+    let open = |item: &PlanItem| !item.done && !item.struck && item.weight == ItemWeight::Normal;
     let timed = plan.items.iter().filter_map(|item| match item.timing {
-        ItemTiming::Timed { start_min, end_min }
-            if !item.done && !item.struck && item.weight == ItemWeight::Normal =>
-        {
-            Some((item, start_min, end_min))
-        }
+        ItemTiming::Timed { start_min, end_min } if open(item) => Some((item, start_min, end_min)),
         _ => None,
     });
     let line = |start: u32, label: &str| format!("{} · {label}", format_time(start));
@@ -196,9 +215,16 @@ pub fn next_card(plan: &DayPlan, now: u32) -> Option<NextCard> {
             row: item.row,
         });
     }
-    let (item, start, _) = timed
-        .filter(|(_, start, _)| *start > now && *start - now <= NEXT_WINDOW_MINUTES)
-        .min_by_key(|(_, start, _)| *start)?;
+    let points = plan
+        .points()
+        .into_iter()
+        .filter_map(|(index, at_min)| Some((plan.items.get(index)?, at_min)))
+        .filter(|(item, _)| open(item));
+    let (item, start) = timed
+        .map(|(item, start, _)| (item, start))
+        .chain(points)
+        .filter(|(_, start)| *start > now && *start - now <= NEXT_WINDOW_MINUTES)
+        .min_by_key(|(_, start)| *start)?;
     Some(NextCard {
         label: format!("NEXT · IN {}", format_wait(start - now)),
         line: line(start, &item.label),
@@ -230,6 +256,7 @@ pub struct DeskPanel {
     project: Entity<Project>,
     backlog: Entity<BacklogPanel>,
     planner: Entity<DayPlannerPanel>,
+    reminders: Entity<RemindersPanel>,
     tab: DeskTab,
     position: DockPosition,
     vault: Option<Vault>,
@@ -263,6 +290,7 @@ impl DeskPanel {
     ) -> Entity<Self> {
         let backlog = BacklogPanel::new(workspace, folds, window, cx);
         let planner = DayPlannerPanel::new(workspace, window, cx);
+        let reminders = RemindersPanel::new(workspace, window, cx);
         let project = workspace.project().clone();
         cx.new(|cx| {
             let mut subscriptions = Vec::new();
@@ -289,6 +317,12 @@ impl DeskPanel {
                 }
                 cx.notify();
             }));
+            subscriptions.push(cx.observe(&reminders, |this, reminders, cx| {
+                if reminders.read(cx).has_selection() {
+                    this.card_selected = false;
+                }
+                cx.notify();
+            }));
             // The card's minutes count down, and "today" moves at midnight.
             let tick = cx.spawn(async move |this, cx| {
                 loop {
@@ -308,6 +342,7 @@ impl DeskPanel {
                 project,
                 backlog,
                 planner,
+                reminders,
                 tab: DeskTab::Backlog,
                 position: DockPosition::Right,
                 vault: None,
@@ -329,6 +364,10 @@ impl DeskPanel {
 
     pub fn backlog(&self) -> &Entity<BacklogPanel> {
         &self.backlog
+    }
+
+    pub fn reminders(&self) -> &Entity<RemindersPanel> {
+        &self.reminders
     }
 
     pub fn tab(&self) -> DeskTab {
@@ -490,9 +529,13 @@ impl DeskPanel {
 
     fn render_tabs(&self, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
+        let overdue = self.reminders.read(cx).overdue_count(cx);
+        // The Reminders count is the overdue number, in the warning colour,
+        // and nothing when none are (V45 §9.1).
         let counts = [
-            Some(self.backlog.read(cx).open_count()),
-            Some(self.planner.read(cx).open_count()),
+            Some((self.backlog.read(cx).open_count(), colors.text_placeholder)),
+            Some((self.planner.read(cx).open_count(), colors.text_placeholder)),
+            (overdue > 0).then(|| (overdue, cx.theme().status().warning)),
             None,
         ];
         h_flex()
@@ -529,11 +572,11 @@ impl DeskPanel {
                             })
                             .child(tab.label()),
                     )
-                    .when_some(count, |this, count| {
+                    .when_some(count, |this, (count, color)| {
                         this.child(
                             div()
                                 .text_size(rems(0.6875))
-                                .text_color(colors.text_placeholder)
+                                .text_color(color)
                                 .child(SharedString::from(count.to_string())),
                         )
                     })
@@ -612,6 +655,37 @@ impl DeskPanel {
             .child(hint(&MoveBacklogTaskToToday, "to today"))
             .into_any_element()
     }
+
+    /// The key hints under the Reminders tab.
+    fn render_reminders_footer(&self, cx: &Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors();
+        let focus = self.reminders.read(cx).focus_handle(cx);
+        let hint = |action: &dyn Action, label: &'static str| {
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(KeyBinding::for_action_in(action, &focus, cx).size(rems(0.6875)))
+                .child(
+                    Label::new(label)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+        };
+        h_flex()
+            .flex_none()
+            .h(px(28.))
+            .px_3()
+            .gap_3()
+            .items_center()
+            .bg(colors.panel_background)
+            .border_t_1()
+            .border_color(colors.border)
+            .child(hint(&CloseReminder, "done"))
+            .child(hint(&RescheduleReminder, "later"))
+            .child(hint(&DropReminder, "drop"))
+            .child(hint(&NewReminder, "new"))
+            .into_any_element()
+    }
 }
 
 impl Focusable for DeskPanel {
@@ -621,6 +695,7 @@ impl Focusable for DeskPanel {
         match self.tab {
             DeskTab::Backlog | DeskTab::Done => self.backlog.read(cx).focus_handle(cx),
             DeskTab::Today => self.planner.read(cx).focus_handle(cx),
+            DeskTab::Reminders => self.reminders.read(cx).focus_handle(cx),
         }
     }
 }
@@ -633,6 +708,8 @@ impl Render for DeskPanel {
             .update(cx, |backlog, _| backlog.set_row_above(has_card));
         self.planner
             .update(cx, |planner, _| planner.set_row_above(has_card));
+        self.reminders
+            .update(cx, |reminders, _| reminders.set_row_above(has_card));
         if !has_card {
             self.card_selected = false;
         }
@@ -656,10 +733,14 @@ impl Render for DeskPanel {
                     .child(match self.tab {
                         DeskTab::Backlog | DeskTab::Done => self.backlog.clone().into_any_element(),
                         DeskTab::Today => self.planner.clone().into_any_element(),
+                        DeskTab::Reminders => self.reminders.clone().into_any_element(),
                     }),
             )
             .when(self.tab == DeskTab::Backlog, |this| {
                 this.child(self.render_footer(cx))
+            })
+            .when(self.tab == DeskTab::Reminders, |this| {
+                this.child(self.render_reminders_footer(cx))
             })
     }
 }
@@ -746,6 +827,39 @@ mod tests {
         - [ ] 15:00 – 15:30 Bi-weekly · Dev Infra Leads\n";
 
     #[test]
+    fn the_card_counts_down_to_a_point_and_never_calls_it_now() {
+        let plan = parse(
+            "# Day planner\n\
+             - [ ] 16:00 - 17:00 Dentist (@15:30)\n\
+             \n\
+             ## Reminders\n\
+             - [ ] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->\n",
+        );
+        let card = next_card(&plan, 14 * 60 + 5).unwrap();
+        assert_eq!(card.label, "NEXT · IN 25 MIN");
+        assert_eq!(card.line, "14:30 · Call the plumber");
+        assert_eq!(card.row, 4);
+        let card = next_card(&plan, 14 * 60 + 30).unwrap();
+        assert_eq!(
+            (card.label.as_str(), card.line.as_str()),
+            ("NEXT · IN 1 H", "15:30 · Dentist"),
+            "at its minute a point is past, never now"
+        );
+        let card = next_card(&plan, 15 * 60 + 45).unwrap();
+        assert_eq!(card.line, "16:00 · Dentist");
+    }
+
+    #[test]
+    fn the_card_drops_a_token_and_its_trailing_comments() {
+        let plan = parse(
+            "# Day planner\n\
+             - [ ] 16:00 - 17:00 Dentist (@15:30) <!--gcal:abc--> <!--rem:3f9a1c0d4e21-->\n",
+        );
+        let card = next_card(&plan, 14 * 60).unwrap();
+        assert_eq!(card.line, "16:00 · Dentist");
+    }
+
+    #[test]
     fn the_card_counts_down_to_the_next_entry() {
         let plan = parse(TODAY_NOTE);
         let card = next_card(&plan, 14 * 60 + 35).unwrap();
@@ -830,7 +944,7 @@ mod tests {
 
     const BACKLOG: &str = "## Soon\n\n\
         - [ ] Study for DNV elections [[2026-09-28-dnv-ballot]]\n\
-        - [ ] Apps to try: vorssaint\n\n\
+        - [ ] Apps to try: vorssaint (@2026-10-20 09:00) <!--gmail:ab12--> <!--rem:3f9a1c0d4e21-->\n\n\
         ### SPI\n\n\
         - [ ] Refactor Maestro.java\n\n\
         ## Someday\n\n\
@@ -928,6 +1042,29 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_backlog_reminder_reads_as_its_words_over_its_chip(cx: &mut TestAppContext) {
+        let setup = setup(cx, false).await;
+        let mut cx = setup.cx.clone();
+        cx.update(|_, cx| {
+            let now = NaiveDate::from_ymd_opt(2026, 10, 21)
+                .and_then(|date| date.and_hms_opt(10, 0, 0))
+                .unwrap();
+            crate::reminders::TestClock::install(now, cx);
+        });
+        let row = setup.desk.read_with(&cx, |desk, cx| {
+            desk.backlog.read(cx).row_for_tests("vorssaint", cx)
+        });
+        assert_eq!(
+            row,
+            Some((
+                "Apps to try: vorssaint".to_string(),
+                Some(("⏰ Yesterday 09:00 · overdue".to_string(), true))
+            )),
+            "the token and both comments leave the text; the chip is the meta line"
+        );
+    }
+
+    #[gpui::test]
     async fn digits_switch_the_views(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false).await;
         assert!(desk_focused(&mut setup));
@@ -936,6 +1073,9 @@ mod tests {
         assert_eq!(tab(&setup), DeskTab::Today);
         assert!(desk_focused(&mut setup), "focus follows the view");
         setup.cx.simulate_keystrokes("3");
+        assert_eq!(tab(&setup), DeskTab::Reminders);
+        assert!(desk_focused(&mut setup));
+        setup.cx.simulate_keystrokes("4");
         assert_eq!(tab(&setup), DeskTab::Done);
         setup.cx.simulate_keystrokes("1");
         assert_eq!(tab(&setup), DeskTab::Backlog);
@@ -946,6 +1086,8 @@ mod tests {
         let mut setup = setup(cx, true).await;
         setup.cx.simulate_keystrokes("g t");
         assert_eq!(tab(&setup), DeskTab::Today);
+        setup.cx.simulate_keystrokes("g t");
+        assert_eq!(tab(&setup), DeskTab::Reminders);
         setup.cx.simulate_keystrokes("g t");
         assert_eq!(tab(&setup), DeskTab::Done);
         setup.cx.simulate_keystrokes("g t");
@@ -1025,7 +1167,7 @@ mod tests {
     #[gpui::test]
     async fn done_lists_the_completed_tasks(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false).await;
-        setup.cx.simulate_keystrokes("3");
+        setup.cx.simulate_keystrokes("4");
         setup.cx.simulate_keystrokes("down");
         assert_eq!(selected(&setup), Some(("completed", 0)));
         setup.cx.simulate_keystrokes("down");

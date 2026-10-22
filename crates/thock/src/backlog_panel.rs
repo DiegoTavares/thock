@@ -34,13 +34,16 @@ use workspace::{OpenOptions, OpenVisible, Workspace};
 use crate::backlog::{
     self, Backlog, BacklogHeadings, BacklogTask, SectionKind, parse_backlog, split_completion,
 };
-use crate::day_plan::strip_trailing_comment;
+use crate::day_plan::strip_trailing_metadata;
 use crate::gmail_service::{self, GmailService};
 use crate::inbox_service::{self, InboxService};
 use crate::markdown_conceal::resolve_wikilink_target;
 use crate::markdown_text::{LinkTarget, parse_inline_spans, render_markdown_row};
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
 use crate::readwise_service::{self, ReadwiseService};
+use crate::reminder_index::{IndexSection, IndexedReminder, IndexedState, StampKind};
+use crate::reminder_service::{self, ReminderEvent, ReminderService};
+use crate::reminders::{ChipState, ReminderClock, ReminderDay, reminder_chip};
 use crate::sync_status;
 use crate::vault::{Vault, VaultStatus};
 use crate::vault_sync::{self, VaultSyncService};
@@ -243,6 +246,9 @@ pub struct BacklogPanel {
     /// only, like the other two.
     readwise_service: Option<Entity<ReadwiseService>>,
     vault_sync_service: Option<Entity<VaultSyncService>>,
+    /// The vault's reminders, whose closed and dropped ones Done lists
+    /// beside the finished tasks (V45 §9.1).
+    reminder_service: Option<Entity<ReminderService>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -292,6 +298,25 @@ impl BacklogPanel {
             .map(|selection| (selection.section.id(), selection.index))
     }
 
+    /// The row text and meta line of the first Soon task containing
+    /// `needle`, for label tests.
+    #[cfg(test)]
+    pub(crate) fn row_for_tests(
+        &self,
+        needle: &str,
+        cx: &App,
+    ) -> Option<(String, Option<(String, bool)>)> {
+        let task = self
+            .backlog
+            .section(SectionKind::Soon)
+            .iter()
+            .find(|task| task.text.contains(needle))?;
+        Some((
+            thock_sync_core::strip_reminder(&task.text),
+            self.task_meta(task, cx),
+        ))
+    }
+
     /// Whether the new-task editor's row lies inside the list's viewport
     /// as last drawn, and how far the list is scrolled, for keystroke tests.
     #[cfg(test)]
@@ -331,6 +356,7 @@ impl BacklogPanel {
             let inbox_service = inbox_service::service_for_project(&project, cx);
             let readwise_service = readwise_service::service_for_project(&project, cx);
             let vault_sync_service = vault_sync::service_for_project(&project, cx);
+            let reminder_service = reminder_service::service_for_project(&project, cx);
             let mut subscriptions = vec![project_subscription];
             if let Some(service) = &gmail_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
@@ -344,6 +370,13 @@ impl BacklogPanel {
             if let Some(service) = &vault_sync_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
             }
+            if let Some(service) = &reminder_service {
+                subscriptions
+                    .push(cx.subscribe(service, |_, _, _: &ReminderEvent, cx| cx.notify()));
+            }
+            // Reminder chips relabel when the day turns.
+            let reminder_day = ReminderDay::global(cx);
+            subscriptions.push(cx.observe(&reminder_day, |_, _, cx| cx.notify()));
             let mut this = Self {
                 workspace: weak_workspace,
                 project,
@@ -374,6 +407,7 @@ impl BacklogPanel {
                 inbox_service,
                 readwise_service,
                 vault_sync_service,
+                reminder_service,
                 _subscriptions: subscriptions,
             };
             this.vault_status = this.detect_vault_status(cx);
@@ -1139,7 +1173,7 @@ impl BacklogPanel {
             let mut editor = Editor::single_line(window, cx);
             // The hidden trailing comment stays out of the editor too;
             // `commit_edit` re-attaches it so a rename can't destroy it.
-            editor.set_text(strip_trailing_comment(initial_text), window, cx);
+            editor.set_text(strip_trailing_metadata(initial_text), window, cx);
             if let EditTarget::New { .. } = target {
                 editor.set_placeholder_text("New task", window, cx);
             }
@@ -1238,7 +1272,7 @@ impl BacklogPanel {
                 // Committing an empty string is a revert, not a delete (§6.2).
                 // The editor showed the text without its hidden trailing
                 // comment, so "unchanged" is judged against that view.
-                if new_text.is_empty() || new_text == strip_trailing_comment(&original_text) {
+                if new_text.is_empty() || new_text == strip_trailing_metadata(&original_text) {
                     return;
                 }
                 let new_text = restore_hidden_suffix(&original_text, &new_text);
@@ -1639,10 +1673,6 @@ impl BacklogPanel {
     /// Returns the text element only — the caller wraps it in the `LabelLike`
     /// that carries the row's size, color and truncation.
     fn render_task_text(&self, id: ElementId, text: &str, cx: &Context<Self>) -> AnyElement {
-        // A trailing `<!-- … -->` (e.g. a capture marker) is identity, not
-        // content — hidden here exactly as the Day Planner hides it (v8
-        // §11.4); the file keeps it.
-        let text = strip_trailing_comment(text);
         render_markdown_row(id, text, &self.project, &self.workspace, cx)
     }
 
@@ -1655,22 +1685,32 @@ impl BacklogPanel {
         (self.selection() == Some(row)).then(|| cx.theme().colors().element_selected)
     }
 
-    /// What a task row says under its text (V43 §8.3): the date of the
-    /// linked note it came from and the folder that note lives in. Only what
-    /// the line already carries; a task without a link has no meta line.
-    fn task_meta(&self, task: &BacklogTask) -> Option<String> {
-        let link = task_link(&task.text)?;
+    /// What a task row says under its text (V43 §8.3, V45 §8.5): its
+    /// reminder's chip, then the date of the linked note it came from and the
+    /// folder that note lives in. Only what the line already carries; a task
+    /// with neither has no meta line. The flag is set when the reminder is
+    /// overdue, for the warning colour.
+    fn task_meta(&self, task: &BacklogTask, cx: &App) -> Option<(String, bool)> {
         let mut parts: Vec<String> = Vec::new();
-        if let Some(date) = link.date {
-            parts.push(format!("from {}", crate::notes::format_date(date, "MMM D")));
+        let today = ReminderClock::global(cx).today();
+        let chip = thock_sync_core::parse_line(&task.text, None)
+            .and_then(|reminder| reminder_chip(&reminder, today));
+        if let Some(chip) = &chip {
+            parts.push(format!("⏰ {}", chip.label));
         }
-        if let Some(Some(folder)) = self.link_folders.get(&link.target) {
-            parts.push(folder.clone());
+        if let Some(link) = task_link(&task.text) {
+            if let Some(date) = link.date {
+                parts.push(format!("from {}", crate::notes::format_date(date, "MMM D")));
+            }
+            if let Some(Some(folder)) = self.link_folders.get(&link.target) {
+                parts.push(folder.clone());
+            }
         }
         if parts.is_empty() {
             return None;
         }
-        Some(parts.join(" · "))
+        let overdue = chip.is_some_and(|chip| chip.state == ChipState::Overdue);
+        Some((parts.join(" · "), overdue))
     }
 
     /// Resolves every linked note's folder in one pass over the vault's
@@ -1742,7 +1782,7 @@ impl BacklogPanel {
         let task_text = task.text.clone();
         let today_task_text = task.text.clone();
         let task_line = task.line;
-        let meta = self.task_meta(task);
+        let meta = self.task_meta(task, cx);
         // Chevrons, matching the `>` / `<` keys that do the same thing.
         let (move_icon, move_tooltip, move_action) = match section {
             SectionKind::Someday => (
@@ -1885,9 +1925,7 @@ impl BacklogPanel {
                     .flex_1()
                     .min_w_0()
                     .cursor_text()
-                    .tooltip(Tooltip::text(
-                        strip_trailing_comment(&task.text).to_string(),
-                    ))
+                    .tooltip(Tooltip::text(thock_sync_core::strip_reminder(&task.text)))
                     .child(
                         div()
                             .text_size(rems(0.875))
@@ -1901,11 +1939,15 @@ impl BacklogPanel {
                                 cx,
                             )),
                     )
-                    .when_some(meta, |this, meta| {
+                    .when_some(meta, |this, (meta, overdue)| {
                         this.child(
                             div()
                                 .text_size(rems(0.71875))
-                                .text_color(colors.text_placeholder)
+                                .text_color(if overdue {
+                                    cx.theme().status().warning
+                                } else {
+                                    colors.text_placeholder
+                                })
                                 .child(SharedString::from(meta)),
                         )
                     })
@@ -2128,11 +2170,20 @@ impl BacklogPanel {
     fn render_done_view(&self, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
         let completed = self.completed_tasks();
+        let mut reminders = self.done_reminders(cx).into_iter().peekable();
         let mut list = v_flex().py_1();
-        if completed.is_empty() {
+        if completed.is_empty() && reminders.peek().is_none() {
             list = list.child(self.render_hint("Nothing finished yet."));
         }
         for (index, task) in completed.into_iter().enumerate() {
+            let task_date = backlog::completion_date(&task.text);
+            // Both lists run newest first; a reminder closed on a later day
+            // than this task goes above it.
+            while let Some(reminder) = reminders
+                .next_if(|reminder| task_date.is_none_or(|date| done_date(reminder) > Some(date)))
+            {
+                list = list.child(self.render_done_reminder(reminder, cx));
+            }
             let (label, date) = split_completion(&task.text);
             let row = TaskSelection {
                 section: SectionKind::Completed,
@@ -2178,11 +2229,89 @@ impl BacklogPanel {
                     ),
             );
         }
+        for reminder in reminders {
+            list = list.child(self.render_done_reminder(reminder, cx));
+        }
         list.id("backlog-completed-list")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handles[BacklogView::Done.index()])
+            .into_any_element()
+    }
+
+    /// Closed and dropped reminders from the index's `## Done`, newest first.
+    pub(crate) fn done_reminders<'a>(&self, cx: &'a App) -> Vec<&'a IndexedReminder> {
+        let Some(service) = &self.reminder_service else {
+            return Vec::new();
+        };
+        let mut reminders: Vec<&IndexedReminder> = service
+            .read(cx)
+            .reminders()
+            .iter()
+            .filter(|reminder| {
+                reminder.section == IndexSection::Done
+                    && matches!(reminder.state, IndexedState::Closed | IndexedState::Dropped)
+            })
+            .collect();
+        reminders.sort_by_key(|reminder| Reverse(done_date(reminder)));
+        reminders
+    }
+
+    /// A finished reminder among the finished tasks: its words struck, over
+    /// the day it was closed or dropped. It is read-only here; the line
+    /// lives in its home note.
+    fn render_done_reminder(&self, reminder: &IndexedReminder, cx: &Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors();
+        let text = reminder.text.clone().unwrap_or_default();
+        let dropped = reminder.state == IndexedState::Dropped
+            || reminder
+                .stamp
+                .is_some_and(|stamp| stamp.kind == StampKind::Dropped);
+        let meta = match (done_date(reminder), dropped) {
+            (Some(date), true) => format!("{date} · dropped"),
+            (Some(date), false) => date.to_string(),
+            (None, true) => "dropped".to_string(),
+            (None, false) => String::new(),
+        };
+        h_flex()
+            .w_full()
+            .gap_2()
+            .pl(px(12.))
+            .pr_2()
+            .py_1()
+            .items_start()
+            .child(
+                div().pt_0p5().child(
+                    Icon::new(IconName::Bell)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(rems(0.875))
+                            .text_color(colors.text_muted)
+                            .line_clamp(2)
+                            .child(
+                                LabelLike::new()
+                                    .strikethrough()
+                                    .child(SharedString::from(text)),
+                            ),
+                    )
+                    .when(!meta.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_size(rems(0.71875))
+                                .text_color(colors.text_placeholder)
+                                .child(SharedString::from(meta)),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 
@@ -2270,6 +2399,11 @@ fn task_link(text: &str) -> Option<TaskLink> {
 /// The completed audit trail in render order. The file stays append-ordered
 /// (oldest first); reversing before the sort puts same-day completions
 /// newest-first too, and the sort is stable so that survives.
+/// The day a finished reminder was closed or dropped, from its stamp.
+fn done_date(reminder: &IndexedReminder) -> Option<NaiveDate> {
+    reminder.stamp.map(|stamp| stamp.date)
+}
+
 fn completed_tasks(backlog: &Backlog) -> Vec<&BacklogTask> {
     let mut tasks: Vec<&BacklogTask> = backlog.completed.iter().rev().collect();
     tasks.sort_by_key(|task| Reverse(backlog::completion_date(&task.text)));
@@ -2331,10 +2465,10 @@ fn column_rows<'a>(
     rows
 }
 
-/// Re-attaches the trailing HTML comment `strip_trailing_comment` hid from
+/// Re-attaches the trailing HTML comment `strip_trailing_metadata` hid from
 /// the inline editor, so renaming a captured task keeps its identity marker.
 fn restore_hidden_suffix(original: &str, edited: &str) -> String {
-    let visible = strip_trailing_comment(original);
+    let visible = strip_trailing_metadata(original);
     let hidden = original[visible.len()..].trim();
     if hidden.is_empty() {
         edited.to_string()

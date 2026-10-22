@@ -3,9 +3,10 @@
 //! `thock::PickReminderDate`, from the palette, a binding, or the suggestion
 //! list's *Pick a date…*, and unlike that list it takes focus.
 
+use crate::reminders::{ReminderClock, ReminderSettings};
 use crate::ui::calendar::{Calendar, add_days, add_months};
 use crate::vault::{Vault, VaultStatus};
-use chrono::{Local, NaiveDate, NaiveTime, Timelike as _};
+use chrono::{NaiveDate, NaiveTime, Timelike as _};
 use editor::actions::ShowCompletions;
 use editor::{Anchor, Editor, EditorEvent, EditorMode, MultiBufferSnapshot, ToPoint as _};
 use gpui::{
@@ -17,10 +18,12 @@ use menu::{Cancel, Confirm, SelectNext, SelectPrevious};
 use multi_buffer::MultiBufferRow;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 use text::Point as BufferPoint;
+use thock_sync_core::{Due, When, parse_line, place_token, token_text};
 use ui::prelude::*;
 use util::ResultExt as _;
-use workspace::ModalView;
+use workspace::{ModalView, Workspace};
 
 actions!(
     thock,
@@ -115,9 +118,22 @@ struct Target {
     from_suggestions: bool,
 }
 
+/// Where the picked due goes.
+#[derive(Clone)]
+enum Destination {
+    /// A token on the cursor's line of a note.
+    Line(Target),
+    /// A caller's handler, such as the Reminders tab's reschedule; focus
+    /// goes back to `focus` either way.
+    Handler {
+        on_pick: Rc<dyn Fn(Due, &mut Window, &mut App)>,
+        focus: FocusHandle,
+    },
+}
+
 /// What the picker starts on, read from the cursor's line.
 struct Opening {
-    target: Target,
+    destination: Destination,
     date: Option<NaiveDate>,
     time: Option<NaiveTime>,
     position: Option<Point<Pixels>>,
@@ -127,18 +143,56 @@ fn pick_reminder_date(editor: &Entity<Editor>, vault: &Vault, window: &mut Windo
     let Some(workspace) = editor.read(cx).workspace() else {
         return;
     };
-    let daily_day =
-        note_file(editor.read(cx), cx).and_then(|(path, _)| vault.daily_note_date(&path));
+    let daily_day = note_file(editor.read(cx), cx).and_then(|(path, _)| note_day(vault, &path));
     let Some(opening) = editor.update(cx, |editor, cx| read_opening(editor, daily_day, window, cx))
     else {
         return;
     };
-    let today = Local::now().date_naive();
+    let today = ReminderClock::global(cx).today();
     workspace.update(cx, |workspace, cx| {
         workspace.toggle_modal(window, cx, |_, cx| {
             ReminderCalendar::new(opening, today, cx)
         });
     });
+}
+
+/// Opens the calendar on `start` (today when `None`) and hands the picked
+/// due to `on_pick`. Focus returns to `focus` whether a date is picked or
+/// not. The popover sits near the top of the window.
+pub fn pick_due(
+    workspace: &mut Workspace,
+    start: Option<Due>,
+    focus: FocusHandle,
+    on_pick: impl Fn(Due, &mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let opening = Opening {
+        destination: Destination::Handler {
+            on_pick: Rc::new(on_pick),
+            focus,
+        },
+        date: start.map(|due| due.date),
+        time: start.and_then(|due| due.time),
+        position: None,
+    };
+    let today = ReminderClock::global(cx).today();
+    workspace.toggle_modal(window, cx, |_, cx| {
+        ReminderCalendar::new(opening, today, cx)
+    });
+}
+
+/// The day of the daily note at `path`, the token's home day (§4.1).
+fn note_day(vault: &Vault, path: &std::path::Path) -> Option<NaiveDate> {
+    let relative = path
+        .strip_prefix(&vault.root)
+        .ok()?
+        .to_str()?
+        .replace('\\', "/");
+    ReminderSettings::default()
+        .reminder_config(vault)
+        .daily
+        .day_of(&relative)
 }
 
 fn read_opening(
@@ -154,16 +208,24 @@ fn read_opening(
     if line.contains("<!--gcal:") {
         return None;
     }
-    let token = token_stub::last_token(&line);
-    let date = token.as_ref().and_then(|token| token.date.or(daily_day));
-    let time = token.as_ref().and_then(|token| token.time);
+    let reminder = parse_line(&line, daily_day);
+    let date = reminder
+        .as_ref()
+        .and_then(|reminder| reminder.due)
+        .map(|due| due.date);
+    let time = reminder
+        .and_then(|reminder| reminder.token)
+        .and_then(|token| match token.when {
+            When::DateTime(_, time) | When::Time(time) => Some(time),
+            When::Date(_) => None,
+        });
     Some(Opening {
-        target: Target {
+        destination: Destination::Line(Target {
             editor: cx.weak_entity(),
             cursor,
             daily_day,
             from_suggestions: open_fragment(&line, column).is_some(),
-        },
+        }),
         date,
         time,
         position: cursor_position(editor, window, cx),
@@ -211,19 +273,20 @@ fn cursor_position(
 fn write_token(
     editor: &mut Editor,
     target: &Target,
-    date: NaiveDate,
-    time: Option<NaiveTime>,
+    due: Due,
     window: &mut Window,
     cx: &mut Context<Editor>,
 ) {
     let snapshot = editor.buffer().read(cx).snapshot(cx);
     let (line, column) = cursor_line(&snapshot, target.cursor);
     let row = target.cursor.to_point(&snapshot).row;
-    let token = token_stub::canonical_token(date, time, target.daily_day);
-    let (range, text) = token_edit(&line, column, &token);
+    let Some((edited, after)) = edited_line(&line, column, due, target.daily_day) else {
+        return;
+    };
+    let (range, text) = changed_span(&line, &edited);
     let start = BufferPoint::new(row, range.start as u32);
     let end = BufferPoint::new(row, range.end as u32);
-    let after = BufferPoint::new(row, (range.start + text.len()) as u32);
+    let after = BufferPoint::new(row, after as u32);
     editor.transact(window, cx, |editor, window, cx| {
         editor.edit([(start..end, text)], cx);
         editor.change_selections(Default::default(), window, cx, |selections| {
@@ -232,26 +295,46 @@ fn write_token(
     });
 }
 
-/// The edit that puts `token` on `line`: it replaces a `(@…` being typed
-/// around the cursor, else the line's own token, else goes in at the cursor.
-fn token_edit(line: &str, cursor: usize, token: &str) -> (Range<usize>, String) {
+/// `line` with the reminder on it, and the column just past its token. A
+/// `(@…` being typed around the cursor becomes the token; otherwise the sync
+/// core rewrites the line's token or writes one before its trailing comments.
+/// `None` on a calendar line.
+fn edited_line(
+    line: &str,
+    cursor: usize,
+    due: Due,
+    home_day: Option<NaiveDate>,
+) -> Option<(String, usize)> {
     if let Some(range) = open_fragment(line, cursor) {
-        return (range, token.to_string());
+        let token = token_text(due, home_day);
+        let after = range.start + token.len();
+        let mut edited = line.to_string();
+        edited.replace_range(range, &token);
+        return Some((edited, after));
     }
-    if let Some(existing) = token_stub::last_token(line) {
-        return (existing.range, token.to_string());
-    }
-    let cursor = cursor.min(line.len());
-    let needs_space = line[..cursor]
+    let edited = place_token(line, due, home_day)?;
+    let after = parse_line(&edited, home_day)
+        .and_then(|reminder| reminder.token)
+        .map_or(edited.len(), |token| token.range.end);
+    Some((edited, after))
+}
+
+/// The bytes of `old` that `new` replaces, and what replaces them, so the
+/// edit leaves the rest of the line (and anchors in it) alone.
+fn changed_span<'a>(old: &str, new: &'a str) -> (Range<usize>, &'a str) {
+    let prefix = old
+        .char_indices()
+        .zip(new.chars())
+        .find(|((_, old_char), new_char)| old_char != new_char)
+        .map_or(old.len().min(new.len()), |((index, _), _)| index);
+    let suffix = old[prefix..]
         .chars()
-        .next_back()
-        .is_some_and(|previous| !previous.is_whitespace());
-    let text = if needs_space {
-        format!(" {token}")
-    } else {
-        token.to_string()
-    };
-    (cursor..cursor, text)
+        .rev()
+        .zip(new[prefix..].chars().rev())
+        .take_while(|(old_char, new_char)| old_char == new_char)
+        .map(|(old_char, _)| old_char.len_utf8())
+        .sum::<usize>();
+    (prefix..old.len() - suffix, &new[prefix..new.len() - suffix])
 }
 
 /// The `(@…` the cursor is in, from `(@` to its closing parenthesis (the one
@@ -330,7 +413,7 @@ fn could_be_time(digits: &str) -> bool {
 /// so it can sit at the cursor rather than at the top of the window.
 pub struct ReminderCalendar {
     focus_handle: FocusHandle,
-    target: Target,
+    destination: Destination,
     selected: NaiveDate,
     today: NaiveDate,
     time: TimeEntry,
@@ -343,7 +426,7 @@ impl ReminderCalendar {
             focus_handle: cx.focus_handle(),
             selected: opening.date.unwrap_or(today),
             time: TimeEntry::from_time(opening.time),
-            target: opening.target,
+            destination: opening.destination,
             today,
             position: opening.position,
         }
@@ -422,8 +505,13 @@ impl ReminderCalendar {
     /// Closes the popover and gives focus back to the note. Drawn bare, the
     /// popover is outside the modal layer's focus, so the layer can't.
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(editor) = self.target.editor.upgrade() {
-            editor.focus_handle(cx).focus(window, cx);
+        match &self.destination {
+            Destination::Line(target) => {
+                if let Some(editor) = target.editor.upgrade() {
+                    editor.focus_handle(cx).focus(window, cx);
+                }
+            }
+            Destination::Handler { focus, .. } => focus.focus(window, cx),
         }
         cx.emit(DismissEvent);
     }
@@ -433,21 +521,28 @@ impl ReminderCalendar {
         let Ok(time) = self.time.time() else {
             return;
         };
-        let date = self.selected;
-        let target = self.target.clone();
+        let due = Due::new(self.selected, time);
+        let destination = self.destination.clone();
         self.dismiss(window, cx);
-        target
-            .editor
-            .update(cx, |editor, cx| {
-                write_token(editor, &target, date, time, window, cx)
-            })
-            .log_err();
+        match destination {
+            Destination::Line(target) => {
+                target
+                    .editor
+                    .update(cx, |editor, cx| {
+                        write_token(editor, &target, due, window, cx)
+                    })
+                    .log_err();
+            }
+            Destination::Handler { on_pick, .. } => on_pick(due, window, cx),
+        }
     }
 
     fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss(window, cx);
-        if self.target.from_suggestions {
-            let editor = self.target.editor.clone();
+        if let Destination::Line(target) = &self.destination
+            && target.from_suggestions
+        {
+            let editor = target.editor.clone();
             window.defer(cx, move |window, cx| {
                 editor
                     .update(cx, |editor, cx| {
@@ -550,98 +645,15 @@ impl Render for ReminderCalendar {
     }
 }
 
-// STUB until `thock_sync_core::reminder` (V45 S1) lands: swap both functions
-// for its token parser and canonical formatter. This covers §4.1's grammar
-// only; §4.2's code, comment and backslash rules are the sync core's.
-mod token_stub {
-    use chrono::{NaiveDate, NaiveTime};
-    use std::ops::Range;
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(super) struct LineToken {
-        pub range: Range<usize>,
-        pub date: Option<NaiveDate>,
-        pub time: Option<NaiveTime>,
-    }
-
-    /// The line's reminder: its last well-formed token.
-    pub(super) fn last_token(line: &str) -> Option<LineToken> {
-        let mut found = None;
-        let mut search = 0;
-        while let Some(offset) = line[search..].find("(@") {
-            let start = search + offset;
-            search = start + 2;
-            let Some(close) = line[search..].find(')') else {
-                break;
-            };
-            let end = search + close + 1;
-            if let Some((date, time)) = parse_when(&line[search..end - 1]) {
-                found = Some(LineToken {
-                    range: start..end,
-                    date,
-                    time,
-                });
-            }
-        }
-        found
-    }
-
-    fn parse_when(when: &str) -> Option<(Option<NaiveDate>, Option<NaiveTime>)> {
-        match when.split_once(' ') {
-            Some((date, time)) => Some((Some(parse_date(date)?), Some(parse_time(time)?))),
-            None if when.contains(':') => Some((None, Some(parse_time(when)?))),
-            None => Some((Some(parse_date(when)?), None)),
-        }
-    }
-
-    fn parse_date(date: &str) -> Option<NaiveDate> {
-        let bytes = date.as_bytes();
-        if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
-            return None;
-        }
-        NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
-    }
-
-    fn parse_time(time: &str) -> Option<NaiveTime> {
-        let (hour, minute) = time.split_once(':')?;
-        if !(1..=2).contains(&hour.len()) || minute.len() != 2 {
-            return None;
-        }
-        if !hour
-            .chars()
-            .chain(minute.chars())
-            .all(|c| c.is_ascii_digit())
-        {
-            return None;
-        }
-        NaiveTime::from_hms_opt(hour.parse().ok()?, minute.parse().ok()?, 0)
-    }
-
-    /// The token Thock writes: `(@HH:MM)` in the daily note of that day,
-    /// otherwise the full date, with the time when there is one.
-    pub(super) fn canonical_token(
-        date: NaiveDate,
-        time: Option<NaiveTime>,
-        daily_day: Option<NaiveDate>,
-    ) -> String {
-        match time {
-            Some(time) if daily_day == Some(date) => format!("(@{})", time.format("%H:%M")),
-            Some(time) => format!("(@{} {})", date.format("%Y-%m-%d"), time.format("%H:%M")),
-            None => format!("(@{})", date.format("%Y-%m-%d")),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::token_stub::{canonical_token, last_token};
     use super::*;
     use fs::FakeFs;
     use gpui::{KeyBinding, TestAppContext, VisualTestContext};
     use project::Project;
     use serde_json::json;
     use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
-    use workspace::{MultiWorkspace, Workspace};
+    use workspace::MultiWorkspace;
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).unwrap()
@@ -652,53 +664,38 @@ mod tests {
     }
 
     #[test]
-    fn the_token_is_the_full_date_unless_the_note_is_that_day() {
-        let day = date(2026, 12, 2);
+    fn the_edit_takes_a_typed_query_then_the_lines_token_then_the_end() {
+        let due = Due::new(date(2026, 12, 2), None);
+        let line = "Call (@dec) <!-- x -->";
         assert_eq!(
-            canonical_token(day, Some(time(10, 20)), None),
-            "(@2026-12-02 10:20)"
-        );
-        assert_eq!(canonical_token(day, None, None), "(@2026-12-02)");
-        assert_eq!(
-            canonical_token(day, Some(time(9, 5)), Some(day)),
-            "(@09:05)"
-        );
-        assert_eq!(canonical_token(day, None, Some(day)), "(@2026-12-02)");
-        assert_eq!(
-            canonical_token(day, Some(time(9, 5)), Some(date(2026, 12, 1))),
-            "(@2026-12-02 09:05)"
-        );
-    }
-
-    #[test]
-    fn the_last_well_formed_token_is_the_lines_reminder() {
-        let line = "Pay (@2026-12-01) rent (@2026-12-02 9:30) (@nope)";
-        let token = last_token(line).unwrap();
-        assert_eq!(&line[token.range.clone()], "(@2026-12-02 9:30)");
-        assert_eq!(token.date, Some(date(2026, 12, 2)));
-        assert_eq!(token.time, Some(time(9, 30)));
-        let token = last_token("Call (@14:30)").unwrap();
-        assert_eq!((token.date, token.time), (None, Some(time(14, 30))));
-        assert_eq!(last_token("No (@2026-02-30) here"), None);
-        assert_eq!(last_token("No (@25:00) here"), None);
-    }
-
-    #[test]
-    fn the_edit_replaces_a_typed_query_then_a_token_then_inserts() {
-        let token = "(@2026-12-02)";
-        let line = "Call (@dec)";
-        assert_eq!(
-            token_edit(line, "Call (@dec".len(), token),
-            (5..line.len(), token.to_string())
+            edited_line(line, "Call (@dec".len(), due, None),
+            Some(("Call (@2026-12-02) <!-- x -->".to_string(), 18))
         );
         let line = "Renew (@2026-11-01 10:00) soon";
-        assert_eq!(token_edit(line, 0, token), (6..25, token.to_string()));
         assert_eq!(
-            token_edit("Call the plumber", 16, token),
-            (16..16, format!(" {token}"))
+            edited_line(line, 0, due, None),
+            Some(("Renew (@2026-12-02) soon".to_string(), 19))
         );
-        assert_eq!(token_edit("Call ", 5, token), (5..5, token.to_string()));
-        assert_eq!(token_edit("", 0, token), (0..0, token.to_string()));
+        let line = "Call the plumber <!--rem:3f9a1c0d4e21-->";
+        assert_eq!(
+            edited_line(line, 4, due, None),
+            Some((
+                "Call the plumber (@2026-12-02) <!--rem:3f9a1c0d4e21-->".to_string(),
+                30
+            ))
+        );
+        assert_eq!(edited_line("Standup <!--gcal:abc-->", 0, due, None), None);
+    }
+
+    #[test]
+    fn the_changed_span_is_only_what_differs() {
+        assert_eq!(changed_span("Call it", "Call it (@x)"), (7..7, " (@x)"));
+        assert_eq!(
+            changed_span("a (@2026-11-01) b", "a (@2026-12-02) b"),
+            (10..14, "2-02")
+        );
+        assert_eq!(changed_span("same", "same"), (4..4, ""));
+        assert_eq!(changed_span("é (@x)", "é (@y)"), (5..6, "y"));
     }
 
     #[test]
@@ -759,6 +756,7 @@ mod tests {
                 ));
             }
             init(cx);
+            crate::reminders::TestClock::install(today().and_time(time(10, 0)), cx);
         });
     }
 
@@ -853,7 +851,7 @@ mod tests {
     }
 
     fn today() -> NaiveDate {
-        Local::now().date_naive()
+        date(2026, 10, 21)
     }
 
     const PICK: &str = "ctrl-alt-shift-d";

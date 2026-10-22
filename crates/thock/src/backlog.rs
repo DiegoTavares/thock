@@ -471,7 +471,15 @@ pub fn complete_task_edits(
         // (before the task text, which starts at `text_span`).
         first_line.trim_end().replacen("[ ]", "[x]", 1)
     };
-    let mut completed_block = format!("{first_line} ✅ {}\n", date.format("%Y-%m-%d"));
+    // The stamp ends the task's text; trailing comments such as a reminder
+    // id stay after it, so the id is still last on the line (V45 §4.3).
+    let split = thock_sync_core::trailing_comments_start(&first_line);
+    let mut completed_block = format!(
+        "{} ✅ {}{}\n",
+        first_line[..split].trim_end(),
+        date.format("%Y-%m-%d"),
+        &first_line[split..]
+    );
     completed_block.push_str(children);
     if !children.is_empty() && !children.ends_with('\n') {
         completed_block.push('\n');
@@ -641,12 +649,15 @@ fn insert_after_line(lines: &[Line<'_>], row: usize, new_text: String) -> Edit {
 }
 
 /// Splits a completed task's text into its label and the ` ✅ YYYY-MM-DD`
-/// completion date, when one is present.
+/// completion date, when one is present. The label stops before the stamp,
+/// so trailing comments after it are left out too.
 pub fn split_completion(text: &str) -> (&str, Option<&str>) {
-    let Some(index) = text.rfind('✅') else {
+    // The stamp sits before any trailing comments.
+    let stamped = &text[..thock_sync_core::trailing_comments_start(text)];
+    let Some(index) = stamped.rfind('✅') else {
         return (text, None);
     };
-    let after = text['✅'.len_utf8() + index..].trim();
+    let after = stamped['✅'.len_utf8() + index..].trim();
     let looks_like_date = !after.is_empty()
         && after
             .chars()
@@ -960,6 +971,33 @@ Some orienting prose the model must never touch.
         assert!(reparsed.soon.is_empty());
         assert_eq!(reparsed.completed.len(), 1);
         assert_eq!(reparsed.completed[0].text, "Last line ✅ 2026-07-24");
+    }
+
+    #[test]
+    fn the_completion_stamp_goes_before_a_reminder_id() {
+        let line = "Renew passport (@2026-12-02 09:00) <!--rem:3f9a1c0d4e21-->";
+        let source = format!("## Soon\n- [ ] {line}\n");
+        let backlog = parse(&source);
+        let task = task(&backlog, SectionKind::Soon, line);
+        let edited = apply_edits(
+            &source,
+            complete_task_edits(
+                &source,
+                task,
+                date(2026, 7, 24),
+                &BacklogHeadings::default(),
+            ),
+        );
+        assert!(edited.contains(
+            "- [x] Renew passport (@2026-12-02 09:00) ✅ 2026-07-24 <!--rem:3f9a1c0d4e21-->\n"
+        ));
+        let reparsed = parse(&edited);
+        let text = &reparsed.completed[0].text;
+        assert_eq!(
+            split_completion(text),
+            ("Renew passport (@2026-12-02 09:00)", Some("2026-07-24"))
+        );
+        assert_eq!(completion_date(text), Some(date(2026, 7, 24)));
     }
 
     #[test]

@@ -675,6 +675,23 @@ pub fn attach(line: &str, due: Due, id: &str, home_day: Option<NaiveDate>) -> Op
     Some(add_id(&with_token, id).unwrap_or(with_token))
 }
 
+/// Puts `due`'s token on `line` without touching its id: the token
+/// rewritten when the line has one, otherwise written before the trailing
+/// comments. `None` on a calendar line. The desk's date picker writes this;
+/// the index service gives the line its id later.
+pub fn place_token(line: &str, due: Due, home_day: Option<NaiveDate>) -> Option<String> {
+    if line.contains(CALENDAR_MARKER) {
+        return None;
+    }
+    match parse_line(line, home_day) {
+        Some(_) => rewrite(line, due, home_day),
+        None => Some(insert_before_trailing_comments(
+            line,
+            &token_text(due, home_day),
+        )),
+    }
+}
+
 /// Appends `<!--rem:<id>-->` as the line's last comment. `None` when the
 /// line already has an id or carries a calendar marker.
 pub fn add_id(line: &str, id: &str) -> Option<String> {
@@ -753,14 +770,34 @@ fn insert_before_trailing_comments(line: &str, token: &str) -> String {
 // ---------------------------------------------------------------------------
 // Display text.
 
+/// `text` without its reminder token and its trailing HTML comments,
+/// everything else as written: what a row outside the editor shows (§8.5).
+pub fn strip_reminder(text: &str) -> String {
+    let without_token = match parse_line(text, None).and_then(|reminder| reminder.token) {
+        Some(token) => remove_range(text, token.range),
+        None => text.to_string(),
+    };
+    without_token[..trailing_comments_start(&without_token)].to_string()
+}
+
+/// Where a line's trailing metadata starts: its run of trailing HTML
+/// comments, and the reminder token just before them when there is one.
+/// `&text[..trailing_metadata_start(text)]` is the line as a person edits it,
+/// and the rest can be put back after an edit.
+pub fn trailing_metadata_start(text: &str) -> usize {
+    let comments = trailing_comments_start(text);
+    match parse_line(text, None).and_then(|reminder| reminder.token) {
+        Some(token) if text[token.range.end..comments].trim().is_empty() => {
+            text[..token.range.start].trim_end().len()
+        }
+        _ => comments,
+    }
+}
+
 /// The words a label shows for a reminder line: no list marker, checkbox,
 /// planner time, token or trailing comments (§4.3, §7.1).
 pub fn reminder_text(line: &str) -> String {
-    let without_token = match parse_line(line, None).and_then(|reminder| reminder.token) {
-        Some(token) => remove_range(line, token.range),
-        None => line.to_string(),
-    };
-    let text = &without_token[..trailing_comments_start(&without_token)];
+    let text = strip_reminder(line);
     let trimmed = text.trim_start();
     let text = match strip_list_marker(trimmed) {
         item if item.len() < trimmed.len() => strip_checkbox(item),
@@ -950,6 +987,57 @@ mod tests {
         let appearances = parse_note(text, "notes/a.md", &ReminderConfig::default());
         assert_eq!(appearances.len(), 1);
         assert_eq!(appearances[0].line, 2);
+    }
+
+    #[test]
+    fn a_row_drops_the_token_and_every_trailing_comment() {
+        assert_eq!(
+            strip_reminder(
+                "Renew passport (@2026-12-02 09:00) <!--gmail:ab--> <!--rem:3f9a1c0d4e21-->"
+            ),
+            "Renew passport"
+        );
+        assert_eq!(
+            strip_reminder("Call (@tom) mum (@14:30) now"),
+            "Call (@tom) mum now"
+        );
+        assert_eq!(strip_reminder("a <!-- b --> c"), "a <!-- b --> c");
+        assert_eq!(strip_reminder("plain"), "plain");
+    }
+
+    #[test]
+    fn trailing_metadata_is_the_token_and_comments_at_the_end() {
+        let line = "Renew passport (@2026-12-02) <!--rem:3f9a1c0d4e21-->";
+        assert_eq!(&line[..trailing_metadata_start(line)], "Renew passport");
+        let line = "Call (@2026-12-02) mum <!--x-->";
+        assert_eq!(
+            &line[..trailing_metadata_start(line)],
+            "Call (@2026-12-02) mum"
+        );
+        assert_eq!(trailing_metadata_start("plain"), 5);
+    }
+
+    #[test]
+    fn placing_a_token_goes_before_trailing_comments() {
+        let due = Due::new(date(2026, 12, 2), Some(time(10, 20)));
+        assert_eq!(
+            place_token("- [ ] Renew passport <!-- note -->", due, None).as_deref(),
+            Some("- [ ] Renew passport (@2026-12-02 10:20) <!-- note -->")
+        );
+        assert_eq!(
+            place_token(
+                "Renew (@2026-11-01) soon <!--rem:3f9a1c0d4e21-->",
+                due,
+                None
+            )
+            .as_deref(),
+            Some("Renew (@2026-12-02 10:20) soon <!--rem:3f9a1c0d4e21-->")
+        );
+        assert_eq!(
+            place_token("Water", due, Some(date(2026, 12, 2))).as_deref(),
+            Some("Water (@10:20)")
+        );
+        assert_eq!(place_token("Standup <!--gcal:abc-->", due, None), None);
     }
 
     #[test]
