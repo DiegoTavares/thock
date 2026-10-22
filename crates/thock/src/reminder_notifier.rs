@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::NaiveDateTime;
-use fs::Fs as _;
 use gpui::{
     App, AppContext as _, Context, Entity, Global, SharedString, Subscription, SystemNotification,
     SystemNotificationAction, SystemNotificationResponse, Task, TaskExt as _, WeakEntity,
@@ -320,7 +319,7 @@ mod tests {
     use crate::reminder_service::clear_services_for_test;
     use crate::reminders::{TestClock, WallClock as _};
     use crate::vault::{Vault, VaultConfig};
-    use fs::FakeFs;
+    use fs::{FakeFs, Fs as _};
     use gpui::TestAppContext;
     use project::Project;
     use serde_json::json;

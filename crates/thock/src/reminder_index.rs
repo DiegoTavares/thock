@@ -617,7 +617,7 @@ fn section_end(lines: &Lines, section: IndexSection, settings: &ReminderSettings
         .into_iter()
         .find(|(found, _)| *found == section)?;
     let mut end = range.start;
-    for row in range.clone() {
+    for row in range {
         if lines
             .lines
             .get(row)
