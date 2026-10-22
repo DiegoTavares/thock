@@ -345,18 +345,25 @@ public enum Reminders {
     static let tokenOpen = "(@"
     static let strike = "~~"
     static let mirrorSeparator = " · "
+    static let templatesFolder = "templates/"
+    /// The longest a mirror line's text runs, in characters (§7.1).
+    public static let mirrorTextCharacters = 80
+    /// A mirror's text when the home line has no words.
+    static let emptyMirrorText = "Reminder"
 
     /// Whether a token in the vault-relative `path` can be a reminder
-    /// (§4.2): a Markdown file outside `.thock/`, `routines/` and the folder
-    /// of each template in `templatePaths` (`templates/daily.md` excludes
-    /// `templates/`; a template at the vault root excludes only itself).
+    /// (§4.2): a Markdown file outside `.thock/`, `routines/` and the
+    /// templates folder, and not one of the vault's templates
+    /// (`templatePaths`). Only the template file itself is excluded wherever
+    /// it lives, so a daily template kept beside the daily notes leaves them
+    /// in scope.
     public static func isReminderPath(_ path: String, templatePaths: [String]) -> Bool {
         let bytes = Array(path.utf8)[...]
         guard let dot = bytes.lastIndex(of: UInt8(ascii: ".")), dot > bytes.startIndex,
               Bytes.string(bytes[(dot + 1)...]).lowercased() == "md",
               Bytes.string(bytes[(dot + 1)...]).utf8.count == 2
         else { return false }
-        if Bytes.hasPrefix(bytes, ".thock/") || Bytes.hasPrefix(bytes, "routines/") {
+        if Bytes.hasPrefix(bytes, ".thock/") || Bytes.hasPrefix(bytes, "routines/") || Bytes.hasPrefix(bytes, templatesFolder) {
             return false
         }
         return !templatePaths.contains { template in
@@ -364,11 +371,7 @@ public enum Reminders {
             while trimmed.first == UInt8(ascii: "/") {
                 trimmed = trimmed.dropFirst()
             }
-            guard let slash = trimmed.lastIndex(of: UInt8(ascii: "/")) else {
-                return bytes.elementsEqual(trimmed)
-            }
-            let folder = trimmed[..<slash]
-            return bytes.starts(with: folder) && bytes.dropFirst(folder.count).first == UInt8(ascii: "/")
+            return bytes.elementsEqual(trimmed)
         }
     }
 
@@ -459,6 +462,8 @@ public enum Reminders {
         /// The last reminder id among the line's comments.
         var id: String?
         var commentOpen = false
+        /// Where an HTML comment this line opens and never closes starts.
+        var unclosedComment: Int?
     }
 
     /// One pass over a line, left to right: a code span or an HTML comment,
@@ -478,16 +483,26 @@ public enum Reminders {
             let rest = line[cursor...]
             if Bytes.hasPrefix(rest, commentOpen) {
                 let inside = rest.dropFirst(commentOpen.utf8.count)
-                guard let close = Bytes.firstRange(of: commentClose, in: inside) else {
+                // `<!-->` and `<!--->` are whole, empty comments (CommonMark).
+                let end: Int?
+                if inside.first == UInt8(ascii: ">") {
+                    end = inside.startIndex + 1
+                } else if Bytes.hasPrefix(inside, "->") {
+                    end = inside.startIndex + 2
+                } else {
+                    end = Bytes.firstRange(of: commentClose, in: inside)?.upperBound
+                }
+                guard let end else {
                     scan.excluded.append(cursor - start..<line.count)
                     scan.commentOpen = true
+                    scan.unclosedComment = cursor - start
                     return scan
                 }
-                if let found = idInComment(line[cursor..<close.upperBound]) {
+                if let found = idInComment(line[cursor..<end]) {
                     scan.id = found
                 }
-                scan.excluded.append(cursor - start..<close.upperBound - start)
-                cursor = close.upperBound
+                scan.excluded.append(cursor - start..<end - start)
+                cursor = end
             } else if line[cursor] == UInt8(ascii: "`") {
                 let run = rest.prefix { $0 == UInt8(ascii: "`") }.count
                 if let end = closingBackticks(line, from: cursor + run, run: run) {
@@ -501,6 +516,14 @@ public enum Reminders {
             }
         }
         return scan
+    }
+
+    /// Where the line's own text ends: before an HTML comment it opens and
+    /// never closes. Anything written after that point would land inside the
+    /// comment, and its `-->` would close the comment early and uncover the
+    /// lines below.
+    private static func writableEnd(_ line: ArraySlice<UInt8>) -> Int {
+        scanInline(line, inComment: false).unclosedComment ?? line.count
     }
 
     /// The end of the backtick run of exactly `run` that closes a code span
@@ -629,6 +652,20 @@ public enum Reminders {
         return "\(tokenOpen)\(due))"
     }
 
+    /// When *In 1 hour* moves a reminder answered at the local wall-clock
+    /// time `day` `hour`:`minute`:`second`: `minutes` later on the wall
+    /// clock, rounded up to the minute. Wall clock, not elapsed time, so the
+    /// desk and the phone agree across a daylight-saving change (§4.1).
+    public static func snoozedDue(day: VaultDay, hour: Int, minute: Int, second: Int, nanosecond: Int, minutes: Int) -> ReminderDue {
+        let minutesPerDay = 24 * 60
+        let roundsUp = second != 0 || nanosecond != 0
+        let total = hour * 60 + minute + max(minutes, 0) + (roundsUp ? 1 : 0)
+        return ReminderDue(
+            date: day.adding(days: total / minutesPerDay),
+            time: ClockTime(clampingHour: (total % minutesPerDay) / 60, minute: total % 60)
+        )
+    }
+
     // MARK: Home-line edits (§11, decision 21)
     //
     // Each returns `nil` when it does not apply to the line, so the caller
@@ -710,16 +747,27 @@ public enum Reminders {
         return insertBeforeTrailingComments(bytes, token: tokenText(due, homeDay: homeDay))
     }
 
-    /// Appends `<!--rem:<id>-->` as the line's last comment. `nil` when the
-    /// line already has an id or carries a calendar marker.
+    /// Appends `<!--rem:<id>-->` as the line's last comment, or puts it
+    /// before a comment the line opens and never closes. `nil` when the line
+    /// already has an id or carries a calendar marker.
     public static func addID(_ line: String, id: String) -> String? {
         let bytes = Array(line.utf8)[...]
         guard Bytes.firstRange(of: calendarMarker, in: bytes) == nil, isID(id) else { return nil }
         if parseLine(line, day: nil)?.id != nil {
             return nil
         }
-        let head = Bytes.trimEnd(bytes)
-        return head.isEmpty ? idMarker(id) : Bytes.string(head) + " " + idMarker(id)
+        let end = bytes.startIndex + writableEnd(bytes)
+        let head = Bytes.trimEnd(bytes[..<end])
+        let tail = Bytes.trimEnd(bytes[end...])
+        var edited = Bytes.string(head)
+        if !head.isEmpty {
+            edited += " "
+        }
+        edited += idMarker(id)
+        if !tail.isEmpty {
+            edited += " " + Bytes.string(tail)
+        }
+        return edited
     }
 
     /// Removes `range` and one side's whitespace, so the words around it keep
@@ -763,7 +811,7 @@ public enum Reminders {
     }
 
     private static func insertBeforeTrailingComments(_ line: ArraySlice<UInt8>, token: String) -> String {
-        let split = line.startIndex + trailingCommentsStart(line)
+        let split = line.startIndex + trailingCommentsStart(line.prefix(writableEnd(line)))
         let head = line[..<split]
         let comments = Bytes.trimmed(line[split...])
         var edited = Bytes.string(head)
@@ -792,20 +840,23 @@ public enum Reminders {
         return removeRange(Array(text.utf8)[...], token.range)
     }
 
-    /// `text` without its reminder token and its trailing HTML comments,
-    /// everything else as written: what a row outside the editor shows (§8.5).
+    /// `text` without its reminder token, its trailing HTML comments and any
+    /// comment it leaves open, everything else as written: what a row outside
+    /// the editor shows (§8.5).
     public static func stripReminder(_ text: String) -> String {
         let withoutToken = Array(removingToken(text).utf8)[...]
-        return Bytes.string(withoutToken.prefix(trailingCommentsStart(withoutToken)))
+        let writable = withoutToken.prefix(writableEnd(withoutToken))
+        return Bytes.string(writable.prefix(trailingCommentsStart(writable)))
     }
 
     /// Where a line's trailing metadata starts, as a UTF-8 offset: its run of
     /// trailing comments, and the reminder token just before them when there
-    /// is one. The line up to it is what a person edits; the rest can be put
+    /// is one. A comment the line opens and never closes is part of that
+    /// run. The line up to it is what a person edits; the rest can be put
     /// back after the edit.
     public static func trailingMetadataStart(_ text: String) -> Int {
         let bytes = Array(text.utf8)[...]
-        let comments = trailingCommentsStart(bytes)
+        let comments = trailingCommentsStart(bytes.prefix(writableEnd(bytes)))
         if let token = parseLine(text, day: nil)?.token, token.range.upperBound <= comments,
            Bytes.trimmed(bytes[token.range.upperBound..<comments]).isEmpty {
             return Bytes.trimEnd(bytes[..<token.range.lowerBound]).count
@@ -823,6 +874,33 @@ public enum Reminders {
         let label = Bytes.string(words)
         let rest = TimePrefix.parse(label).map { String($0.rest) } ?? label
         return Bytes.string(Bytes.trimmed(Array(rest.utf8)[...]))
+    }
+
+    /// A home line's words (`reminderText`) as a mirror line writes them
+    /// (§7.1): one space between words, no `<!--` or `~~` that would read as
+    /// a marker or a strike, every `(@` escaped so no earlier token on the
+    /// home line becomes a live one on the mirror, and cut at
+    /// `mirrorTextCharacters` on a word.
+    public static func mirrorText(_ text: String) -> String {
+        let removed = text.replacingOccurrences(of: commentOpen, with: "").replacingOccurrences(of: strike, with: "")
+        let words = removed.unicodeScalars.split { $0.properties.isWhitespace }.map { String(String.UnicodeScalarView($0)) }
+        guard !words.isEmpty else { return emptyMirrorText }
+        return cutText(escapeTokens(words.joined(separator: " ")), maxCharacters: mirrorTextCharacters)
+    }
+
+    /// Puts a backslash before every `(@` that does not have one.
+    private static func escapeTokens(_ text: String) -> String {
+        var escaped = ""
+        var rest = Array(text.utf8)[...]
+        while let open = Bytes.firstRange(of: tokenOpen, in: rest) {
+            escaped += Bytes.string(rest[..<open.lowerBound])
+            if !escaped.hasSuffix("\\") {
+                escaped += "\\"
+            }
+            escaped += tokenOpen
+            rest = rest[open.upperBound...]
+        }
+        return escaped + Bytes.string(rest)
     }
 
     /// `text` cut to at most `maxCharacters` characters on a word boundary,

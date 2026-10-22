@@ -771,5 +771,193 @@
       "id": "3f9a1c0d4e21"
     },
     "after": null
+  },
+  {
+    "name": "attach to a closed task rewrites it and keeps it closed",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [x] Pay the deposit (@2026-10-19 09:00) <!--rem:51aa02c9d811-->",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [x] Pay the deposit (@2026-12-02 09:00) <!--rem:51aa02c9d811-->"
+  },
+  {
+    "name": "attach to struck prose keeps the strike",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Got the quote back, it's fine. ~~(@2026-10-18 10:00)~~ <!--rem:0d93be7a1c44-->",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "Got the quote back, it's fine. ~~(@2026-12-02 09:00)~~ <!--rem:0d93be7a1c44-->"
+  },
+  {
+    "name": "attach before a comment the line leaves open",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Buy stamps <!-- for the cards",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Buy stamps (@2026-12-02 09:00) <!--rem:3f9a1c0d4e21--> <!-- for the cards"
+  },
+  {
+    "name": "attach to a token before a comment the line leaves open",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Buy stamps (@2026-11-01) <!--gmail:ab--> <!-- for the cards",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Buy stamps (@2026-12-02 09:00) <!--gmail:ab--> <!--rem:3f9a1c0d4e21--> <!-- for the cards"
+  },
+  {
+    "name": "add an id before a comment the line leaves open",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Call the plumber (@2026-10-21 14:30) <!-- ask about the boiler",
+    "edit": {
+      "kind": "add_id",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:3f9a1c0d4e21--> <!-- ask about the boiler",
+    "identity_changes": true
+  },
+  {
+    "name": "add an id after a closed comment and before an open one",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Renew passport (@2026-12-02) <!--gmail:ab--> <!-- draft  ",
+    "edit": {
+      "kind": "add_id",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Renew passport (@2026-12-02) <!--gmail:ab--> <!--rem:3f9a1c0d4e21--> <!-- draft",
+    "identity_changes": true
+  },
+  {
+    "name": "rewrite a dropped line before a comment it leaves open",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Send the leak photos <!--rem:9e4a21f0b388--> <!-- later",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-22 09:00"
+    },
+    "after": "- [ ] Send the leak photos (@2026-10-22 09:00) <!--rem:9e4a21f0b388--> <!-- later"
+  },
+  {
+    "name": "place a token before trailing comments",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Renew passport <!-- note -->",
+    "edit": {
+      "kind": "place",
+      "due": "2026-12-02 10:20"
+    },
+    "after": "- [ ] Renew passport (@2026-12-02 10:20) <!-- note -->"
+  },
+  {
+    "name": "place rewrites the token and keeps the id",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Renew (@2026-11-01) soon <!--rem:3f9a1c0d4e21-->",
+    "edit": {
+      "kind": "place",
+      "due": "2026-12-02 10:20"
+    },
+    "after": "Renew (@2026-12-02 10:20) soon <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "place in the daily note of that day writes the short form",
+    "path": "daily/2026-12-02.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Water",
+    "edit": {
+      "kind": "place",
+      "due": "2026-12-02 10:20"
+    },
+    "after": "Water (@10:20)"
+  },
+  {
+    "name": "place on a calendar line",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Standup <!--gcal:abc-->",
+    "edit": {
+      "kind": "place",
+      "due": "2026-12-02 10:20"
+    },
+    "after": null
+  },
+  {
+    "name": "place writes no id",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Buy stamps",
+    "edit": {
+      "kind": "place",
+      "due": "2026-12-02"
+    },
+    "after": "- [ ] Buy stamps (@2026-12-02)"
+  },
+  {
+    "name": "place before a comment the line leaves open",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Buy stamps <!-- for the cards",
+    "edit": {
+      "kind": "place",
+      "due": "2026-12-02"
+    },
+    "after": "Buy stamps (@2026-12-02) <!-- for the cards"
   }
 ]

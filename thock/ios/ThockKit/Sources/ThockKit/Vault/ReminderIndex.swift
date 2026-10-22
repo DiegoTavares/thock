@@ -305,17 +305,16 @@ public struct ReminderChip: Hashable, Sendable {
 // MARK: Writes (V45 §10.2–§10.4)
 
 extension ReminderSettings {
-    /// *In 1 hour*: `snoozeMinutes` after `now`, rounded up to the minute.
+    /// *In 1 hour*: `snoozeMinutes` after `now` on the wall clock of
+    /// `calendar`'s time zone, rounded up to the minute. Wall clock, not
+    /// elapsed time, as the desk counts it (`Reminders.snoozedDue`).
     public func snoozedDue(now: Date, calendar: Calendar) -> ReminderDue {
-        let later = now.addingTimeInterval(TimeInterval(snoozeMinutes * 60))
-        var parts = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second, .nanosecond], from: later)
-        if (parts.second ?? 0) != 0 || (parts.nanosecond ?? 0) != 0 {
-            let rounded = calendar.date(byAdding: .minute, value: 1, to: later) ?? later
-            parts = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: rounded)
-        }
-        return ReminderDue(
-            date: VaultDay(year: parts.year ?? 1970, month: parts.month ?? 1, day: parts.day ?? 1),
-            time: ClockTime(clampingHour: parts.hour ?? 0, minute: parts.minute ?? 0)
+        let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second, .nanosecond], from: now)
+        return Reminders.snoozedDue(
+            day: VaultDay(year: parts.year ?? 1970, month: parts.month ?? 1, day: parts.day ?? 1),
+            hour: parts.hour ?? 0, minute: parts.minute ?? 0,
+            second: parts.second ?? 0, nanosecond: parts.nanosecond ?? 0,
+            minutes: snoozeMinutes
         )
     }
 

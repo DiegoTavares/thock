@@ -36,11 +36,28 @@
         "daily-template.md"
       ],
       "counted": [
-        "templates/daily.md",
-        "notes/daily-template.md"
+        "notes/daily-template.md",
+        "daily/2026-10-21.md"
       ],
       "ignored": [
-        "daily-template.md"
+        "daily-template.md",
+        "templates/daily.md"
+      ]
+    },
+    {
+      "templates": [
+        "daily/_template.md",
+        "weekly/_template.md"
+      ],
+      "counted": [
+        "daily/2026-10-21.md",
+        "weekly/2026-W43.md",
+        "daily/notes/_template.md"
+      ],
+      "ignored": [
+        "daily/_template.md",
+        "weekly/_template.md",
+        "templates/daily.md"
       ]
     }
   ],
@@ -1008,6 +1025,111 @@
           "text": "Ping Bob <!--gmail:ab--> about it -->"
         }
       ]
+    },
+    {
+      "name": "a mirror line keeps an escaped token as text",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "## Day planner\n\n### Reminders\n- [ ] Call \\(@2026-10-20) about it · [[backlog]] <!--rem:2f6b08e19a5c-->",
+      "reminders": [
+        {
+          "line": 3,
+          "id": "2f6b08e19a5c",
+          "token": null,
+          "when": null,
+          "struck": false,
+          "task": "open",
+          "due": null,
+          "state": "dropped",
+          "mirror": true,
+          "text": "Call \\(@2026-10-20) about it · [[backlog]]"
+        }
+      ]
+    },
+    {
+      "name": "an id before a comment the line leaves open",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:3f9a1c0d4e21--> <!-- ask about the boiler\nstill in the comment (@2026-10-22)\n-->\n- [ ] After (@2026-10-23)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": "3f9a1c0d4e21",
+          "token": "(@2026-10-21 14:30)",
+          "when": "2026-10-21 14:30",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-21 14:30",
+          "state": "open",
+          "mirror": false,
+          "text": "Call the plumber"
+        },
+        {
+          "line": 3,
+          "id": null,
+          "token": "(@2026-10-23)",
+          "when": "2026-10-23",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-23",
+          "state": "open",
+          "mirror": false,
+          "text": "After"
+        }
+      ]
+    },
+    {
+      "name": "an empty comment closes itself",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "Ask <!--> about it (@2026-10-22)\nAnd <!---> this (@2026-10-23)\nThen (@2026-10-24)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@2026-10-22)",
+          "when": "2026-10-22",
+          "struck": false,
+          "task": null,
+          "due": "2026-10-22",
+          "state": "open",
+          "mirror": false,
+          "text": "Ask <!--> about it"
+        },
+        {
+          "line": 1,
+          "id": null,
+          "token": "(@2026-10-23)",
+          "when": "2026-10-23",
+          "struck": false,
+          "task": null,
+          "due": "2026-10-23",
+          "state": "open",
+          "mirror": false,
+          "text": "And <!---> this"
+        },
+        {
+          "line": 2,
+          "id": null,
+          "token": "(@2026-10-24)",
+          "when": "2026-10-24",
+          "struck": false,
+          "task": null,
+          "due": "2026-10-24",
+          "state": "open",
+          "mirror": false,
+          "text": "Then"
+        }
+      ]
     }
   ],
   "mirrors": [
@@ -1140,6 +1262,18 @@
     {
       "line": "- [ ] ~~Call the plumber~~ → soon · [[projects/house]] <!--rem:7d3e55a1c0f2-->",
       "mirror": null
+    },
+    {
+      "line": "- [ ] Call \\(@2026-10-20) about it · [[backlog]] <!--rem:2f6b08e19a5c-->",
+      "mirror": {
+        "checked": false,
+        "time": null,
+        "text": "Call \\(@2026-10-20) about it",
+        "mark": null,
+        "carried": null,
+        "note": "backlog",
+        "id": "2f6b08e19a5c"
+      }
     }
   ],
   "texts": [
@@ -1172,6 +1306,142 @@
       "text": "Café com Ana às doze",
       "max": 13,
       "cut": "Café com Ana…"
+    }
+  ],
+  "mirror_texts": [
+    {
+      "text": "Call the plumber",
+      "mirror": "Call the plumber"
+    },
+    {
+      "text": "Ask  about   it",
+      "mirror": "Ask about it"
+    },
+    {
+      "text": "Moved from (@2026-10-20) to here",
+      "mirror": "Moved from \\(@2026-10-20) to here"
+    },
+    {
+      "text": "Already \\(@2026-10-20) escaped",
+      "mirror": "Already \\(@2026-10-20) escaped"
+    },
+    {
+      "text": "Two (@10:00) and (@2026-10-21)",
+      "mirror": "Two \\(@10:00) and \\(@2026-10-21)"
+    },
+    {
+      "text": "Odd <!--gmail:x--> ~~struck~~",
+      "mirror": "Odd gmail:x--> struck"
+    },
+    {
+      "text": "",
+      "mirror": "Reminder"
+    },
+    {
+      "text": "   ",
+      "mirror": "Reminder"
+    },
+    {
+      "text": "~~~~",
+      "mirror": "Reminder"
+    },
+    {
+      "text": "Renew the car insurance before the old policy runs out at the end of the month, call first",
+      "mirror": "Renew the car insurance before the old policy runs out at the end of the month,…"
+    }
+  ],
+  "rows": [
+    {
+      "line": "Renew passport (@2026-12-02 09:00) <!--gmail:ab--> <!--rem:3f9a1c0d4e21-->",
+      "comments": "Renew passport (@2026-12-02 09:00)",
+      "edited": "Renew passport",
+      "strip": "Renew passport"
+    },
+    {
+      "line": "Call (@tom) mum (@14:30) now",
+      "comments": "Call (@tom) mum (@14:30) now",
+      "edited": "Call (@tom) mum (@14:30) now",
+      "strip": "Call (@tom) mum now"
+    },
+    {
+      "line": "a <!-- b --> c",
+      "comments": "a <!-- b --> c",
+      "edited": "a <!-- b --> c",
+      "strip": "a <!-- b --> c"
+    },
+    {
+      "line": "plain",
+      "comments": "plain",
+      "edited": "plain",
+      "strip": "plain"
+    },
+    {
+      "line": "Renew passport (@2026-12-02) <!--rem:3f9a1c0d4e21-->",
+      "comments": "Renew passport (@2026-12-02)",
+      "edited": "Renew passport",
+      "strip": "Renew passport"
+    },
+    {
+      "line": "Call (@2026-12-02) mum <!--x-->",
+      "comments": "Call (@2026-12-02) mum",
+      "edited": "Call (@2026-12-02) mum",
+      "strip": "Call mum"
+    },
+    {
+      "line": "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it (@11:00) -->",
+      "comments": "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it (@11:00) -->",
+      "edited": "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it (@11:00) -->",
+      "strip": "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it -->"
+    },
+    {
+      "line": "- [ ] Call (@2026-10-21) <!--rem:3f9a1c0d4e21--> <!-- ask",
+      "comments": "- [ ] Call (@2026-10-21) <!--rem:3f9a1c0d4e21--> <!-- ask",
+      "edited": "- [ ] Call",
+      "strip": "- [ ] Call"
+    },
+    {
+      "line": "<!-->",
+      "comments": "<!-->",
+      "edited": "<!-->",
+      "strip": "<!-->"
+    }
+  ],
+  "snoozes": [
+    {
+      "now": "2026-10-21T14:05:00",
+      "minutes": 60,
+      "zone": "America/New_York",
+      "due": "2026-10-21 15:05"
+    },
+    {
+      "now": "2026-10-21T14:05:01",
+      "minutes": 60,
+      "zone": "America/New_York",
+      "due": "2026-10-21 15:06"
+    },
+    {
+      "now": "2026-10-21T23:30:30",
+      "minutes": 30,
+      "zone": "America/New_York",
+      "due": "2026-10-22 00:01"
+    },
+    {
+      "now": "2026-03-08T01:30:00",
+      "minutes": 60,
+      "zone": "America/New_York",
+      "due": "2026-03-08 02:30"
+    },
+    {
+      "now": "2026-03-08T01:59:30",
+      "minutes": 60,
+      "zone": "America/New_York",
+      "due": "2026-03-08 03:00"
+    },
+    {
+      "now": "2026-11-01T01:15:00",
+      "minutes": 60,
+      "zone": "America/New_York",
+      "due": "2026-11-01 02:15"
     }
   ]
 }

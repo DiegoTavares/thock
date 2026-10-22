@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use chrono::{Datelike, Days, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{Datelike, Days, NaiveDate, NaiveDateTime, NaiveTime};
 use fs::Fs;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 use serde::Deserialize;
@@ -188,20 +188,9 @@ impl ReminderSettings {
     }
 
     /// When *In 1 hour* moves a reminder answered at `now`: `snooze_minutes`
-    /// later, rounded up to the minute.
+    /// later on the wall clock, rounded up to the minute.
     pub fn snoozed_due(&self, now: NaiveDateTime) -> Due {
-        let later = now + chrono::Duration::minutes(i64::from(self.snooze_minutes));
-        let rounded = if later.second() == 0 && later.nanosecond() == 0 {
-            later
-        } else {
-            later
-                .with_second(0)
-                .unwrap_or(later)
-                .with_nanosecond(0)
-                .unwrap_or(later)
-                + chrono::Duration::minutes(1)
-        };
-        Due::new(rounded.date(), Some(rounded.time()))
+        thock_sync_core::snoozed_due(now, self.snooze_minutes)
     }
 
     /// *Tomorrow 09:00*, from `today`.

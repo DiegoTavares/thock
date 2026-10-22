@@ -29,6 +29,11 @@ const CALENDAR_MARKER: &str = "<!--gcal:";
 const TOKEN_OPEN: &str = "(@";
 const STRIKE: &str = "~~";
 const MIRROR_SEPARATOR: &str = " · ";
+const TEMPLATES_FOLDER: &str = "templates/";
+/// The longest a mirror line's text runs, in characters (§7.1).
+pub const MIRROR_TEXT_CHARS: usize = 80;
+/// A mirror's text when the home line has no words.
+const EMPTY_MIRROR_TEXT: &str = "Reminder";
 
 /// A vault's `[daily]` notes: the folder and the moment-style filename format.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,24 +89,24 @@ impl Default for ReminderConfig {
 }
 
 /// Whether a token in the vault-relative `path` can be a reminder (spec
-/// §4.2): a Markdown file outside `.thock/`, `routines/` and the folder of
-/// each template in `template_paths` (`templates/daily.md` excludes
-/// `templates/`; a template at the vault root excludes only itself).
+/// §4.2): a Markdown file outside `.thock/`, `routines/` and the templates
+/// folder, and not one of the vault's templates (`template_paths`). Only the
+/// template file itself is excluded wherever it lives, so a daily template
+/// kept beside the daily notes leaves them in scope.
 pub fn is_reminder_path(path: &str, template_paths: &[&str]) -> bool {
     let is_markdown = path
         .rsplit_once('.')
         .is_some_and(|(stem, extension)| !stem.is_empty() && extension.eq_ignore_ascii_case("md"));
-    if !is_markdown || path.starts_with(".thock/") || path.starts_with("routines/") {
+    if !is_markdown
+        || path.starts_with(".thock/")
+        || path.starts_with("routines/")
+        || path.starts_with(TEMPLATES_FOLDER)
+    {
         return false;
     }
-    !template_paths.iter().any(
-        |template| match template.trim_start_matches('/').rsplit_once('/') {
-            Some((folder, _)) => path
-                .strip_prefix(folder)
-                .is_some_and(|rest| rest.starts_with('/')),
-            None => path == template.trim_start_matches('/'),
-        },
-    )
+    !template_paths
+        .iter()
+        .any(|template| path == template.trim_start_matches('/'))
 }
 
 /// When a reminder is due: a day, and a time unless it is date-only.
@@ -386,6 +391,8 @@ struct InlineScan {
     /// The last reminder id among the line's comments.
     id: Option<String>,
     comment_open: bool,
+    /// Where an HTML comment this line opens and never closes starts.
+    unclosed_comment: Option<usize>,
 }
 
 /// One pass over a line, left to right: a code span or an HTML comment,
@@ -405,6 +412,7 @@ fn scan_inline(line: &str, in_comment: bool) -> InlineScan {
                     excluded: vec![0..line.len()],
                     id: None,
                     comment_open: true,
+                    unclosed_comment: None,
                 };
             }
         }
@@ -413,9 +421,19 @@ fn scan_inline(line: &str, in_comment: bool) -> InlineScan {
     while cursor < line.len() {
         let rest = &line[cursor..];
         if let Some(inside) = rest.strip_prefix(COMMENT_OPEN) {
-            match inside.find(COMMENT_CLOSE) {
-                Some(offset) => {
-                    let end = cursor + COMMENT_OPEN.len() + offset + COMMENT_CLOSE.len();
+            // `<!-->` and `<!--->` are whole, empty comments (CommonMark).
+            let length = if inside.starts_with('>') {
+                Some(COMMENT_OPEN.len() + 1)
+            } else if inside.starts_with("->") {
+                Some(COMMENT_OPEN.len() + 2)
+            } else {
+                inside
+                    .find(COMMENT_CLOSE)
+                    .map(|offset| COMMENT_OPEN.len() + offset + COMMENT_CLOSE.len())
+            };
+            match length {
+                Some(length) => {
+                    let end = cursor + length;
                     if let Some(found) = id_in_comment(&line[cursor..end]) {
                         id = Some(found.to_string());
                     }
@@ -428,6 +446,7 @@ fn scan_inline(line: &str, in_comment: bool) -> InlineScan {
                         excluded,
                         id,
                         comment_open: true,
+                        unclosed_comment: Some(cursor),
                     };
                 }
             }
@@ -448,7 +467,17 @@ fn scan_inline(line: &str, in_comment: bool) -> InlineScan {
         excluded,
         id,
         comment_open: false,
+        unclosed_comment: None,
     }
+}
+
+/// Where the line's own text ends: before an HTML comment it opens and never
+/// closes. Anything written after that point would land inside the comment,
+/// and its `-->` would close the comment early and uncover the lines below.
+fn writable_end(line: &str) -> usize {
+    scan_inline(line, false)
+        .unclosed_comment
+        .unwrap_or(line.len())
 }
 
 /// The end of the backtick run of exactly `run` that closes a code span
@@ -603,6 +632,24 @@ pub fn token_text(due: Due, home_day: Option<NaiveDate>) -> String {
     }
 }
 
+/// When *In 1 hour* moves a reminder answered at the local wall-clock time
+/// `now`: `minutes` later on the wall clock, rounded up to the minute. Wall
+/// clock, not elapsed time, so the desk and the phone agree across a
+/// daylight-saving change (§4.1: times are local wall-clock times).
+pub fn snoozed_due(now: NaiveDateTime, minutes: u32) -> Due {
+    let later = now + chrono::Duration::minutes(i64::from(minutes));
+    let floor = later
+        .with_second(0)
+        .and_then(|later| later.with_nanosecond(0))
+        .unwrap_or(later);
+    let rounded = if floor == later {
+        later
+    } else {
+        floor + chrono::Duration::minutes(1)
+    };
+    Due::new(rounded.date(), Some(rounded.time()))
+}
+
 // ---------------------------------------------------------------------------
 // Home-line edits (§11, decision 21). Each returns `None` when it does not
 // apply to the line, so the caller writes nothing.
@@ -695,8 +742,9 @@ pub fn place_token(line: &str, due: Due, home_day: Option<NaiveDate>) -> Option<
     }
 }
 
-/// Appends `<!--rem:<id>-->` as the line's last comment. `None` when the
-/// line already has an id or carries a calendar marker.
+/// Appends `<!--rem:<id>-->` as the line's last comment, or puts it before
+/// a comment the line opens and never closes. `None` when the line already
+/// has an id or carries a calendar marker.
 pub fn add_id(line: &str, id: &str) -> Option<String> {
     if line.contains(CALENDAR_MARKER) || !is_id(id) {
         return None;
@@ -704,12 +752,20 @@ pub fn add_id(line: &str, id: &str) -> Option<String> {
     if parse_line(line, None).is_some_and(|reminder| reminder.id.is_some()) {
         return None;
     }
-    let head = line.trim_end();
-    Some(if head.is_empty() {
-        id_marker(id)
-    } else {
-        format!("{head} {}", id_marker(id))
-    })
+    let end = writable_end(line);
+    let head = line[..end].trim_end();
+    let tail = line[end..].trim_end();
+    let mut edited = String::with_capacity(line.len() + ID_OPEN.len() + ID_LENGTH + 5);
+    edited.push_str(head);
+    if !head.is_empty() {
+        edited.push(' ');
+    }
+    edited.push_str(&id_marker(id));
+    if !tail.is_empty() {
+        edited.push(' ');
+        edited.push_str(tail);
+    }
+    Some(edited)
 }
 
 fn replace_range(line: &str, range: Range<usize>, with: &str) -> String {
@@ -757,7 +813,7 @@ pub fn trailing_comments_start(line: &str) -> usize {
 }
 
 fn insert_before_trailing_comments(line: &str, token: &str) -> String {
-    let split = trailing_comments_start(line);
+    let split = trailing_comments_start(&line[..writable_end(line)]);
     let head = &line[..split];
     let comments = line[split..].trim();
     let mut edited = String::with_capacity(line.len() + token.len() + 2);
@@ -776,22 +832,24 @@ fn insert_before_trailing_comments(line: &str, token: &str) -> String {
 // ---------------------------------------------------------------------------
 // Display text.
 
-/// `text` without its reminder token and its trailing HTML comments,
-/// everything else as written: what a row outside the editor shows (§8.5).
+/// `text` without its reminder token, its trailing HTML comments and any
+/// comment it leaves open, everything else as written: what a row outside the editor shows (§8.5).
 pub fn strip_reminder(text: &str) -> String {
     let without_token = match parse_line(text, None).and_then(|reminder| reminder.token) {
         Some(token) => remove_range(text, token.range),
         None => text.to_string(),
     };
-    without_token[..trailing_comments_start(&without_token)].to_string()
+    let text = &without_token[..writable_end(&without_token)];
+    text[..trailing_comments_start(text)].to_string()
 }
 
 /// Where a line's trailing metadata starts: its run of trailing HTML
 /// comments, and the reminder token just before them when there is one.
+/// A comment the line opens and never closes is part of that run.
 /// `&text[..trailing_metadata_start(text)]` is the line as a person edits it,
 /// and the rest can be put back after an edit.
 pub fn trailing_metadata_start(text: &str) -> usize {
-    let comments = trailing_comments_start(text);
+    let comments = trailing_comments_start(&text[..writable_end(text)]);
     match parse_line(text, None).and_then(|reminder| reminder.token) {
         Some(token)
             if text
@@ -814,6 +872,40 @@ pub fn reminder_text(line: &str) -> String {
         prose => prose,
     };
     strip_time_prefix(text).trim().to_string()
+}
+
+/// A home line's words (`reminder_text`) as a mirror line writes them (§7.1):
+/// one space between words, no `<!--` or `~~` that would read as a marker or a
+/// strike, every `(@` escaped so no earlier token on the home line becomes a
+/// live one on the mirror, and cut at `MIRROR_TEXT_CHARS` on a word.
+pub fn mirror_text(text: &str) -> String {
+    let clean = text
+        .replace(COMMENT_OPEN, "")
+        .replace(STRIKE, "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if clean.is_empty() {
+        return EMPTY_MIRROR_TEXT.to_string();
+    }
+    let escaped = escape_tokens(&clean);
+    cut_text(&escaped, MIRROR_TEXT_CHARS)
+}
+
+/// Puts a backslash before every `(@` that does not have one.
+fn escape_tokens(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(offset) = rest.find(TOKEN_OPEN) {
+        escaped.push_str(&rest[..offset]);
+        if !escaped.ends_with('\\') {
+            escaped.push('\\');
+        }
+        escaped.push_str(TOKEN_OPEN);
+        rest = &rest[offset + TOKEN_OPEN.len()..];
+    }
+    escaped.push_str(rest);
+    escaped
 }
 
 /// `text` cut to at most `max_chars` characters on a word boundary, with
@@ -1000,57 +1092,6 @@ mod tests {
     }
 
     #[test]
-    fn a_row_drops_the_token_and_every_trailing_comment() {
-        assert_eq!(
-            strip_reminder(
-                "Renew passport (@2026-12-02 09:00) <!--gmail:ab--> <!--rem:3f9a1c0d4e21-->"
-            ),
-            "Renew passport"
-        );
-        assert_eq!(
-            strip_reminder("Call (@tom) mum (@14:30) now"),
-            "Call (@tom) mum now"
-        );
-        assert_eq!(strip_reminder("a <!-- b --> c"), "a <!-- b --> c");
-        assert_eq!(strip_reminder("plain"), "plain");
-    }
-
-    #[test]
-    fn trailing_metadata_is_the_token_and_comments_at_the_end() {
-        let line = "Renew passport (@2026-12-02) <!--rem:3f9a1c0d4e21-->";
-        assert_eq!(&line[..trailing_metadata_start(line)], "Renew passport");
-        let line = "Call (@2026-12-02) mum <!--x-->";
-        assert_eq!(
-            &line[..trailing_metadata_start(line)],
-            "Call (@2026-12-02) mum"
-        );
-        assert_eq!(trailing_metadata_start("plain"), 5);
-    }
-
-    #[test]
-    fn placing_a_token_goes_before_trailing_comments() {
-        let due = Due::new(date(2026, 12, 2), Some(time(10, 20)));
-        assert_eq!(
-            place_token("- [ ] Renew passport <!-- note -->", due, None).as_deref(),
-            Some("- [ ] Renew passport (@2026-12-02 10:20) <!-- note -->")
-        );
-        assert_eq!(
-            place_token(
-                "Renew (@2026-11-01) soon <!--rem:3f9a1c0d4e21-->",
-                due,
-                None
-            )
-            .as_deref(),
-            Some("Renew (@2026-12-02 10:20) soon <!--rem:3f9a1c0d4e21-->")
-        );
-        assert_eq!(
-            place_token("Water", due, Some(date(2026, 12, 2))).as_deref(),
-            Some("Water (@10:20)")
-        );
-        assert_eq!(place_token("Standup <!--gcal:abc-->", due, None), None);
-    }
-
-    #[test]
     fn edits_round_trip() {
         let line = "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->";
         let closed = close(line).unwrap();
@@ -1061,17 +1102,6 @@ mod tests {
         assert_eq!(
             moved,
             "- [ ] Call the plumber (@2026-10-22 09:00) <!--rem:7d3e55a1c0f2-->"
-        );
-    }
-
-    #[test]
-    fn text_after_a_closed_comment_is_not_a_trailing_comment() {
-        let line = "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it (@11:00) -->";
-        assert_eq!(trailing_comments_start(line), line.len());
-        assert_eq!(trailing_metadata_start(line), line.len());
-        assert_eq!(
-            strip_reminder(line),
-            "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it -->"
         );
     }
 

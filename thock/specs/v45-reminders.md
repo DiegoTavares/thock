@@ -110,10 +110,13 @@ gap; a time that happens twice rings the first time.
 
 ### 4.2 Where a token counts
 
-- **Files:** Markdown files in the vault, except under `.thock/`, the templates folder and
-  `routines/`. A template's token is not a reminder; the note made from it is.
+- **Files:** Markdown files in the vault, except under `.thock/`, `templates/` and `routines/`, and
+  except the `[daily]` and `[weekly]` template files wherever they live. Only the template file is
+  left out, so `template = "daily/_template.md"` keeps every daily note in scope. A template's token
+  is not a reminder; the note made from it is.
 - **Not code or comments.** A token inside inline code, a fenced block, front matter or an HTML
-  comment is text, and so is one after a backslash (`\(@…)`). `AGENTS.md` and the Routine docs
+  comment is text, and so is one after a backslash (`\(@…)`). `<!-->` and `<!--->` are whole, empty
+  comments, as in CommonMark. `AGENTS.md` and the Routine docs
   write their examples in code.
 - **One reminder per line:** the last token on the line. Earlier tokens on the same line are text.
 - **Anywhere on the line** on read; Thock writes it at the end, before any trailing comment. A
@@ -138,11 +141,15 @@ ties a line to its index entry and to every copy of the line.
   and lets the desk add the id. Before writing one, the writer checks the index for a collision and
   draws again.
 - **Where it sits.** Last on the line, after the token and after any other trailing comment the
-  line already had (a `<!--gmail:…-->` backlog capture keeps its marker before it).
+  line already had (a `<!--gmail:…-->` backlog capture keeps its marker before it). A line that opens
+  a comment and never closes it (`… <!-- details` continuing on the next lines) gets the id, and the
+  token, before that `<!--`: written after it they would sit inside the comment, unread, and their
+  `-->` would close it early.
 - **Never drawn.** Conceal hides it like every comment. Panel and phone labels strip every trailing
   comment, not just one (today the backlog row and the planner label strip one).
 - **Sync identity is unchanged.** `line_hash` already drops trailing comments (V34 API §7.4), so
-  adding an id never changes a line's identity and never trips a phone write. The token itself is
+  adding an id never changes a line's identity and never trips a phone write. The one exception is
+  the line that leaves a comment open, whose id goes inside the text `line_hash` reads. The token itself is
   part of the identity: a reminder rescheduled on both devices before they sync keeps both lines
   under V34's keep-both rule, and because both carry the id it is still one reminder (§5.3).
 
@@ -280,8 +287,8 @@ no text (*line not found*) until step 4 settles it.
   (trimmed to 80 characters) as the title, `14:30 · projects/house` or `today · reminders` as the
   body, and three actions: *Done*, *In 1 hour* and *Tomorrow 09:00*.
 - **Answers** come through `on_system_notification_response` and edit the home line: *Done* ticks
-  it or strikes the token; *In 1 hour* rewrites the token to now plus `snooze_minutes`, rounded up to
-  the minute; *Tomorrow 09:00* rewrites it to tomorrow at `tomorrow_at`. A rewrite writes the full
+  it or strikes the token; *In 1 hour* rewrites the token to now plus `snooze_minutes` on the wall
+  clock (so the desk and the phone agree across a clock change), rounded up to the minute; *Tomorrow 09:00* rewrites it to tomorrow at `tomorrow_at`. A rewrite writes the full
   date unless the home is the daily note of the new day.
 - **Never twice.** `.thock/cache/reminders/fired.json` records `id → due` once rung. A rescheduled
   reminder has a new due and can ring again; a restart does not repeat a ring.
@@ -329,7 +336,9 @@ left as they were. A future day's note, created ahead, gets its own reminders an
   at 80 characters on a word boundary. It is a copy for the planner's sake; the id ties it to the
   original.
 - **No token on a mirror line**, so it is never a reminder of its own, and the Obsidian plugin does
-  not ring it twice.
+  not ring it twice. The text escapes every `(@` as `\(@`, so an earlier token the home line still
+  shows as text never comes alive on the mirror. `mirror_text` in the sync core writes it, with a
+  vector for each rule.
 
 ### 7.2 The reconciler
 

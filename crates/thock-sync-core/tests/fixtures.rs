@@ -15,9 +15,10 @@ use thock_sync_core::{
     Applied, Context, DailyNotes, Due, Group, Heading, MirrorLine, MirrorMark, Operation, Outcome,
     Place, Placement, ReminderConfig, ReminderState, Task, When, Write, add_id, apply, attach,
     close, content_hash, cut_text, drop_token, effect_present, group, heading_key,
-    is_reminder_path, is_syncable_image_path, is_syncable_path, key_check, line_hash, open,
-    parse_line, parse_note, parse_write, reminder_text, reopen, rewrite, seal_with_nonce,
-    section_hash,
+    is_reminder_path, is_syncable_image_path, is_syncable_path, key_check, line_hash, mirror_text,
+    open, parse_line, parse_note, parse_write, place_token, reminder_text, reopen, rewrite,
+    seal_with_nonce, section_hash, snoozed_due, strip_reminder, trailing_comments_start,
+    trailing_metadata_start,
 };
 
 fn fixtures_root() -> PathBuf {
@@ -411,6 +412,36 @@ struct ReminderVectors {
     cases: Vec<ReminderCase>,
     mirrors: Vec<MirrorVector>,
     texts: Vec<CutVector>,
+    mirror_texts: Vec<MirrorTextVector>,
+    rows: Vec<RowVector>,
+    snoozes: Vec<SnoozeVector>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MirrorTextVector {
+    text: String,
+    mirror: String,
+}
+
+/// A line as rows outside the editor see it: up to its trailing comments, up
+/// to its trailing metadata (what a person edits), and stripped for a label.
+#[derive(Debug, Deserialize)]
+struct RowVector {
+    line: String,
+    comments: String,
+    edited: String,
+    strip: String,
+}
+
+/// *In 1 hour* at a local wall-clock `now`. `zone` is for runners whose
+/// clock is an instant; the answer is the same wall-clock time in any zone.
+#[derive(Debug, Deserialize)]
+struct SnoozeVector {
+    now: String,
+    minutes: u32,
+    #[allow(dead_code)]
+    zone: String,
+    due: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -586,6 +617,41 @@ fn reminder_vectors_match() {
     for vector in &vectors.texts {
         assert_eq!(cut_text(&vector.text, vector.max), vector.cut, "{vector:?}");
     }
+
+    for vector in &vectors.mirror_texts {
+        let mirror = mirror_text(&vector.text);
+        assert_eq!(mirror, vector.mirror, "{vector:?}");
+        let line = format!("- [ ] {mirror} · [[backlog]] <!--rem:2f6b08e19a5c-->");
+        assert!(
+            parse_line(&line, None).is_some_and(|reminder| reminder.token.is_none()),
+            "{vector:?}: no token on a mirror line (§7.1)"
+        );
+    }
+
+    for vector in &vectors.rows {
+        let line = &vector.line;
+        assert_eq!(
+            &line[..trailing_comments_start(line)],
+            vector.comments,
+            "{vector:?}: comments"
+        );
+        assert_eq!(
+            &line[..trailing_metadata_start(line)],
+            vector.edited,
+            "{vector:?}: edited"
+        );
+        assert_eq!(strip_reminder(line), vector.strip, "{vector:?}: strip");
+    }
+
+    for vector in &vectors.snoozes {
+        let now = NaiveDateTime::parse_from_str(&vector.now, "%Y-%m-%dT%H:%M:%S")
+            .unwrap_or_else(|_| panic!("now {:?}", vector.now));
+        assert_eq!(
+            snoozed_due(now, vector.minutes).to_string(),
+            vector.due,
+            "{vector:?}"
+        );
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -616,6 +682,10 @@ struct EditVector {
     line: String,
     edit: serde_json::Value,
     after: Option<String>,
+    /// An id written before a comment the line leaves open is part of the
+    /// line's identity, the one place §4.3's rule gives way.
+    #[serde(default)]
+    identity_changes: bool,
 }
 
 #[test]
@@ -634,10 +704,14 @@ fn reminder_edit_vectors_match() {
             Some("drop") => drop_token(&vector.line),
             Some("attach") => attach(&vector.line, due(), id(), day),
             Some("add_id") => add_id(&vector.line, id()),
+            Some("place") => place_token(&vector.line, due(), day),
             other => panic!("{}: unknown edit {other:?}", vector.name),
         };
         assert_eq!(after, vector.after, "{}", vector.name);
-        if let Some(after) = after.as_ref().filter(|_| edit["kind"] == "add_id") {
+        if let Some(after) = after
+            .as_ref()
+            .filter(|_| edit["kind"] == "add_id" && !vector.identity_changes)
+        {
             assert_eq!(
                 line_hash(after),
                 line_hash(&vector.line),

@@ -270,11 +270,30 @@ final class SyncCoreFixtureTests: XCTestCase {
             var max: Int
             var cut: String
         }
+        struct MirrorText: Decodable {
+            var text: String
+            var mirror: String
+        }
+        struct Row: Decodable {
+            var line: String
+            var comments: String
+            var edited: String
+            var strip: String
+        }
+        struct Snooze: Decodable {
+            var now: String
+            var minutes: Int
+            var zone: String
+            var due: String
+        }
         struct Vectors: Decodable {
             var scope: [Scope]
             var cases: [Case]
             var mirrors: [Mirror]
             var texts: [Cut]
+            var mirror_texts: [MirrorText]
+            var rows: [Row]
+            var snoozes: [Snooze]
         }
         func whenText(_ when: ReminderWhen) -> String {
             switch when {
@@ -351,6 +370,35 @@ final class SyncCoreFixtureTests: XCTestCase {
             for vector in vectors.texts {
                 XCTAssertEqual(Reminders.cutText(vector.text, maxCharacters: vector.max), vector.cut, vector.text)
             }
+
+            for vector in vectors.mirror_texts {
+                let mirror = Reminders.mirrorText(vector.text)
+                XCTAssertEqual(mirror, vector.mirror, vector.text)
+                let line = "- [ ] \(mirror) · [[backlog]] <!--rem:2f6b08e19a5c-->"
+                XCTAssertNil(Reminders.parseLine(line, day: nil)?.token, "\(vector.text): no token on a mirror line")
+            }
+
+            func prefix(_ line: String, _ offset: Int) -> String {
+                Bytes.string(Array(line.utf8).prefix(offset)[...])
+            }
+            for vector in vectors.rows {
+                XCTAssertEqual(prefix(vector.line, Reminders.trailingCommentsStart(vector.line)), vector.comments, "\(vector.line): comments")
+                XCTAssertEqual(prefix(vector.line, Reminders.trailingMetadataStart(vector.line)), vector.edited, "\(vector.line): edited")
+                XCTAssertEqual(Reminders.stripReminder(vector.line), vector.strip, "\(vector.line): strip")
+            }
+
+            for vector in vectors.snoozes {
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = try XCTUnwrap(TimeZone(identifier: vector.zone))
+                let numbers = vector.now.split(whereSeparator: { "-T:".contains($0) }).compactMap { Int($0) }
+                XCTAssertEqual(numbers.count, 6, vector.now)
+                guard numbers.count == 6 else { continue }
+                let parts = DateComponents(year: numbers[0], month: numbers[1], day: numbers[2], hour: numbers[3], minute: numbers[4], second: numbers[5])
+                let now = try XCTUnwrap(calendar.date(from: parts))
+                var settings = ReminderSettings()
+                settings.snoozeMinutes = vector.minutes
+                XCTAssertEqual(settings.snoozedDue(now: now, calendar: calendar).description, vector.due, "\(vector.now) + \(vector.minutes) min")
+            }
         }
     }
 
@@ -384,6 +432,7 @@ final class SyncCoreFixtureTests: XCTestCase {
             var line: String
             var edit: Edit
             var after: String?
+            var identity_changes: Bool?
         }
         let urls = reminderFiles("reminder_edits.json")
         XCTAssertFalse(urls.isEmpty)
@@ -405,41 +454,17 @@ final class SyncCoreFixtureTests: XCTestCase {
                 case "drop": after = Reminders.dropToken(vector.line)
                 case "attach": after = Reminders.attach(vector.line, due: try due(), id: id, homeDay: day)
                 case "add_id": after = Reminders.addID(vector.line, id: id)
+                case "place": after = Reminders.placeToken(vector.line, due: try due(), homeDay: day)
                 default:
                     XCTFail("\(vector.name): unknown edit \(edit.kind)")
                     continue
                 }
                 XCTAssertEqual(after, vector.after, vector.name)
-                if edit.kind == "add_id", let after {
+                if edit.kind == "add_id", vector.identity_changes != true, let after {
                     XCTAssertEqual(SyncCore.lineHash(after), SyncCore.lineHash(vector.line), "\(vector.name): an id never changes a line's identity")
                 }
             }
         }
-    }
-
-    func testTheDesksUnitCasesForRowsAndMetadata() throws {
-        XCTAssertEqual(Reminders.stripReminder("Renew passport (@2026-12-02 09:00) <!--gmail:ab--> <!--rem:3f9a1c0d4e21-->"), "Renew passport")
-        XCTAssertEqual(Reminders.stripReminder("Call (@tom) mum (@14:30) now"), "Call (@tom) mum now")
-        XCTAssertEqual(Reminders.stripReminder("a <!-- b --> c"), "a <!-- b --> c")
-        XCTAssertEqual(Reminders.stripReminder("plain"), "plain")
-
-        func edited(_ line: String) -> String {
-            Bytes.string(Array(line.utf8).prefix(Reminders.trailingMetadataStart(line))[...])
-        }
-        XCTAssertEqual(edited("Renew passport (@2026-12-02) <!--rem:3f9a1c0d4e21-->"), "Renew passport")
-        XCTAssertEqual(edited("Call (@2026-12-02) mum <!--x-->"), "Call (@2026-12-02) mum")
-        XCTAssertEqual(Reminders.trailingMetadataStart("plain"), 5)
-
-        let due = try XCTUnwrap(ReminderDue("2026-12-02 10:20"))
-        XCTAssertEqual(Reminders.placeToken("- [ ] Renew passport <!-- note -->", due: due, homeDay: nil), "- [ ] Renew passport (@2026-12-02 10:20) <!-- note -->")
-        XCTAssertEqual(Reminders.placeToken("Renew (@2026-11-01) soon <!--rem:3f9a1c0d4e21-->", due: due, homeDay: nil), "Renew (@2026-12-02 10:20) soon <!--rem:3f9a1c0d4e21-->")
-        XCTAssertEqual(Reminders.placeToken("Water", due: due, homeDay: VaultDay(year: 2026, month: 12, day: 2)), "Water (@10:20)")
-        XCTAssertNil(Reminders.placeToken("Standup <!--gcal:abc-->", due: due, homeDay: nil))
-
-        let line = "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it (@11:00) -->"
-        XCTAssertEqual(Reminders.trailingCommentsStart(line), line.utf8.count)
-        XCTAssertEqual(Reminders.trailingMetadataStart(line), line.utf8.count)
-        XCTAssertEqual(Reminders.stripReminder(line), "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it -->")
     }
 
     /// The index cases read as the desk's runner reads them: each entry's

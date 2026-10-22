@@ -18,7 +18,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use thock_sync_core::{
-    Due, MirrorLine, MirrorMark, ReminderState, cut_text, note_link, parse_line, reminder_text,
+    Due, MirrorLine, MirrorMark, ReminderState, mirror_text, note_link, parse_line, reminder_text,
 };
 use util::ResultExt as _;
 
@@ -29,12 +29,6 @@ use crate::reminder_index::IndexedState;
 use crate::reminder_service::{ReminderEvent, ReminderService};
 use crate::reminders::{ReminderClock, ReminderSettings};
 use crate::vault::{VAULT_MARKER_DIR, Vault};
-
-/// How long a mirror line's text may be, in characters (§7.1).
-pub const MIRROR_TEXT_CHARS: usize = 80;
-
-/// What a mirror says when its home line has no words of its own.
-const EMPTY_TEXT: &str = "Reminder";
 
 /// Where a reminder stands, as the index reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -438,21 +432,6 @@ fn followed_text(current: &str, reminder: &DayReminder) -> Option<String> {
 fn words_trailing<'a>(text: &'a str, words: &str) -> Option<&'a str> {
     let rest = text.strip_prefix(words)?;
     (rest.is_empty() || rest.starts_with(char::is_whitespace)).then_some(rest)
-}
-
-/// A home line's words as a mirror writes them: cut on a word, with nothing
-/// that would read as a marker or a strike (§7.1).
-fn mirror_text(text: &str) -> String {
-    let clean = text
-        .replace("<!--", "")
-        .replace("~~", "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if clean.is_empty() {
-        return EMPTY_TEXT.to_string();
-    }
-    cut_text(&clean, MIRROR_TEXT_CHARS)
 }
 
 /// The day section: a heading one level below the planner's, inside the
@@ -1556,19 +1535,39 @@ mod tests {
                 on(10, 21),
             ),
             open("333333333333", "c.md", "", on(10, 21)),
+            open(
+                "444444444444",
+                "d.md",
+                "Moved from (@2026-10-20 09:00) to here",
+                on(10, 21),
+            ),
         ];
         let (applied, _) = run("## Day planner\n", &reminders);
         let mirrors: Vec<MirrorLine> = applied.lines().filter_map(MirrorLine::parse).collect();
-        assert_eq!(mirrors.len(), 3, "{applied}");
+        assert_eq!(mirrors.len(), 4, "{applied}");
         assert!(
             mirrors
                 .iter()
-                .all(|mirror| mirror.text.chars().count() <= MIRROR_TEXT_CHARS + 1)
+                .all(|mirror| mirror.text.chars().count() <= thock_sync_core::MIRROR_TEXT_CHARS + 1)
         );
-        assert!(mirrors.iter().any(|mirror| mirror.text == EMPTY_TEXT));
+        assert!(mirrors.iter().any(|mirror| mirror.text == "Reminder"));
         let mut ids: Vec<&str> = mirrors.iter().map(|mirror| mirror.id.as_str()).collect();
         ids.sort_unstable();
-        assert_eq!(ids, ["111111111111", "222222222222", "333333333333"]);
+        assert_eq!(
+            ids,
+            [
+                "111111111111",
+                "222222222222",
+                "333333333333",
+                "444444444444"
+            ]
+        );
+        for line in applied.lines().filter(|line| line.contains("<!--rem:")) {
+            assert!(
+                parse_line(line, None).is_some_and(|reminder| reminder.token.is_none()),
+                "no token on a mirror line: {line}"
+            );
+        }
         for line in applied.lines().filter(|line| line.contains("<!--rem:")) {
             let id = parse_line(line, None).and_then(|reminder| reminder.id);
             assert!(id.is_some_and(|id| ids.contains(&id.as_str())), "{line}");
