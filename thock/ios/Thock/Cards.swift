@@ -47,6 +47,7 @@ struct ProseCard: View {
 
     @State private var timing: PlannerItem?
     @State private var editing: PlannerItem?
+    @State private var reminding: PlannerItem?
 
     var body: some View {
         let editable = !model.isReadOnly
@@ -56,7 +57,7 @@ struct ProseCard: View {
             ForEach(visible) { block in
                 if let item = card.items.first(where: { $0.line == block.line }) {
                     if !model.isBeingRemoved(item, note: note) {
-                        PlannerRow(item: item, note: note, timing: $timing, editing: $editing, allowsTime: false)
+                        PlannerRow(item: item, note: note, timing: $timing, editing: $editing, reminding: $reminding, allowsTime: false)
                     }
                 } else if editable, view.isEditable(block, in: card) {
                     BlockView(block: block)
@@ -86,7 +87,7 @@ struct ProseCard: View {
                     .accessibilityAddTraits(.isButton)
             }
         }
-        .lineSheets(timing: $timing, editing: $editing, note: note)
+        .lineSheets(timing: $timing, editing: $editing, reminding: $reminding, note: note)
     }
 }
 
@@ -95,6 +96,7 @@ struct LineSheets: ViewModifier {
     @Environment(AppModel.self) private var model
     @Binding var timing: PlannerItem?
     @Binding var editing: PlannerItem?
+    @Binding var reminding: PlannerItem?
     var note: NoteID
 
     func body(content: Content) -> some View {
@@ -113,12 +115,21 @@ struct LineSheets: ViewModifier {
                     .presentationCornerRadius(26)
                     .preferredColorScheme(model.appearance.scheme)
             }
+            .sheet(item: $reminding) { item in
+                RemindMeSheet(subject: Inline.plainText(item.label), initial: item.reminder?.due) { due in
+                    model.remindMe(item, note: note, due: due)
+                }
+                .presentationDetents([.height(360)])
+                .presentationBackground(Theme.surface)
+                .presentationCornerRadius(26)
+                .preferredColorScheme(model.appearance.scheme)
+            }
     }
 }
 
 extension View {
-    func lineSheets(timing: Binding<PlannerItem?>, editing: Binding<PlannerItem?>, note: NoteID) -> some View {
-        modifier(LineSheets(timing: timing, editing: editing, note: note))
+    func lineSheets(timing: Binding<PlannerItem?>, editing: Binding<PlannerItem?>, reminding: Binding<PlannerItem?>, note: NoteID) -> some View {
+        modifier(LineSheets(timing: timing, editing: editing, reminding: reminding, note: note))
     }
 }
 
@@ -336,6 +347,7 @@ struct PlannerCard: View {
 
     @State private var timing: PlannerItem?
     @State private var editing: PlannerItem?
+    @State private var reminding: PlannerItem?
 
     var body: some View {
         let items = planner.items.filter { !model.isBeingRemoved($0, note: note) }
@@ -346,23 +358,24 @@ struct PlannerCard: View {
                 if let name = group.name {
                     Text(name)
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(group.isCalendar ? Theme.cal : PlannerPalette.color(for: name))
+                        .foregroundStyle(group.isCalendar ? Theme.cal : group.isReminders ? Theme.amber : PlannerPalette.color(for: name))
                         .padding(.top, 8)
                         .padding(.bottom, 2)
                 }
                 ForEach(group.items.filter { !model.isBeingRemoved($0, note: note) }) { item in
-                    PlannerRow(item: item, note: note, timing: $timing, editing: $editing)
+                    PlannerRow(item: item, note: note, timing: $timing, editing: $editing, reminding: $reminding)
                 }
                 ForEach(group.notes) { block in
                     BlockView(block: block)
                         .padding(.vertical, 5)
                 }
-                if !group.isCalendar, !model.isReadOnly {
+                // The day's Reminders section is the desk's to write.
+                if !group.isCalendar, !group.isReminders, !model.isReadOnly {
                     AddLineRow(group: group, note: note)
                 }
             }
         }
-        .lineSheets(timing: $timing, editing: $editing, note: note)
+        .lineSheets(timing: $timing, editing: $editing, reminding: $reminding, note: note)
     }
 }
 
@@ -394,9 +407,21 @@ struct PlannerRow: View {
     var note: NoteID
     @Binding var timing: PlannerItem?
     @Binding var editing: PlannerItem?
+    @Binding var reminding: PlannerItem?
     /// Only the day's planner takes hours (V37 §5); goals and the checklists
     /// of other sections do not.
     var allowsTime = true
+
+    /// The reminder chip after the words, or *from Tue* on a copy carried
+    /// from an earlier day (V45 §7.1, §10.4).
+    private var reminderNote: Text {
+        if let mirror = item.mirror {
+            guard mirror.mark == nil, let carried = mirror.carried else { return Text("") }
+            return Text("  from \(carried.date.formatted("ddd"))").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.warn)
+        }
+        guard let reminder = item.reminder, let chip = ReminderChip(reminder, today: .today()) else { return Text("") }
+        return Text("  ") + ReminderChipText.text(chip)
+    }
 
     private var timeText: String {
         guard let time = item.time else { return "" }
@@ -412,6 +437,7 @@ struct PlannerRow: View {
         let label = Text(Rich.text(Inline.parse(item.label)))
             .font(.system(size: 17))
             .strikethrough(faded, color: Theme.dim)
+            + reminderNote
         // The hour is what the eye scans for, so it never reads as part of
         // the words; meetings keep the calendar's tone.
         let timeColor = faded ? Theme.dim : (item.isCalendar ? Theme.cal : Theme.amber)
@@ -432,6 +458,17 @@ struct PlannerRow: View {
 
         if model.isReadOnly {
             row.accessibilityHint(item.isCalendar ? "From your calendar" : "")
+        } else if item.mirror != nil {
+            // A copy of a reminder that lives in another note: a tick closes
+            // it there (V45 §5.3); everything else is done to the reminder.
+            row
+                .onTapGesture { model.tick(item, note: note) }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("A reminder from \(item.mirror?.note ?? "another note")")
+                .contextMenu {
+                    Button(item.done ? "Untick" : "Tick") { model.tick(item, note: note) }
+                    Button("Open Reminders") { model.openReminders() }
+                }
         } else if item.isCalendar {
             // The desk's calendar sync owns the words and the hour; a tick is
             // the person's own and survives the next sync.
@@ -451,6 +488,7 @@ struct PlannerRow: View {
                     if allowsTime, note.kind == .daily {
                         Button("Set a time…") { timing = item }
                     }
+                    Button(item.reminder?.token == nil ? "Remind me…" : "Reschedule…") { reminding = item }
                     Button(note.kind == .weekly ? "Edit this goal" : "Edit this line") { editing = item }
                     Button("Move to Soon") {
                         if model.perform({ try $0.moveToSoon(item, note: note) }) {

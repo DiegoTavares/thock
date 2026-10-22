@@ -105,7 +105,7 @@ struct ReceiptsScreen: View {
 
     private func dot(for state: ReceiptState) -> Color {
         switch state {
-        case .filed, .addedToToday, .addedToBacklog, .archived: return Theme.good
+        case .filed, .addedToToday, .addedToBacklog, .addedToReminders, .archived: return Theme.good
         default: return Theme.dim
         }
     }
@@ -148,6 +148,8 @@ struct ReceiptsScreen: View {
             return Text("\(kind) · \(when(record.madeAt)) · ") + Text("added to Today").foregroundStyle(emphasis)
         case .addedToBacklog:
             return Text("\(kind) · \(when(record.madeAt)) · ") + Text("added to Backlog · Soon").foregroundStyle(emphasis)
+        case .addedToReminders:
+            return Text("Reminder · \(when(record.madeAt)) · ") + Text("waits in Reminders").foregroundStyle(emphasis)
         case .archived(let day):
             return Text("Archived" + when(day))
         case .gone:
@@ -738,6 +740,145 @@ struct SetTimeSheet: View {
                 end = date(minutes: min(minutes(newStart) + 30, 23 * 60 + 59))
             }
         }
+    }
+}
+
+/// *Remind me* (V45 §10.2), a sibling of *Set a time* at the same height:
+/// three quick choices that answer at once, or a day and a time picked by
+/// hand. Used by the capture chip, *Remind me…* on a line, and rescheduling.
+struct RemindMeSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    /// The words the reminder is about, shown under the title.
+    var subject: String
+    var initial: ReminderDue?
+    var onPick: (ReminderDue) -> Void
+
+    @State private var day = Date()
+    @State private var time = Date()
+    @State private var noTime = false
+
+    private var settings: ReminderSettings {
+        model.session?.config.reminders ?? ReminderSettings()
+    }
+
+    private var today: VaultDay { .today() }
+
+    private func pick(_ due: ReminderDue) {
+        UISelectionFeedbackGenerator().selectionChanged()
+        onPick(due)
+        dismiss()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SheetHeader(leading: "Cancel", title: "Remind me", trailing: "Done") {
+                dismiss()
+            } onTrailing: {
+                let parts = Calendar.current.dateComponents([.hour, .minute], from: time)
+                pick(ReminderDue(date: VaultDay(day), time: noTime ? nil : ClockTime(clampingHour: parts.hour ?? 9, minute: parts.minute ?? 0)))
+            }
+            if !subject.isEmpty {
+                Text(subject)
+                    .font(.system(size: 17))
+                    .foregroundStyle(Theme.muted)
+                    .lineLimit(1)
+            }
+            HStack(spacing: 8) {
+                // *Later today* only while there is a later today left.
+                if Calendar.current.component(.hour, from: Date()) < 16 {
+                    quick("Later today", "17:00", ReminderDue(date: today, time: ClockTime(clampingHour: 17, minute: 0)))
+                }
+                quick("Tomorrow", settings.tomorrowAt.description, settings.tomorrowDue(today: today))
+                quick("Next week", "Mon \(settings.tomorrowAt)", settings.mondayDue(today: today))
+            }
+            Text("DATE AND TIME")
+                .font(Theme.mono(11, weight: .medium))
+                .foregroundStyle(Theme.dim)
+                .padding(.top, 4)
+            HStack {
+                DatePicker("Day", selection: $day, in: Calendar.current.startOfDay(for: Date())..., displayedComponents: .date)
+                    .labelsHidden()
+                if !noTime {
+                    DatePicker("Time", selection: $time, displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                }
+                Spacer(minLength: 0)
+            }
+            Toggle("No time", isOn: $noTime)
+                .toggleStyle(ThockToggleStyle())
+            if model.notificationsDenied {
+                Text("Notifications are off for Thock, so this won't ring on this phone. It still waits in Reminders.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.dim)
+            }
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 17))
+        .foregroundStyle(Theme.ink)
+        .padding(.horizontal, 20)
+        // 24-hour time, as the vault writes it.
+        .environment(\.locale, Locale(identifier: "en_GB"))
+        .task { await model.askToRing() }
+        .onAppear {
+            let start = initial ?? settings.tomorrowDue(today: today)
+            day = Calendar.current.date(from: DateComponents(year: start.date.year, month: start.date.month, day: start.date.day, hour: 12)) ?? Date()
+            let at = start.time ?? settings.dateOnlyAt
+            time = Calendar.current.date(bySettingHour: at.hour, minute: at.minute, second: 0, of: Date()) ?? Date()
+            noTime = initial != nil && initial?.time == nil
+        }
+    }
+
+    private func quick(_ title: String, _ detail: String, _ due: ReminderDue) -> some View {
+        Button { pick(due) } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(Theme.ink)
+                Text(detail)
+                    .font(Theme.mono(12))
+                    .foregroundStyle(Theme.amber)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.rule, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title), \(detail)")
+    }
+}
+
+extension ReminderDue {
+    /// *⏰ Thu 10:00*: what the capture chip reads once a time is set.
+    func chipText(today: VaultDay) -> String {
+        "⏰ " + shortLabel(today: today)
+    }
+
+    /// The day as a week reads it, then the time.
+    func shortLabel(today: VaultDay) -> String {
+        let distance = today.days(until: date)
+        let day: String
+        switch distance {
+        case 0: day = "Today"
+        case 1...6: day = date.formatted("ddd")
+        default: day = date.formatted(date.year == today.year ? "ddd D MMM" : "ddd D MMM YYYY")
+        }
+        return time.map { "\(day) \($0)" } ?? day
+    }
+
+    /// *Rings Thursday at 10:00*.
+    func ringsSentence(today: VaultDay, dateOnlyAt: ClockTime) -> String {
+        let distance = today.days(until: date)
+        let day: String
+        switch distance {
+        case 0: day = "today"
+        case 1: day = "tomorrow"
+        case 2...6: day = date.weekdayName
+        default: day = date.formatted(date.year == today.year ? "dddd D MMMM" : "dddd D MMMM YYYY")
+        }
+        return "Rings \(day) at \(time ?? dateOnlyAt)"
     }
 }
 

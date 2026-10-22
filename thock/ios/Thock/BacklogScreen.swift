@@ -8,6 +8,7 @@ struct BacklogScreen: View {
     @Environment(AppModel.self) private var model
     @State private var editing: BacklogTask?
     @State private var adding: BacklogGroup?
+    @State private var reminding: BacklogTask?
     @State private var showingDone = false
     @State private var collapsed: Set<String> = Self.loadCollapsed()
 
@@ -108,6 +109,15 @@ struct BacklogScreen: View {
                 model.backlogEdit(task, text: text)
             }
         }
+        .sheet(item: $reminding) { task in
+            RemindMeSheet(subject: Inline.plainText(task.label), initial: task.reminder?.due) { due in
+                model.remindMe(task, due: due)
+            }
+            .presentationDetents([.height(360)])
+            .presentationBackground(Theme.surface)
+            .presentationCornerRadius(26)
+            .preferredColorScheme(model.appearance.scheme)
+        }
         .sheet(item: $adding) { group in
             BacklogLineSheet(title: group.name.map { "Add to \($0)" } ?? "Add to \(view.section(group.heading))", initial: "", hint: "It lands at the end of the group.") { text in
                 model.backlogAdd(text, to: group)
@@ -204,7 +214,7 @@ struct BacklogScreen: View {
             .accessibilityAddTraits(.isButton)
             .accessibilityHint(isCollapsed ? "Expands the group" : "Collapses the group")
         case .task(let task, let group):
-            BacklogRow(task: task, group: group, view: view, rows: rows, editing: $editing)
+            BacklogRow(task: task, group: group, view: view, rows: rows, editing: $editing, reminding: $reminding)
         case .empty(let section):
             Text(section.exists ? "Nothing here yet." : "Nothing in \(section.title) yet.")
                 .font(.system(size: 16))
@@ -317,6 +327,7 @@ struct BacklogRow: View {
     var view: BacklogView
     var rows: [BacklogScreen.Row]
     @Binding var editing: BacklogTask?
+    @Binding var reminding: BacklogTask?
 
     /// The open tasks drawn in this group, in order.
     private var siblings: [BacklogTask] {
@@ -341,7 +352,7 @@ struct BacklogRow: View {
             .disabled(!editable)
             .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 3 }
             .accessibilityLabel("Tick")
-            Text(Rich.text(Inline.parse(task.label)))
+            (Text(Rich.text(Inline.parse(task.label))) + chip)
                 .font(.system(size: 17))
                 .foregroundStyle(Theme.ink)
                 .fixedSize(horizontal: false, vertical: true)
@@ -365,6 +376,7 @@ struct BacklogRow: View {
             if editable {
                 Button("Tick") { model.backlogTick(task) }
                 Button("Edit this task") { editing = task }
+                Button(task.reminder?.token == nil ? "Remind me…" : "Reschedule…") { reminding = task }
                 moveUpDown
                 Menu("Move to…") {
                     ForEach(view.openSections, id: \.kind) { section in
@@ -380,6 +392,12 @@ struct BacklogRow: View {
                 Button("Remove", role: .destructive) { model.backlogRemove(task) }
             }
         }
+    }
+
+    /// The reminder the task carries, as its chip (V45 §10.4).
+    private var chip: Text {
+        guard let reminder = task.reminder, let chip = ReminderChip(reminder, today: .today()) else { return Text("") }
+        return Text("  ") + ReminderChipText.text(chip)
     }
 
     @ViewBuilder

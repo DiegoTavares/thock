@@ -11,6 +11,10 @@ struct CaptureSheet: View {
     var preset: CaptureDestination?
 
     @State private var destination: CaptureDestination = .today
+    /// The chip to fall back to when *Remind me* closes without a time.
+    @State private var beforeReminder: CaptureDestination = .today
+    @State private var due: ReminderDue?
+    @State private var choosingTime = false
     @State private var blocks: [Block] = []
     @State private var images: [ImageAttachment] = []
     @State private var handle = EditorHandle()
@@ -25,7 +29,24 @@ struct CaptureSheet: View {
         case .inbox: return "Lands in your inbox. Triage sorts it at the desk."
         case .today: return "One line joins today's plan. More than one lands in today's note as written."
         case .backlog: return "Goes under Soon in your backlog."
+        case .reminder:
+            let settings = model.session?.config.reminders ?? ReminderSettings()
+            guard let due else { return "Rings when you choose and waits in \(settings.index)." }
+            return "\(due.ringsSentence(today: .today(), dateOnlyAt: settings.dateOnlyAt)) and waits in \(settings.index)."
         }
+    }
+
+    private func choose(_ option: CaptureDestination) {
+        UISelectionFeedbackGenerator().selectionChanged()
+        guard option == .reminder else {
+            destination = option
+            return
+        }
+        if destination != .reminder {
+            beforeReminder = destination
+        }
+        destination = .reminder
+        choosingTime = true
     }
 
     var body: some View {
@@ -47,10 +68,9 @@ struct CaptureSheet: View {
             HStack(spacing: 8) {
                 ForEach(CaptureDestination.allCases, id: \.self) { option in
                     Button {
-                        destination = option
-                        UISelectionFeedbackGenerator().selectionChanged()
+                        choose(option)
                     } label: {
-                        Text(option.title)
+                        Text(option == .reminder ? (due?.chipText(today: .today()) ?? option.title) : option.title)
                             .font(.system(size: 14, weight: .medium))
                             .foregroundStyle(destination == option ? Theme.amberInk : Theme.muted)
                             .padding(.horizontal, 14)
@@ -70,6 +90,18 @@ struct CaptureSheet: View {
                 .padding(.bottom, 10)
         }
         .padding(.horizontal, 20)
+        .sheet(isPresented: $choosingTime, onDismiss: {
+            // Closed without a time: the capture goes where it was going.
+            if due == nil {
+                destination = beforeReminder
+            }
+        }) {
+            RemindMeSheet(subject: "", initial: due) { due = $0 }
+                .presentationDetents([.height(360)])
+                .presentationBackground(Theme.surface)
+                .presentationCornerRadius(26)
+                .preferredColorScheme(model.appearance.scheme)
+        }
         .onAppear {
             destination = preset ?? model.chip(for: entry)
         }
@@ -87,7 +119,10 @@ struct CaptureSheet: View {
         guard !finished else { return }
         finished = true
         guard !isEmpty else { return }
-        model.saveCapture(blocks: blocks, destination: destination, images: images, entry: entry)
+        // A reminder with no time yet is not a reminder: it goes where the
+        // capture was going before the chip was touched.
+        let target = destination == .reminder && due == nil ? beforeReminder : destination
+        model.saveCapture(blocks: blocks, destination: target, images: images, due: due, entry: entry)
     }
 }
 
@@ -97,6 +132,7 @@ extension CaptureDestination {
         case .inbox: return "Inbox"
         case .today: return "Today"
         case .backlog: return "Backlog"
+        case .reminder: return "Reminder"
         }
     }
 }
