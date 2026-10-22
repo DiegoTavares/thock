@@ -86,7 +86,15 @@ fn install(editor: &mut Editor, cx: &mut Context<Editor>) -> bool {
     );
     // The presets' time is the vault's; the defaults stand until it loads, and
     // when `.thock/reminders.toml` can't be read.
-    if let Some(project) = editor.project() {
+    if let Some(project) = editor.project().cloned() {
+        let observed = crate::reminder_service::observe_settings(&project, cx, {
+            let reminder_settings = reminder_settings.clone();
+            move |_, settings, _| *reminder_settings.borrow_mut() = settings.clone()
+        });
+        if let Some(settings) = observed {
+            *reminder_settings.borrow_mut() = settings;
+            return true;
+        }
         let fs = project.read(cx).fs().clone();
         cx.spawn(async move |_, _| {
             if let Some(settings) = load_reminder_settings(&fs, &note.vault_root)
