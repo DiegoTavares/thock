@@ -525,11 +525,17 @@ pub fn status_for_reminder_day(hold: &DayHold) -> ConnectorStatus {
     }
 }
 
-/// The Reminders row for the Day Planner: a failed write first, then a hold.
+/// The Reminders row: a failed write of the index or of a day section
+/// first, then today's hold.
 pub fn reminder_day_status(service: &ReminderService, cx: &App) -> Option<ConnectorStatus> {
     status_for_reminders(service.status()).or_else(|| {
         let day_sync = service.day_sync()?.read(cx);
-        day_sync.hold().map(status_for_reminder_day)
+        match day_sync.failure() {
+            Some(error) => status_for_reminders(&ReminderStatus::Failing {
+                error: error.clone(),
+            }),
+            None => day_sync.hold().map(status_for_reminder_day),
+        }
     })
 }
 
