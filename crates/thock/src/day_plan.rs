@@ -63,6 +63,9 @@ pub enum ItemTiming {
     Timed { start_min: u32, end_min: u32 },
     /// Rendered as a chip in the unscheduled strip.
     Unscheduled,
+    /// A reminder's mirror line (V45 §7.3): a bell marker at `at_min`, never
+    /// a block.
+    Point { at_min: u32 },
 }
 
 /// How much of the grid an item claims. A calendar *status* block — Google's
@@ -94,6 +97,12 @@ pub struct PlanItem {
     /// heading) the item sits under; `None` for root-level items and when the
     /// whole note is parsed without a planner heading (spec v8 §11.1).
     pub section: Option<String>,
+    /// When the line's own `(@HH:MM)` reminder rings, in minutes since
+    /// midnight: a point beside the line's block (V45 §7.3).
+    pub reminder_min: Option<u32>,
+    /// The original day of a reminder carried into today from an earlier
+    /// one, which the panel draws as *from Tue 20 Oct* (V45 §7.1).
+    pub carried_from: Option<chrono::NaiveDate>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -128,6 +137,22 @@ impl DayPlan {
             .iter()
             .any(|item| matches!(item.timing, ItemTiming::Timed { .. }))
     }
+
+    /// Every reminder point on the grid as `(item index, minute)`, earliest
+    /// first: mirror lines, and the token times on planner lines.
+    pub fn points(&self) -> Vec<(usize, u32)> {
+        let mut points: Vec<(usize, u32)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| match item.timing {
+                ItemTiming::Point { at_min } => Some((index, at_min)),
+                _ => item.reminder_min.map(|at_min| (index, at_min)),
+            })
+            .collect();
+        points.sort_by_key(|(index, at_min)| (*at_min, *index));
+        points
+    }
 }
 
 /// Parses a note's text into the plan model (spec §5). Candidate lines are
@@ -153,6 +178,12 @@ pub fn parse_day_plan(text: &str, config: &DayPlannerConfig) -> DayPlan {
             && level == planner_level + 1
         {
             current_section = Some(heading_text.to_string());
+            continue;
+        }
+        if current_section.is_some()
+            && let Some(mirror) = thock_sync_core::MirrorLine::parse(line)
+        {
+            items.push(mirror_item(row as u32, mirror, current_section.clone()));
             continue;
         }
         let Some((done, task_text)) = parse_task_line(line) else {
@@ -185,9 +216,48 @@ pub fn parse_day_plan(text: &str, config: &DayPlannerConfig) -> DayPlan {
             label: label.to_string(),
             timing,
             section: current_section.clone(),
+            reminder_min: token_minute(line),
+            carried_from: None,
         });
     }
     DayPlan { items }
+}
+
+/// A mirror line under the day's Reminders subsection, as a point at its
+/// time or, untimed or carried, a chip.
+fn mirror_item(row: u32, mirror: thock_sync_core::MirrorLine, section: Option<String>) -> PlanItem {
+    PlanItem {
+        row,
+        done: mirror.checked,
+        weight: ItemWeight::Normal,
+        struck: mirror.mark.is_some(),
+        label: mirror.text,
+        timing: match mirror.time {
+            Some(time) => ItemTiming::Point {
+                at_min: minute_of_day(time),
+            },
+            None => ItemTiming::Unscheduled,
+        },
+        section,
+        reminder_min: None,
+        carried_from: mirror.carried.map(|due| due.date),
+    }
+}
+
+/// The minute a planner line's own reminder rings. Only a time-only token
+/// counts: it is what a daily note's reminders are written as, and a dated
+/// token may name another day, which this parse can't tell from the text.
+fn token_minute(line: &str) -> Option<u32> {
+    let token = thock_sync_core::parse_line(line, None)?.token?;
+    match token.when {
+        thock_sync_core::When::Time(time) => Some(minute_of_day(time)),
+        _ => None,
+    }
+}
+
+fn minute_of_day(time: chrono::NaiveTime) -> u32 {
+    use chrono::Timelike as _;
+    time.hour() * 60 + time.minute()
 }
 
 /// Trims `text` and, when the whole of it is one `~~strikethrough~~` run,
@@ -538,6 +608,10 @@ pub fn grid_bounds(plan: &DayPlan, config: &DayPlannerConfig) -> (u32, u32) {
             end = end.max(end_min);
         }
     }
+    for (_, at_min) in plan.points() {
+        start = start.min(at_min);
+        end = end.max(at_min + 1);
+    }
     (start / 60 * 60, end.div_ceil(60) * 60)
 }
 
@@ -591,7 +665,7 @@ fn layout_lane(plan: &DayPlan, weight: ItemWeight, min_visual_minutes: u32) -> V
                 column: 0,
                 column_count: 1,
             }),
-            ItemTiming::Unscheduled => None,
+            ItemTiming::Unscheduled | ItemTiming::Point { .. } => None,
         })
         .collect();
     blocks.sort_by_key(|block| (block.start_min, block.end_min));
@@ -671,6 +745,8 @@ mod tests {
                     label: "Evaluate the plan".to_string(),
                     timing: timed(480, 660),
                     section: None,
+                    reminder_min: None,
+                    carried_from: None,
                 },
                 PlanItem {
                     row: 1,
@@ -680,6 +756,8 @@ mod tests {
                     label: "Standup".to_string(),
                     timing: timed(570, 600),
                     section: None,
+                    reminder_min: None,
+                    carried_from: None,
                 },
                 PlanItem {
                     row: 2,
@@ -689,6 +767,8 @@ mod tests {
                     label: "Workout".to_string(),
                     timing: ItemTiming::Unscheduled,
                     section: None,
+                    reminder_min: None,
+                    carried_from: None,
                 },
             ]
         );
@@ -1090,6 +1170,52 @@ mod tests {
             "a token in front of the time takes the line off the planner (V4 §5)"
         );
         assert_eq!(plan.items[2].label, "16:00 Haircut");
+    }
+
+    #[test]
+    fn mirror_lines_are_points_and_token_times_add_points() {
+        let plan = parse_day_plan(
+            "## Day planner\n\
+             - [ ] 16:00 - 17:00 Dentist (@15:30) <!--rem:5b71c08e3f6d-->\n\
+             - [ ] Call (@2026-12-02 10:00)\n\
+             \n\
+             ### Reminders\n\
+             - [ ] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->\n\
+             - [ ] Send the October invoice · [[reminders]] <!--rem:a90c1377d02e-->\n\
+             - [ ] Renew the car insurance · 2026-10-20 09:00 · [[backlog]] <!--rem:2f6b08e19a5c-->\n\
+             - [ ] ~~Fix the gate~~ → 2026-10-23 · [[projects/house]] <!--rem:0d93be7a1c44-->\n\
+             \n\
+             ### Calendar\n\
+             - [ ] 12:00 - 12:30 Team sync <!--gcal:5d0c2a91b7e4-->\n",
+            &config(),
+        );
+        let dentist = &plan.items[0];
+        assert_eq!(dentist.label, "Dentist");
+        assert_eq!(dentist.timing, timed(960, 1020));
+        assert_eq!(dentist.reminder_min, Some(930));
+        assert_eq!(
+            plan.items[1].reminder_min, None,
+            "a dated token may be another day's"
+        );
+        let plumber = &plan.items[2];
+        assert_eq!(plumber.label, "Call the plumber");
+        assert_eq!(plumber.timing, ItemTiming::Point { at_min: 870 });
+        assert_eq!(plan.items[3].timing, ItemTiming::Unscheduled);
+        assert_eq!(plan.items[3].label, "Send the October invoice");
+        let carried = &plan.items[4];
+        assert_eq!(carried.label, "Renew the car insurance");
+        assert_eq!(
+            carried.carried_from,
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 20)
+        );
+        assert!(plan.items[5].struck, "a moved reminder is struck");
+        assert_eq!(plan.items[6].timing, timed(720, 750));
+        assert_eq!(plan.points(), vec![(2, 870), (0, 930)]);
+        assert_eq!(
+            layout_blocks(&plan, 15).len(),
+            2,
+            "points are never blocks: only Dentist and Team sync are"
+        );
     }
 
     #[test]

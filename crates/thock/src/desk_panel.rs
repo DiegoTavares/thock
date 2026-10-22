@@ -8,7 +8,7 @@ use crate::backlog_panel::{
     RevealBacklogTask,
 };
 use crate::backlog_panel::{BacklogFolds, BacklogPanel, BacklogView, ToggleBacklogFocus};
-use crate::day_plan::{DayPlan, ItemTiming, ItemWeight, parse_day_plan};
+use crate::day_plan::{DayPlan, ItemTiming, ItemWeight, PlanItem, parse_day_plan};
 use crate::day_planner_panel::{DayPlannerPanel, ToggleDayPlannerFocus};
 use crate::notes::NoteKind;
 use crate::vault::{Vault, VaultStatus};
@@ -172,16 +172,14 @@ pub struct NextCard {
 }
 
 /// The card for today's plan at `now` (minutes since midnight): an entry
-/// happening now, else the next one starting within three hours. All-day
+/// happening now, else the next one starting within three hours. A reminder
+/// point counts down like a block but is never *Now* (V45 §7.3). All-day
 /// and unscheduled entries, finished ones, and calendar status blocks (focus
 /// time, out of office) never make the card.
 pub fn next_card(plan: &DayPlan, now: u32) -> Option<NextCard> {
+    let open = |item: &PlanItem| !item.done && !item.struck && item.weight == ItemWeight::Normal;
     let timed = plan.items.iter().filter_map(|item| match item.timing {
-        ItemTiming::Timed { start_min, end_min }
-            if !item.done && !item.struck && item.weight == ItemWeight::Normal =>
-        {
-            Some((item, start_min, end_min))
-        }
+        ItemTiming::Timed { start_min, end_min } if open(item) => Some((item, start_min, end_min)),
         _ => None,
     });
     let line = |start: u32, label: &str| format!("{} · {label}", format_time(start));
@@ -196,9 +194,16 @@ pub fn next_card(plan: &DayPlan, now: u32) -> Option<NextCard> {
             row: item.row,
         });
     }
-    let (item, start, _) = timed
-        .filter(|(_, start, _)| *start > now && *start - now <= NEXT_WINDOW_MINUTES)
-        .min_by_key(|(_, start, _)| *start)?;
+    let points = plan
+        .points()
+        .into_iter()
+        .filter_map(|(index, at_min)| Some((plan.items.get(index)?, at_min)))
+        .filter(|(item, _)| open(item));
+    let (item, start) = timed
+        .map(|(item, start, _)| (item, start))
+        .chain(points)
+        .filter(|(_, start)| *start > now && *start - now <= NEXT_WINDOW_MINUTES)
+        .min_by_key(|(_, start)| *start)?;
     Some(NextCard {
         label: format!("NEXT · IN {}", format_wait(start - now)),
         line: line(start, &item.label),
@@ -744,6 +749,29 @@ mod tests {
         - [ ] 09:00 – 11:00 Misc\n\
         - [x] 11:40 – 12:00 Standup meeting\n\
         - [ ] 15:00 – 15:30 Bi-weekly · Dev Infra Leads\n";
+
+    #[test]
+    fn the_card_counts_down_to_a_point_and_never_calls_it_now() {
+        let plan = parse(
+            "# Day planner\n\
+             - [ ] 16:00 - 17:00 Dentist (@15:30)\n\
+             \n\
+             ## Reminders\n\
+             - [ ] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->\n",
+        );
+        let card = next_card(&plan, 14 * 60 + 5).unwrap();
+        assert_eq!(card.label, "NEXT · IN 25 MIN");
+        assert_eq!(card.line, "14:30 · Call the plumber");
+        assert_eq!(card.row, 4);
+        let card = next_card(&plan, 14 * 60 + 30).unwrap();
+        assert_eq!(
+            (card.label.as_str(), card.line.as_str()),
+            ("NEXT · IN 1 H", "15:30 · Dentist"),
+            "at its minute a point is past, never now"
+        );
+        let card = next_card(&plan, 15 * 60 + 45).unwrap();
+        assert_eq!(card.line, "16:00 · Dentist");
+    }
 
     #[test]
     fn the_card_drops_a_token_and_its_trailing_comments() {

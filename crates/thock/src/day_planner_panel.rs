@@ -686,10 +686,7 @@ impl DayPlannerPanel {
         else {
             return;
         };
-        let Some(block) = day_plan::layout_blocks(&active.plan, min_visual_minutes())
-            .into_iter()
-            .find(|block| block.item_index == selected)
-        else {
+        let Some((start_min, end_min)) = grid_extent(&active.plan, selected) else {
             return;
         };
         let viewport_height = self.grid_scroll_handle.bounds().size.height;
@@ -697,9 +694,8 @@ impl DayPlannerPanel {
             return;
         }
         let (grid_start, _) = day_plan::grid_bounds(&active.plan, &vault.config.day_planner);
-        let top = px(block.start_min.saturating_sub(grid_start) as f32 / 60.0 * HOUR_HEIGHT);
-        let height =
-            px(((block.end_min - block.start_min) as f32 / 60.0 * HOUR_HEIGHT).max(MIN_BLOCK_PX));
+        let top = px(start_min.saturating_sub(grid_start) as f32 / 60.0 * HOUR_HEIGHT);
+        let height = px(((end_min - start_min) as f32 / 60.0 * HOUR_HEIGHT).max(MIN_BLOCK_PX));
         let offset = self.grid_scroll_handle.offset();
         let scroll_top = -offset.y;
         let new_scroll_top = if top < scroll_top {
@@ -850,9 +846,84 @@ impl DayPlannerPanel {
                 .color(state.finished_color().unwrap_or(Color::Muted)),
             )
             .child(label)
+            .when_some(item.carried_from, |this, date| {
+                this.child(
+                    Label::new(format!("from {}", format_date(date, "ddd D MMM")))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning),
+                )
+            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.reveal_item(item_index, window, cx);
             }))
+            .into_any_element()
+    }
+
+    /// A reminder point (V45 §7.3): a bell at its minute, never a block. A
+    /// mirror line's point runs across the grid with its text; a planner
+    /// line's own reminder is a small bell at the block's right edge.
+    fn render_point(
+        &self,
+        item_index: usize,
+        at_min: u32,
+        item: &PlanItem,
+        grid_start: u32,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors();
+        let selected = self.selected_item == Some(item_index);
+        let state = ItemState::of(item);
+        let color = state.finished_color().unwrap_or(Color::Accent);
+        let mirror = matches!(item.timing, day_plan::ItemTiming::Point { .. });
+        let top = px(at_min.saturating_sub(grid_start) as f32 / 60.0 * HOUR_HEIGHT) - px(8.0);
+        let marker = h_flex()
+            .id(("thock-day-planner-point", item_index))
+            .absolute()
+            .top(top)
+            .h(px(16.0))
+            .gap_1()
+            .px_1()
+            .rounded_sm()
+            .cursor_pointer()
+            .bg(colors.editor_background)
+            .when(selected, |this| {
+                this.border_1().border_color(colors.text_accent)
+            })
+            .child(
+                Icon::new(IconName::Bell)
+                    .size(IconSize::XSmall)
+                    .color(color),
+            )
+            .child(
+                Label::new(format_minutes(at_min))
+                    .size(LabelSize::XSmall)
+                    .color(color),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.reveal_item(item_index, window, cx);
+            }));
+        if !mirror {
+            return marker.right(px(2.0)).into_any_element();
+        }
+        let label = LabelLike::new().size(LabelSize::XSmall).truncate();
+        let label = match state.finished_color() {
+            Some(color) => label.strikethrough().color(color),
+            None => label,
+        };
+        marker
+            .left_0()
+            .right_0()
+            .child(label.child(self.render_item_label(
+                ElementId::Name(format!("thock-day-planner-point-text-{item_index}").into()),
+                item,
+                cx,
+            )))
+            .child(
+                div()
+                    .flex_1()
+                    .h(px(1.0))
+                    .bg(colors.text_accent.opacity(0.35)),
+            )
             .into_any_element()
     }
 
@@ -939,7 +1010,14 @@ impl DayPlannerPanel {
                 lane_blocks(day_plan::ItemWeight::Normal)
                     .map(|(block, item)| self.render_block(block, item, grid_start, cx)),
             );
-        body = body.child(block_area);
+        let points = plan
+            .points()
+            .into_iter()
+            .filter_map(|(item_index, at_min)| {
+                let item = plan.items.get(item_index)?;
+                Some(self.render_point(item_index, at_min, item, grid_start, cx))
+            });
+        body = body.child(block_area.children(points));
 
         if let Some(now_minutes) = self.now_line_minutes(config, date)
             && (grid_start..=grid_end).contains(&now_minutes)
@@ -1104,17 +1182,43 @@ fn min_visual_minutes() -> u32 {
 /// first, then the grid's blocks top to bottom, left to right within a row
 /// (the status lane sits left of the day's blocks).
 fn navigation_order(plan: &DayPlan) -> Vec<usize> {
-    let mut blocks = day_plan::layout_blocks(plan, min_visual_minutes());
-    blocks.sort_by_key(|block| {
-        let lane = match plan.items.get(block.item_index).map(|item| item.weight) {
-            Some(day_plan::ItemWeight::Status) => 0,
-            _ => 1,
-        };
-        (block.start_min, lane, block.column, block.item_index)
-    });
+    let mut grid: Vec<(u32, usize, usize, usize)> =
+        day_plan::layout_blocks(plan, min_visual_minutes())
+            .into_iter()
+            .map(|block| {
+                let lane = match plan.items.get(block.item_index).map(|item| item.weight) {
+                    Some(day_plan::ItemWeight::Status) => 0,
+                    _ => 1,
+                };
+                (block.start_min, lane, block.column, block.item_index)
+            })
+            .collect();
+    // A mirror line's point is a row of its own; a planner line's reminder
+    // is reached through its block.
+    grid.extend(
+        plan.items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| match item.timing {
+                day_plan::ItemTiming::Point { at_min } => Some((at_min, 1, 0, index)),
+                _ => None,
+            }),
+    );
+    grid.sort();
     plan.unscheduled_indices()
-        .chain(blocks.into_iter().map(|block| block.item_index))
+        .chain(grid.into_iter().map(|(_, _, _, index)| index))
         .collect()
+}
+
+/// The minutes an item spans on the grid: its block, or a point's marker.
+fn grid_extent(plan: &DayPlan, item_index: usize) -> Option<(u32, u32)> {
+    if let day_plan::ItemTiming::Point { at_min } = plan.items.get(item_index)?.timing {
+        return Some((at_min, at_min + min_visual_minutes()));
+    }
+    day_plan::layout_blocks(plan, min_visual_minutes())
+        .into_iter()
+        .find(|block| block.item_index == item_index)
+        .map(|block| (block.start_min, block.end_min))
 }
 
 /// The selection carried across a re-parse of the same day: the item with
@@ -1250,6 +1354,20 @@ mod tests {
     /// planner docked and focused. `Vault::detect` reads the marker from
     /// disk, so it lives in a real temp dir mirrored into the FakeFs.
     async fn setup(cx: &mut TestAppContext, vim: bool) -> Setup {
+        let setup = setup_note(cx, vim, NOTE).await;
+        assert_eq!(
+            setup.panel.read_with(&setup.cx, |panel, _| panel
+                .active
+                .as_ref()
+                .map(|active| active.plan.items.len())),
+            Some(3),
+            "the planner mirrors the open daily note"
+        );
+        setup
+    }
+
+    /// The Desk on its Today tab, planning `daily/2026-01-05.md` holding `note`.
+    async fn setup_note(cx: &mut TestAppContext, vim: bool, note: &str) -> Setup {
         init_test(cx, vim);
         let vault_dir = tempfile::tempdir().unwrap();
         let root = vault_dir.path();
@@ -1260,7 +1378,7 @@ mod tests {
             root,
             json!({
                 ".thock": { "config.toml": "schema = 1\n" },
-                "daily": { "2026-01-05.md": NOTE },
+                "daily": { "2026-01-05.md": note },
             }),
         )
         .await;
@@ -1294,14 +1412,6 @@ mod tests {
             workspace.toggle_panel_focus::<DeskPanel>(window, cx);
         });
         cx.run_until_parked();
-        assert_eq!(
-            panel.read_with(&cx, |panel, _| panel
-                .active
-                .as_ref()
-                .map(|active| active.plan.items.len())),
-            Some(3),
-            "the planner mirrors the open daily note"
-        );
         Setup {
             desk,
             panel,
@@ -1405,6 +1515,37 @@ mod tests {
         assert!(panel_focused(&mut setup));
         setup.cx.simulate_keystrokes("3");
         assert_eq!(tab(&setup), DeskTab::Done);
+    }
+
+    #[gpui::test]
+    async fn the_keyboard_reaches_a_reminder_point_in_time_order(cx: &mut TestAppContext) {
+        let note = "# Day planner\n\
+            - [ ] 09:00 – 10:00 First block\n\
+            - [ ] 16:00 – 17:00 Dentist (@15:30)\n\
+            \n\
+            ## Reminders\n\
+            - [ ] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->\n\
+            - [ ] Renew the car insurance · 2026-01-02 09:00 · [[backlog]] <!--rem:2f6b08e19a5c-->\n";
+        let mut setup = setup_note(cx, false, note).await;
+        let plan = setup.panel.read_with(&setup.cx, |panel, _| {
+            panel.active.as_ref().map(|active| active.plan.clone())
+        });
+        let plan = plan.expect("the note is planned");
+        assert_eq!(plan.points(), vec![(2, 14 * 60 + 30), (1, 15 * 60 + 30)]);
+        setup.cx.simulate_keystrokes("down");
+        assert_eq!(
+            selected_row(&setup),
+            Some(6),
+            "the carried reminder is a chip"
+        );
+        setup.cx.simulate_keystrokes("down down");
+        assert_eq!(
+            selected_row(&setup),
+            Some(5),
+            "the 14:30 point comes before 16:00"
+        );
+        setup.cx.simulate_keystrokes("down");
+        assert_eq!(selected_row(&setup), Some(2));
     }
 
     #[gpui::test]
