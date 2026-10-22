@@ -2,6 +2,7 @@ import LocalAuthentication
 import SwiftUI
 import ThockKit
 import UIKit
+import UserNotifications
 import WidgetKit
 
 enum Appearance: String, CaseIterable, Identifiable {
@@ -93,6 +94,11 @@ final class AppModel {
     var showingWeek = false
     /// The backlog is a canvas over the pager, never a sheet (V38 §4).
     var showingBacklog = false
+    /// So is the Reminders screen (V45 §10.4).
+    var showingReminders = false
+    /// A notification was tapped before the app had greeted its person; the
+    /// greeting opens Reminders instead of Today's pager.
+    @ObservationIgnored private var remindersRequested = false
     var pairingError: String?
     var isPairing = false
     var deskAwake = true
@@ -169,6 +175,7 @@ final class AppModel {
             if store.isConnected {
                 try await connect(store: store)
                 phase = .ready
+                scheduleReminderRefresh()
             } else {
                 phase = .welcome
             }
@@ -209,6 +216,7 @@ final class AppModel {
     private func storeChanged() {
         revision += 1
         scheduleWidgetReload()
+        scheduleReminderRefresh()
         // A write just landed locally; send it on without waiting for the feed.
         Task { await engine?.sync() }
     }
@@ -294,15 +302,71 @@ final class AppModel {
         }
     }
 
+    // MARK: Reminders ringing (V45 §10.5)
+
+    @ObservationIgnored private var reminderRefresh: Task<Void, Never>?
+    /// Whether this phone may ring, once anything has asked.
+    private(set) var notificationsDenied = false
+
+    /// Hands iOS the soonest reminders again. A burst of store changes is
+    /// one refresh.
+    func scheduleReminderRefresh() {
+        reminderRefresh?.cancel()
+        reminderRefresh = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled, phase == .ready, let session else { return }
+            AppDelegate.notifier.registerCategories(tomorrowAt: session.config.reminders.tomorrowAt)
+            await AppDelegate.notifier.refresh(alerts: session.reminderAlerts())
+        }
+    }
+
+    /// Asked the first time the Reminder chip or Remind me… is used, never
+    /// at launch. Denied, reminders still save and list.
+    func askToRing() async {
+        let notifier = AppDelegate.notifier
+        switch await notifier.authorization() {
+        case .notDetermined:
+            notificationsDenied = !(await notifier.requestAuthorization())
+        case .denied:
+            notificationsDenied = true
+        default:
+            notificationsDenied = false
+        }
+        scheduleReminderRefresh()
+    }
+
+    /// A notification's answer, which may have launched the app in the
+    /// background: one write on the home line, then a round to send it.
+    func answer(_ answer: ReminderAnswer, reminderID: String) async {
+        await boot()
+        guard phase == .ready else { return }
+        guard perform({ try $0.answer(answer, reminderID: reminderID) }) else { return }
+        var grace = UIBackgroundTaskIdentifier.invalid
+        grace = UIApplication.shared.beginBackgroundTask {
+            UIApplication.shared.endBackgroundTask(grace)
+            grace = .invalid
+        }
+        await engine?.sync()
+        if UIApplication.shared.applicationState == .background {
+            await engine?.stop()
+        }
+        await AppDelegate.notifier.refresh(alerts: session?.reminderAlerts() ?? [])
+        if grace != .invalid {
+            UIApplication.shared.endBackgroundTask(grace)
+        }
+    }
+
     private func finishConnecting() async {
         goToToday()
         isUnlocked = true
         needsGreeting = false
         phase = .ready
+        scheduleReminderRefresh()
         await refreshSyncState()
     }
 
     func disconnect() async {
+        await AppDelegate.notifier.clear()
         askTask?.cancel()
         askTurns = []
         await engine?.disconnect()
@@ -353,6 +417,7 @@ final class AppModel {
     func becameActive() {
         guard phase == .ready else { return }
         revision += 1
+        scheduleReminderRefresh()
         // Reopens the feed the background let go of, starting with a round;
         // back from inactive with the feed still held, the round alone.
         Task { await engine?.start() }
@@ -433,6 +498,8 @@ final class AppModel {
         selectedWeek = .current()
         showingWeek = false
         showingBacklog = false
+        showingReminders = remindersRequested
+        remindersRequested = false
     }
 
     // MARK: The backlog
@@ -442,12 +509,128 @@ final class AppModel {
     func openBacklog() {
         guard phase == .ready, isUnlocked else { return }
         sheet = nil
+        showingReminders = false
         withAnimation(.snappy) { showingBacklog = true }
     }
 
     func closeBacklog() {
         commitPendingRemoval()
         withAnimation(.snappy) { showingBacklog = false }
+    }
+
+    // MARK: Reminders (V45 §10.4)
+
+    /// Opens Reminders over the pager. It reads the vault, so it waits for
+    /// the unlock like the backlog; until then the canvas stays locked.
+    func openReminders() {
+        guard phase == .ready else { return }
+        sheet = nil
+        showingBacklog = false
+        withAnimation(.snappy) { showingReminders = true }
+    }
+
+    func closeReminders() {
+        withAnimation(.snappy) { showingReminders = false }
+    }
+
+    /// A tap on a reminder's notification.
+    func openRemindersFromNotification() {
+        if phase == .ready, !needsGreeting {
+            openReminders()
+        } else {
+            remindersRequested = true
+        }
+    }
+
+    /// The reminder found again by its id after a write moved its line.
+    private func reminder(id: String) -> IndexedReminder? {
+        session?.reminderIndex().reminder(id: id)
+    }
+
+    func closeReminder(_ reminder: IndexedReminder) {
+        guard perform({ try $0.closeReminder(reminder) }) else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        show("Done") { [weak self] in
+            if let now = self?.reminder(id: reminder.id) {
+                self?.perform { try $0.reopenReminder(now) }
+            }
+            withAnimation(.snappy) { self?.toast = nil }
+        }
+    }
+
+    func reopenReminder(_ reminder: IndexedReminder) {
+        guard perform({ try $0.reopenReminder(reminder) }) else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        show("Open again") { [weak self] in
+            if let now = self?.reminder(id: reminder.id) {
+                self?.perform { try $0.closeReminder(now) }
+            }
+            withAnimation(.snappy) { self?.toast = nil }
+        }
+    }
+
+    func rescheduleReminder(_ reminder: IndexedReminder, to due: ReminderDue) {
+        guard perform({ try $0.rescheduleReminder(reminder, to: due) }) else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        show("Moved to \(due.shortLabel(today: .today()))") { [weak self] in
+            self?.restoreDue(of: reminder)
+        }
+    }
+
+    /// Removes the token and keeps the words and the id (V45 decision 16).
+    func dropReminder(_ reminder: IndexedReminder) {
+        guard perform({ try $0.dropReminder(reminder) }) else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        show("Reminder dropped") { [weak self] in
+            self?.restoreDue(of: reminder)
+        }
+    }
+
+    /// Undo for a reschedule or a drop: the token as it was.
+    private func restoreDue(of reminder: IndexedReminder) {
+        if let due = reminder.due, let now = self.reminder(id: reminder.id) {
+            perform { try $0.rescheduleReminder(now, to: due) }
+        }
+        withAnimation(.snappy) { toast = nil }
+    }
+
+    /// The note a reminder lives in, where the phone can show it: a day, a
+    /// week, the backlog, or the index itself.
+    func openNote(of reminder: IndexedReminder) {
+        guard let config = session?.config else { return }
+        if let day = config.day(ofDailyPath: reminder.home) {
+            showingReminders = false
+            go(to: day)
+        } else if let week = config.week(ofWeeklyPath: reminder.home) {
+            showingReminders = false
+            go(to: week)
+        } else if reminder.home == config.backlogFile {
+            openBacklog()
+        } else if reminder.home == config.reminders.index {
+            show("It lives in \(reminder.home), this list.")
+        } else {
+            show("\(Reminders.noteLink(reminder.home)) opens at the desk.")
+        }
+    }
+
+    /// *Remind me…* on a planner or checklist line (V45 §10.3).
+    func remindMe(_ item: PlannerItem, note: NoteID, due: ReminderDue) {
+        guard perform({ try $0.remindMe(item, note: note, due: due) }) else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        scheduleReminderRefresh()
+        show(due.ringsSentence(today: .today(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt), action: "Show") { [weak self] in
+            self?.openReminders()
+        }
+    }
+
+    /// *Remind me…* on a backlog task.
+    func remindMe(_ task: BacklogTask, due: ReminderDue) {
+        guard perform({ try $0.remindMe(task, due: due) }) else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        scheduleReminderRefresh()
+        show(due.ringsSentence(today: .today(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt), action: "Show") { [weak self] in
+            self?.openReminders()
+        }
     }
 
     func takePendingEntry() {
@@ -466,6 +649,10 @@ final class AppModel {
             openBacklog()
             return
         }
+        if url.host == "reminders" {
+            openReminders()
+            return
+        }
         if let host = url.host, let entry = EntryPoint(rawValue: host == "capture" ? "idea" : host) {
             open(entry)
         }
@@ -480,7 +667,7 @@ final class AppModel {
 
     /// Launch arguments for looking at a screen without tapping to it:
     /// `-thock-practice` opens the practice notebook from a fresh install,
-    /// `-thock-open <journal|idea|clip|ask|receipts|you|dock|calendar|backlog>` opens a sheet or the backlog,
+    /// `-thock-open <journal|idea|clip|ask|receipts|you|dock|calendar|backlog|reminders>` opens a sheet, the backlog or Reminders,
     /// `-thock-day <offset>` shows another day, `-thock-week <offset>` a week,
     /// `-thock-looks <dark|light|system>` sets the appearance.
     private func applyLaunchArguments() async {
@@ -511,6 +698,7 @@ final class AppModel {
         case "you"?: sheet = .you
         case "calendar"?: sheet = .calendar
         case "backlog"?: openBacklog()
+        case "reminders"?: openReminders()
         case "dock"?: sheet = .capture(entry: "dock", preset: nil)
         case let other?:
             if let entry = EntryPoint(rawValue: other) { open(entry) }
@@ -538,6 +726,24 @@ final class AppModel {
                 }
                 if let data = image.pngData(), let attachment = ImageDownsizer.prepare(data, name: "smoke") {
                     saveCapture(blocks: Blocks.parse(parts[2].replacingOccurrences(of: "\\n", with: "\n")), destination: CaptureDestination(rawValue: parts[1]) ?? .inbox, images: [attachment], entry: "script")
+                }
+            case "remind" where parts.count == 3:
+                // `remind:<YYYY-MM-DD HH.MM>:<text>`: a capture with the
+                // Reminder chip and that time (V45 §10.2). The time takes a
+                // dot because a colon separates the step's parts.
+                if let due = ReminderDue(parts[1].replacingOccurrences(of: ".", with: ":")) {
+                    saveCapture(blocks: Blocks.parse(parts[2]), destination: .reminder, due: due, entry: "script")
+                }
+            case "remind-task" where parts.count == 3:
+                // `remind-task:<YYYY-MM-DD HH.MM>:<label prefix>`: Remind me…
+                // on a backlog task (V45 §10.3).
+                if let due = ReminderDue(parts[1].replacingOccurrences(of: ".", with: ":")), let task = session?.backlog().openSections.flatMap(\.tasks).first(where: { $0.label.hasPrefix(parts[2]) }) {
+                    remindMe(task, due: due)
+                }
+            case "reminder-done" where parts.count >= 2:
+                // `reminder-done:<label prefix>`: the Reminders screen's swipe right.
+                if let reminder = session?.reminderIndex().reminders.first(where: { $0.status == .open && $0.label.hasPrefix(parts[1]) }) {
+                    closeReminder(reminder)
                 }
             case "journal" where parts.count >= 2:
                 perform { try $0.journalAppend(blocks: Blocks.parse(parts[1])) }
@@ -733,16 +939,20 @@ final class AppModel {
     }
 
     func chip(for entry: String) -> CaptureDestination {
-        ThockEnvironment.defaults.string(forKey: "chip.\(entry)").flatMap(CaptureDestination.init(rawValue:)) ?? .today
+        CaptureDestination.remembered(ThockEnvironment.defaults.string(forKey: "chip.\(entry)"))
     }
 
+    /// A reminder capture keeps the previous chip, so the next capture opens
+    /// where it always did (V45 §10.2).
     func remember(chip: CaptureDestination, for entry: String) {
+        guard chip.isRemembered else { return }
         ThockEnvironment.defaults.set(chip.rawValue, forKey: "chip.\(entry)")
     }
 
-    func saveCapture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], entry: String) {
+    /// `due` is when a reminder capture rings.
+    func saveCapture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], due: ReminderDue? = nil, entry: String) {
         var saved: CaptureRecord?
-        let ok = perform { saved = try $0.capture(blocks: blocks, destination: destination, images: images) }
+        let ok = perform { saved = try $0.capture(blocks: blocks, destination: destination, images: images, due: due) }
         guard ok, saved != nil else { return }
         remember(chip: destination, for: entry)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -750,6 +960,13 @@ final class AppModel {
         case .inbox: show("Saved to your inbox")
         case .today: show("Added to today")
         case .backlog: show("Added to Backlog · Soon")
+        case .reminder:
+            // Scheduled from the phone's own copy at once, so it rings even
+            // if the phone never reaches the server.
+            scheduleReminderRefresh()
+            show(due.map { $0.ringsSentence(today: .today(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt) } ?? "Reminder saved", action: "Show") { [weak self] in
+                self?.openReminders()
+            }
         }
     }
 

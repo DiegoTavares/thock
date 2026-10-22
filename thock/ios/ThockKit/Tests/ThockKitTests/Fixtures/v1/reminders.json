@@ -1,0 +1,1119 @@
+{
+  "scope": [
+    {
+      "templates": [
+        "templates/daily.md",
+        "templates/weekly.md"
+      ],
+      "counted": [
+        "projects/house.md",
+        "backlog.md",
+        "reminders.md",
+        "daily/2026-10-21.md",
+        "notes/README.MD",
+        "templates.md",
+        "my templates/x.md",
+        "routines.md",
+        "thock/notes.md"
+      ],
+      "ignored": [
+        ".thock/config.toml",
+        ".thock/notes.md",
+        ".thock/cache/x.md",
+        "routines/timeline/skills/week-review.md",
+        "routines/finance/README.md",
+        "templates/daily.md",
+        "templates/other.md",
+        "templates/deep/x.md",
+        "projects/house.txt",
+        "image.png",
+        ".md",
+        "noext"
+      ]
+    },
+    {
+      "templates": [
+        "daily-template.md"
+      ],
+      "counted": [
+        "templates/daily.md",
+        "notes/daily-template.md"
+      ],
+      "ignored": [
+        "daily-template.md"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "name": "a task with a full token",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+      "reminders": [
+        {
+          "line": 0,
+          "id": "7d3e55a1c0f2",
+          "token": "(@2026-10-21 14:30)",
+          "when": "2026-10-21 14:30",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-21 14:30",
+          "state": "open",
+          "mirror": false,
+          "text": "Call the plumber"
+        }
+      ]
+    },
+    {
+      "name": "prose with a date-only token",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "The boiler ticks when it starts. Ask about it before the cold comes (@2026-11-02) <!--rem:7c11e0b4d2a9-->",
+      "reminders": [
+        {
+          "line": 0,
+          "id": "7c11e0b4d2a9",
+          "token": "(@2026-11-02)",
+          "when": "2026-11-02",
+          "struck": false,
+          "task": null,
+          "due": "2026-11-02",
+          "state": "open",
+          "mirror": false,
+          "text": "The boiler ticks when it starts. Ask about it before the cold comes"
+        }
+      ]
+    },
+    {
+      "name": "a token with no id yet",
+      "path": "backlog.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] Renew passport (@2026-12-02)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@2026-12-02)",
+          "when": "2026-12-02",
+          "struck": false,
+          "task": "open",
+          "due": "2026-12-02",
+          "state": "open",
+          "mirror": false,
+          "text": "Renew passport"
+        }
+      ]
+    },
+    {
+      "name": "time-only on a planner line in its daily note",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] 16:00 - 17:00 Dentist (@15:30) <!--rem:5b71c08e3f6d-->",
+      "reminders": [
+        {
+          "line": 0,
+          "id": "5b71c08e3f6d",
+          "token": "(@15:30)",
+          "when": "15:30",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-21 15:30",
+          "state": "open",
+          "mirror": false,
+          "text": "Dentist"
+        }
+      ]
+    },
+    {
+      "name": "time-only with one hour digit in a daily note",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "Stretch (@9:05)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@9:05)",
+          "when": "09:05",
+          "struck": false,
+          "task": null,
+          "due": "2026-10-21 09:05",
+          "state": "open",
+          "mirror": false,
+          "text": "Stretch"
+        }
+      ]
+    },
+    {
+      "name": "time-only outside a daily note has no day",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] 16:00 - 17:00 Dentist (@15:30)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@15:30)",
+          "when": "15:30",
+          "struck": false,
+          "task": "open",
+          "due": null,
+          "state": "open",
+          "mirror": false,
+          "text": "Dentist"
+        }
+      ]
+    },
+    {
+      "name": "time-only in a daily note under another filename format",
+      "path": "daily/20261021_Oct-Wed.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYYMMDD_MMM-ddd"
+      },
+      "note": "- [ ] Water the plants (@18:00)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@18:00)",
+          "when": "18:00",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-21 18:00",
+          "state": "open",
+          "mirror": false,
+          "text": "Water the plants"
+        }
+      ]
+    },
+    {
+      "name": "a path the other filename format does not read has no day",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYYMMDD_MMM-ddd"
+      },
+      "note": "- [ ] Water the plants (@18:00)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@18:00)",
+          "when": "18:00",
+          "struck": false,
+          "task": "open",
+          "due": null,
+          "state": "open",
+          "mirror": false,
+          "text": "Water the plants"
+        }
+      ]
+    },
+    {
+      "name": "a full token means its own date even in a daily note",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] Book the train (@2026-10-23 08:00)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@2026-10-23 08:00)",
+          "when": "2026-10-23 08:00",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-23 08:00",
+          "state": "open",
+          "mirror": false,
+          "text": "Book the train"
+        }
+      ]
+    },
+    {
+      "name": "a closed task",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [x] Pay the deposit (@2026-10-19 09:00) <!--rem:51aa02c9d811-->",
+      "reminders": [
+        {
+          "line": 0,
+          "id": "51aa02c9d811",
+          "token": "(@2026-10-19 09:00)",
+          "when": "2026-10-19 09:00",
+          "struck": false,
+          "task": "done",
+          "due": "2026-10-19 09:00",
+          "state": "closed",
+          "mirror": false,
+          "text": "Pay the deposit"
+        }
+      ]
+    },
+    {
+      "name": "a capital X ticks too",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "* [X] Pay the deposit (@2026-10-19 09:00)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@2026-10-19 09:00)",
+          "when": "2026-10-19 09:00",
+          "struck": false,
+          "task": "done",
+          "due": "2026-10-19 09:00",
+          "state": "closed",
+          "mirror": false,
+          "text": "Pay the deposit"
+        }
+      ]
+    },
+    {
+      "name": "closed in prose by a struck token",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "Got the quote back, it's fine. ~~(@2026-10-18 10:00)~~ <!--rem:0d93be7a1c44-->",
+      "reminders": [
+        {
+          "line": 0,
+          "id": "0d93be7a1c44",
+          "token": "~~(@2026-10-18 10:00)~~",
+          "when": "2026-10-18 10:00",
+          "struck": true,
+          "task": null,
+          "due": "2026-10-18 10:00",
+          "state": "closed",
+          "mirror": false,
+          "text": "Got the quote back, it's fine."
+        }
+      ]
+    },
+    {
+      "name": "a struck token on an unticked task is closed",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] Call Ana ~~(@2026-10-18)~~",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "~~(@2026-10-18)~~",
+          "when": "2026-10-18",
+          "struck": true,
+          "task": "open",
+          "due": "2026-10-18",
+          "state": "closed",
+          "mirror": false,
+          "text": "Call Ana"
+        }
+      ]
+    },
+    {
+      "name": "tildes on one side do not strike",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "Call Ana ~~(@2026-10-18)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@2026-10-18)",
+          "when": "2026-10-18",
+          "struck": false,
+          "task": null,
+          "due": "2026-10-18",
+          "state": "open",
+          "mirror": false,
+          "text": "Call Ana ~~"
+        }
+      ]
+    },
+    {
+      "name": "dropped: an id and no token",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] Send the leak photos to the landlord <!--rem:9e4a21f0b388-->",
+      "reminders": [
+        {
+          "line": 0,
+          "id": "9e4a21f0b388",
+          "token": null,
+          "when": null,
+          "struck": false,
+          "task": "open",
+          "due": null,
+          "state": "dropped",
+          "mirror": false,
+          "text": "Send the leak photos to the landlord"
+        }
+      ]
+    },
+    {
+      "name": "the last token on a line counts",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "Move (@2026-10-21) to (@2026-10-23 09:00) <!--rem:3f9a1c0d4e21-->",
+      "reminders": [
+        {
+          "line": 0,
+          "id": "3f9a1c0d4e21",
+          "token": "(@2026-10-23 09:00)",
+          "when": "2026-10-23 09:00",
+          "struck": false,
+          "task": null,
+          "due": "2026-10-23 09:00",
+          "state": "open",
+          "mirror": false,
+          "text": "Move (@2026-10-21) to"
+        }
+      ]
+    },
+    {
+      "name": "a token anywhere on the line counts",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] (@2026-10-22) Call the bank",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@2026-10-22)",
+          "when": "2026-10-22",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-22",
+          "state": "open",
+          "mirror": false,
+          "text": "Call the bank"
+        }
+      ]
+    },
+    {
+      "name": "a token in front of a planner time",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] (@15:30) 16:00 Dentist",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@15:30)",
+          "when": "15:30",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-21 15:30",
+          "state": "open",
+          "mirror": false,
+          "text": "Dentist"
+        }
+      ]
+    },
+    {
+      "name": "a token in inline code is text",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "Write `(@2026-10-21 14:30)` at the end of a line",
+      "reminders": []
+    },
+    {
+      "name": "a token after a code span counts",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "Write `(@2026-10-21)` like this (@2026-10-22)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@2026-10-22)",
+          "when": "2026-10-22",
+          "struck": false,
+          "task": null,
+          "due": "2026-10-22",
+          "state": "open",
+          "mirror": false,
+          "text": "Write `(@2026-10-21)` like this"
+        }
+      ]
+    },
+    {
+      "name": "an unclosed backtick is not code",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "`not code (@2026-10-22)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@2026-10-22)",
+          "when": "2026-10-22",
+          "struck": false,
+          "task": null,
+          "due": "2026-10-22",
+          "state": "open",
+          "mirror": false,
+          "text": "`not code"
+        }
+      ]
+    },
+    {
+      "name": "a token after a backslash is text",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "Type \\(@2026-10-21) to write one",
+      "reminders": []
+    },
+    {
+      "name": "a token in an HTML comment is text",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "Keep <!-- (@2026-10-21) --> this",
+      "reminders": []
+    },
+    {
+      "name": "a comment that spans lines hides its tokens",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "<!-- an old plan\n(@2026-10-21) still a comment -->\nAfter it (@2026-10-22)",
+      "reminders": [
+        {
+          "line": 2,
+          "id": null,
+          "token": "(@2026-10-22)",
+          "when": "2026-10-22",
+          "struck": false,
+          "task": null,
+          "due": "2026-10-22",
+          "state": "open",
+          "mirror": false,
+          "text": "After it"
+        }
+      ]
+    },
+    {
+      "name": "tokens in fences and front matter are text",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "---\nremind: (@2026-10-21)\n---\n# House\n\n```md\n- [ ] Call (@2026-10-21) <!--rem:7d3e55a1c0f2-->\n```\n\n~~~\n(@2026-10-21)\n~~~\n- [ ] Real one (@2026-10-24)",
+      "reminders": [
+        {
+          "line": 12,
+          "id": null,
+          "token": "(@2026-10-24)",
+          "when": "2026-10-24",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-24",
+          "state": "open",
+          "mirror": false,
+          "text": "Real one"
+        }
+      ]
+    },
+    {
+      "name": "tokens that are not real dates or times are text",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "(@2026-02-30) (@24:00) (@every mon 09:00) (@2026-1-2) (@9:5) (@ 10:00) (@10:00 ) (@2026-10-21  10:00) (@)",
+      "reminders": []
+    },
+    {
+      "name": "a calendar line never holds a reminder",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] 12:00 - 12:30 Team sync (@11:55) <!--gcal:5d0c2a91b7e4-->",
+      "reminders": []
+    },
+    {
+      "name": "the id sits after other trailing comments",
+      "path": "backlog.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] Renew passport (@2026-12-02) <!--gmail:18c2f0a9b3d4e5f6--> <!--rem:9e4a21f0b388-->",
+      "reminders": [
+        {
+          "line": 0,
+          "id": "9e4a21f0b388",
+          "token": "(@2026-12-02)",
+          "when": "2026-12-02",
+          "struck": false,
+          "task": "open",
+          "due": "2026-12-02",
+          "state": "open",
+          "mirror": false,
+          "text": "Renew passport"
+        }
+      ]
+    },
+    {
+      "name": "a malformed id is not one",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] Call (@2026-10-22) <!--rem:ABCDEF123456--> <!--rem:3f9a1c0d4e2-->",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@2026-10-22)",
+          "when": "2026-10-22",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-22",
+          "state": "open",
+          "mirror": false,
+          "text": "Call"
+        }
+      ]
+    },
+    {
+      "name": "an id in code is text",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "Ids look like `<!--rem:3f9a1c0d4e21-->` in the source",
+      "reminders": []
+    },
+    {
+      "name": "an ordered list item is a task, a bare checkbox is prose",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "1. [ ] Call the bank (@2026-10-22)\n[ ] Not a list (@2026-10-22)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@2026-10-22)",
+          "when": "2026-10-22",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-22",
+          "state": "open",
+          "mirror": false,
+          "text": "Call the bank"
+        },
+        {
+          "line": 1,
+          "id": null,
+          "token": "(@2026-10-22)",
+          "when": "2026-10-22",
+          "struck": false,
+          "task": null,
+          "due": "2026-10-22",
+          "state": "open",
+          "mirror": false,
+          "text": "[ ] Not a list"
+        }
+      ]
+    },
+    {
+      "name": "words in any script",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] Café com Ana às 12:30 (@2026-10-22 12:30) <!--rem:a90c1377d02e-->",
+      "reminders": [
+        {
+          "line": 0,
+          "id": "a90c1377d02e",
+          "token": "(@2026-10-22 12:30)",
+          "when": "2026-10-22 12:30",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-22 12:30",
+          "state": "open",
+          "mirror": false,
+          "text": "Café com Ana às 12:30"
+        }
+      ]
+    },
+    {
+      "name": "windows line endings",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "## Day planner\r\n- [ ] 09:00 Standup (@08:55) <!--rem:5b71c08e3f6d-->\r\n",
+      "reminders": [
+        {
+          "line": 1,
+          "id": "5b71c08e3f6d",
+          "token": "(@08:55)",
+          "when": "08:55",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-21 08:55",
+          "state": "open",
+          "mirror": false,
+          "text": "Standup"
+        }
+      ]
+    },
+    {
+      "name": "mirror lines in a daily note's day section",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "## Day planner\n- [ ] 16:00 - 17:00 Dentist (@15:30) <!--rem:5b71c08e3f6d-->\n\n### Reminders\n- [ ] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->\n- [ ] Renew the car insurance · 2026-10-20 09:00 · [[backlog]] <!--rem:2f6b08e19a5c-->\n- [ ] Typed here by hand (@17:00) <!--rem:c41f77a8e590-->\n\n### Calendar\n- [ ] 12:00 - 12:30 Team sync <!--gcal:5d0c2a91b7e4-->\n- [ ] Left the section <!--rem:a90c1377d02e-->",
+      "reminders": [
+        {
+          "line": 1,
+          "id": "5b71c08e3f6d",
+          "token": "(@15:30)",
+          "when": "15:30",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-21 15:30",
+          "state": "open",
+          "mirror": false,
+          "text": "Dentist"
+        },
+        {
+          "line": 4,
+          "id": "7d3e55a1c0f2",
+          "token": null,
+          "when": null,
+          "struck": false,
+          "task": "open",
+          "due": null,
+          "state": "dropped",
+          "mirror": true,
+          "text": "Call the plumber · [[projects/house]]"
+        },
+        {
+          "line": 5,
+          "id": "2f6b08e19a5c",
+          "token": null,
+          "when": null,
+          "struck": false,
+          "task": "open",
+          "due": null,
+          "state": "dropped",
+          "mirror": true,
+          "text": "Renew the car insurance · 2026-10-20 09:00 · [[backlog]]"
+        },
+        {
+          "line": 6,
+          "id": "c41f77a8e590",
+          "token": "(@17:00)",
+          "when": "17:00",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-21 17:00",
+          "state": "open",
+          "mirror": false,
+          "text": "Typed here by hand"
+        },
+        {
+          "line": 10,
+          "id": "a90c1377d02e",
+          "token": null,
+          "when": null,
+          "struck": false,
+          "task": "open",
+          "due": null,
+          "state": "dropped",
+          "mirror": false,
+          "text": "Left the section"
+        }
+      ]
+    },
+    {
+      "name": "the day heading matches loosely and can be renamed",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "day_headings": [
+        "Erinnerungen"
+      ],
+      "note": "### ⏰ **Reminders**:\n- [ ] Call · [[backlog]] <!--rem:2f6b08e19a5c-->\n### Erinnerungen\n- [ ] Anrufen · [[backlog]] <!--rem:3f9a1c0d4e21-->",
+      "reminders": [
+        {
+          "line": 1,
+          "id": "2f6b08e19a5c",
+          "token": null,
+          "when": null,
+          "struck": false,
+          "task": "open",
+          "due": null,
+          "state": "dropped",
+          "mirror": false,
+          "text": "Call · [[backlog]]"
+        },
+        {
+          "line": 3,
+          "id": "3f9a1c0d4e21",
+          "token": null,
+          "when": null,
+          "struck": false,
+          "task": "open",
+          "due": null,
+          "state": "dropped",
+          "mirror": true,
+          "text": "Anrufen · [[backlog]]"
+        }
+      ]
+    },
+    {
+      "name": "the day heading loosely, default names",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "### ⏰ **Reminders**:\n- [ ] Call · [[backlog]] <!--rem:2f6b08e19a5c-->",
+      "reminders": [
+        {
+          "line": 1,
+          "id": "2f6b08e19a5c",
+          "token": null,
+          "when": null,
+          "struck": false,
+          "task": "open",
+          "due": null,
+          "state": "dropped",
+          "mirror": true,
+          "text": "Call · [[backlog]]"
+        }
+      ]
+    },
+    {
+      "name": "a day section outside a daily note holds no mirrors",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "### Reminders\n- [ ] Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->",
+      "reminders": [
+        {
+          "line": 1,
+          "id": "7d3e55a1c0f2",
+          "token": null,
+          "when": null,
+          "struck": false,
+          "task": "open",
+          "due": null,
+          "state": "dropped",
+          "mirror": false,
+          "text": "Call the plumber · [[projects/house]]"
+        }
+      ]
+    },
+    {
+      "name": "a loose line in the index",
+      "path": "reminders.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "## Open\n- [ ] Send the October invoice (@2026-10-21) <!--rem:a90c1377d02e-->\n- [[projects/house]] <!--rem:7d3e55a1c0f2-->",
+      "reminders": [
+        {
+          "line": 1,
+          "id": "a90c1377d02e",
+          "token": "(@2026-10-21)",
+          "when": "2026-10-21",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-21",
+          "state": "open",
+          "mirror": false,
+          "text": "Send the October invoice"
+        },
+        {
+          "line": 2,
+          "id": "7d3e55a1c0f2",
+          "token": null,
+          "when": null,
+          "struck": false,
+          "task": null,
+          "due": null,
+          "state": "dropped",
+          "mirror": false,
+          "text": "[[projects/house]]"
+        }
+      ]
+    },
+    {
+      "name": "a done stamp after the token",
+      "path": "reminders.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [x] Pay the nursery (@2026-10-19 09:00) ✅ 2026-10-19 <!--rem:6e1f42b07a93-->",
+      "reminders": [
+        {
+          "line": 0,
+          "id": "6e1f42b07a93",
+          "token": "(@2026-10-19 09:00)",
+          "when": "2026-10-19 09:00",
+          "struck": false,
+          "task": "done",
+          "due": "2026-10-19 09:00",
+          "state": "closed",
+          "mirror": false,
+          "text": "Pay the nursery ✅ 2026-10-19"
+        }
+      ]
+    }
+  ],
+  "mirrors": [
+    {
+      "line": "- [ ] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->",
+      "mirror": {
+        "checked": false,
+        "time": "14:30",
+        "text": "Call the plumber",
+        "mark": null,
+        "carried": null,
+        "note": "projects/house",
+        "id": "7d3e55a1c0f2"
+      }
+    },
+    {
+      "line": "- [ ] Send the October invoice · [[reminders]] <!--rem:a90c1377d02e-->",
+      "mirror": {
+        "checked": false,
+        "time": null,
+        "text": "Send the October invoice",
+        "mark": null,
+        "carried": null,
+        "note": "reminders",
+        "id": "a90c1377d02e"
+      }
+    },
+    {
+      "line": "- [ ] Renew the car insurance · 2026-10-20 09:00 · [[backlog]] <!--rem:2f6b08e19a5c-->",
+      "mirror": {
+        "checked": false,
+        "time": null,
+        "text": "Renew the car insurance",
+        "mark": null,
+        "carried": "2026-10-20 09:00",
+        "note": "backlog",
+        "id": "2f6b08e19a5c"
+      }
+    },
+    {
+      "line": "- [ ] Renew the car insurance · 2026-10-20 · [[backlog]] <!--rem:2f6b08e19a5c-->",
+      "mirror": {
+        "checked": false,
+        "time": null,
+        "text": "Renew the car insurance",
+        "mark": null,
+        "carried": "2026-10-20",
+        "note": "backlog",
+        "id": "2f6b08e19a5c"
+      }
+    },
+    {
+      "line": "- [x] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->",
+      "mirror": {
+        "checked": true,
+        "time": "14:30",
+        "text": "Call the plumber",
+        "mark": null,
+        "carried": null,
+        "note": "projects/house",
+        "id": "7d3e55a1c0f2"
+      }
+    },
+    {
+      "line": "- [ ] ~~Call the plumber~~ → 2026-10-23 · [[projects/house]] <!--rem:7d3e55a1c0f2-->",
+      "mirror": {
+        "checked": false,
+        "time": null,
+        "text": "Call the plumber",
+        "mark": {
+          "moved": "2026-10-23"
+        },
+        "carried": null,
+        "note": "projects/house",
+        "id": "7d3e55a1c0f2"
+      }
+    },
+    {
+      "line": "- [ ] ~~Renew the car insurance~~ (dropped) · [[backlog]] <!--rem:2f6b08e19a5c-->",
+      "mirror": {
+        "checked": false,
+        "time": null,
+        "text": "Renew the car insurance",
+        "mark": "dropped",
+        "carried": null,
+        "note": "backlog",
+        "id": "2f6b08e19a5c"
+      }
+    },
+    {
+      "line": "- [ ] ~~Call the plumber~~ (removed) · [[projects/house]] <!--rem:7d3e55a1c0f2-->",
+      "mirror": {
+        "checked": false,
+        "time": null,
+        "text": "Call the plumber",
+        "mark": "removed",
+        "carried": null,
+        "note": "projects/house",
+        "id": "7d3e55a1c0f2"
+      }
+    },
+    {
+      "line": "- [ ] Pay rent · Tom · [[money/rent]] <!--rem:6e1f42b07a93-->",
+      "mirror": {
+        "checked": false,
+        "time": null,
+        "text": "Pay rent · Tom",
+        "mark": null,
+        "carried": null,
+        "note": "money/rent",
+        "id": "6e1f42b07a93"
+      }
+    },
+    {
+      "line": "- [ ] Call the plumber <!--rem:7d3e55a1c0f2-->",
+      "mirror": null
+    },
+    {
+      "line": "- [ ] 14:30 Call the plumber · [[projects/house]]",
+      "mirror": null
+    },
+    {
+      "line": "- [ ] · [[projects/house]] <!--rem:7d3e55a1c0f2-->",
+      "mirror": null
+    },
+    {
+      "line": "Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->",
+      "mirror": null
+    },
+    {
+      "line": "- [ ] ~~Call the plumber~~ → soon · [[projects/house]] <!--rem:7d3e55a1c0f2-->",
+      "mirror": null
+    }
+  ],
+  "texts": [
+    {
+      "text": "Call the plumber",
+      "max": 80,
+      "cut": "Call the plumber"
+    },
+    {
+      "text": "one two three",
+      "max": 9,
+      "cut": "one two…"
+    },
+    {
+      "text": "one two three",
+      "max": 7,
+      "cut": "one two…"
+    },
+    {
+      "text": "one two three",
+      "max": 8,
+      "cut": "one two…"
+    },
+    {
+      "text": "abcdefghij",
+      "max": 4,
+      "cut": "abcd…"
+    },
+    {
+      "text": "Café com Ana às doze",
+      "max": 13,
+      "cut": "Café com Ana…"
+    }
+  ]
+}

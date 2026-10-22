@@ -196,7 +196,7 @@ public actor SimulatedDesk {
     }
 
     private func seed(for path: String) -> String? {
-        let config = VaultConfig(config: state.disk[VaultConfig.configPath], inboxConfig: state.disk[VaultConfig.inboxConfigPath])
+        let config = VaultConfig(config: state.disk[VaultConfig.configPath], inboxConfig: state.disk[VaultConfig.inboxConfigPath], remindersConfig: state.disk[ReminderSettings.path])
         let base = today()
         for offset in -7...7 {
             let day = base.adding(days: offset)
@@ -225,7 +225,7 @@ public actor SimulatedDesk {
     /// waiting capture becomes a Someday task, its note is removed, and the
     /// triage log gains its line (V13 §9).
     public func triageInbox() async throws -> Int {
-        let config = VaultConfig(config: state.disk[VaultConfig.configPath], inboxConfig: state.disk[VaultConfig.inboxConfigPath])
+        let config = VaultConfig(config: state.disk[VaultConfig.configPath], inboxConfig: state.disk[VaultConfig.inboxConfigPath], remindersConfig: state.disk[ReminderSettings.path])
         let day = today()
         let waiting = state.disk.keys.filter(config.isInboxNote).sorted()
         guard !waiting.isEmpty else { return 0 }

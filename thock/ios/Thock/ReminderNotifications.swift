@@ -1,0 +1,93 @@
+import ThockKit
+import UIKit
+import UserNotifications
+
+/// Hands the soonest reminders to iOS and takes their answers (V45 §10.5).
+/// Which reminders, and what changed, is `ReminderSchedule`'s; this holds
+/// only the `UNUserNotificationCenter` calls.
+@MainActor
+final class ReminderNotifier: NSObject, UNUserNotificationCenterDelegate {
+    private var center: UNUserNotificationCenter { .current() }
+
+    /// The three answers. Registered on every launch: it needs no permission,
+    /// and a notification delivered before the app runs still finds them.
+    func registerCategories(tomorrowAt: ClockTime) {
+        let actions = [
+            UNNotificationAction(identifier: ReminderAnswer.done.rawValue, title: "Done", options: []),
+            UNNotificationAction(identifier: ReminderAnswer.snooze.rawValue, title: "In 1 hour", options: []),
+            UNNotificationAction(identifier: ReminderAnswer.tomorrow.rawValue, title: "Tomorrow \(tomorrowAt)", options: []),
+        ]
+        center.setNotificationCategories([UNNotificationCategory(identifier: ReminderSchedule.category, actions: actions, intentIdentifiers: [])])
+    }
+
+    /// Whether reminders can ring: asked the first time a reminder is made,
+    /// never at launch.
+    func authorization() async -> UNAuthorizationStatus {
+        await center.notificationSettings().authorizationStatus
+    }
+
+    /// Asks once; afterwards iOS answers from Settings without asking again.
+    func requestAuthorization() async -> Bool {
+        (try? await center.requestAuthorization(options: [.alert, .sound, .badge])) ?? false
+    }
+
+    /// Brings iOS's pending reminder notifications in line with `alerts`,
+    /// replacing only what changed. Without permission there is nothing to
+    /// hand over.
+    func refresh(alerts: [ReminderAlert]) async {
+        let status = await authorization()
+        guard status == .authorized || status == .provisional || status == .ephemeral else { return }
+        let pending = await center.pendingNotificationRequests().map { ($0.identifier, $0.content.title, $0.content.body) }
+        let changes = ReminderSchedule.changes(pending: pending, wanted: alerts)
+        if !changes.remove.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: changes.remove)
+        }
+        for alert in changes.add {
+            let content = UNMutableNotificationContent()
+            content.title = alert.title
+            content.body = alert.body
+            content.sound = .default
+            content.categoryIdentifier = ReminderSchedule.category
+            content.userInfo = ["reminder": alert.reminderID]
+            // No time zone: the trigger is local wall-clock time wherever the
+            // phone is, as reminders are (§4.1).
+            let moment = DateComponents(year: alert.date.year, month: alert.date.month, day: alert.date.day, hour: alert.time.hour, minute: alert.time.minute)
+            let trigger = UNCalendarNotificationTrigger(dateMatching: moment, repeats: false)
+            do {
+                try await center.add(UNNotificationRequest(identifier: alert.identifier, content: content, trigger: trigger))
+            } catch {
+                AppDelegate.model.show("A reminder couldn't be scheduled on this phone.")
+            }
+        }
+    }
+
+    /// Takes back every reminder notification, for a phone that disconnected.
+    func clear() async {
+        let ours = await center.pendingNotificationRequests().map(\.identifier).filter { $0.hasPrefix(ReminderSchedule.identifierPrefix) }
+        center.removePendingNotificationRequests(withIdentifiers: ours)
+    }
+
+    // MARK: UNUserNotificationCenterDelegate
+
+    /// A reminder that comes due while Thock is open still shows.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list, .sound])
+    }
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        let action = response.actionIdentifier
+        let identifier = response.notification.request.identifier
+        Task { @MainActor in
+            guard let reminderID = ReminderSchedule.reminderID(in: identifier) else {
+                completionHandler()
+                return
+            }
+            if let answer = ReminderAnswer(rawValue: action) {
+                await AppDelegate.model.answer(answer, reminderID: reminderID)
+            } else if action == UNNotificationDefaultActionIdentifier {
+                AppDelegate.model.openRemindersFromNotification()
+            }
+            completionHandler()
+        }
+    }
+}

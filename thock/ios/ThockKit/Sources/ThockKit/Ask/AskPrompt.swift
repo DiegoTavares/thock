@@ -53,6 +53,9 @@ public enum AskPrompt {
         lines.append(note("This week's note", config.weeklyPath(today)))
         lines.append("- Daily notes are in `\(config.daily.dir)/` and weekly notes in `\(config.weekly.dir)/`, each named by its date like the two above.")
         lines.append("- Tasks: `\(config.backlogFile)`, under the headings `\(config.soonHeading)`, `\(config.somedayHeading)` and `\(config.completedHeading)`.")
+        let index = config.reminders.index
+        let openHeading = config.reminders.openHeadings.first ?? "Open"
+        lines.append("- Reminders: `\(index)` indexes them. A reminder is `(@YYYY-MM-DD HH:MM)` or `(@YYYY-MM-DD)` at the end of a line, or `(@HH:MM)` in a daily note. To set one, write the token on the line it is about; one with no other home is a `- [ ] ` task under `\(openHeading)` in `\(index)`. Never write or change a `<!--rem:…-->` id: Thock adds them and keeps the index.")
         if let planner = config.plannerHeadings.first {
             lines.append("- The day's plan lives under the `\(planner)` heading of the daily note.")
         }

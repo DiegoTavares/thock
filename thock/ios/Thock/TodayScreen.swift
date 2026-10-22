@@ -19,6 +19,8 @@ struct TodayScreen: View {
         VStack(spacing: 0) {
             if model.isUnlocked, model.showingBacklog {
                 BacklogScreen()
+            } else if model.isUnlocked, model.showingReminders {
+                RemindersScreen()
             } else if model.isUnlocked {
                 Group {
                     if model.showingWeek {
@@ -42,7 +44,7 @@ struct TodayScreen: View {
             } else {
                 LockedView()
             }
-            if model.showingBacklog, model.isUnlocked {
+            if model.showingBacklog || model.showingReminders, model.isUnlocked {
                 EmptyView()
             } else if model.syncState == .disconnected {
                 NoticeBar(text: "This phone is no longer connected to your desk.", action: "Connect again") {
@@ -317,11 +319,13 @@ struct DayCanvas: View {
                         if isToday, card.id == inboxAfter {
                             InboxRow()
                             BacklogRowOnToday()
+                            RemindersRowOnToday()
                         }
                     }
                     if isToday, inboxAfter == nil {
                         InboxRow()
                         BacklogRowOnToday()
+                        RemindersRowOnToday()
                     }
                 } else {
                     Hairline()
@@ -331,6 +335,7 @@ struct DayCanvas: View {
                     if isToday {
                         InboxRow()
                         BacklogRowOnToday()
+                        RemindersRowOnToday()
                     }
                 }
             }
