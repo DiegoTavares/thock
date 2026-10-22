@@ -70,8 +70,8 @@ question or where you need something only the person can give.
   don't send anything anywhere.
 - Don't write under `.thock/`, `.claude/`, or `.gemini/` — that is the app's own
   machinery. Two exceptions, both only when a ritual says so: the state markers a
-  ritual documents, and `.thock/config.toml` when a ritual is changing a setting
-  the person asked for.
+  ritual documents, and `.thock/config.toml` or `.thock/reminders.toml` when a
+  ritual is changing a setting the person asked for.
 - Anything irreversible or outside the notes — money, email, messages to other
   people — is theirs to do. Prepare it, then hand it over.
 

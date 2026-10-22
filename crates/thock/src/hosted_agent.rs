@@ -20,9 +20,11 @@ use std::hash::{Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use util::ResultExt as _;
 
 use crate::agent::ModelTier;
 use crate::notes::NoteKind;
+use crate::reminders::ReminderSettings;
 use crate::routines::RoutineManifest;
 use crate::vault::Vault;
 
@@ -181,8 +183,9 @@ fn vault_relative(path: &Path, root: &Path) -> String {
 }
 
 /// The live facts a session needs and no file in the vault carries: today's
-/// date, where this week's notes live, the language the vault was set to, and
-/// which Routines are installed (spec `v27-agent-session-prompt.md` §5.3).
+/// date, where this week's notes and the reminders index live, the language
+/// the vault was set to, and which Routines are installed (spec
+/// `v27-agent-session-prompt.md` §5.3, `v45-reminders.md` §13.3).
 ///
 /// Pi loads this straight after `SYSTEM.md` and before the vault's own
 /// `AGENTS.md`, so the user's file still has the last word.
@@ -191,6 +194,7 @@ pub fn compose_vault_context(
     routines: &[RoutineManifest],
     has_profile: bool,
     memory_index: Option<&str>,
+    reminders: &ReminderSettings,
     today: NaiveDate,
 ) -> String {
     let week = today.iso_week();
@@ -227,6 +231,19 @@ pub fn compose_vault_context(
         context,
         "- Tasks: `{}`, under the headings `{}`, `{}` and `{}`.",
         vault.config.backlog.file, headings.soon, headings.someday, headings.completed,
+    );
+    let open_heading = reminders
+        .open_headings
+        .first()
+        .map_or("Open", String::as_str);
+    let _ = writeln!(
+        context,
+        "- Reminders: `{index}` indexes them. A reminder is `(@YYYY-MM-DD HH:MM)` or \
+         `(@YYYY-MM-DD)` at the end of a line, or `(@HH:MM)` in a daily note. To set one, write \
+         the token on the line it is about; one with no other home is a `- [ ] ` task under \
+         `{open_heading}` in `{index}`. Never write or change a `<!--rem:…-->` id: Thock adds \
+         them and keeps the index.",
+        index = reminders.index,
     );
     let planner_heading = vault.config.day_planner.heading.trim();
     if !planner_heading.is_empty() {
@@ -342,11 +359,16 @@ pub async fn gather_vault_context(
     let has_profile = vault.root.join("profile.md").is_file();
     let memory_index =
         crate::memory::read_index_capped(fs, &vault.root, vault.config.memory.index_lines).await;
+    let reminders = crate::reminders::load_reminder_settings(fs, &vault.root)
+        .await
+        .log_err()
+        .unwrap_or_default();
     Some(compose_vault_context(
         vault,
         &routines,
         has_profile,
         memory_index.as_deref(),
+        &reminders,
         today,
     ))
 }
@@ -661,8 +683,14 @@ mod tests {
 
     #[test]
     fn context_states_the_date_the_week_and_this_week_notes() {
-        let context =
-            compose_vault_context(&vault_at("/Users/me/Thock"), &[], false, None, today());
+        let context = compose_vault_context(
+            &vault_at("/Users/me/Thock"),
+            &[],
+            false,
+            None,
+            &ReminderSettings::default(),
+            today(),
+        );
         assert!(context.contains("Monday, 14 September 2026 (2026-09-14)"));
         assert!(context.contains("week 2026-W38"));
         assert!(context.contains("/Users/me/Thock"));
@@ -689,12 +717,52 @@ mod tests {
             tag: Some("pt-BR".to_string()),
             name: Some("Portuguese (Brazil)".to_string()),
         });
-        let context = compose_vault_context(&vault, &[], true, None, today());
+        let context = compose_vault_context(
+            &vault,
+            &[],
+            true,
+            None,
+            &ReminderSettings::default(),
+            today(),
+        );
         assert!(context.contains("`tarefas.md`"));
         assert!(context.contains("`Em breve`, `Algum dia` and `Concluído`"));
         assert!(context.contains("`## Hoje` heading"));
         assert!(context.contains("**Portuguese (Brazil)** (`pt-BR`)"));
         assert!(context.contains("profile.md"));
+    }
+
+    #[test]
+    fn context_names_the_reminders_index_and_its_open_heading() {
+        let context = compose_vault_context(
+            &vault_at("/Users/me/Thock"),
+            &[],
+            false,
+            None,
+            &ReminderSettings::default(),
+            today(),
+        );
+        assert!(context.contains("- Reminders: `reminders.md`"), "{context}");
+        assert!(context.contains("under `Open` in `reminders.md`"));
+        assert!(context.contains("Never write or change a `<!--rem:…-->` id"));
+
+        let reminders = ReminderSettings {
+            index: "lembretes.md".to_string(),
+            open_headings: vec!["Abertos".to_string(), "Open".to_string()],
+            ..ReminderSettings::default()
+        };
+        let context = compose_vault_context(
+            &vault_at("/Users/me/Cofre"),
+            &[],
+            false,
+            None,
+            &reminders,
+            today(),
+        );
+        assert!(
+            context.contains("under `Abertos` in `lembretes.md`"),
+            "{context}"
+        );
     }
 
     #[test]
@@ -713,6 +781,7 @@ mod tests {
                 &[],
                 has_profile,
                 memory_index,
+                &ReminderSettings::default(),
                 today(),
             );
             assert!(!context.to_lowercase().contains("this person"), "{context}");
@@ -721,8 +790,14 @@ mod tests {
 
     #[test]
     fn context_falls_back_to_mirroring_the_person_when_no_language_is_set() {
-        let context =
-            compose_vault_context(&vault_at("/Users/me/Thock"), &[], false, None, today());
+        let context = compose_vault_context(
+            &vault_at("/Users/me/Thock"),
+            &[],
+            false,
+            None,
+            &ReminderSettings::default(),
+            today(),
+        );
         assert!(context.contains("whatever language the person writes to you in"));
     }
 
@@ -750,6 +825,7 @@ mod tests {
             std::slice::from_ref(&manifest),
             false,
             None,
+            &ReminderSettings::default(),
             today(),
         );
         assert!(context.contains("**Daily & Weekly** — `routines/timeline/`"));
@@ -759,8 +835,14 @@ mod tests {
 
     #[test]
     fn context_says_so_when_no_routine_is_installed() {
-        let context =
-            compose_vault_context(&vault_at("/Users/me/Thock"), &[], false, None, today());
+        let context = compose_vault_context(
+            &vault_at("/Users/me/Thock"),
+            &[],
+            false,
+            None,
+            &ReminderSettings::default(),
+            today(),
+        );
         assert!(context.contains("None are installed yet"));
         assert!(context.contains("skills/thock/new-routine.md"));
     }
@@ -774,6 +856,7 @@ mod tests {
             &[],
             false,
             Some(index),
+            &ReminderSettings::default(),
             today(),
         );
         assert!(context.contains("## What you already know"));
@@ -784,8 +867,14 @@ mod tests {
 
     #[test]
     fn context_says_nothing_is_known_yet_without_an_index() {
-        let context =
-            compose_vault_context(&vault_at("/Users/me/Thock"), &[], false, None, today());
+        let context = compose_vault_context(
+            &vault_at("/Users/me/Thock"),
+            &[],
+            false,
+            None,
+            &ReminderSettings::default(),
+            today(),
+        );
         assert!(context.contains("## What you already know"));
         assert!(context.contains("Nothing yet"));
         assert!(context.contains("`memory/inbox.md`"));
