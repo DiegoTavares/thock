@@ -143,6 +143,27 @@ pub fn service_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity
         .cloned()
 }
 
+/// Calls `apply` each time `.thock/reminders.toml` changes, and returns the
+/// vault's reminder settings as its service has read them so far. Returns
+/// `None` and subscribes to nothing when `project` has no service yet, or the
+/// service hasn't read the file.
+pub fn observe_settings<T: 'static>(
+    project: &Entity<Project>,
+    cx: &mut Context<T>,
+    apply: impl Fn(&mut T, &ReminderSettings, &mut Context<T>) + 'static,
+) -> Option<ReminderSettings> {
+    let service = service_for_project(project, cx)?;
+    cx.subscribe(&service, move |this, service, event, cx| {
+        if *event == ReminderEvent::SettingsChanged {
+            let settings = service.read(cx).settings().clone();
+            apply(this, &settings, cx);
+        }
+    })
+    .detach();
+    let service = service.read(cx);
+    service.settings_loaded.then(|| service.settings().clone())
+}
+
 /// Whether the last writes went through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReminderStatus {
@@ -164,6 +185,8 @@ pub enum ReminderEvent {
     NoteCreated { path: String },
     /// The local date moved.
     DayChanged { today: NaiveDate },
+    /// `.thock/reminders.toml` changed and `settings()` holds the new values.
+    SettingsChanged,
     /// Something asked to show the Reminders tab: the notifier's
     /// *Open Reminders*, or a click on a notification's body.
     ShowReminders,
@@ -210,6 +233,8 @@ pub struct ReminderService {
     status: ReminderStatus,
     batch_task: Option<Task<()>>,
     recheck_task: Option<Task<()>>,
+    /// Re-reads notes whose new token waits for a cursor to leave its line.
+    cursor_task: Option<Task<()>>,
     /// Notes read by batches, for the startup test.
     #[cfg(test)]
     reads: usize,
@@ -243,6 +268,8 @@ struct JobResult {
     written: Vec<String>,
     /// Paths deferred because their buffer was being typed in.
     deferred: Vec<String>,
+    /// Paths with a token that got no id because a cursor sits on its line.
+    at_cursor: Vec<String>,
     created: Vec<String>,
     errors: Vec<String>,
     recheck_at: Option<NaiveDateTime>,
@@ -322,6 +349,7 @@ impl ReminderService {
             status: ReminderStatus::Idle,
             batch_task: None,
             recheck_task: None,
+            cursor_task: None,
             #[cfg(test)]
             reads: 0,
             _subscriptions: vec![day_subscription],
@@ -542,14 +570,16 @@ impl ReminderService {
 
     fn finish_batch(&mut self, result: JobResult, cx: &mut Context<Self>) {
         if let Some(settings) = result.settings {
-            match settings {
-                Ok(settings) => self.settings = settings,
-                Err(error) => {
-                    log::warn!("Thock reminders: {error:#}; using the defaults");
-                    self.settings = ReminderSettings::default();
-                }
-            }
+            let settings = settings.unwrap_or_else(|error| {
+                log::warn!("Thock reminders: {error:#}; using the defaults");
+                ReminderSettings::default()
+            });
+            let changed = self.settings != settings;
+            self.settings = settings;
             self.settings_loaded = true;
+            if changed {
+                cx.emit(ReminderEvent::SettingsChanged);
+            }
         }
         self.scan = result.scan;
         self.scan_loaded = true;
@@ -559,6 +589,18 @@ impl ReminderService {
             self.reads += result.reads;
         }
         self.dirty.extend(result.written);
+        if !result.at_cursor.is_empty() {
+            let paths = result.at_cursor;
+            self.cursor_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(TYPING_QUIET).await;
+                this.update(cx, |this, cx| {
+                    this.dirty.extend(paths);
+                    this.settle_rounds = 0;
+                    this.schedule(cx);
+                })
+                .log_err();
+            }));
+        }
         let deferred = !result.deferred.is_empty();
         self.dirty.extend(result.deferred);
         if deferred {
@@ -728,6 +770,18 @@ impl ReminderService {
         created.clear();
 
         let skip_rows = cursor_rows(&job.workspaces, &buffers, cx);
+        let at_cursor: Vec<String> = skip_rows
+            .iter()
+            .filter(|(path, rows)| {
+                job.scan.get(*path).is_some_and(|entry| {
+                    entry
+                        .lines
+                        .iter()
+                        .any(|line| line.token && line.id.is_none() && rows.contains(&line.row))
+                })
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
         let scan_lines: BTreeMap<String, Vec<ScanLine>> = job
             .scan
             .iter()
@@ -825,6 +879,7 @@ impl ReminderService {
             state: job.state,
             written,
             deferred,
+            at_cursor,
             created,
             errors,
             recheck_at: plan.recheck_at,
@@ -1485,5 +1540,106 @@ mod tests {
             row.primary_action().map(|action| action.kind),
             Some(ActionKind::RetryReminders)
         );
+    }
+
+    #[gpui::test]
+    async fn the_cursor_line_gets_its_id_once_the_cursor_leaves(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            editor::init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/vault", json!({ ".thock": {}, "a.md": "# A\n\n" }))
+            .await;
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        let project_path = project
+            .read_with(cx, |project, cx| {
+                project.find_project_path("/vault/a.md", cx)
+            })
+            .unwrap();
+        let editor = workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_path(project_path, None, true, window, cx)
+            })
+            .await
+            .unwrap()
+            .downcast::<editor::Editor>()
+            .unwrap();
+        let weak_workspace = workspace.downgrade();
+        cx.update(|_, cx| ReminderService::attach(vault(), &project, Some(weak_workspace), cx));
+        cx.run_until_parked();
+
+        editor.update_in(cx, |editor, window, cx| {
+            editor.move_to_end(&Default::default(), window, cx);
+            editor.insert("Call the bank (@2026-10-22)", window, cx);
+        });
+        let buffer = editor.read_with(cx, |editor, cx| {
+            editor.buffer().read(cx).as_singleton().unwrap()
+        });
+        project
+            .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
+            .await
+            .unwrap();
+        for _ in 0..16 {
+            cx.executor().advance_clock(BATCH_DELAY);
+            cx.run_until_parked();
+        }
+        let text = buffer.read_with(cx, |buffer, _| buffer.text());
+        assert_eq!(
+            text, "# A\n\nCall the bank (@2026-10-22)",
+            "no id under the cursor"
+        );
+
+        editor.update_in(cx, |editor, window, cx| {
+            editor.move_to_beginning(&Default::default(), window, cx);
+        });
+        for _ in 0..16 {
+            cx.executor().advance_clock(BATCH_DELAY);
+            cx.run_until_parked();
+        }
+        let text = buffer.read_with(cx, |buffer, _| buffer.text());
+        assert_eq!(
+            ids_in(&text).len(),
+            1,
+            "the id lands once the cursor leaves: {text}"
+        );
+        assert!(text.starts_with("# A\n\nCall the bank (@2026-10-22) <!--rem:"));
+    }
+
+    #[gpui::test]
+    async fn a_settings_change_reloads_and_tells_listeners(cx: &mut TestAppContext) {
+        let setup = setup(cx, json!({ ".thock": {}, "a.md": "# A\n" })).await;
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            let events = events.clone();
+            cx.subscribe(&setup.service, move |_, event: &ReminderEvent, _| {
+                events.lock().unwrap().push(event.clone());
+            })
+        });
+        write(
+            &setup,
+            cx,
+            ".thock/reminders.toml",
+            "[headings]\nday = [\"Lembretes\"]\n",
+        )
+        .await;
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .contains(&ReminderEvent::SettingsChanged)
+        );
+        setup.service.read_with(cx, |service, _| {
+            assert_eq!(
+                service.settings().day_headings,
+                vec!["Lembretes".to_string()]
+            );
+        });
     }
 }

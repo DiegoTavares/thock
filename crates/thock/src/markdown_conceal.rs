@@ -430,36 +430,50 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
 /// Reads the vault's day-section names from `.thock/reminders.toml`, which
 /// tell a mirror line from a home line (V45 §7.1), and reparses with them.
 /// The defaults stand until then, and when the file can't be read.
-fn load_reminder_headings(editor: &Editor, cx: &mut Context<Editor>) {
+fn load_reminder_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
     let Some(vault_root) = editor
         .addon::<MarkdownConcealAddon>()
         .and_then(|addon| Some(addon.reminder_note.as_ref()?.vault_root.clone()))
     else {
         return;
     };
-    let Some(fs) = editor
-        .project()
-        .map(|project| project.read(cx).fs().clone())
-    else {
+    let Some(project) = editor.project().cloned() else {
         return;
     };
+    let observed =
+        crate::reminder_service::observe_settings(&project, cx, |editor, settings, cx| {
+            set_reminder_headings(editor, settings, cx)
+        });
+    if let Some(settings) = observed {
+        set_reminder_headings(editor, &settings, cx);
+        return;
+    }
+    let fs = project.read(cx).fs().clone();
     cx.spawn(async move |editor, cx| {
         let Some(settings) = load_reminder_settings(&fs, &vault_root).await.log_err() else {
             return;
         };
         editor
             .update(cx, |editor, cx| {
-                if let Some(note) = editor
-                    .addon_mut::<MarkdownConcealAddon>()
-                    .and_then(|addon| addon.reminder_note.as_mut())
-                {
-                    note.config.day_headings = settings.day_headings;
-                }
-                schedule_reparse(editor, cx);
+                set_reminder_headings(editor, &settings, cx)
             })
             .log_err();
     })
     .detach();
+}
+
+fn set_reminder_headings(
+    editor: &mut Editor,
+    settings: &ReminderSettings,
+    cx: &mut Context<Editor>,
+) {
+    if let Some(note) = editor
+        .addon_mut::<MarkdownConcealAddon>()
+        .and_then(|addon| addon.reminder_note.as_mut())
+    {
+        note.config.day_headings = settings.day_headings.clone();
+    }
+    schedule_reparse(editor, cx);
 }
 
 /// Sets the note in the body face from settings with lining numerals while
