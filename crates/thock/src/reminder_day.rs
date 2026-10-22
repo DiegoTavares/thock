@@ -581,6 +581,9 @@ pub struct ReminderDaySync {
     retry: BTreeSet<String>,
     load_task: Option<Task<()>>,
     run_task: Option<Task<()>>,
+    /// The last write of `day.json` and `log.jsonl`; each write waits for the
+    /// one before, so two never interleave.
+    cache_write: Option<Task<()>>,
     /// Makes every day-section write fail, for the retry tests.
     #[cfg(test)]
     fail_writes: bool,
@@ -639,6 +642,7 @@ impl ReminderDaySync {
                 retry: BTreeSet::new(),
                 load_task: None,
                 run_task: None,
+                cache_write: None,
                 #[cfg(test)]
                 fail_writes: false,
                 _subscription: subscription,
@@ -746,6 +750,15 @@ impl ReminderDaySync {
         let mut reopened = HashSet::new();
         let mut memory_changed = false;
         if std::mem::take(&mut self.index_dirty) {
+            let known: HashSet<&str> = indexed
+                .iter()
+                .map(|reminder| reminder.id.as_str())
+                .collect();
+            let remembered = self.memory.reminders.len();
+            self.memory
+                .reminders
+                .retain(|id, _| known.contains(id.as_str()));
+            memory_changed |= self.memory.reminders.len() != remembered;
             for reminder in &indexed {
                 if reminder.state == IndexedState::Missing {
                     continue;
@@ -933,7 +946,11 @@ impl ReminderDaySync {
         }
         let fs = job.fs.clone();
         let cache = job.root.join(VAULT_MARKER_DIR);
-        cx.background_spawn(async move {
+        let previous = self.cache_write.take();
+        self.cache_write = Some(cx.background_spawn(async move {
+            if let Some(previous) = previous {
+                previous.await;
+            }
             let written: anyhow::Result<()> = async {
                 if let Some(memory) = memory {
                     let path = cache.join(MEMORY_FILE);
@@ -957,8 +974,7 @@ impl ReminderDaySync {
             written
                 .context("saving the day reconciler's cache")
                 .log_err();
-        })
-        .detach();
+        }));
     }
 }
 
@@ -1014,7 +1030,7 @@ async fn run_job(job: &DayJob, cx: &mut AsyncApp) -> Vec<NoteOutcome> {
             let config = job.config.clone();
             let note_path = path.clone();
             let (day, today) = (*day, job.today);
-            service.write_note(
+            service.write_day_section(
                 path,
                 move |text| {
                     let text = text?;
@@ -1890,6 +1906,72 @@ mod wiring_tests {
         );
         let memory = read(&setup, ".thock/cache/reminders/day.json").await;
         assert!(!memory.contains("Ring Bob"), "{memory}");
+    }
+
+    #[gpui::test]
+    async fn a_quick_undo_on_the_home_is_never_taken_back_by_the_mirror(cx: &mut TestAppContext) {
+        let setup = setup(
+            cx,
+            json!({
+                "projects": { "house.md": "- [ ] Call the plumber (@2026-10-21 14:30)\n" },
+                "daily": { "2026-10-21.md": "## Day planner\n" },
+            }),
+        )
+        .await;
+        let line = house_line(&setup).await;
+        assert!(
+            read(&setup, TODAY)
+                .await
+                .contains("- [ ] 14:30 Call the plumber")
+        );
+
+        let closed = thock_sync_core::close(&line).unwrap();
+        setup
+            .fs
+            .atomic_write(Path::new("/vault").join(HOUSE), format!("{closed}\n"))
+            .await
+            .unwrap();
+        // One batch: the index follows the close and the reconciler ticks the
+        // mirror. The batch that reads the ticked mirror hasn't run yet.
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(500));
+        cx.run_until_parked();
+        assert!(
+            read(&setup, TODAY)
+                .await
+                .contains("- [x] 14:30 Call the plumber")
+        );
+
+        // The person undoes the close in the same moment.
+        setup
+            .fs
+            .atomic_write(Path::new("/vault").join(HOUSE), format!("{line}\n"))
+            .await
+            .unwrap();
+        settle(cx);
+        assert_eq!(house_line(&setup).await, line, "the undo stands");
+        let note = read(&setup, TODAY).await;
+        assert!(note.contains("- [ ] 14:30 Call the plumber"), "{note}");
+    }
+
+    #[gpui::test]
+    async fn reminders_gone_from_the_index_are_forgotten(cx: &mut TestAppContext) {
+        let setup = setup(
+            cx,
+            json!({
+                "projects": { "house.md": "- [ ] Call the plumber (@2026-10-21 14:30)\n" },
+                "daily": { "2026-10-21.md": "## Day planner\n" },
+            }),
+        )
+        .await;
+        let day = day_sync(&setup, cx);
+        assert_eq!(day.read_with(cx, |day, _| day.memory.reminders.len()), 1);
+
+        write(&setup, cx, HOUSE, "").await;
+        write(&setup, cx, "reminders.md", "## Open\n\n## Done\n").await;
+        assert_eq!(day.read_with(cx, |day, _| day.memory.reminders.len()), 0);
+        let memory = read(&setup, ".thock/cache/reminders/day.json").await;
+        assert!(!memory.contains("Call the plumber"), "{memory}");
     }
 
     #[gpui::test]

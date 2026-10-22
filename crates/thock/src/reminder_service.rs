@@ -14,7 +14,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use fs::Fs;
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, SharedString,
-    Subscription, Task, WeakEntity, actions,
+    Subscription, Task, TaskExt as _, WeakEntity, actions,
 };
 use language::{Buffer, Point};
 use project::Project;
@@ -55,6 +55,8 @@ const TYPING_QUIET: Duration = Duration::from_secs(2);
 const MAX_SETTLE_ROUNDS: usize = 8;
 const CACHE_DIR: &str = "cache/reminders";
 const SCAN_FILE: &str = "scan.json";
+/// `scan.json`'s format; a cache of another version is ignored and rebuilt.
+const SCAN_VERSION: u32 = 2;
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _window, cx| {
@@ -223,6 +225,28 @@ pub struct ReminderService {
     batch_state: BatchState,
     /// Notes to re-read in the next batch, vault-relative.
     dirty: BTreeSet<String>,
+    /// Notes the worktree reported without saying they changed (its first
+    /// scan): re-read only when their mtime differs from the scan's.
+    unverified: BTreeSet<String>,
+    /// What the last batch wrote: their file events don't restart the
+    /// settle count, or the service's own writes could keep it going.
+    recent_writes: HashSet<String>,
+    /// Day sections the reconciler just wrote, as the scan should see them,
+    /// so the next batch never takes the reconciler's own ticks for a
+    /// person's tick on a copy.
+    reconciled: BTreeMap<String, Vec<ScanLine>>,
+    /// The linked notes the last batch read, by mtime, so an unchanged one
+    /// isn't read again.
+    home_texts: HashMap<String, CachedText>,
+    /// Home-line edits whose write failed, applied again on `retry`.
+    failed_edits: Vec<FailedEdit>,
+    /// The last home-line edit that had nothing to change, until the next
+    /// edit goes through or `retry`.
+    edit_error: Option<SharedString>,
+    /// The last `write_note` that failed, until `retry`.
+    write_error: Option<SharedString>,
+    /// The last batch's first error.
+    batch_error: Option<SharedString>,
     /// Walk the vault and re-read every note whose mtime changed (startup).
     full_scan: bool,
     /// Ignore `scan.json` and re-read every note (`RebuildReminders`).
@@ -248,10 +272,26 @@ pub struct ReminderService {
     /// Notes read by batches, for the startup test.
     #[cfg(test)]
     reads: usize,
+    /// Linked notes read from disk to read the index, for the cache test.
+    #[cfg(test)]
+    home_loads: usize,
     _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<ReminderEvent> for ReminderService {}
+
+#[derive(Debug, Clone)]
+struct FailedEdit {
+    id: String,
+    edit: HomeEdit,
+    error: SharedString,
+}
+
+#[derive(Debug, Clone)]
+struct CachedText {
+    mtime: (u64, u32),
+    text: String,
+}
 
 /// One batch's inputs, taken from the service.
 struct Job {
@@ -263,10 +303,12 @@ struct Job {
     projects: Vec<Entity<Project>>,
     workspaces: Vec<Entity<Workspace>>,
     dirty: BTreeSet<String>,
+    unverified: BTreeSet<String>,
     full_scan: bool,
     rebuild: bool,
     scan: BTreeMap<String, ScanEntry>,
     scan_loaded: bool,
+    home_texts: HashMap<String, CachedText>,
     state: BatchState,
     now: NaiveDateTime,
 }
@@ -281,13 +323,15 @@ struct JobResult {
     deferred: Vec<String>,
     /// Paths with a token that got no id because a cursor sits on its line.
     at_cursor: Vec<String>,
-    created: Vec<String>,
+    home_texts: HashMap<String, CachedText>,
     errors: Vec<String>,
     recheck_at: Option<NaiveDateTime>,
     /// `None` when the index couldn't be read: keep the last reading.
     reminders: Option<Vec<IndexedReminder>>,
     #[cfg(test)]
     reads: usize,
+    #[cfg(test)]
+    home_loads: usize,
 }
 
 impl ReminderService {
@@ -355,6 +399,14 @@ impl ReminderService {
             scan_loaded: false,
             batch_state: BatchState::default(),
             dirty: BTreeSet::new(),
+            unverified: BTreeSet::new(),
+            recent_writes: HashSet::new(),
+            reconciled: BTreeMap::new(),
+            home_texts: HashMap::new(),
+            failed_edits: Vec::new(),
+            edit_error: None,
+            write_error: None,
+            batch_error: None,
             full_scan: true,
             rebuild: false,
             needs_plan: true,
@@ -372,6 +424,8 @@ impl ReminderService {
             cursor_wait: false,
             #[cfg(test)]
             reads: 0,
+            #[cfg(test)]
+            home_loads: 0,
             _subscriptions: vec![day_subscription],
         };
         this.schedule(cx);
@@ -473,6 +527,7 @@ impl ReminderService {
         let settings_path = format!("{VAULT_MARKER_DIR}/{REMINDERS_CONFIG_FILE}");
         let vault_config = format!("{VAULT_MARKER_DIR}/{VAULT_CONFIG_FILE}");
         let mut touched = false;
+        let mut restart = false;
         for (path, _, change) in changes.iter() {
             let path = path.as_unix_str();
             if path == settings_path || path == vault_config {
@@ -484,22 +539,45 @@ impl ReminderService {
                 self.settings_loaded = false;
                 self.full_scan = true;
                 touched = true;
+                restart = true;
             } else if path == self.settings.index || is_reminder_note(&self.vault, path) {
-                if matches!(change, project::PathChange::Added) {
-                    cx.emit(ReminderEvent::NoteCreated {
-                        path: path.to_string(),
-                    });
-                } else if path != self.settings.index {
-                    cx.emit(ReminderEvent::NoteChanged {
-                        path: path.to_string(),
-                    });
+                match change {
+                    project::PathChange::Added => {
+                        cx.emit(ReminderEvent::NoteCreated {
+                            path: path.to_string(),
+                        });
+                        self.dirty.insert(path.to_string());
+                    }
+                    // The worktree's first scan reports every file; the scan
+                    // cache says which of them changed while Thock was closed.
+                    project::PathChange::Loaded => {
+                        self.unverified.insert(path.to_string());
+                    }
+                    project::PathChange::AddedOrUpdated => {
+                        if path != self.settings.index {
+                            cx.emit(ReminderEvent::NoteChanged {
+                                path: path.to_string(),
+                            });
+                        }
+                        self.unverified.insert(path.to_string());
+                    }
+                    project::PathChange::Updated | project::PathChange::Removed => {
+                        if path != self.settings.index {
+                            cx.emit(ReminderEvent::NoteChanged {
+                                path: path.to_string(),
+                            });
+                        }
+                        self.dirty.insert(path.to_string());
+                    }
                 }
-                self.dirty.insert(path.to_string());
                 touched = true;
+                restart |= !self.recent_writes.contains(path);
             }
         }
         if touched {
-            self.settle_rounds = 0;
+            if restart {
+                self.settle_rounds = 0;
+            }
             self.schedule(cx);
         }
     }
@@ -522,11 +600,20 @@ impl ReminderService {
         self.schedule(cx);
     }
 
-    /// Runs the batch again after a failed write.
+    /// Runs the batch again after a failed write, and the home-line edits
+    /// that failed.
     pub fn retry(&mut self, cx: &mut Context<Self>) {
         self.full_scan = true;
         self.needs_plan = true;
         self.settle_rounds = 0;
+        self.edit_error = None;
+        self.write_error = None;
+        for failed in std::mem::take(&mut self.failed_edits) {
+            // A failure is recorded again by `edit_reminder` itself.
+            self.edit_reminder(&failed.id, failed.edit, cx)
+                .detach_and_log_err(cx);
+        }
+        self.refresh_status(cx);
         self.schedule(cx);
         // The day sections' failed writes too, once this update is done: the
         // day sync reads this service.
@@ -558,7 +645,10 @@ impl ReminderService {
     }
 
     fn take_job(&mut self, cx: &mut Context<Self>) -> Option<Job> {
-        let has_work = !self.dirty.is_empty() || self.full_scan || self.needs_plan;
+        let has_work = !self.dirty.is_empty()
+            || !self.unverified.is_empty()
+            || self.full_scan
+            || self.needs_plan;
         let projects: Vec<Entity<Project>> = self
             .projects
             .iter()
@@ -573,9 +663,15 @@ impl ReminderService {
         };
         if !has_work || self.settle_rounds >= MAX_SETTLE_ROUNDS {
             self.running = false;
+            self.recent_writes.clear();
             return None;
         }
         self.settle_rounds += 1;
+        for (path, lines) in std::mem::take(&mut self.reconciled) {
+            let entry = self.scan.entry(path).or_default();
+            entry.lines = lines;
+            entry.mtime = None;
+        }
         self.workspaces
             .retain(|workspace| workspace.upgrade().is_some());
         Some(Job {
@@ -590,10 +686,12 @@ impl ReminderService {
                 .filter_map(WeakEntity::upgrade)
                 .collect(),
             dirty: std::mem::take(&mut self.dirty),
+            unverified: std::mem::take(&mut self.unverified),
             full_scan: std::mem::take(&mut self.full_scan),
             rebuild: std::mem::take(&mut self.rebuild),
             scan: self.scan.clone(),
             scan_loaded: self.scan_loaded,
+            home_texts: self.home_texts.clone(),
             state: self.batch_state.clone(),
             now: {
                 self.needs_plan = false;
@@ -624,9 +722,12 @@ impl ReminderService {
         self.scan = result.scan;
         self.scan_loaded = true;
         self.batch_state = result.state;
+        self.home_texts = result.home_texts;
+        self.recent_writes = result.written.iter().cloned().collect();
         #[cfg(test)]
         {
             self.reads += result.reads;
+            self.home_loads += result.home_loads;
         }
         self.dirty.extend(result.written);
         self.at_cursor.extend(result.at_cursor);
@@ -649,15 +750,8 @@ impl ReminderService {
         if deferred {
             self.settle_rounds = 0;
         }
-        for path in result.created {
-            cx.emit(ReminderEvent::NoteCreated { path });
-        }
-        self.status = match result.errors.first().or(self.settings_error.as_ref()) {
-            Some(error) => ReminderStatus::Failing {
-                error: error.clone().into(),
-            },
-            None => ReminderStatus::Idle,
-        };
+        self.batch_error = result.errors.first().cloned().map(SharedString::from);
+        self.refresh_status(cx);
         if let Some(at) = result.recheck_at {
             let wait = ReminderClock::global(cx).duration_until(at) + Duration::from_millis(1);
             self.recheck_task = Some(cx.spawn(async move |this, cx| {
@@ -679,6 +773,26 @@ impl ReminderService {
             }
         }
         cx.notify();
+    }
+
+    /// The status row: the batch's error, a settings file that won't
+    /// parse, a home-line edit that failed, or a failed write, first first.
+    fn refresh_status(&mut self, cx: &mut Context<Self>) {
+        let error = self
+            .batch_error
+            .clone()
+            .or_else(|| self.settings_error.clone().map(SharedString::from))
+            .or_else(|| self.failed_edits.first().map(|failed| failed.error.clone()))
+            .or_else(|| self.edit_error.clone())
+            .or_else(|| self.write_error.clone());
+        let status = match error {
+            Some(error) => ReminderStatus::Failing { error },
+            None => ReminderStatus::Idle,
+        };
+        if status != self.status {
+            self.status = status;
+            cx.notify();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -709,11 +823,23 @@ impl ReminderService {
         } else if !job.scan_loaded
             && let Ok(text) = job.fs.load(&cache_path).await
             && let Some(cache) = serde_json::from_str::<ScanCache>(&text).log_err()
+            && cache.version == SCAN_VERSION
         {
             job.scan = cache.files;
         }
+        let scan_before = job.scan.clone();
 
         let mut dirty = job.dirty.clone();
+        for path in &job.unverified {
+            if dirty.contains(path) {
+                continue;
+            }
+            let mtime = mtime_of(&job.fs, &job.vault.root.join(path)).await;
+            let known = job.scan.get(path).and_then(|entry| entry.mtime);
+            if mtime.is_none() || known != mtime {
+                dirty.insert(path.clone());
+            }
+        }
         if job.full_scan {
             let listed = list_notes(&job.projects, &job.vault, &index_path, cx);
             for path in &listed {
@@ -769,7 +895,16 @@ impl ReminderService {
             let mtime = mtime_of(&job.fs, &abs).await;
             mtimes.insert(path.clone(), mtime);
             let text = match buffers.get(path) {
-                Some(buffer) => Some(buffer.read_with(cx, |buffer, _| buffer.text())),
+                Some(buffer) => {
+                    let (text, unsaved) =
+                        buffer.read_with(cx, |buffer, _| (buffer.text(), buffer.is_dirty()));
+                    // Ids read from unsaved text are not what the file on
+                    // disk holds, so the next startup reads it again.
+                    if unsaved {
+                        mtimes.insert(path.clone(), None);
+                    }
+                    Some(text)
+                }
                 None if mtime.is_some() => match job.fs.load(&abs).await {
                     Ok(text) => Some(text),
                     Err(error) => {
@@ -791,7 +926,6 @@ impl ReminderService {
             }
         }
 
-        let mut created = Vec::new();
         let previous: BTreeMap<String, Vec<ScanLine>> = dirty
             .iter()
             .filter_map(|path| Some((path.clone(), job.scan.get(path)?.lines.clone())))
@@ -799,9 +933,6 @@ impl ReminderService {
         for path in &dirty {
             match texts.get(path) {
                 Some(text) => {
-                    if !job.scan.contains_key(path) && job.scan_loaded && path != &index_path {
-                        created.push(path.clone());
-                    }
                     job.scan.insert(
                         path.clone(),
                         ScanEntry {
@@ -816,10 +947,6 @@ impl ReminderService {
                 }
             }
         }
-        // `NoteCreated` already went out for file events; only the startup
-        // scan's discoveries are new here, and those are not creations.
-        created.clear();
-
         let skip_rows = cursor_rows(&job.workspaces, &buffers, cx);
         let at_cursor: Vec<String> = skip_rows
             .iter()
@@ -828,7 +955,7 @@ impl ReminderService {
                     entry
                         .lines
                         .iter()
-                        .any(|line| line.token && line.id.is_none() && rows.contains(&line.row))
+                        .any(|line| line.has_day && line.id.is_none() && rows.contains(&line.row))
                 })
             })
             .map(|(path, _)| path.clone())
@@ -892,6 +1019,9 @@ impl ReminderService {
         // Read the index the way every desk reader sees it. An unreadable one
         // keeps the reminders read last time.
         let index_abs = job.vault.root.join(&index_path);
+        let mut home_texts = HashMap::new();
+        #[cfg(test)]
+        let mut home_loads = 0;
         let reminders = match read_text(&job.fs, &job.projects, &index_abs, cx).await {
             Err(error) => {
                 errors.push(format!("{index_path}: {error:#}"));
@@ -908,10 +1038,26 @@ impl ReminderService {
                     {
                         let text = match texts.get(&home) {
                             Some(text) if !written.contains(&home) => Ok(Some(text.clone())),
-                            _ => {
-                                read_text(&job.fs, &job.projects, &job.vault.root.join(&home), cx)
-                                    .await
-                            }
+                            _ => read_home(
+                                &job.fs,
+                                &job.projects,
+                                &job.vault.root.join(&home),
+                                job.home_texts.get(&home),
+                                cx,
+                            )
+                            .await
+                            .map(|read| {
+                                read.map(|read| {
+                                    #[cfg(test)]
+                                    if read.loaded {
+                                        home_loads += 1;
+                                    }
+                                    if let Some(cache) = read.cache {
+                                        home_texts.insert(home.clone(), cache);
+                                    }
+                                    read.text
+                                })
+                            }),
                         };
                         match text {
                             Ok(Some(text)) => {
@@ -933,10 +1079,12 @@ impl ReminderService {
         };
 
         let cache = ScanCache {
-            version: 1,
+            version: SCAN_VERSION,
             files: job.scan.clone(),
         };
-        if let Some(text) = serde_json::to_string(&cache).log_err() {
+        if job.scan != scan_before
+            && let Some(text) = serde_json::to_string(&cache).log_err()
+        {
             let write = async {
                 if let Some(parent) = cache_path.parent() {
                     job.fs.create_dir(parent).await?;
@@ -953,12 +1101,14 @@ impl ReminderService {
             written,
             deferred,
             at_cursor,
-            created,
+            home_texts,
             errors,
             recheck_at: plan.recheck_at,
             reminders,
             #[cfg(test)]
             reads,
+            #[cfg(test)]
+            home_loads,
         }
     }
 
@@ -995,15 +1145,46 @@ impl ReminderService {
             },
             cx,
         );
-        cx.spawn(async move |_, _| {
-            if task.await? {
-                Ok(())
-            } else {
-                Err(anyhow!(
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            let outcome = task.await;
+            this.update(cx, |this, cx| {
+                this.edit_reminder_done(&id, edit, &home, &outcome, cx)
+            })?;
+            match outcome {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(anyhow!(
                     "the reminder's line in {home} could not be changed"
-                ))
+                )),
+                Err(error) => Err(error),
             }
         })
+    }
+
+    /// Keeps a failed home-line edit for `retry` and on the status row until
+    /// it goes through.
+    fn edit_reminder_done(
+        &mut self,
+        id: &str,
+        edit: HomeEdit,
+        home: &str,
+        outcome: &Result<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        self.failed_edits.retain(|failed| failed.id != id);
+        match outcome {
+            Ok(true) => self.edit_error = None,
+            Ok(false) => {
+                self.edit_error =
+                    Some(format!("{home}: the reminder's line could not be changed").into());
+            }
+            Err(error) => self.failed_edits.push(FailedEdit {
+                id: id.to_string(),
+                edit,
+                error: format!("{home}: {error:#}").into(),
+            }),
+        }
+        self.refresh_status(cx);
     }
 
     /// Adds an empty task, `- [ ] `, at the end of the index's Open section
@@ -1045,6 +1226,28 @@ impl ReminderService {
         edit: impl FnOnce(Option<&str>) -> Option<String> + 'static,
         cx: &mut Context<Self>,
     ) -> Task<Result<bool>> {
+        self.write_note_and_scan(path, edit, false, cx)
+    }
+
+    /// `write_note` for the day reconciler: the scan takes the note as the
+    /// reconciler wrote it, so the mirrors it ticked or unticked are never
+    /// read back as a person's tick on a copy (§5.3).
+    pub fn write_day_section(
+        &mut self,
+        path: &str,
+        edit: impl FnOnce(Option<&str>) -> Option<String> + 'static,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
+        self.write_note_and_scan(path, edit, true, cx)
+    }
+
+    fn write_note_and_scan(
+        &mut self,
+        path: &str,
+        edit: impl FnOnce(Option<&str>) -> Option<String> + 'static,
+        rescan: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
         let projects: Vec<Entity<Project>> = self
             .projects
             .iter()
@@ -1058,19 +1261,35 @@ impl ReminderService {
         };
         let abs = self.vault.root.join(path);
         let path = path.to_string();
+        let written_text = Arc::new(std::sync::Mutex::new(None::<String>));
+        let edit = {
+            let written_text = written_text.clone();
+            move |text: Option<&str>| {
+                let edited = edit(text);
+                if rescan && let Ok(mut written) = written_text.lock() {
+                    *written = edited.clone();
+                }
+                edited
+            }
+        };
         cx.spawn(async move |this, cx| {
             let outcome = write_text(&fs, &projects, &abs, edit, cx).await;
             this.update(cx, |this, cx| match &outcome {
-                Ok(_) => {
+                Ok(wrote) => {
+                    if *wrote
+                        && let Some(text) =
+                            written_text.lock().ok().and_then(|mut text| text.take())
+                    {
+                        let lines = scan_note(&text, &path, &this.config());
+                        this.reconciled.insert(path.clone(), lines);
+                    }
                     this.dirty.insert(path.clone());
                     this.settle_rounds = 0;
                     this.schedule(cx);
                 }
                 Err(error) => {
-                    this.status = ReminderStatus::Failing {
-                        error: format!("{path}: {error:#}").into(),
-                    };
-                    cx.notify();
+                    this.write_error = Some(format!("{path}: {error:#}").into());
+                    this.refresh_status(cx);
                 }
             })?;
             outcome
@@ -1145,6 +1364,67 @@ async fn read_text(
         .await
         .map(Some)
         .with_context(|| format!("reading {}", abs.display()))
+}
+
+/// A linked note as `read_home` found it.
+struct HomeText {
+    text: String,
+    /// What to keep for the next batch: the text by mtime, when it came from
+    /// the disk.
+    cache: Option<CachedText>,
+    /// Whether the disk was read.
+    #[cfg(test)]
+    loaded: bool,
+}
+
+/// A linked note's text: its open buffer, the cached text while its mtime
+/// is unchanged, or the disk. `None` when the note is missing.
+async fn read_home(
+    fs: &Arc<dyn Fs>,
+    projects: &[Entity<Project>],
+    abs: &Path,
+    cached: Option<&CachedText>,
+    cx: &mut AsyncApp,
+) -> Result<Option<HomeText>> {
+    if let Some(buffer) = open_buffer(projects, abs, cx) {
+        return Ok(Some(HomeText {
+            text: buffer.read_with(cx, |buffer, _| buffer.text()),
+            cache: None,
+            #[cfg(test)]
+            loaded: false,
+        }));
+    }
+    let Some(mtime) = mtime_of(fs, abs).await else {
+        return Ok(read_text(fs, projects, abs, cx)
+            .await?
+            .map(|text| HomeText {
+                text,
+                cache: None,
+                #[cfg(test)]
+                loaded: true,
+            }));
+    };
+    if let Some(cached) = cached.filter(|cached| cached.mtime == mtime) {
+        return Ok(Some(HomeText {
+            text: cached.text.clone(),
+            cache: Some(cached.clone()),
+            #[cfg(test)]
+            loaded: false,
+        }));
+    }
+    let text = fs
+        .load(abs)
+        .await
+        .with_context(|| format!("reading {}", abs.display()))?;
+    Ok(Some(HomeText {
+        cache: Some(CachedText {
+            mtime,
+            text: text.clone(),
+        }),
+        text,
+        #[cfg(test)]
+        loaded: true,
+    }))
 }
 
 /// Writes through the open buffer as one undoable transaction, or through
@@ -1585,11 +1865,7 @@ mod tests {
 
     #[gpui::test]
     async fn startup_reads_only_changed_notes(cx: &mut TestAppContext) {
-        let Setup {
-            fs,
-            project,
-            service,
-        } = setup(
+        let Setup { fs, service, .. } = setup(
             cx,
             json!({
                 ".thock": {},
@@ -1611,13 +1887,226 @@ mod tests {
             .await
             .unwrap();
 
+        // A new window: the service attaches before the worktree's first
+        // scan is delivered, so it sees every file reported as loaded.
+        let project = Project::test(fs.clone(), [], cx).await;
         let service = cx.update(|cx| ReminderService::attach(vault(), &project, None, cx));
+        project
+            .update(cx, |project, cx| {
+                project.find_or_create_worktree("/vault", true, cx)
+            })
+            .await
+            .unwrap();
         settle(cx);
-        // c.md and the index, then both again after the id and the link.
+        // c.md and the index, then both again after the id and the link; a
+        // note the first scan reports unchanged is never read.
         let reads = service.read_with(cx, |service, _| service.reads());
-        assert!(reads <= 5, "read {reads} notes");
+        assert!(reads <= 4, "read {reads} notes");
         let index = fs.load(Path::new("/vault/reminders.md")).await.unwrap();
         assert!(index.contains("- [[c]]"), "{index}");
+    }
+
+    fn worktree_id(project: &Entity<Project>, cx: &App) -> project::WorktreeId {
+        project
+            .read(cx)
+            .visible_worktrees(cx)
+            .next()
+            .unwrap()
+            .read(cx)
+            .id()
+    }
+
+    fn updated_entries(path: &str, change: project::PathChange) -> project::UpdatedEntriesSet {
+        let path = util::rel_path::RelPath::from_unix_str(path)
+            .unwrap()
+            .into_arc();
+        Arc::from([(path, project::ProjectEntryId::from_proto(1), change)])
+    }
+
+    #[gpui::test]
+    async fn a_time_only_token_outside_a_daily_note_gets_no_id(cx: &mut TestAppContext) {
+        let setup = setup(
+            cx,
+            json!({
+                ".thock": {},
+                "projects": { "house.md": "- [ ] Call the plumber (@17:00)\n" },
+                "daily": { "2026-10-21.md": "- [ ] Water the plants (@17:00)\n" },
+            }),
+        )
+        .await;
+        assert_eq!(
+            read(&setup, "projects/house.md").await,
+            "- [ ] Call the plumber (@17:00)\n"
+        );
+        assert_eq!(ids_in(&read(&setup, "daily/2026-10-21.md").await).len(), 1);
+        let index = read(&setup, "reminders.md").await;
+        assert!(!index.contains("projects/house"), "{index}");
+        assert!(index.contains("[[daily/2026-10-21]]"), "{index}");
+    }
+
+    #[gpui::test]
+    async fn a_failed_edit_stays_on_the_status_row_until_retry_applies_it(cx: &mut TestAppContext) {
+        const LINE: &str = "- [ ] Call (@2026-10-22) <!--rem:111111111111-->\n";
+        let setup = setup(
+            cx,
+            json!({
+                ".thock": {},
+                "a.md": LINE,
+                "reminders.md": "## Open\n- [[a]] <!--rem:111111111111-->\n\n## Done\n",
+            }),
+        )
+        .await;
+        setup
+            .fs
+            .insert_file("/vault/a.md", vec![0xff, 0xfe, 0xfd])
+            .await;
+        settle(cx);
+        let failed = setup
+            .service
+            .update(cx, |service, cx| {
+                service.edit_reminder("111111111111", HomeEdit::Close, cx)
+            })
+            .await;
+        assert!(failed.is_err());
+
+        // The note reads again; the batch that follows has no error of its
+        // own, and the edit still waits.
+        write(&setup, cx, "a.md", LINE).await;
+        assert_eq!(read(&setup, "a.md").await, LINE);
+        setup.service.read_with(cx, |service, _| {
+            assert!(
+                matches!(service.status(), ReminderStatus::Failing { .. }),
+                "{:?}",
+                service.status()
+            );
+        });
+
+        setup.service.update(cx, |service, cx| service.retry(cx));
+        settle(cx);
+        assert!(read(&setup, "a.md").await.starts_with("- [x] Call"));
+        setup.service.read_with(cx, |service, _| {
+            assert_eq!(service.status(), &ReminderStatus::Idle);
+        });
+    }
+
+    #[gpui::test]
+    async fn an_edit_with_nothing_to_change_shows_on_the_status_row(cx: &mut TestAppContext) {
+        let setup = setup(
+            cx,
+            json!({
+                ".thock": {},
+                "a.md": "- [x] Call (@2026-10-22) <!--rem:111111111111-->\n",
+                "reminders.md": "## Open\n\n## Done\n- [[a]] ✅ 2026-10-21 <!--rem:111111111111-->\n",
+            }),
+        )
+        .await;
+        let outcome = setup
+            .service
+            .update(cx, |service, cx| {
+                service.edit_reminder("111111111111", HomeEdit::Close, cx)
+            })
+            .await;
+        assert!(outcome.is_err());
+        settle(cx);
+        setup.service.read_with(cx, |service, _| {
+            assert!(matches!(service.status(), ReminderStatus::Failing { .. }));
+        });
+        setup.service.update(cx, |service, cx| service.retry(cx));
+        settle(cx);
+        setup.service.read_with(cx, |service, _| {
+            assert_eq!(service.status(), &ReminderStatus::Idle);
+        });
+    }
+
+    #[gpui::test]
+    async fn ids_read_from_an_unsaved_buffer_are_cached_without_an_mtime(cx: &mut TestAppContext) {
+        let setup = setup(cx, json!({ ".thock": {}, "a.md": "# A\n" })).await;
+        let buffer = setup
+            .project
+            .update(cx, |project, cx| {
+                project.open_local_buffer("/vault/a.md", cx)
+            })
+            .await
+            .unwrap();
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(4..4, "Call (@2026-10-22)\n")], None, cx)
+        });
+        setup.service.update(cx, |service, cx| {
+            service.dirty.insert("a.md".into());
+            service.schedule(cx);
+        });
+        cx.executor().advance_clock(TYPING_QUIET);
+        settle(cx);
+        assert!(buffer.read_with(cx, |buffer, _| buffer.is_dirty()));
+        setup.service.read_with(cx, |service, _| {
+            let entry = service.scan.get("a.md").unwrap();
+            assert!(entry.lines.iter().any(|line| line.id.is_some()));
+            assert_eq!(entry.mtime, None, "read again at the next startup");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_quiet_batch_rereads_and_rewrites_nothing(cx: &mut TestAppContext) {
+        let setup = setup(
+            cx,
+            json!({
+                ".thock": {},
+                "a.md": "- [ ] Call (@2026-10-22) <!--rem:111111111111-->\n",
+                "reminders.md": "## Open\n- [[a]] <!--rem:111111111111-->\n\n## Done\n",
+            }),
+        )
+        .await;
+        let quiet_batch = |cx: &mut TestAppContext| {
+            setup.service.update(cx, |service, cx| {
+                service.needs_plan = true;
+                service.schedule(cx);
+            });
+            settle(cx);
+        };
+        // The first quiet batch reads a.md as a linked note and keeps it.
+        quiet_batch(cx);
+        let cache = Path::new("/vault/.thock/cache/reminders/scan.json");
+        let written = setup.fs.metadata(cache).await.unwrap().unwrap().mtime;
+        let loads = setup.service.read_with(cx, |service, _| service.home_loads);
+        quiet_batch(cx);
+        assert_eq!(
+            setup.fs.metadata(cache).await.unwrap().unwrap().mtime,
+            written,
+            "scan.json is written only when the scan changed"
+        );
+        setup.service.read_with(cx, |service, _| {
+            assert_eq!(service.home_loads, loads, "a.md is unchanged");
+            assert_eq!(service.reminders().len(), 1);
+            assert_eq!(service.reminders()[0].text.as_deref(), Some("Call"));
+        });
+    }
+
+    #[gpui::test]
+    async fn the_services_own_writes_never_restart_the_settle_count(cx: &mut TestAppContext) {
+        let setup = setup(cx, json!({ ".thock": {}, "a.md": "# A\n" })).await;
+        setup.service.update(cx, |service, cx| {
+            service.recent_writes.insert("a.md".into());
+            service.settle_rounds = 3;
+            service.handle_project_event(
+                setup.project.clone(),
+                &project::Event::WorktreeUpdatedEntries(
+                    worktree_id(&setup.project, cx),
+                    updated_entries("a.md", project::PathChange::Updated),
+                ),
+                cx,
+            );
+            assert_eq!(service.settle_rounds, 3);
+            service.recent_writes.clear();
+            service.handle_project_event(
+                setup.project.clone(),
+                &project::Event::WorktreeUpdatedEntries(
+                    worktree_id(&setup.project, cx),
+                    updated_entries("a.md", project::PathChange::Updated),
+                ),
+                cx,
+            );
+            assert_eq!(service.settle_rounds, 0);
+        });
     }
 
     #[gpui::test]

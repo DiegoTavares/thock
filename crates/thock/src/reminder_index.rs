@@ -346,6 +346,10 @@ pub struct ScanLine {
     pub id: Option<String>,
     /// The line carries a token.
     pub token: bool,
+    /// The token names a day: not a time-only token outside a daily note,
+    /// which is never indexed (§4.2).
+    #[serde(default)]
+    pub has_day: bool,
     /// Ticked, or its token struck.
     pub closed: bool,
     /// A mirror line in a daily note's day section.
@@ -372,6 +376,7 @@ pub fn scan_note(text: &str, path: &str, config: &ReminderConfig) -> Vec<ScanLin
                 row: appearance.line,
                 id: reminder.id.clone(),
                 token: reminder.token.is_some(),
+                has_day: reminder.due.is_some(),
                 closed: reminder.task == Some(Task::Done)
                     || reminder.token.as_ref().is_some_and(|token| token.struck),
                 mirror: appearance.mirror,
@@ -416,6 +421,9 @@ pub enum Change {
         to: IndexSection,
         line: String,
     },
+    /// Remove every link entry of `id` after its first entry. Loose lines
+    /// are a person's words and stay.
+    RemoveDuplicateLinks { id: String },
 }
 
 /// The changes one file needs, in order.
@@ -567,6 +575,18 @@ pub fn apply_changes(
             }
             Change::AppendEntry { section, line } => {
                 append_entry(&mut lines, *section, line.clone(), settings);
+            }
+            Change::RemoveDuplicateLinks { id } => {
+                let duplicates: Vec<usize> = parse_index(&lines.join(), path, settings, config)
+                    .into_iter()
+                    .filter(|entry| &entry.id == id)
+                    .skip(1)
+                    .filter(|entry| matches!(entry.kind, EntryKind::Link { .. }))
+                    .map(|entry| entry.row)
+                    .collect();
+                for row in duplicates.into_iter().rev() {
+                    lines.remove(row);
+                }
             }
             Change::ReplaceEntry { id, line } => {
                 if let Some(entry) = entry_row(&lines, path, id, settings, config) {
@@ -785,10 +805,28 @@ pub fn plan_batch(
     new_id: &mut dyn FnMut() -> String,
 ) -> BatchPlan {
     let today = input.now.date();
-    let entries = input
+    let all_entries = input
         .index_text
         .map(|text| parse_index(text, input.index_path, settings, config))
         .unwrap_or_default();
+    // One entry per id: later link entries for an id already listed are
+    // removed first, so every change below addresses the one that stays.
+    let mut index_changes = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut entries: Vec<IndexEntry> = Vec::new();
+    for entry in &all_entries {
+        if seen.insert(entry.id.as_str()) {
+            entries.push(entry.clone());
+        } else if matches!(entry.kind, EntryKind::Link { .. })
+            && !index_changes.iter().any(
+                |change| matches!(change, Change::RemoveDuplicateLinks { id } if id == &entry.id),
+            )
+        {
+            index_changes.push(Change::RemoveDuplicateLinks {
+                id: entry.id.clone(),
+            });
+        }
+    }
     let mut scan = input.scan.clone();
     let mut known: HashSet<String> = scan
         .values()
@@ -806,7 +844,9 @@ pub fn plan_batch(
             continue;
         };
         for line in lines.iter_mut() {
-            if !line.token || line.id.is_some() || skip.is_some_and(|skip| skip.contains(&line.row))
+            if !line.has_day
+                || line.id.is_some()
+                || skip.is_some_and(|skip| skip.contains(&line.row))
             {
                 continue;
             }
@@ -858,11 +898,10 @@ pub fn plan_batch(
     };
     let moved_to = |id: &str, from: &str| -> Option<String> {
         homes.get(id)?.iter().find_map(|(path, line)| {
-            (line.token && *path != from && *path != input.index_path).then(|| path.to_string())
+            (line.has_day && *path != from && *path != input.index_path).then(|| path.to_string())
         })
     };
 
-    let mut index_changes = Vec::new();
     let mut home_changes: BTreeMap<String, Vec<Change>> = BTreeMap::new();
     let mut recheck_at: Option<NaiveDateTime> = None;
 
@@ -1018,7 +1057,7 @@ pub fn plan_batch(
         }
         let Some((path, line)) = appearances
             .iter()
-            .find(|(path, line)| line.token && *path != input.index_path)
+            .find(|(path, line)| line.has_day && *path != input.index_path)
         else {
             continue;
         };
@@ -1232,6 +1271,49 @@ mod tests {
             &mut || "a00000000001".into(),
         );
         assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn a_time_only_token_outside_a_daily_note_is_never_indexed() {
+        let mut vault = Vault::new(&[
+            ("projects/house.md", "- [ ] Call the plumber (@17:00)\n"),
+            ("b.md", "- [ ] Ask (@2026-10-22) <!--rem:111111111111-->\n"),
+            (
+                "reminders.md",
+                "## Open\n- [[b]] <!--rem:111111111111-->\n\n## Done\n",
+            ),
+        ]);
+        vault.settle(&["projects/house.md"], at(NOW));
+        assert_eq!(
+            vault.files["projects/house.md"], "- [ ] Call the plumber (@17:00)\n",
+            "no id"
+        );
+        assert!(!vault.index().contains("[[projects/house]]"));
+
+        // A line that moved here with its id is no new home for its link.
+        vault.edit("b.md", "");
+        vault.edit(
+            "projects/house.md",
+            "- [ ] Ask (@17:00) <!--rem:111111111111-->\n",
+        );
+        vault.settle(&["b.md", "projects/house.md"], at(NOW));
+        assert!(vault.index().contains("- [[b]] <!--rem:111111111111-->"));
+    }
+
+    #[test]
+    fn duplicate_links_for_one_id_collapse_to_the_first() {
+        let mut vault = Vault::new(&[
+            ("a.md", "- [ ] Call (@2026-10-22) <!--rem:111111111111-->\n"),
+            (
+                "reminders.md",
+                "## Open\n- [[a]] <!--rem:111111111111-->\n- [ ] Loose (@2026-10-23) <!--rem:222222222222-->\n- [[a]] <!--rem:111111111111-->\n- [[b]] <!--rem:222222222222-->\n\n## Done\n- [[a]] <!--rem:111111111111-->\n",
+            ),
+        ]);
+        vault.settle(&["reminders.md"], at(NOW));
+        assert_eq!(
+            vault.index(),
+            "## Open\n- [[a]] <!--rem:111111111111-->\n- [ ] Loose (@2026-10-23) <!--rem:222222222222-->\n\n## Done\n"
+        );
     }
 
     #[test]

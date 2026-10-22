@@ -264,10 +264,13 @@ batch:
 
 Writes go through the open buffer as one undoable transaction when the file is open, and through
 `Fs` otherwise, never as a whole-file rewrite (CLAUDE.md, Vault I/O). A failed write surfaces in the
-sync status popover (V32) as a Reminders row with Retry; it never fails silently.
+sync status popover (V32) as a Reminders row with Retry; it never fails silently. A home-line edit
+that failed (a tick from the tab or a notification) stays on that row until Retry applies it.
 
 **Startup.** The service keeps `.thock/cache/reminders/scan.json`, each in-scope path with its
-mtime and ids. At startup it re-parses only the files whose mtime changed while Thock was closed. On
+mtime and ids. At startup it re-parses only the files whose mtime changed while Thock was closed;
+the worktree's first scan reports every file, and those reports are checked against the cache too.
+Ids read from a buffer with unsaved changes are cached without an mtime, so they are read again. On
 the first run, or after `thock::RebuildReminders`, it scans the vault once and builds the index.
 `.thock/cache/` is outside sync and rebuildable.
 
