@@ -285,9 +285,12 @@ pub fn parse_note(text: &str, path: &str, config: &ReminderConfig) -> Vec<Appear
         let Some(reminder) = read.reminder else {
             continue;
         };
+        // A mirror has the mirror shape; a home line in the section that
+        // lost its token is a dropped reminder, not a copy.
         let mirror = reminder.token.is_none()
             && reminder.id.is_some()
-            && day_sections.iter().any(|section| section.contains(&index));
+            && day_sections.iter().any(|section| section.contains(&index))
+            && MirrorLine::parse(&line.text).is_some();
         appearances.push(Appearance {
             line: index,
             reminder,
@@ -742,7 +745,10 @@ pub fn trailing_comments_start(line: &str) -> usize {
         let Some(open) = tail.rfind(COMMENT_OPEN) else {
             break;
         };
-        if open + COMMENT_OPEN.len() > tail.len() - COMMENT_CLOSE.len() {
+        let inner = tail.get(open + COMMENT_OPEN.len()..tail.len() - COMMENT_CLOSE.len());
+        // The last `<!--` must open the comment the final `-->` closes: in
+        // `<!--a--> text -->` the comment ends early and the rest is text.
+        if inner.is_none_or(|inner| inner.contains(COMMENT_CLOSE)) {
             break;
         }
         tail = tail[..open].trim_end();
@@ -787,7 +793,11 @@ pub fn strip_reminder(text: &str) -> String {
 pub fn trailing_metadata_start(text: &str) -> usize {
     let comments = trailing_comments_start(text);
     match parse_line(text, None).and_then(|reminder| reminder.token) {
-        Some(token) if text[token.range.end..comments].trim().is_empty() => {
+        Some(token)
+            if text
+                .get(token.range.end..comments)
+                .is_some_and(|rest| rest.trim().is_empty()) =>
+        {
             text[..token.range.start].trim_end().len()
         }
         _ => comments,
@@ -1051,6 +1061,17 @@ mod tests {
         assert_eq!(
             moved,
             "- [ ] Call the plumber (@2026-10-22 09:00) <!--rem:7d3e55a1c0f2-->"
+        );
+    }
+
+    #[test]
+    fn text_after_a_closed_comment_is_not_a_trailing_comment() {
+        let line = "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it (@11:00) -->";
+        assert_eq!(trailing_comments_start(line), line.len());
+        assert_eq!(trailing_metadata_start(line), line.len());
+        assert_eq!(
+            strip_reminder(line),
+            "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it -->"
         );
     }
 

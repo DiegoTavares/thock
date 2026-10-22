@@ -121,11 +121,12 @@ fn section_ranges(
     ranges
 }
 
+/// A top-level list item's text after its marker. Indented items are a
+/// loose entry's children, never entries of their own.
 fn list_item_body(line: &str) -> Option<&str> {
-    let trimmed = line.trim_start();
     ["- ", "* ", "+ "]
         .iter()
-        .find_map(|marker| trimmed.strip_prefix(marker))
+        .find_map(|marker| line.strip_prefix(marker))
 }
 
 fn parse_stamp(line: &str) -> Option<Stamp> {
@@ -145,7 +146,7 @@ fn parse_stamp(line: &str) -> Option<Stamp> {
     Some(Stamp { kind, date })
 }
 
-/// Every entry of the index, top to bottom: list items with a reminder id
+/// Every entry of the index, top to bottom: top-level list items with a reminder id
 /// under the Open and Done headings (matched loosely), outside fences, front
 /// matter and comments.
 pub fn parse_index(
@@ -574,8 +575,26 @@ pub fn apply_changes(
             }
             Change::MoveEntry { id, to, line } => {
                 if let Some(entry) = entry_row(&lines, path, id, settings, config) {
-                    lines.remove(entry);
-                    append_entry(&mut lines, *to, line.clone(), settings);
+                    // The entry's indented children (a phone capture's extra
+                    // lines and pictures) move with it.
+                    let indent = |text: &str| text.len() - text.trim_start().len();
+                    let base = indent(&lines.lines[entry]);
+                    let mut end = entry + 1;
+                    while lines
+                        .lines
+                        .get(end)
+                        .is_some_and(|child| !child.trim().is_empty() && indent(child) > base)
+                    {
+                        end += 1;
+                    }
+                    let children: Vec<String> = lines.lines[entry + 1..end].to_vec();
+                    for _ in entry..end {
+                        lines.remove(entry);
+                    }
+                    let row = append_entry(&mut lines, *to, line.clone(), settings);
+                    for (offset, child) in children.into_iter().enumerate() {
+                        lines.insert(row + 1 + offset, child);
+                    }
                 }
             }
         }
@@ -603,12 +622,13 @@ fn append_entry(
     section: IndexSection,
     line: String,
     settings: &ReminderSettings,
-) {
+) -> usize {
     let row = section_end(lines, section, settings).unwrap_or_else(|| {
         add_heading(lines, section, settings);
         section_end(lines, section, settings).unwrap_or(lines.lines.len())
     });
     lines.insert(row, line);
+    row
 }
 
 /// The row a new entry of `section` goes at: after its last non-blank line.
@@ -1391,6 +1411,25 @@ mod tests {
         assert_eq!(
             vault.index(),
             "## Open\n\n## Done\n- [x] Call the bank (@2026-10-22 10:00) ✅ 2026-10-21 <!--rem:3f9a1c0d4e21-->\n"
+        );
+    }
+
+    #[test]
+    fn a_closed_loose_line_moves_with_its_children() {
+        let mut vault = Vault::new(&[(
+            "reminders.md",
+            "## Open\n- [ ] Call the vet (@2026-10-22 10:00) <!--rem:3f9a1c0d4e21-->\n  Their number is on the fridge\n  ![receipt](images/2026-10-21-vet.jpg)\n- [ ] Buy stamps (@2026-10-23) <!--rem:a90c1377d02e-->\n\n## Done\n",
+        )]);
+        vault.edit(
+            "reminders.md",
+            &vault
+                .index()
+                .replace("- [ ] Call the vet", "- [x] Call the vet"),
+        );
+        vault.settle(&["reminders.md"], at(NOW));
+        assert_eq!(
+            vault.index(),
+            "## Open\n- [ ] Buy stamps (@2026-10-23) <!--rem:a90c1377d02e-->\n\n## Done\n- [x] Call the vet (@2026-10-22 10:00) ✅ 2026-10-21 <!--rem:3f9a1c0d4e21-->\n  Their number is on the fridge\n  ![receipt](images/2026-10-21-vet.jpg)\n"
         );
     }
 

@@ -717,7 +717,12 @@ fn reminder_index_cases_agree_with_the_grammar() {
         let index_lines = note_lines(index_text);
         let entries: Vec<_> = parse_note(index_text, &case.index, &config)
             .into_iter()
-            .filter(|appearance| appearance.reminder.id.is_some())
+            .filter(|appearance| {
+                appearance.reminder.id.is_some()
+                    && ["- ", "* ", "+ "]
+                        .iter()
+                        .any(|marker| index_lines[appearance.line].starts_with(marker))
+            })
             .collect();
         assert_eq!(
             entries
