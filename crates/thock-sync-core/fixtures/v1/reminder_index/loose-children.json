@@ -1,0 +1,70 @@
+{
+  "name": "loose-children",
+  "description": "Phone captures keep their extra lines and pictures as indented children (§10.2): children are part of the entry, never entries of their own, and the home line is the entry's first line.",
+  "now": "2026-10-21T14:05",
+  "index": "reminders.md",
+  "headings": {
+    "open": [
+      "Open"
+    ],
+    "done": [
+      "Done"
+    ],
+    "day": [
+      "Reminders"
+    ]
+  },
+  "daily": {
+    "dir": "daily",
+    "filename": "YYYY-MM-DD"
+  },
+  "date_only_at": "09:00",
+  "files": {
+    "reminders.md": "# Reminders\n\n## Open\n- [ ] Call the vet (@2026-10-22 10:00) <!--rem:3f9a1c0d4e21-->\n  Their number is on the fridge\n  ![receipt](images/2026-10-21-vet.jpg)\n- [[backlog]] <!--rem:2f6b08e19a5c-->\n\n## Done\n- [x] Pay the nursery (@2026-10-19 09:00) ✅ 2026-10-19 <!--rem:6e1f42b07a93-->\n  - [ ] A child task is not an entry (@2026-10-25) <!--rem:0a0a0a0a0a0a-->\n",
+    "backlog.md": "# Backlog\n\n## Inbox\n- [ ] Renew the car insurance (@2026-10-20 09:00) <!--rem:2f6b08e19a5c-->\n  - a note under the task\n"
+  },
+  "reminders": [
+    {
+      "id": "3f9a1c0d4e21",
+      "section": "open",
+      "entry": "loose",
+      "stamp": null,
+      "home": "reminders.md",
+      "line": 3,
+      "text": "Call the vet",
+      "due": "2026-10-22 10:00",
+      "rings_at": "2026-10-22T10:00",
+      "state": "open",
+      "group": "upcoming"
+    },
+    {
+      "id": "2f6b08e19a5c",
+      "section": "open",
+      "entry": "link",
+      "stamp": null,
+      "home": "backlog.md",
+      "line": 3,
+      "text": "Renew the car insurance",
+      "due": "2026-10-20 09:00",
+      "rings_at": "2026-10-20T09:00",
+      "state": "open",
+      "group": "overdue"
+    },
+    {
+      "id": "6e1f42b07a93",
+      "section": "done",
+      "entry": "loose",
+      "stamp": {
+        "kind": "done",
+        "date": "2026-10-19"
+      },
+      "home": "reminders.md",
+      "line": 9,
+      "text": "Pay the nursery ✅ 2026-10-19",
+      "due": "2026-10-19 09:00",
+      "rings_at": "2026-10-19T09:00",
+      "state": "closed",
+      "group": "done"
+    }
+  ]
+}

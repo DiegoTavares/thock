@@ -950,6 +950,64 @@
           "text": "Pay the nursery ✅ 2026-10-19"
         }
       ]
+    },
+    {
+      "name": "a home line in the day section that lost its token is dropped, not a mirror",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "### Reminders\n- [ ] Typed here by hand <!--rem:c41f77a8e590-->\n- [x] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->",
+      "reminders": [
+        {
+          "line": 1,
+          "id": "c41f77a8e590",
+          "token": null,
+          "when": null,
+          "struck": false,
+          "task": "open",
+          "due": null,
+          "state": "dropped",
+          "mirror": false,
+          "text": "Typed here by hand"
+        },
+        {
+          "line": 2,
+          "id": "7d3e55a1c0f2",
+          "token": null,
+          "when": null,
+          "struck": false,
+          "task": "done",
+          "due": null,
+          "state": "dropped",
+          "mirror": true,
+          "text": "Call the plumber · [[projects/house]]"
+        }
+      ]
+    },
+    {
+      "name": "text after a closed comment is not a trailing comment",
+      "path": "daily/2026-10-21.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it (@11:00) -->",
+      "reminders": [
+        {
+          "line": 0,
+          "id": null,
+          "token": "(@11:00)",
+          "when": "11:00",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-21 11:00",
+          "state": "open",
+          "mirror": false,
+          "text": "Ping Bob <!--gmail:ab--> about it -->"
+        }
+      ]
     }
   ],
   "mirrors": [
