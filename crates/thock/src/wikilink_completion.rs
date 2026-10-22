@@ -9,9 +9,12 @@
 //! provider delegates everything else to the editor's regular project-backed
 //! completions.
 
+use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use chrono::NaiveTime;
 use editor::actions::ShowCompletions;
 use editor::{CompletionProvider, Editor, EditorEvent, EditorMode};
 use gpui::{App, Context, Entity, Task, Window};
@@ -21,11 +24,12 @@ use project::{
 };
 use text::{Point, ToOffset as _, ToPoint as _};
 use thock_sync_core::{DailyNotes, Due, token_text};
+use util::ResultExt as _;
 
 use crate::markdown_syntax;
 use crate::reminder_calendar::PickReminderDate;
 use crate::reminder_reading;
-use crate::reminders::{ReminderClock, due_label};
+use crate::reminders::{ReminderClock, ReminderSettings, due_label, load_reminder_settings};
 use crate::vault::{Vault, VaultStatus};
 
 gpui::actions!(
@@ -69,10 +73,31 @@ fn register(editor: &mut Editor, cx: &mut Context<Editor>) {
 }
 
 fn install(editor: &mut Editor, cx: &mut Context<Editor>) -> bool {
-    let Some((images_dir, daily)) = vault_markdown_file(editor, cx) else {
+    let Some(note) = vault_markdown_file(editor, cx) else {
         return false;
     };
-    install_provider(editor, images_dir, daily, cx);
+    let reminder_settings = Rc::new(RefCell::new(ReminderSettings::default()));
+    install_provider(
+        editor,
+        note.images_dir,
+        note.daily,
+        reminder_settings.clone(),
+        cx,
+    );
+    // The presets' time is the vault's; the defaults stand until it loads, and
+    // when `.thock/reminders.toml` can't be read.
+    if let Some(project) = editor.project() {
+        let fs = project.read(cx).fs().clone();
+        cx.spawn(async move |_, _| {
+            if let Some(settings) = load_reminder_settings(&fs, &note.vault_root)
+                .await
+                .log_err()
+            {
+                *reminder_settings.borrow_mut() = settings;
+            }
+        })
+        .detach();
+    }
     true
 }
 
@@ -83,12 +108,14 @@ fn install_provider(
     editor: &mut Editor,
     images_dir: String,
     daily: DailyNotes,
+    reminder_settings: Rc<RefCell<ReminderSettings>>,
     cx: &mut Context<Editor>,
 ) {
     let provider = WikilinkCompletionProvider {
         project: editor.project().cloned(),
         images_dir,
         daily,
+        reminder_settings,
     };
     editor.set_completion_provider(Some(Rc::new(provider)));
     let editor_handle = cx.weak_entity();
@@ -111,9 +138,16 @@ fn insert_image(editor: &mut Editor, window: &mut Window, cx: &mut Context<Edito
     editor.show_completions(&ShowCompletions, window, cx);
 }
 
+/// What the provider needs to know about the vault a note is in.
+struct VaultNote {
+    images_dir: String,
+    daily: DailyNotes,
+    vault_root: PathBuf,
+}
+
 /// Whether the editor's buffer is a `.md` file under a Thock vault root,
-/// returning the vault's images folder and daily notes when it is.
-fn vault_markdown_file(editor: &Editor, cx: &App) -> Option<(String, DailyNotes)> {
+/// returning what the provider needs from the vault when it is.
+fn vault_markdown_file(editor: &Editor, cx: &App) -> Option<VaultNote> {
     let buffer = editor.buffer().read(cx).as_singleton()?;
     let file = buffer.read(cx).file()?;
     if file.path().extension() != Some("md") {
@@ -122,13 +156,14 @@ fn vault_markdown_file(editor: &Editor, cx: &App) -> Option<(String, DailyNotes)
     let file = project::File::from_dyn(Some(file))?;
     let vault_root = file.worktree.read(cx).abs_path();
     match Vault::detect(&vault_root) {
-        VaultStatus::Valid(vault) => Some((
-            vault.config.images.dir,
-            DailyNotes {
+        VaultStatus::Valid(vault) => Some(VaultNote {
+            images_dir: vault.config.images.dir,
+            daily: DailyNotes {
                 dir: vault.config.daily.dir,
                 filename: vault.config.daily.filename,
             },
-        )),
+            vault_root: vault_root.to_path_buf(),
+        }),
         _ => None,
     }
 }
@@ -141,6 +176,8 @@ struct WikilinkCompletionProvider {
     /// Where the vault's daily notes are, so a token in a daily note can
     /// drop its date (V45 §4.1).
     daily: DailyNotes,
+    /// The vault's `.thock/reminders.toml`, once loaded.
+    reminder_settings: Rc<RefCell<ReminderSettings>>,
 }
 
 impl CompletionProvider for WikilinkCompletionProvider {
@@ -158,7 +195,10 @@ impl CompletionProvider for WikilinkCompletionProvider {
         if let Some(response) = image_response(buffer, buffer_position, &self.images_dir, cx) {
             return Task::ready(Ok(vec![response]));
         }
-        if let Some(response) = reminder_response(buffer, buffer_position, &self.daily, cx) {
+        let tomorrow_at = self.reminder_settings.borrow().tomorrow_at;
+        if let Some(response) =
+            reminder_response(buffer, buffer_position, &self.daily, tomorrow_at, cx)
+        {
             return Task::ready(Ok(vec![response]));
         }
         match &self.project {
@@ -364,6 +404,7 @@ fn reminder_response(
     buffer: &Entity<Buffer>,
     buffer_position: text::Anchor,
     daily: &DailyNotes,
+    tomorrow_at: NaiveTime,
     cx: &Context<Editor>,
 ) -> Option<CompletionResponse> {
     let buffer = buffer.read(cx);
@@ -379,7 +420,7 @@ fn reminder_response(
 
     let mut suggestions: Vec<(String, Due)> = Vec::new();
     if query.trim().is_empty() {
-        for preset in reminder_reading::presets(now) {
+        for preset in reminder_reading::presets(now, tomorrow_at) {
             let reading = preset.reading;
             let label = match reading.time {
                 Some(time) => format!("{} {}", preset.label, time.format("%H:%M")),
@@ -410,6 +451,8 @@ fn reminder_response(
     let display_options = CompletionDisplayOptions {
         dynamic_width: true,
     };
+    // An empty response still counts as the provider's answer, so fallback
+    // word completions don't fill the list it closes.
     if suggestions.is_empty() {
         return Some(CompletionResponse {
             completions: Vec::new(),
@@ -586,10 +629,10 @@ fn closing_bracket_len(following: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{NaiveDate, NaiveTime};
+    use chrono::NaiveDate;
     use editor::code_context_menus::CodeContextMenu;
     use fs::FakeFs;
-    use gpui::{KeyBinding, TestAppContext, VisualTestContext};
+    use gpui::{BorrowAppContext as _, KeyBinding, TestAppContext, VisualTestContext};
     use project::Project;
     use serde_json::json;
     use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
@@ -689,6 +732,16 @@ mod tests {
     /// A vault whose note `open` holds `text`, open in a workspace with the
     /// cursor at the end of `text`, on Wednesday 21 October 2026 at 14:05.
     async fn setup(cx: &mut TestAppContext, open: &str, text: &str) -> Setup {
+        setup_with(cx, open, text, None).await
+    }
+
+    /// `setup`, with `reminders_toml` as the vault's `.thock/reminders.toml`.
+    async fn setup_with(
+        cx: &mut TestAppContext,
+        open: &str,
+        text: &str,
+        reminders_toml: Option<&str>,
+    ) -> Setup {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
@@ -712,6 +765,9 @@ mod tests {
         std::fs::write(root.join(".thock/config.toml"), "schema = 1\n").unwrap();
         let fs = FakeFs::new(cx.executor());
         let mut tree = json!({ ".thock": { "config.toml": "schema = 1\n" } });
+        if let Some(reminders_toml) = reminders_toml {
+            tree[".thock"]["reminders.toml"] = json!(reminders_toml);
+        }
         let (folder, file) = open.split_once('/').unwrap();
         tree[folder][file] = json!(text);
         fs.insert_tree(&root, tree).await;
@@ -796,6 +852,53 @@ mod tests {
                 "Pick a date…"
             ]
         );
+    }
+
+    #[gpui::test]
+    async fn the_presets_ring_at_the_vaults_tomorrow_time(cx: &mut TestAppContext) {
+        let mut setup = setup_with(
+            cx,
+            "projects/house.md",
+            "Renew passport ",
+            Some("[ring]\ntomorrow_at = \"08:30\"\n"),
+        )
+        .await;
+        type_text(&mut setup, "(@");
+        assert_eq!(
+            labels(&mut setup),
+            [
+                "Later today 17:00",
+                "Tomorrow 08:30",
+                "Monday 08:30",
+                "Pick a date…"
+            ]
+        );
+    }
+
+    #[gpui::test]
+    async fn fallback_words_never_fill_a_closed_list(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "dentistry dentists\nCall ").await;
+        setup.cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.project.all_languages.defaults.completions =
+                        Some(settings::CompletionSettingsContent {
+                            words: Some(settings::WordsCompletionMode::Fallback),
+                            words_min_length: Some(0),
+                            ..Default::default()
+                        });
+                });
+            });
+        });
+        type_text(&mut setup, "dent");
+        assert!(
+            labels(&mut setup).contains(&"dentistry".to_string()),
+            "fallback word completions are on: {:?}",
+            labels(&mut setup)
+        );
+        setup.cx.simulate_keystrokes("escape");
+        type_text(&mut setup, " (@dentist");
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
     }
 
     #[gpui::test]
