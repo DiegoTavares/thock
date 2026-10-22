@@ -1,0 +1,186 @@
+[
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "daily/2026-10-21.md",
+    "day": "2026-10-21"
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "daily/2028-02-29.md",
+    "day": "2028-02-29"
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "daily/2026-02-29.md",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "daily/2026-10-21.txt",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "daily/2026-10-21.MD",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "2026-10-21.md",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "dailyx/2026-10-21.md",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "daily/sub/2026-10-21.md",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "daily/2026-10-21-extra.md",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "daily/2026-1-21.md",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "weekly/2026-W43.md",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "daily/",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "daily/2026-10-21.md",
+    "day": "2026-10-21"
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYYMMDD_MMM-ddd"
+    },
+    "path": "daily/20261021_Oct-Wed.md",
+    "day": "2026-10-21"
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYYMMDD_MMM-ddd"
+    },
+    "path": "daily/20261021_Oct-Thu.md",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYYMMDD_MMM-ddd"
+    },
+    "path": "daily/2026-10-21.md",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "journal/days",
+      "filename": "YYYY/MM/DD"
+    },
+    "path": "journal/days/2026/10/21.md",
+    "day": "2026-10-21"
+  },
+  {
+    "daily": {
+      "dir": "",
+      "filename": "YYYY-MM-DD"
+    },
+    "path": "2026-10-21.md",
+    "day": "2026-10-21"
+  },
+  {
+    "daily": {
+      "dir": "journal",
+      "filename": "DD.MM.YYYY"
+    },
+    "path": "journal/21.10.2026.md",
+    "day": "2026-10-21"
+  },
+  {
+    "daily": {
+      "dir": "journal",
+      "filename": "D MMMM YYYY"
+    },
+    "path": "journal/1 October 2026.md",
+    "day": "2026-10-01"
+  },
+  {
+    "daily": {
+      "dir": "journal",
+      "filename": "[Day] YYYY-MM-DD"
+    },
+    "path": "journal/Day 2026-10-21.md",
+    "day": "2026-10-21"
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "GGGG-[W]WW"
+    },
+    "path": "daily/2026-W43.md",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM"
+    },
+    "path": "daily/2026-10.md",
+    "day": null
+  },
+  {
+    "daily": {
+      "dir": "daily",
+      "filename": "dddd"
+    },
+    "path": "daily/Wednesday.md",
+    "day": null
+  }
+]
