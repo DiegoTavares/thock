@@ -405,7 +405,10 @@ public enum Reminders {
             let read = readLine(Array(line.text.utf8)[...], day: day, inComment: inComment)
             inComment = read.commentOpen
             guard let reminder = read.reminder else { continue }
+            // A mirror has the mirror shape; a home line in the section that
+            // lost its token is a dropped reminder, not a copy.
             let mirror = reminder.token == nil && reminder.id != nil && sections.contains { $0.contains(index) }
+                && MirrorLine(parsing: line.text) != nil
             appearances.append(ReminderAppearance(line: index, reminder: reminder, mirror: mirror))
         }
         return appearances
@@ -423,7 +426,7 @@ public enum Reminders {
 
     /// Heading names match as the planner's do (V26): lowercase equality, or
     /// equal heading keys.
-    static func headingMatches(_ text: String, _ name: String) -> Bool {
+    public static func headingMatches(_ text: String, _ name: String) -> Bool {
         if Bytes.trimmed(text).lowercased() == Bytes.trimmed(name).lowercased() {
             return true
         }
@@ -695,6 +698,18 @@ public enum Reminders {
         return addID(withToken, id: id) ?? withToken
     }
 
+    /// Puts `due`'s token on `line` without touching its id: the token
+    /// rewritten when the line has one, otherwise written before the trailing
+    /// comments. `nil` on a calendar line.
+    public static func placeToken(_ line: String, due: ReminderDue, homeDay: VaultDay?) -> String? {
+        let bytes = Array(line.utf8)[...]
+        guard Bytes.firstRange(of: calendarMarker, in: bytes) == nil else { return nil }
+        if parseLine(line, day: homeDay) != nil {
+            return rewrite(line, due: due, homeDay: homeDay)
+        }
+        return insertBeforeTrailingComments(bytes, token: tokenText(due, homeDay: homeDay))
+    }
+
     /// Appends `<!--rem:<id>-->` as the line's last comment. `nil` when the
     /// line already has an id or carries a calendar marker.
     public static func addID(_ line: String, id: String) -> String? {
@@ -725,13 +740,21 @@ public enum Reminders {
         return Bytes.string(before) + Bytes.string(after)
     }
 
-    /// The UTF-8 offset where the line's trailing run of HTML comments
-    /// starts, or the end of its text.
+    /// The UTF-8 offset where the line's trailing run of HTML comments (and
+    /// the whitespace before them) starts, or the end of its text.
+    public static func trailingCommentsStart(_ line: String) -> Int {
+        trailingCommentsStart(Array(line.utf8)[...])
+    }
+
     private static func trailingCommentsStart(_ line: ArraySlice<UInt8>) -> Int {
         var tail = Bytes.trimEnd(line)
         while Bytes.hasSuffix(tail, commentClose) {
             guard let open = Bytes.lastRange(of: commentOpen, in: tail)?.lowerBound else { break }
-            if open + commentOpen.utf8.count > tail.endIndex - commentClose.utf8.count {
+            let innerStart = open + commentOpen.utf8.count
+            let innerEnd = tail.endIndex - commentClose.utf8.count
+            // The last `<!--` must open the comment the final `-->` closes:
+            // in `<!--a--> text -->` the comment ends early and the rest is text.
+            if innerStart > innerEnd || Bytes.firstRange(of: commentClose, in: tail[innerStart..<innerEnd]) != nil {
                 break
             }
             tail = Bytes.trimEnd(tail[..<open])
@@ -769,16 +792,31 @@ public enum Reminders {
         return removeRange(Array(text.utf8)[...], token.range)
     }
 
+    /// `text` without its reminder token and its trailing HTML comments,
+    /// everything else as written: what a row outside the editor shows (§8.5).
+    public static func stripReminder(_ text: String) -> String {
+        let withoutToken = Array(removingToken(text).utf8)[...]
+        return Bytes.string(withoutToken.prefix(trailingCommentsStart(withoutToken)))
+    }
+
+    /// Where a line's trailing metadata starts, as a UTF-8 offset: its run of
+    /// trailing comments, and the reminder token just before them when there
+    /// is one. The line up to it is what a person edits; the rest can be put
+    /// back after the edit.
+    public static func trailingMetadataStart(_ text: String) -> Int {
+        let bytes = Array(text.utf8)[...]
+        let comments = trailingCommentsStart(bytes)
+        if let token = parseLine(text, day: nil)?.token, token.range.upperBound <= comments,
+           Bytes.trimmed(bytes[token.range.upperBound..<comments]).isEmpty {
+            return Bytes.trimEnd(bytes[..<token.range.lowerBound]).count
+        }
+        return comments
+    }
+
     /// The words a label shows for a reminder line: no list marker, checkbox,
     /// planner time, token or trailing comments (§4.3, §7.1).
     public static func reminderText(_ line: String) -> String {
-        let withoutToken: [UInt8]
-        if let token = parseLine(line, day: nil)?.token {
-            withoutToken = Array(removeRange(Array(line.utf8)[...], token.range).utf8)
-        } else {
-            withoutToken = Array(line.utf8)
-        }
-        let text = withoutToken[..<trailingCommentsStart(withoutToken[...])]
+        let text = Array(stripReminder(line).utf8)[...]
         let trimmed = Bytes.trimStart(text)
         let item = Bytes.stripListMarker(trimmed)
         let words = item.count < trimmed.count ? Bytes.stripCheckbox(item) : trimmed

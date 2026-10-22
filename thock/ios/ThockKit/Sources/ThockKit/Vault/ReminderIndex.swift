@@ -203,12 +203,13 @@ public struct ReminderIndex: Equatable, Sendable {
         return path.lowercased().hasSuffix(".md") ? path : path + ".md"
     }
 
-    /// A `-`, `*` or `+` item's words, as the desk's `list_item_body`; a
-    /// numbered item is not an entry.
+    /// A top-level `-`, `*` or `+` item's words, as the desk's
+    /// `list_item_body`. A numbered item is not an entry, and an indented one
+    /// is a loose entry's child (its extra lines and pictures).
     static func listItemBody(_ line: String) -> String? {
-        let trimmed = Bytes.trimStart(Array(line.utf8)[...])
-        for marker in ["- ", "* ", "+ "] where Bytes.hasPrefix(trimmed, marker) {
-            return Bytes.string(trimmed.dropFirst(2))
+        let bytes = Array(line.utf8)[...]
+        for marker in ["- ", "* ", "+ "] where Bytes.hasPrefix(bytes, marker) {
+            return Bytes.string(bytes.dropFirst(2))
         }
         return nil
     }
