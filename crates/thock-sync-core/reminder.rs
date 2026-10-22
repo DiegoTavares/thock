@@ -316,9 +316,32 @@ fn day_sections(document: &Document, names: &[String]) -> Vec<Range<usize>> {
         .collect()
 }
 
+/// An ATX heading of a note, outside fences and front matter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteHeading {
+    /// The heading's line index, counting from 0.
+    pub row: usize,
+    pub level: u8,
+    pub text: String,
+}
+
+/// Every heading in `text`, top to bottom, the way the sync rules see them
+/// (V34 API §7.2).
+pub fn note_headings(text: &str) -> Vec<NoteHeading> {
+    Document::split(text)
+        .headings()
+        .into_iter()
+        .map(|heading| NoteHeading {
+            row: heading.index,
+            level: heading.level,
+            text: heading.text,
+        })
+        .collect()
+}
+
 /// Heading names match as the planner's do (V26): lowercase equality, or
 /// equal `heading_key`s.
-fn heading_matches(text: &str, name: &str) -> bool {
+pub fn heading_matches(text: &str, name: &str) -> bool {
     if text.trim().to_lowercase() == name.trim().to_lowercase() {
         return true;
     }
@@ -711,9 +734,8 @@ fn remove_range(line: &str, range: Range<usize>) -> String {
     format!("{before}{after}")
 }
 
-/// The byte offset where the line's trailing run of HTML comments starts,
-/// or the end of its text. Anything Thock appends to a line's text (a
-/// token, a completion stamp) goes here, so an id stays last (§4.3).
+/// The byte offset where the line's trailing run of HTML comments (and the
+/// whitespace before them) starts, or the end of its text.
 pub fn trailing_comments_start(line: &str) -> usize {
     let mut tail = line.trim_end();
     while tail.ends_with(COMMENT_CLOSE) {

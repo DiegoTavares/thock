@@ -22,7 +22,7 @@ use crate::markdown_syntax::{self, ConcealSpan, SpanKind};
 use crate::markdown_text;
 use crate::reminders::{
     ChipState, DayChanged, ReminderClock, ReminderDay, ReminderSettings, is_reminder_note,
-    reminder_chip,
+    load_reminder_settings, reminder_chip,
 };
 use crate::thock_theme::on_accent_color;
 use crate::vault::{Vault, VaultStatus};
@@ -50,12 +50,13 @@ use settings::{Settings as _, SettingsStore};
 use std::any::TypeId;
 use std::borrow::Cow;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use thock_sync_core::{ReminderConfig, parse_note};
 use ui::prelude::FluentBuilder as _;
 use ui::{ActiveTheme as _, Color, Icon, IconName, IconSize};
+use util::ResultExt as _;
 use util::paths::PathStyle;
 use util::rel_path::{RelPath, RelPathBuf};
 use workspace::Workspace;
@@ -136,6 +137,9 @@ pub struct ConcealSettings {
 pub struct ReminderNote {
     pub path: String,
     pub config: ReminderConfig,
+    /// Where `.thock/reminders.toml` is read from, for the vault's heading
+    /// names.
+    pub vault_root: PathBuf,
 }
 
 /// One `#` or `##` line drawn as a block (V43 §7.2): the line it stands on,
@@ -289,6 +293,7 @@ fn vault_markdown_settings(editor: &Editor, cx: &App) -> Option<ConcealSettings>
             let reminder_note = is_reminder_note(&vault, &path).then(|| ReminderNote {
                 path,
                 config: ReminderSettings::default().reminder_config(&vault),
+                vault_root: vault_root.to_path_buf(),
             });
             Some(ConcealSettings {
                 conceal: vault.config.markdown.conceal,
@@ -419,6 +424,42 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
     });
     apply_body_font(editor, cx);
     schedule_reparse(editor, cx);
+    load_reminder_headings(editor, cx);
+}
+
+/// Reads the vault's day-section names from `.thock/reminders.toml`, which
+/// tell a mirror line from a home line (V45 §7.1), and reparses with them.
+/// The defaults stand until then, and when the file can't be read.
+fn load_reminder_headings(editor: &Editor, cx: &mut Context<Editor>) {
+    let Some(vault_root) = editor
+        .addon::<MarkdownConcealAddon>()
+        .and_then(|addon| Some(addon.reminder_note.as_ref()?.vault_root.clone()))
+    else {
+        return;
+    };
+    let Some(fs) = editor
+        .project()
+        .map(|project| project.read(cx).fs().clone())
+    else {
+        return;
+    };
+    cx.spawn(async move |editor, cx| {
+        let Some(settings) = load_reminder_settings(&fs, &vault_root).await.log_err() else {
+            return;
+        };
+        editor
+            .update(cx, |editor, cx| {
+                if let Some(note) = editor
+                    .addon_mut::<MarkdownConcealAddon>()
+                    .and_then(|addon| addon.reminder_note.as_mut())
+                {
+                    note.config.day_headings = settings.day_headings;
+                }
+                schedule_reparse(editor, cx);
+            })
+            .log_err();
+    })
+    .detach();
 }
 
 /// Sets the note in the body face from settings with lining numerals while
@@ -2369,6 +2410,7 @@ mod tests {
             reminder_note: Some(ReminderNote {
                 path: "note.md".to_string(),
                 config: ReminderConfig::default(),
+                vault_root: PathBuf::from("/vault"),
             }),
         }
     }
@@ -3875,6 +3917,7 @@ mod tests {
             reminder_note: Some(ReminderNote {
                 path: "daily/2026-10-21.md".to_string(),
                 config: ReminderConfig::default(),
+                vault_root: PathBuf::from("/vault"),
             }),
             ..test_settings()
         };

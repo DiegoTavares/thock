@@ -22,10 +22,11 @@ pub use inbox::{
 pub use markdown::{heading_key, line_hash, section_hash};
 pub use reminder::{
     Appearance, DEFAULT_DAY_HEADING, DailyNotes, Due, Group, ID_LENGTH, LineReminder, MirrorLine,
-    MirrorMark, ReminderConfig, ReminderState, Task, Token, When, add_id, attach, close, cut_text,
-    drop_token, group, id_from_bytes, id_marker, index_link_line, is_id, is_reminder_path,
-    note_link, parse_line, parse_note, place_token, reminder_text, reopen, rewrite, strip_reminder,
-    token_text, trailing_comments_start, trailing_metadata_start,
+    MirrorMark, NoteHeading, ReminderConfig, ReminderState, Task, Token, When, add_id, attach,
+    close, cut_text, drop_token, group, heading_matches, id_from_bytes, id_marker, index_link_line,
+    is_id, is_reminder_path, note_headings, note_link, parse_line, parse_note, place_token,
+    reminder_text, reopen, rewrite, strip_reminder, token_text, trailing_comments_start,
+    trailing_metadata_start,
 };
 pub use write::{Heading, Operation, Place, Placement, Write, WriteError, parse_write};
 
