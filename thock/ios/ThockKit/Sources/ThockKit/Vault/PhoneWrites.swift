@@ -33,6 +33,16 @@ public enum CaptureDestination: String, Codable, CaseIterable, Sendable {
     /// A task in `reminders.md` that rings (V45 §10.2). Chosen per capture
     /// and never remembered as the entry's chip.
     case reminder
+
+    /// Whether saving with this chip makes it the entry's next one.
+    public var isRemembered: Bool { self != .reminder }
+
+    /// The chip an entry opens with, from what was last remembered for it:
+    /// Today when nothing was, and never Reminder.
+    public static func remembered(_ stored: String?) -> CaptureDestination {
+        guard let chip = stored.flatMap(CaptureDestination.init(rawValue:)), chip.isRemembered else { return .today }
+        return chip
+    }
 }
 
 /// When a reminder capture rings, and the id its line gets.

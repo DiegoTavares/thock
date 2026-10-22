@@ -340,6 +340,16 @@ public struct VaultConfig: Equatable, Sendable {
         dailyNotes.day(of: path)
     }
 
+    /// The week named by a path under the weekly folder.
+    public func week(ofWeeklyPath path: String) -> VaultWeek? {
+        let prefix = weekly.dir.isEmpty ? "" : weekly.dir + "/"
+        guard path.hasPrefix(prefix), path.hasSuffix(".md") else { return nil }
+        let stem = String(path.dropFirst(prefix.count).dropLast(3))
+        guard let monday = DateFormat.parse(stem, format: weekly.filename) else { return nil }
+        let week = VaultWeek(monday)
+        return weeklyPath(week) == path ? week : nil
+    }
+
     public var dailyNotes: DailyNotes {
         DailyNotes(dir: daily.dir, filename: daily.filename)
     }

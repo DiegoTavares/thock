@@ -59,6 +59,9 @@ public struct PlannerGroup: Identifiable, Equatable, Sendable {
     /// Plain text written among the tasks, such as a capture that was not a
     /// checkbox. Drawn below the group's tasks, never ticked.
     public var notes: [Block] = []
+    /// The day's Reminders section (V45 §7): the desk keeps it, the phone
+    /// only ticks its lines.
+    public var isReminders = false
 
     public var isCalendar: Bool {
         name.map { SyncCore.headingKey($0) == "calendar" } ?? false
@@ -243,7 +246,10 @@ public struct NoteView: Equatable, Sendable {
                 // belong to the group they sit in, as on the desk.
                 if child.level == heading.level + 1 {
                     let line = HeadingLine(index: index, level: child.level, text: child.text)
-                    groups.append(PlannerGroup(id: index, name: Inline.plainText(child.text), heading: Self.reference(line, in: headings), items: []))
+                    let name = Inline.plainText(child.text)
+                    var group = PlannerGroup(id: index, name: name, heading: Self.reference(line, in: headings), items: [])
+                    group.isReminders = reading.day != nil && reading.dayHeadings.contains { Reminders.headingMatches(child.text, $0) }
+                    groups.append(group)
                 }
                 continue
             }
@@ -251,8 +257,7 @@ public struct NoteView: Equatable, Sendable {
             let reminder = Reminders.parseLine(text, day: reading.day)
             // A copy the desk keeps in the day's Reminders section (V45 §7.1)
             // reads as its text, struck when it moved, dropped or went.
-            let inDaySection = groups[groups.count - 1].name.map { name in reading.dayHeadings.contains { Reminders.headingMatches(name, $0) } } ?? false
-            if inDaySection, reminder?.token == nil, let mirror = MirrorLine(parsing: text) {
+            if groups[groups.count - 1].isReminders, reminder?.token == nil, let mirror = MirrorLine(parsing: text) {
                 let time = TimePrefix.parse(withoutLeadingCheckbox(text) ?? "")
                 guard !SyncCore.lineIdentity(text).isEmpty, !mirror.text.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
                 groups[groups.count - 1].items.append(PlannerItem(
