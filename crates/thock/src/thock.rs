@@ -31,6 +31,7 @@ pub mod plus;
 pub mod readwise;
 pub mod readwise_service;
 pub mod reminder_calendar;
+pub mod reminder_index;
 pub mod reminder_reading;
 pub mod reminders;
 pub mod routine_collections;
