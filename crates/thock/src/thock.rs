@@ -32,6 +32,7 @@ pub mod readwise;
 pub mod readwise_service;
 pub mod reminder_calendar;
 pub mod reminder_index;
+pub mod reminder_notifier;
 pub mod reminder_reading;
 pub mod reminder_service;
 pub mod reminders;
@@ -125,6 +126,7 @@ pub fn init(cx: &mut App) {
     readwise_service::init(cx);
     reminders::init(cx);
     reminder_service::init(cx);
+    reminder_notifier::init(cx);
     sync_status::init(cx);
     vault_sync::init(cx);
     markdown_conceal::init(cx);

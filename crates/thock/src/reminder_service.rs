@@ -28,6 +28,7 @@ use crate::reminder_index::{
     BatchInput, BatchState, Change, HomeEdit, IndexedReminder, ScanLine, apply_changes,
     insert_loose_line, plan_batch, read_index, scan_note,
 };
+use crate::reminder_notifier::ReminderNotifier;
 use crate::reminders::{
     DayChanged, REMINDERS_CONFIG_FILE, ReminderClock, ReminderDay, ReminderSettings,
     is_reminder_note, load_reminder_settings,
@@ -126,6 +127,14 @@ struct GlobalReminderServices {
 
 impl Global for GlobalReminderServices {}
 
+/// Forgets every service, as closing every window would.
+#[cfg(test)]
+pub(crate) fn clear_services_for_test(cx: &mut App) {
+    cx.default_global::<GlobalReminderServices>()
+        .by_project
+        .clear();
+}
+
 /// The reminders service of the vault `project` is on, if it is one.
 pub fn service_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity<ReminderService>> {
     cx.try_global::<GlobalReminderServices>()?
@@ -155,6 +164,9 @@ pub enum ReminderEvent {
     NoteCreated { path: String },
     /// The local date moved.
     DayChanged { today: NaiveDate },
+    /// Something asked to show the Reminders tab: the notifier's
+    /// *Open Reminders*, or a click on a notification's body.
+    ShowReminders,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,7 +203,10 @@ pub struct ReminderService {
     needs_plan: bool,
     settle_rounds: usize,
     running: bool,
+    /// Whether a batch has finished, so `reminders` reflects the index.
+    loaded: bool,
     reminders: Vec<IndexedReminder>,
+    notifier: Option<Entity<ReminderNotifier>>,
     status: ReminderStatus,
     batch_task: Option<Task<()>>,
     recheck_task: Option<Task<()>>,
@@ -268,6 +283,8 @@ impl ReminderService {
                 cx.default_global::<GlobalReminderServices>()
                     .by_vault
                     .insert(key, service.downgrade());
+                let notifier = ReminderNotifier::new(&service, cx);
+                service.update(cx, |service, _| service.notifier = Some(notifier));
                 service
             }
         };
@@ -299,7 +316,9 @@ impl ReminderService {
             needs_plan: true,
             settle_rounds: 0,
             running: false,
+            loaded: false,
             reminders: Vec::new(),
+            notifier: None,
             status: ReminderStatus::Idle,
             batch_task: None,
             recheck_task: None,
@@ -370,6 +389,20 @@ impl ReminderService {
 
     pub fn status(&self) -> &ReminderStatus {
         &self.status
+    }
+
+    /// Whether the first batch has finished, so `reminders` reflects the
+    /// index rather than an empty start.
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+
+    /// The vault's `Fs`, while one of its windows is open.
+    pub fn fs(&self, cx: &App) -> Option<Arc<dyn Fs>> {
+        self.projects
+            .iter()
+            .find_map(WeakEntity::upgrade)
+            .map(|project| project.read(cx).fs().clone())
     }
 
     // -----------------------------------------------------------------------
@@ -552,7 +585,9 @@ impl ReminderService {
                 .log_err();
             }));
         }
-        if result.reminders != self.reminders {
+        let first = !self.loaded;
+        self.loaded = true;
+        if result.reminders != self.reminders || first {
             self.reminders = result.reminders;
             cx.emit(ReminderEvent::IndexChanged);
         }
