@@ -30,6 +30,7 @@ pub mod notes;
 pub mod plus;
 pub mod readwise;
 pub mod readwise_service;
+pub mod reminder_reading;
 pub mod routine_collections;
 pub mod routines;
 pub mod routines_panel;
