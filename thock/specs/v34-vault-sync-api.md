@@ -619,6 +619,16 @@ trailing newline; `hex(sha256(bytes))[0..16]`. An empty body hashes the empty st
 
 Known-answer vectors for both live in the fixtures (§9.3).
 
+### 7.5 Reminders are a reading, not a kind
+
+V45 reminders (`v45-reminders.md`) add no write kind and leave `WRITE_VERSION` and `line_hash` as they
+are. A reminder is a `(@…)` token and a `<!--rem:…-->` id on an ordinary line; every phone gesture on
+one is an `append` (a capture or an index link under `## Open` in `reminders.md`) or a `replace_line`
+(tick, strike, rewrite, drop or attach on the home line). Because `line_hash` drops trailing comments
+(§7.4 step 5), adding an id never changes a line's identity; the token is part of it. What the two
+sides must agree on is the reading and the line edits, which live in `reminder.rs` beside the rules
+here and are pinned by the vectors in §9.2.
+
 ## 8. Application rules
 
 `apply(existing: Option<text>, write, seed: Option<text>) → (text, outcome)`. Deterministic, total:
@@ -772,6 +782,14 @@ Hash vectors: `fixtures/v1/hashes.json`, a list of `{"line": "…", "line_hash":
 plus one `{"key": hex, "key_check": hex}`. Path vectors: `fixtures/v1/paths.json`,
 `{"syncable": […], "refused": […]}` for `is_syncable_path`.
 
+Reminder vectors (V45 §11, all hand-written; `fixtures/v1/README.md` gives each field):
+`fixtures/v1/reminders.json` (path scope, notes and the reminder lines they yield, mirror lines,
+text cuts), `fixtures/v1/daily_paths.json` (a `[daily]` config, a path, and the day it names or
+`null`), `fixtures/v1/reminder_edits.json` (a line, its path and `[daily]` config, an edit, and the
+line it becomes or `null`), and `fixtures/v1/reminder_index/<case>.json` (an index, the notes it
+links to and a pinned time, and the reminders a reader yields with their state and group). The index
+cases are data only: the desk and the phone each read `reminders.md` themselves and must both pass.
+
 ### 9.3 Corpus
 
 The fixture corpus required before any side calls itself done: every shipped template under
@@ -908,6 +926,11 @@ incremental pull converge with a reference store; rebase keeps pending writes; p
 retries reuse `client_id`; a lapsed vault goes read-only without losing the local copy.
 
 ## 13. Changelog
+
+- **2026-10-21** — V45 reminders: §7.5 names them a reading over existing kinds, and §9.2 lists their
+  vectors. The core gains `reminder.rs` (grammar, daily-path day rule, mirror lines, state, home-line
+  edits) and the moment-style `format_date`/`parse_date` the desk used to keep to itself. No protocol
+  change: `WRITE_VERSION` and `line_hash` are unchanged.
 
 - **2026-10-20** — §6.5: the server ends every feed after five minutes, and the phone closes it when
   the app leaves the foreground. Every phone stream used to run to Cloud Run's one-hour cut, because a

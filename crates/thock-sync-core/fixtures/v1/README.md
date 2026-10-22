@@ -48,6 +48,105 @@ the vector reproducible: a real `seal` draws a fresh random nonce every time.
 `notes/cafe\u0301.md` (decomposed) is refused while `notes/caf\u00e9.md` syncs.
 Those two are written as JSON escapes on purpose: as raw UTF-8 they render identically.
 
+## Reminders (V45 §11)
+
+Hand-written, read by `tests/fixtures.rs`; edit the JSON directly. Dates are `YYYY-MM-DD`, times
+`HH:MM`, a due is `YYYY-MM-DD` (date-only) or `YYYY-MM-DD HH:MM`, all local wall-clock. A `daily`
+object is a vault's `[daily]` table: `{"dir", "filename"}` with the moment-style format of
+`format_date`. Line indexes count from 0 over the note split on `\n` (a trailing `\r` belongs to the
+ending, not the line).
+
+### `reminders.json`
+
+```
+scope    [{templates, counted, ignored}]  is_reminder_path(path, templates) is true for every
+                                          counted path and false for every ignored one
+cases    [{name, path, daily, day_headings?, note, reminders}]
+mirrors  [{line, mirror}]                 MirrorLine.parse(line); mirror is null when it is not one
+texts    [{text, max, cut}]               cut_text(text, max) == cut
+```
+
+A case runs `parse_note(note, path, {daily, day_headings})`, where `day_headings` defaults to
+`["Reminders"]`; it must yield exactly `reminders`, in order, one per line that carries a token or an
+id. Each expected reminder:
+
+```
+line     the line index in the note
+id       the 12 hex digits of <!--rem:…-->, or null
+token    the token's source text, "~~" included when struck, or null
+when     what the token says as written: "YYYY-MM-DD", "YYYY-MM-DD HH:MM" or "HH:MM", or null
+struck   whether the token is ~~struck~~
+task     "open" | "done" for a list item with a checkbox, null for prose
+due      the resolved due, or null (no token, or a time-only token outside a daily note)
+state    "open" | "closed" | "dropped", read from this line alone (§5.2)
+mirror   a line in a daily note's day section with an id and no token: a copy, never a home
+text     reminder_text(line): no list marker, checkbox, planner time, token or trailing comments
+```
+
+For a single-line note, `parse_line(note, day)` must agree with `parse_note`. A `mirror` object is
+`{checked, time, text, mark, carried, note, id}` where `mark` is null, `"dropped"`, `"removed"` or
+`{"moved": "YYYY-MM-DD"}`, and `carried` is a due or null; formatting the parsed mirror must give
+`line` back byte for byte.
+
+### `daily_paths.json`
+
+A list of `{daily, path, day}`: `DailyNotes.day_of(path)` is `day`, or none for `null`. A format
+without a year, a month and a day of the month never names a day.
+
+### `reminder_edits.json`
+
+A list of `{name, path, daily, line, edit, after}`. The home's day is `day_of(path)`. `after` is the
+edited line, or `null` when the edit does not apply (and the caller writes nothing). `edit` is one
+of:
+
+```
+{"kind": "close"}                     close(line)
+{"kind": "reopen"}                    reopen(line)
+{"kind": "rewrite", "due"}            rewrite(line, due, day)
+{"kind": "drop"}                      drop_token(line)
+{"kind": "attach", "due", "id"}       attach(line, due, id, day)
+{"kind": "add_id", "id"}              add_id(line, id); line_hash(after) == line_hash(line)
+```
+
+### `reminder_index/<case>.json`
+
+Data only: each side reads `reminders.md` with its own code and must yield these reminders.
+
+```
+name, description
+now            "YYYY-MM-DDTHH:MM", the reader's local time
+index          the index path, "reminders.md"
+headings       {open, done, day}: heading names, matched loosely (V26), first one written
+daily          the [daily] table
+date_only_at   "HH:MM", when a date-only reminder rings
+files          {path: text} for the index and every note that exists; nothing else is in the vault
+reminders      one per index entry, in file order
+```
+
+An entry is a list item with a reminder id under the Open or Done heading, outside fences, front
+matter and comments. Each expected reminder:
+
+```
+id         the entry's id
+section    "open" | "done": the heading the entry sits under
+entry      "link" for "- [[target]] …" ([[target|alias]] too), "loose" for a full line
+stamp      {kind: "done"|"dropped"|"removed", date} from "✅ <date>", "dropped <date>" or
+           "removed <date>" before the id, or null
+home       the home note: target + ".md" for a link, the index itself for a loose line
+line       the home line's index, or null when there is none
+text       reminder_text(home line), or null
+due        the home line's due, or null
+rings_at   "YYYY-MM-DDTHH:MM": the due's time, or date_only_at on its day; null with no due
+state      "open" | "closed" | "dropped" from the home line; with no home line, "removed" when
+           the entry is stamped removed and "missing" otherwise
+group      group(state, due, today): "overdue" | "today" | "upcoming" | "done", null when open
+           with no due or missing
+```
+
+The home line is the first line in `home` that carries the id and a token; failing that the first
+that carries the id; mirror lines in a daily note's day section never count. The state always comes
+from the home line, whatever section the entry is in.
+
 ## Where this corpus is stricter than the contract text
 
 Decisions the implementation had to take; the contract will be amended to match.

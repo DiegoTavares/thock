@@ -1,0 +1,139 @@
+{
+  "name": "copies-and-gaps",
+  "description": "Loose headings, a fenced example, an aliased link, a line with a token preferred over a copy without one, a missing line, a missing file, a mirror that is never a home, a time-only loose line with no day, and home lines that disagree with their section.",
+  "now": "2026-10-21T14:05",
+  "index": "reminders.md",
+  "headings": {
+    "open": [
+      "Open"
+    ],
+    "done": [
+      "Done"
+    ],
+    "day": [
+      "Reminders"
+    ]
+  },
+  "daily": {
+    "dir": "daily",
+    "filename": "YYYY-MM-DD"
+  },
+  "date_only_at": "09:00",
+  "files": {
+    "reminders.md": "---\ntitle: Reminders\n---\n# Reminders\n\n## **Open**:\n```md\n- [[projects/garden]] <!--rem:0a0a0a0a0a0a-->\n```\n- [[projects/garden]] <!--rem:a1a1a1a1a1a1-->\n- [[projects/garden]] <!--rem:b2b2b2b2b2b2-->\n- [[projects/gone]] <!--rem:c3c3c3c3c3c3-->\n- [[projects/garden|the garden]] <!--rem:d4d4d4d4d4d4-->\n- [ ] Water the plants (@18:00) <!--rem:e5e5e5e5e5e5-->\n- [[daily/2026-10-21]] <!--rem:f6f6f6f6f6f6-->\nSome prose the person wrote under the heading.\n\n## Done ✅\n- [[projects/garden]] ✅ 2026-10-20 <!--rem:1b1b1b1b1b1b-->\n- [x] Phoned the vet (@2026-10-19) ✅ 2026-10-19 <!--rem:2c2c2c2c2c2c-->\n",
+    "projects/garden.md": "# Garden\n\n> Copied from the closure: Prune the roses <!--rem:a1a1a1a1a1a1-->\n- [ ] Prune the roses (@2026-10-24) <!--rem:a1a1a1a1a1a1-->\n- [x] Order bulbs (@2026-10-21 09:00) <!--rem:d4d4d4d4d4d4-->\n- [ ] Mow the lawn (@2026-10-22 08:00) <!--rem:1b1b1b1b1b1b-->\n```\n- [ ] Not this one (@2026-10-21) <!--rem:b2b2b2b2b2b2-->\n```\n",
+    "daily/2026-10-21.md": "# Wednesday, October 21, 2026\n\n## Day planner\n- [ ] 10:00 Standup\n\n### Reminders\n- [ ] 14:30 Call the plumber · [[projects/house]] <!--rem:f6f6f6f6f6f6-->\n"
+  },
+  "reminders": [
+    {
+      "id": "a1a1a1a1a1a1",
+      "section": "open",
+      "entry": "link",
+      "stamp": null,
+      "home": "projects/garden.md",
+      "line": 3,
+      "text": "Prune the roses",
+      "due": "2026-10-24",
+      "rings_at": "2026-10-24T09:00",
+      "state": "open",
+      "group": "upcoming"
+    },
+    {
+      "id": "b2b2b2b2b2b2",
+      "section": "open",
+      "entry": "link",
+      "stamp": null,
+      "home": "projects/garden.md",
+      "line": null,
+      "text": null,
+      "due": null,
+      "rings_at": null,
+      "state": "missing",
+      "group": null
+    },
+    {
+      "id": "c3c3c3c3c3c3",
+      "section": "open",
+      "entry": "link",
+      "stamp": null,
+      "home": "projects/gone.md",
+      "line": null,
+      "text": null,
+      "due": null,
+      "rings_at": null,
+      "state": "missing",
+      "group": null
+    },
+    {
+      "id": "d4d4d4d4d4d4",
+      "section": "open",
+      "entry": "link",
+      "stamp": null,
+      "home": "projects/garden.md",
+      "line": 4,
+      "text": "Order bulbs",
+      "due": "2026-10-21 09:00",
+      "rings_at": "2026-10-21T09:00",
+      "state": "closed",
+      "group": "done"
+    },
+    {
+      "id": "e5e5e5e5e5e5",
+      "section": "open",
+      "entry": "loose",
+      "stamp": null,
+      "home": "reminders.md",
+      "line": 13,
+      "text": "Water the plants",
+      "due": null,
+      "rings_at": null,
+      "state": "open",
+      "group": null
+    },
+    {
+      "id": "f6f6f6f6f6f6",
+      "section": "open",
+      "entry": "link",
+      "stamp": null,
+      "home": "daily/2026-10-21.md",
+      "line": null,
+      "text": null,
+      "due": null,
+      "rings_at": null,
+      "state": "missing",
+      "group": null
+    },
+    {
+      "id": "1b1b1b1b1b1b",
+      "section": "done",
+      "entry": "link",
+      "stamp": {
+        "kind": "done",
+        "date": "2026-10-20"
+      },
+      "home": "projects/garden.md",
+      "line": 5,
+      "text": "Mow the lawn",
+      "due": "2026-10-22 08:00",
+      "rings_at": "2026-10-22T08:00",
+      "state": "open",
+      "group": "upcoming"
+    },
+    {
+      "id": "2c2c2c2c2c2c",
+      "section": "done",
+      "entry": "loose",
+      "stamp": {
+        "kind": "done",
+        "date": "2026-10-19"
+      },
+      "home": "reminders.md",
+      "line": 19,
+      "text": "Phoned the vet ✅ 2026-10-19",
+      "due": "2026-10-19",
+      "rings_at": "2026-10-19T09:00",
+      "state": "closed",
+      "group": "done"
+    }
+  ]
+}

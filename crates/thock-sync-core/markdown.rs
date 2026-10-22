@@ -617,7 +617,7 @@ pub(crate) fn normalize_line(line: &str) -> String {
     collapsed
 }
 
-fn strip_list_marker(text: &str) -> &str {
+pub(crate) fn strip_list_marker(text: &str) -> &str {
     for marker in ["- ", "* ", "+ "] {
         if let Some(rest) = text.strip_prefix(marker) {
             return rest;
@@ -635,7 +635,7 @@ fn strip_list_marker(text: &str) -> &str {
     text
 }
 
-fn strip_checkbox(text: &str) -> &str {
+pub(crate) fn strip_checkbox(text: &str) -> &str {
     for checkbox in ["[ ] ", "[x] ", "[X] "] {
         if let Some(rest) = text.strip_prefix(checkbox) {
             return rest;
@@ -647,7 +647,7 @@ fn strip_checkbox(text: &str) -> &str {
 /// The V4 time grammar: `H:MM`/`HH:MM`, optionally `–`/`—`/`-`/`to` and a
 /// second time (`24:00` allowed as an end), followed by whitespace or the
 /// end of the line. A "time" glued to its label is not one and stays.
-fn strip_time_prefix(text: &str) -> &str {
+pub(crate) fn strip_time_prefix(text: &str) -> &str {
     let Some(after_start) = parse_time(text) else {
         return text;
     };
