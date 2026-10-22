@@ -626,7 +626,7 @@ impl ReminderDaySync {
                     ReminderEvent::NoteCreated { path } | ReminderEvent::NoteChanged { path } => {
                         this.pending.insert(path.clone());
                     }
-                    ReminderEvent::ShowReminders => return,
+                    ReminderEvent::ShowReminders { .. } => return,
                 }
                 this.schedule(cx);
             });

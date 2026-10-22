@@ -292,12 +292,16 @@ no text (*line not found*) until step 4 settles it.
 - **Answers** come through `on_system_notification_response` and edit the home line: *Done* ticks
   it or strikes the token; *In 1 hour* rewrites the token to now plus `snooze_minutes` on the wall
   clock (so the desk and the phone agree across a clock change), rounded up to the minute; *Tomorrow 09:00* rewrites it to tomorrow at `tomorrow_at`. A rewrite writes the full
-  date unless the home is the daily note of the new day.
+  date unless the home is the daily note of the new day. An answer whose tag's due is no longer
+  the reminder's, or to a reminder no longer open (rescheduled, closed or answered on the other
+  device since it rang), edits nothing and opens the Reminders tab instead. A failed edit stays on
+  the sync status row with Retry.
 - **Never twice.** `.thock/cache/reminders/fired.json` records `id → due` once rung. A rescheduled
   reminder has a new due and can ring again; a restart does not repeat a ring.
 - **While closed.** At startup, reminders that came due while Thock was closed and never rang on the
   desk produce one summary (*2 reminders came due while Thock was closed*, with *Open Reminders*),
-  not a burst. They wait in Today or Overdue like any other.
+  not a burst. Its tag is `rem:summary:<vault root>`, one per vault. *Open Reminders* brings Thock
+  to the front and shows the tab in the most recently used window on that vault, not in every one. They wait in Today or Overdue like any other.
 - **Off switch.** `[ring] desk = false` stops desk notifications; the tab and the day section keep
   working.
 - **Platforms.** Linux rings through notify-rust over D-Bus today; whether the action buttons show

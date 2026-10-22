@@ -204,10 +204,17 @@ impl RemindersPanel {
                     this.keep_selection(cx);
                     cx.notify();
                 }
-                ReminderEvent::ShowReminders => this.show_on_desk(window, cx),
+                ReminderEvent::ShowReminders { window: target } => {
+                    if target.is_none_or(|target| target == window.window_handle()) {
+                        this.show_on_desk(window, cx);
+                    }
+                }
                 ReminderEvent::NoteCreated { .. } | ReminderEvent::NoteChanged { .. } => {}
             },
         )];
+        service.update(cx, |service, _| {
+            service.register_window(window.window_handle())
+        });
         self.service = Some(service);
         cx.notify();
     }

@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result, anyhow};
 use chrono::{NaiveDate, NaiveDateTime};
 use fs::Fs;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, SharedString,
+    AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, SharedString,
     Subscription, Task, TaskExt as _, WeakEntity, actions,
 };
 use language::{Buffer, Point};
@@ -194,8 +194,9 @@ pub enum ReminderEvent {
     /// `.thock/reminders.toml` changed and `settings()` holds the new values.
     SettingsChanged,
     /// Something asked to show the Reminders tab: the notifier's
-    /// *Open Reminders*, or a click on a notification's body.
-    ShowReminders,
+    /// *Open Reminders*, or a click on a notification's body. Only the panel
+    /// in `window` shows it; `None` when no window registered one.
+    ShowReminders { window: Option<AnyWindowHandle> },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +248,8 @@ pub struct ReminderService {
     write_error: Option<SharedString>,
     /// The last batch's first error.
     batch_error: Option<SharedString>,
+    /// Windows with a Reminders tab on this vault, oldest first.
+    windows: Vec<AnyWindowHandle>,
     /// Walk the vault and re-read every note whose mtime changed (startup).
     full_scan: bool,
     /// Ignore `scan.json` and re-read every note (`RebuildReminders`).
@@ -407,6 +410,7 @@ impl ReminderService {
             edit_error: None,
             write_error: None,
             batch_error: None,
+            windows: Vec::new(),
             full_scan: true,
             rebuild: false,
             needs_plan: true,
@@ -510,6 +514,31 @@ impl ReminderService {
             .iter()
             .find_map(WeakEntity::upgrade)
             .map(|project| project.read(cx).fs().clone())
+    }
+
+    /// Notes that `window` has a Reminders tab that can show this vault's
+    /// reminders.
+    pub fn register_window(&mut self, window: AnyWindowHandle) {
+        if !self.windows.contains(&window) {
+            self.windows.push(window);
+        }
+    }
+
+    /// Brings Thock and the most recently used window on this vault to the
+    /// front, and asks that window's Reminders tab to show.
+    pub fn show_reminders(&mut self, cx: &mut Context<Self>) {
+        let open = cx.windows();
+        self.windows.retain(|window| open.contains(window));
+        let window = pick_window(&self.windows, cx.window_stack(), cx.active_window());
+        cx.activate(true);
+        if let Some(window) = window {
+            cx.defer(move |cx| {
+                window
+                    .update(cx, |_, window, _| window.activate_window())
+                    .log_err();
+            });
+        }
+        cx.emit(ReminderEvent::ShowReminders { window });
     }
 
     // -----------------------------------------------------------------------
@@ -1302,6 +1331,24 @@ impl ReminderService {
     }
 }
 
+/// The window to show reminders in: the frontmost of `registered` in
+/// `stack` (front to back) when the platform knows the order, else the
+/// active one when it is registered, else the one registered last.
+fn pick_window<W: Copy + PartialEq>(
+    registered: &[W],
+    stack: Option<Vec<W>>,
+    active: Option<W>,
+) -> Option<W> {
+    stack
+        .and_then(|stack| {
+            stack
+                .into_iter()
+                .find(|window| registered.contains(window))
+        })
+        .or_else(|| active.filter(|window| registered.contains(window)))
+        .or_else(|| registered.last().copied())
+}
+
 /// Every in-scope note of the vault, from the worktree, vault-relative.
 fn list_notes(
     projects: &[Entity<Project>],
@@ -1904,6 +1951,15 @@ mod tests {
         assert!(reads <= 4, "read {reads} notes");
         let index = fs.load(Path::new("/vault/reminders.md")).await.unwrap();
         assert!(index.contains("- [[c]]"), "{index}");
+    }
+
+    #[test]
+    fn reminders_show_in_the_frontmost_window_on_the_vault() {
+        assert_eq!(pick_window(&[1, 2, 3], Some(vec![9, 2, 1]), Some(9)), Some(2));
+        assert_eq!(pick_window(&[1, 2, 3], None, Some(1)), Some(1));
+        assert_eq!(pick_window(&[1, 2, 3], None, Some(9)), Some(3));
+        assert_eq!(pick_window(&[1, 2], Some(vec![9]), None), Some(2));
+        assert_eq!(pick_window::<u8>(&[], Some(vec![9]), Some(9)), None);
     }
 
     fn worktree_id(project: &Entity<Project>, cx: &App) -> project::WorktreeId {

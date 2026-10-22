@@ -28,6 +28,8 @@ use crate::vault::VAULT_MARKER_DIR;
 const CHECK_INTERVAL: Duration = Duration::from_secs(60);
 const FIRED_FILE: &str = "cache/reminders/fired.json";
 const TAG_PREFIX: &str = "rem:";
+/// The summary's tag, followed by the vault's root so each vault's summary
+/// is its own.
 const SUMMARY_TAG: &str = "rem:summary";
 const ACTION_DONE: &str = "done";
 const ACTION_SNOOZE: &str = "snooze";
@@ -61,6 +63,8 @@ impl Global for GlobalNotifiers {}
 
 pub struct ReminderNotifier {
     service: WeakEntity<ReminderService>,
+    /// `rem:summary:<vault root>`.
+    summary_tag: SharedString,
     fired_path: PathBuf,
     /// `id → due` of every reminder that has rung, so a restart never rings
     /// one twice and a rescheduled one rings again.
@@ -84,15 +88,18 @@ fn tag_id(tag: &str) -> Option<&str> {
     Some(rest.split_once(':').map_or(rest, |(id, _)| id))
 }
 
+/// The due a ring's tag was rung for, `None` for a tag without one.
+fn tag_due(tag: &str) -> Option<Due> {
+    let rest = tag.strip_prefix(TAG_PREFIX)?;
+    Due::parse(rest.split_once(':')?.1)
+}
+
 impl ReminderNotifier {
     /// Starts the notifier for `service`'s vault.
     pub fn new(service: &Entity<ReminderService>, cx: &mut App) -> Entity<Self> {
-        let fired_path = service
-            .read(cx)
-            .vault()
-            .root
-            .join(VAULT_MARKER_DIR)
-            .join(FIRED_FILE);
+        let root = service.read(cx).vault().root.clone();
+        let fired_path = root.join(VAULT_MARKER_DIR).join(FIRED_FILE);
+        let summary_tag: SharedString = format!("{SUMMARY_TAG}:{}", root.display()).into();
         let notifier = cx.new(|cx| {
             let subscription = cx.subscribe(service, |this: &mut Self, _, event, cx| {
                 if matches!(
@@ -104,6 +111,7 @@ impl ReminderNotifier {
             });
             let mut this = Self {
                 service: service.downgrade(),
+                summary_tag,
                 fired_path,
                 fired: BTreeMap::new(),
                 fired_loaded: false,
@@ -197,7 +205,7 @@ impl ReminderNotifier {
             if !missed.is_empty() {
                 let count = missed.len();
                 cx.show_system_notification(SystemNotification {
-                    tag: SUMMARY_TAG.into(),
+                    tag: self.summary_tag.clone(),
                     title: if count == 1 {
                         "1 reminder came due while Thock was closed".into()
                     } else {
@@ -259,28 +267,41 @@ impl ReminderNotifier {
         let Some(service) = self.service.upgrade() else {
             return false;
         };
-        if response.tag == SUMMARY_TAG {
-            service.update(cx, |_, cx| cx.emit(ReminderEvent::ShowReminders));
+        let show = |cx: &mut Context<Self>| {
+            service.update(cx, |service, cx| service.show_reminders(cx));
+        };
+        if response.tag == self.summary_tag {
+            show(cx);
             return true;
         }
         let Some(id) = tag_id(&response.tag) else {
             return false;
         };
-        if service.read(cx).reminder(id).is_none() {
+        let Some(reminder) = service.read(cx).reminder(id) else {
             return false;
-        }
+        };
+        // An answer to a ring the reminder has moved on from (rescheduled,
+        // closed, or answered on another device) edits nothing: it shows
+        // the reminder as it is now.
+        let current = reminder.is_open() && reminder.due.is_some() && reminder.due == tag_due(&response.tag);
         let clock = ReminderClock::global(cx);
         let settings = service.read(cx).settings().clone();
         let edit = match response.action_id.as_deref() {
-            Some(ACTION_DONE) => HomeEdit::Close,
-            Some(ACTION_SNOOZE) => HomeEdit::Rewrite(settings.snoozed_due(clock.now())),
-            Some(ACTION_TOMORROW) => HomeEdit::Rewrite(settings.tomorrow_due(clock.today())),
+            Some(ACTION_DONE) if current => HomeEdit::Close,
+            Some(ACTION_SNOOZE) if current => {
+                HomeEdit::Rewrite(settings.snoozed_due(clock.now()))
+            }
+            Some(ACTION_TOMORROW) if current => {
+                HomeEdit::Rewrite(settings.tomorrow_due(clock.today()))
+            }
             _ => {
-                service.update(cx, |_, cx| cx.emit(ReminderEvent::ShowReminders));
+                show(cx);
                 return true;
             }
         };
         let id = id.to_string();
+        // A failed edit stays on the sync status row with Retry
+        // (`ReminderService::edit_reminder`).
         let task: Task<Result<()>> =
             service.update(cx, |service, cx| service.edit_reminder(&id, edit, cx));
         task.detach_and_log_err(cx);
@@ -463,7 +484,7 @@ mod tests {
         // Both came due before the desk opened: one summary, no burst.
         let shown = cx.shown_system_notifications();
         assert_eq!(shown.len(), 1, "{shown:?}");
-        assert_eq!(shown[0].tag.as_ref(), SUMMARY_TAG);
+        assert_eq!(shown[0].tag.as_ref(), "rem:summary:/vault");
         assert_eq!(
             shown[0].title.as_ref(),
             "2 reminders came due while Thock was closed"
@@ -566,7 +587,63 @@ mod tests {
         let tag = notification_tag("7d3e55a1c0f2", due);
         assert_eq!(tag, "rem:7d3e55a1c0f2:2026-10-21 14:30");
         assert_eq!(tag_id(&tag), Some("7d3e55a1c0f2"));
+        assert_eq!(tag_due(&tag), Some(due));
+        assert_eq!(
+            tag_due("rem:7d3e55a1c0f2:2026-10-22"),
+            Due::parse("2026-10-22")
+        );
+        assert_eq!(tag_due("rem:7d3e55a1c0f2"), None);
         assert_eq!(tag_id("gcal:x"), None);
+    }
+
+    #[gpui::test]
+    async fn an_answer_to_a_stale_ring_edits_nothing_and_shows_reminders(
+        cx: &mut TestAppContext,
+    ) {
+        let setup = setup(cx, "2026-10-21 14:29", vault_tree()).await;
+        advance(cx, Duration::from_secs(60));
+        let shown = Arc::new(std::sync::Mutex::new(0));
+        let _subscription = cx.update(|cx| {
+            let shown = shown.clone();
+            cx.subscribe(&setup.service, move |_, event: &ReminderEvent, _| {
+                if matches!(event, ReminderEvent::ShowReminders { .. }) {
+                    *shown.lock().unwrap() += 1;
+                }
+            })
+        });
+        let house = || async {
+            setup
+                .fs
+                .load(Path::new("/vault/projects/house.md"))
+                .await
+                .unwrap()
+        };
+        let before = house().await;
+
+        // Rung for 14:00, but the line now says 14:30.
+        cx.simulate_system_notification_response(SystemNotificationResponse {
+            tag: "rem:7d3e55a1c0f2:2026-10-21 14:00".into(),
+            action_id: Some(ACTION_DONE.into()),
+        });
+        settle(cx);
+        assert_eq!(house().await, before);
+        assert_eq!(*shown.lock().unwrap(), 1);
+
+        // Closed elsewhere since it rang.
+        let closed = before.replacen("- [ ]", "- [x]", 1);
+        setup
+            .fs
+            .atomic_write("/vault/projects/house.md".into(), closed.clone())
+            .await
+            .unwrap();
+        settle(cx);
+        cx.simulate_system_notification_response(SystemNotificationResponse {
+            tag: "rem:7d3e55a1c0f2:2026-10-21 14:30".into(),
+            action_id: Some(ACTION_SNOOZE.into()),
+        });
+        settle(cx);
+        assert_eq!(house().await, closed);
+        assert_eq!(*shown.lock().unwrap(), 2);
     }
 
     #[gpui::test]
