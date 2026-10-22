@@ -746,6 +746,16 @@ mod tests {
         - [ ] 15:00 – 15:30 Bi-weekly · Dev Infra Leads\n";
 
     #[test]
+    fn the_card_drops_a_token_and_its_trailing_comments() {
+        let plan = parse(
+            "# Day planner\n\
+             - [ ] 16:00 - 17:00 Dentist (@15:30) <!--gcal:abc--> <!--rem:3f9a1c0d4e21-->\n",
+        );
+        let card = next_card(&plan, 14 * 60).unwrap();
+        assert_eq!(card.line, "16:00 · Dentist");
+    }
+
+    #[test]
     fn the_card_counts_down_to_the_next_entry() {
         let plan = parse(TODAY_NOTE);
         let card = next_card(&plan, 14 * 60 + 35).unwrap();
@@ -830,7 +840,7 @@ mod tests {
 
     const BACKLOG: &str = "## Soon\n\n\
         - [ ] Study for DNV elections [[2026-09-28-dnv-ballot]]\n\
-        - [ ] Apps to try: vorssaint\n\n\
+        - [ ] Apps to try: vorssaint (@2026-10-20 09:00) <!--gmail:ab12--> <!--rem:3f9a1c0d4e21-->\n\n\
         ### SPI\n\n\
         - [ ] Refactor Maestro.java\n\n\
         ## Someday\n\n\
@@ -925,6 +935,29 @@ mod tests {
         setup
             .cx
             .update(|window, cx| desk.read(cx).focus_handle(cx).contains_focused(window, cx))
+    }
+
+    #[gpui::test]
+    async fn a_backlog_reminder_reads_as_its_words_over_its_chip(cx: &mut TestAppContext) {
+        let setup = setup(cx, false).await;
+        let mut cx = setup.cx.clone();
+        cx.update(|_, cx| {
+            let now = NaiveDate::from_ymd_opt(2026, 10, 21)
+                .and_then(|date| date.and_hms_opt(10, 0, 0))
+                .unwrap();
+            crate::reminders::TestClock::install(now, cx);
+        });
+        let row = setup.desk.read_with(&cx, |desk, cx| {
+            desk.backlog.read(cx).row_for_tests("vorssaint", cx)
+        });
+        assert_eq!(
+            row,
+            Some((
+                "Apps to try: vorssaint".to_string(),
+                Some(("⏰ Yesterday 09:00 · overdue".to_string(), true))
+            )),
+            "the token and both comments leave the text; the chip is the meta line"
+        );
     }
 
     #[gpui::test]

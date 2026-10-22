@@ -86,7 +86,8 @@ pub struct PlanItem {
     /// Whether the whole label is `~~struck through~~` — a task the user
     /// crossed out rather than ticked. The panel treats it as finished.
     pub struck: bool,
-    /// Task text with any leading time token and trailing HTML comment removed.
+    /// Task text without its leading time, reminder token and trailing HTML
+    /// comments.
     pub label: String,
     pub timing: ItemTiming,
     /// The subsection heading (exactly one level deeper than the planner
@@ -168,12 +169,14 @@ pub fn parse_day_plan(text: &str, config: &DayPlannerConfig) -> DayPlan {
         // only its text (`09:00 ~~Meeting~~`), so the wrapper comes off on
         // both sides of the time parse — a struck task still belongs on the
         // grid at its hour.
-        let (task_text, struck_line) = unwrap_strikethrough(strip_trailing_comment(task_text));
+        let (task_text, struck_line) = unwrap_strikethrough(strip_trailing_metadata(task_text));
         let (timing, label) = match parse_leading_time(task_text, config.default_duration) {
             Some((start_min, end_min, rest)) => (ItemTiming::Timed { start_min, end_min }, rest),
             None => (ItemTiming::Unscheduled, task_text),
         };
-        let (label, struck_label) = unwrap_strikethrough(label);
+        // A token anywhere in the text is the reminder's, not the label's.
+        let label = thock_sync_core::strip_reminder(label);
+        let (label, struck_label) = unwrap_strikethrough(&label);
         items.push(PlanItem {
             row: row as u32,
             done,
@@ -199,18 +202,12 @@ fn unwrap_strikethrough(text: &str) -> (&str, bool) {
     }
 }
 
-/// Removes one trailing HTML comment (`<!-- … -->` at end of line) from a
-/// label, plus the whitespace before it. Generic rather than gcal-specific,
-/// so a user's own trailing comment is hidden the same way (spec v8 §11.4).
-pub fn strip_trailing_comment(label: &str) -> &str {
-    let trimmed = label.trim_end();
-    if !trimmed.ends_with("-->") {
-        return label;
-    }
-    match trimmed.rfind("<!--") {
-        Some(start) if start + 4 <= trimmed.len() - 3 => trimmed[..start].trim_end(),
-        _ => label,
-    }
+/// Removes a label's trailing metadata: every trailing HTML comment and a
+/// reminder token just before them, plus the whitespace before it. Generic
+/// rather than gcal-specific, so a user's own trailing comment is hidden the
+/// same way (spec v8 §11.4, V45 §8.5).
+pub fn strip_trailing_metadata(label: &str) -> &str {
+    label[..thock_sync_core::trailing_metadata_start(label)].trim_end()
 }
 
 /// A stable palette slot for a subsection name: FNV-1a over the trimmed,
@@ -1074,11 +1071,33 @@ mod tests {
     }
 
     #[test]
-    fn strip_trailing_comment_ignores_mid_line_comments() {
-        assert_eq!(strip_trailing_comment("a <!-- b --> c"), "a <!-- b --> c");
-        assert_eq!(strip_trailing_comment("a <!-- b -->"), "a");
-        assert_eq!(strip_trailing_comment("<!-->"), "<!-->");
-        assert_eq!(strip_trailing_comment("plain"), "plain");
+    fn reminder_tokens_and_every_trailing_comment_leave_labels() {
+        let plan = parse_day_plan(
+            "- [ ] 16:00 - 17:00 Dentist (@15:30) <!--gcal:abc--> <!--rem:3f9a1c0d4e21-->\n\
+             - [ ] Call (@2026-10-21 14:30) the plumber <!-- a --> <!--rem:7d3e55a1c0f2-->\n\
+             - [ ] (@15:30) 16:00 Haircut\n",
+            &config(),
+        );
+        assert_eq!(plan.items[0].label, "Dentist");
+        assert!(matches!(
+            plan.items[0].timing,
+            ItemTiming::Timed { start_min: 960, .. }
+        ));
+        assert_eq!(plan.items[1].label, "Call the plumber");
+        assert_eq!(
+            plan.items[2].timing,
+            ItemTiming::Unscheduled,
+            "a token in front of the time takes the line off the planner (V4 §5)"
+        );
+        assert_eq!(plan.items[2].label, "16:00 Haircut");
+    }
+
+    #[test]
+    fn strip_trailing_metadata_ignores_mid_line_comments() {
+        assert_eq!(strip_trailing_metadata("a <!-- b --> c"), "a <!-- b --> c");
+        assert_eq!(strip_trailing_metadata("a <!-- b -->"), "a");
+        assert_eq!(strip_trailing_metadata("<!-->"), "<!-->");
+        assert_eq!(strip_trailing_metadata("plain"), "plain");
     }
 
     #[test]
