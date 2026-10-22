@@ -652,6 +652,23 @@ pub fn attach(line: &str, due: Due, id: &str, home_day: Option<NaiveDate>) -> Op
     Some(add_id(&with_token, id).unwrap_or(with_token))
 }
 
+/// Puts `due`'s token on `line` without touching its id: the token
+/// rewritten when the line has one, otherwise written before the trailing
+/// comments. `None` on a calendar line. The desk's date picker writes this;
+/// the index service gives the line its id later.
+pub fn place_token(line: &str, due: Due, home_day: Option<NaiveDate>) -> Option<String> {
+    if line.contains(CALENDAR_MARKER) {
+        return None;
+    }
+    match parse_line(line, home_day) {
+        Some(_) => rewrite(line, due, home_day),
+        None => Some(insert_before_trailing_comments(
+            line,
+            &token_text(due, home_day),
+        )),
+    }
+}
+
 /// Appends `<!--rem:<id>-->` as the line's last comment. `None` when the
 /// line already has an id or carries a calendar marker.
 pub fn add_id(line: &str, id: &str) -> Option<String> {
@@ -927,6 +944,29 @@ mod tests {
         let appearances = parse_note(text, "notes/a.md", &ReminderConfig::default());
         assert_eq!(appearances.len(), 1);
         assert_eq!(appearances[0].line, 2);
+    }
+
+    #[test]
+    fn placing_a_token_goes_before_trailing_comments() {
+        let due = Due::new(date(2026, 12, 2), Some(time(10, 20)));
+        assert_eq!(
+            place_token("- [ ] Renew passport <!-- note -->", due, None).as_deref(),
+            Some("- [ ] Renew passport (@2026-12-02 10:20) <!-- note -->")
+        );
+        assert_eq!(
+            place_token(
+                "Renew (@2026-11-01) soon <!--rem:3f9a1c0d4e21-->",
+                due,
+                None
+            )
+            .as_deref(),
+            Some("Renew (@2026-12-02 10:20) soon <!--rem:3f9a1c0d4e21-->")
+        );
+        assert_eq!(
+            place_token("Water", due, Some(date(2026, 12, 2))).as_deref(),
+            Some("Water (@10:20)")
+        );
+        assert_eq!(place_token("Standup <!--gcal:abc-->", due, None), None);
     }
 
     #[test]
