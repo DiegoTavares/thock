@@ -337,17 +337,20 @@ fn changed_span<'a>(old: &str, new: &'a str) -> (Range<usize>, &'a str) {
     (prefix..old.len() - suffix, &new[prefix..new.len() - suffix])
 }
 
-/// The `(@…` the cursor is in, from `(@` to its closing parenthesis (the one
-/// Markdown autocloses), when no `)` comes between `(@` and the cursor.
+/// The `(@…` the cursor is in, when no `)` comes between `(@` and the
+/// cursor: from `(@` to the cursor, and the `)` right after it, the one
+/// Markdown autocloses. Text further on is the person's and stays.
 fn open_fragment(line: &str, cursor: usize) -> Option<Range<usize>> {
     let before = line.get(..cursor)?;
     let start = before.rfind("(@")?;
     if before[start..].contains(')') {
         return None;
     }
-    let end = line[cursor..]
-        .find(')')
-        .map_or(cursor, |close| cursor + close + 1);
+    let end = if line[cursor..].starts_with(')') {
+        cursor + 1
+    } else {
+        cursor
+    };
     Some(start..end)
 }
 
@@ -685,6 +688,15 @@ mod tests {
             ))
         );
         assert_eq!(edited_line("Standup <!--gcal:abc-->", 0, due, None), None);
+        let line = "Call the bank (@about (the) loan";
+        assert_eq!(
+            edited_line(line, "Call the bank (@".len(), due, None),
+            Some((
+                "Call the bank (@2026-12-02)about (the) loan".to_string(),
+                27
+            )),
+            "only the autoclosed parenthesis goes, never later words"
+        );
     }
 
     #[test]

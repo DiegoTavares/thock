@@ -1085,6 +1085,10 @@
       "[": "thock::SelectPreviousCalendarMonth",
       "]": "thock::SelectNextCalendarMonth",
       "backspace": "thock::ClearReminderTime",
+      "h": "thock::SelectPreviousCalendarDay",
+      "l": "thock::SelectNextCalendarDay",
+      "k": "menu::SelectPrevious",
+      "j": "menu::SelectNext",
     },
   },
   {
