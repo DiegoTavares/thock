@@ -20,7 +20,8 @@ rather than hiding it.
 - **Confirm before each write batch.** Show what will change, wait for a
   yes.
 - The only paths you may touch under `.thock/` are `.thock/config.toml`
-  (step 4, the sanctioned settings write) and the done marker (step 8).
+  and `.thock/reminders.toml` (step 4, the sanctioned settings writes) and
+  the done marker (step 8).
 - **Never touch the user's own notes** (`daily/`, `weekly/`, `backlog.md`
   task lines, anything they wrote). What they wrote stays in the language
   they wrote it in; only headings the app parses and shipped prose change.
@@ -67,11 +68,12 @@ file, not your memory.
 one section to the new language.)
 
 Then propose the whole plan and get a yes: the config keys to be written —
-`[language]`, `[backlog] headings`, `[day_planner] heading` — with your
-proposed translations of **Soon**, **Someday**, **Completed**, and
-**Day planner**; the heading renames in `backlog.md` and
-`templates/daily.md`; and the files whose prose will be translated
-(step 6's list).
+`[language]`, `[backlog] headings`, `[day_planner] heading`, and the
+`[headings]` of `.thock/reminders.toml` — with your proposed translations
+of **Soon**, **Someday**, **Completed**, **Day planner**, **Open**,
+**Done** and **Reminders**; the heading renames in `backlog.md`,
+`reminders.md` and `templates/daily.md`; and the files whose prose will be
+translated (step 6's list).
 
 ### 4. Write the settings
 
@@ -90,9 +92,19 @@ headings = { soon = "…", someday = "…", completed = "…" }
 heading = ["…", "Day planner"]   # new name first, the old one kept as an alias
 ```
 
-Keeping the old name in that list is what lets notes written before today —
-which still say `## Day planner` — keep working while the vault catches up.
-Drop it later if the user ever wants to.
+In `.thock/reminders.toml` — create it if it's missing, otherwise merge
+into it the same way:
+
+```toml
+[headings]
+open = ["…", "Open"]             # the index's sections, in reminders.md
+done = ["…", "Done"]
+day = ["…", "Reminders"]         # the section under each day's planner
+```
+
+Keeping the old name in each list is what lets notes written before today —
+which still say `## Day planner` or `### Reminders` — keep working while the
+vault catches up. Drop it later if the user ever wants to.
 
 ### 5. Rename the headings that are parsed
 
@@ -100,6 +112,9 @@ To exactly what step 4 wrote — the app matches these strings:
 
 - `backlog.md` — the three section headings. Only the heading lines; every
   task and line under them stays untouched.
+- `reminders.md`, when it exists — the `Open` and `Done` section headings,
+  the same way. The day sections in daily notes are the user's notes: leave
+  them, the old name still matches.
 - `templates/daily.md` — the planner heading (the `[day_planner] heading`
   value).
 
@@ -138,7 +153,8 @@ language** — including to change languages again or go back to English.
 ## If something goes wrong
 
 Missing files are normal in a hand-edited vault — skip what isn't there and
-say so. If you can't finish, leave `.thock/config.toml`, `AGENTS.md`, and
-the renamed headings consistent with each other (the app falls back to the
+say so. If you can't finish, leave `.thock/config.toml`,
+`.thock/reminders.toml`, `AGENTS.md`, and the renamed headings consistent
+with each other (the app falls back to the
 English headings while they disagree, so nothing breaks), and tell the user
 exactly what remains.

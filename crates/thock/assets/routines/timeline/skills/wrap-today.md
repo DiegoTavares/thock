@@ -1,9 +1,9 @@
 # Wrap Today
 
-Close out **today's** daily note. Read what you planned and did, pull in whatever outside activity your profile allows, scan the last few days for multi-day context, reconcile finished tasks, offer unfinished tasks to the backlog, then append an AI review with suggestions to today's note. It never rewrites your prose; the only edit it makes to what you wrote is flipping a task checkbox you confirm.
+Close out **today's** daily note. Read what you planned and did, pull in whatever outside activity your profile allows, scan the last few days for multi-day context, reconcile finished tasks, ask about the day's reminders, offer unfinished tasks to the backlog, then append an AI review with suggestions to today's note. It never rewrites your prose; the only edits it makes to what you wrote are flipping a task checkbox you confirm and the reminder answers you give.
 
-**Reads:** today's daily note, the prior few daily notes, the backlog file, `profile.md`, and any sources recorded in `routines/timeline/sources.md`.
-**Writes:** today's daily note (append the review; check off confirmed tasks), the backlog file.
+**Reads:** today's daily note, the prior few daily notes, the backlog file, the reminders index (`reminders.md`) and the notes it links to, `profile.md`, and any sources recorded in `routines/timeline/sources.md`.
+**Writes:** today's daily note (append the review; check off confirmed tasks), the home lines of the reminders you answer about, the backlog file.
 
 > **Note paths and filenames are vault-configured.** Read `.thock/config.toml` first: `[daily]` / `[weekly]` set each note kind's `dir` and moment-style `filename` format, and `[backlog]` sets `file`. This skill's examples use the defaults (`daily/YYYY-MM-DD.md`, `weekly/GGGG-[W]WW.md`, `backlog.md`); when the config — or the vault's existing notes — use different names, follow those silently. That's configuration, not a doc mismatch worth reporting.
 
@@ -58,20 +58,43 @@ Some tasks probably got done today but were never checked off. Cross-reference t
 2. If any look done, confirm them one at a time with the `ask` tool: the question names the task and the evidence (the commit or note that suggests completion), and the options are **Tick it** and **Not yet**. Default to **none**; only mark what the user explicitly confirms. If nothing looks finished, skip this step silently.
 3. For each confirmed task, flip its box in place (`- [ ]` → `- [x]`) in today's note. This checkbox flip is the **only** edit this skill makes to your own text — leave the task wording and everything else untouched.
 
-A task marked done here is no longer "unfinished," so it drops out of the step 6 backlog offer.
+A task marked done here is no longer "unfinished," so it drops out of the step 7 backlog offer.
 
-## 6. Offer unfinished tasks to the backlog
+## 6. Ask about the day's reminders
+
+A reminder is a token at the end of a line, `(@YYYY-MM-DD HH:MM)`, `(@YYYY-MM-DD)`, or `(@HH:MM)` in a daily note (that note's day), followed by a `<!--rem:…-->` id Thock adds. Find them as the Week Review skill's step 6 does: read the index (`reminders.md`, unless `.thock/reminders.toml` names another), and through each link the line carrying the same id in the linked note, its **home**. Most of today's also show under `### Reminders` in today's note, but those lines are copies; the index is the full list.
+
+1. Collect the open reminders due **today**: an unticked task or a sentence whose token is not struck. If there are none, skip this step silently.
+2. Ask **one** question with the `ask` tool, naming them: *N reminders are still open from today. Move them to tomorrow at 09:00?*, with **Move to tomorrow 09:00**, **Let me pick** and **Leave them**.
+3. On **Let me pick**, ask once per reminder, as the Week Review does: **Tomorrow 09:00**, **Next week** (Monday 09:00), **Pick a date**, **Close** and **Drop the reminder**.
+4. Write each answer on the home line only, found by its id, exactly as the Week Review's step 6 shows: rewrite the token in its full form to move it, tick the task (or strike the token in a sentence) to close it, delete the token and keep the words and the id to drop it. Never write or change an id, and never edit the index or the copies under `### Reminders`.
+
+A reminder moved here, or closed in step 5, is no longer unfinished, so it drops out of step 7. A reminder you leave stays open and Thock keeps listing it, each morning, until it is closed, moved or dropped.
+
+## 7. Offer unfinished tasks to the backlog
 
 The vault keeps a holding pen — the configured backlog file, `backlog.md` by default — with the sections `## Soon`, `## Someday`, and `## Completed` (the Desk panel's Backlog tab in the right dock renders it). Unfinished tasks shouldn't die in today's note:
 
-1. List the unfinished (`- [ ]`) tasks you found in the note.
+1. List the unfinished (`- [ ]`) tasks you found in the note. Leave out the lines under `### Reminders`: each is a copy of a reminder that lives in another note, and step 6 already asked about it.
 2. Ask the user **one** question with the `ask` tool: move them to the backlog? The options are **All of them**, **None** (they stay only in the note) and **Let me pick**. If they pick, ask once per task with the options **Soon**, **Someday** and **Leave it**. Otherwise the destination is **Soon**. If there are no unfinished tasks, skip this step silently.
-3. **Deduplicate before appending:** skip any chosen task whose text already appears in `backlog.md` — compare whitespace-insensitively and ignore any ` ✅ YYYY-MM-DD` completion suffix — in **any** section, `## Completed` included. Report skips as "already in backlog: …".
-4. Append the remaining tasks as `- [ ] <task text>` at the end of the matching section. Create `backlog.md` or a missing section heading if needed — never rewrite, reorder, or delete anything already in the file.
+3. **Deduplicate before appending:** skip any chosen task whose text already appears in `backlog.md` — compare whitespace-insensitively and ignore any ` ✅ YYYY-MM-DD` completion suffix, any `(@…)` reminder token and any `<!--rem:…-->` id — in **any** section, `## Completed` included. Report skips as "already in backlog: …".
+4. Append the remaining tasks as `- [ ] <task text>` at the end of the matching section. A task with a reminder keeps its token and its id, which keeps it the same reminder; only a `(@HH:MM)` token changes, to the full `(@YYYY-MM-DD HH:MM)` of the note's day, since the backlog has no day of its own. Create `backlog.md` or a missing section heading if needed — never rewrite, reorder, or delete anything already in the file.
 
-Never move a task without the user's answer. Apart from the confirmed checkbox flips in step 5, never edit the tasks inside the daily note — don't rewrite their wording, and don't touch anything else you already wrote.
+   A task in today's note (`daily/2026-10-21.md`), and the line the backlog gets:
 
-## 7. Append the review
+   ```markdown
+   - [ ] Call the plumber (@14:30) <!--rem:7d3e55a1c0f2-->
+   - [ ] Renew the passport (@2026-12-02) <!--rem:2f6b08e19a5c-->
+   ```
+
+   ```markdown
+   - [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->
+   - [ ] Renew the passport (@2026-12-02) <!--rem:2f6b08e19a5c-->
+   ```
+
+Never move a task without the user's answer. Apart from the confirmed checkbox flips in step 5 and the reminder answers in step 6, never edit the tasks inside the daily note — don't rewrite their wording, and don't touch anything else you already wrote.
+
+## 8. Append the review
 
 Append a `# Daily Closure` section at the end of today's note with the `append` tool, in one call, after everything already there. Never re-create the note and never paste the review into the chat in place of writing it:
 
@@ -89,11 +112,11 @@ Append a `# Daily Closure` section at the end of today's note with the `append` 
 - One or two concrete, actionable nudges (don't pad)
 ```
 
-When step 3 actually pulled something in, add one section for it above `## Suggestions`: `## Commits` for code (`- repo@abc123 · commit message`), `## Calendar` for meetings. **Omit the heading entirely when there is nothing to put under it**; never write `N/A` or "not configured" under it. An empty `## Commits` on a day with no code is noise, and on a vault that doesn't track code it's someone else's life. Under `## Open (carried forward)` copy each task line exactly as `- [ ] text`, one dash, not a dash in front of another dash.
+When step 3 actually pulled something in, add one section for it above `## Suggestions`: `## Commits` for code (`- repo@abc123 · commit message`), `## Calendar` for meetings. **Omit the heading entirely when there is nothing to put under it**; never write `N/A` or "not configured" under it. An empty `## Commits` on a day with no code is noise, and on a vault that doesn't track code it's someone else's life. Under `## Open (carried forward)` copy each task line exactly as `- [ ] text`, one dash, not a dash in front of another dash, and without its `(@…)` reminder token and its `<!--rem:…-->` id: the closure is a record of the day, not a second reminder. The two tasks above are quoted as `- [ ] Call the plumber → backlog (Soon)` and `- [ ] Renew the passport → backlog (Soon)`.
 
-Write it in the tone the profile names, and use the profile's area names when you group anything. Keep it short and factual. Base "carried forward" on the still-unchecked tasks (those you marked done in step 5 belong under `## Done`, not here) plus anything the recent-days scan shows lingering. Suffix each task that moved in step 6 with `→ backlog (Soon)` (or `(Someday)`) so the note records where it went; tasks that were skipped as duplicates get `→ already in backlog`.
+Write it in the tone the profile names, and use the profile's area names when you group anything. Keep it short and factual. Base "carried forward" on the still-unchecked tasks (those you marked done in step 5 belong under `## Done`, not here) plus anything the recent-days scan shows lingering. Suffix each task that moved in step 7 with `→ backlog (Soon)` (or `(Someday)`) so the note records where it went; tasks that were skipped as duplicates get `→ already in backlog`.
 
-## 8. Reflect
+## 9. Reflect
 
 Read `skills/thock/reflect.md` at the vault root and run it in **daily** mode over today's note, which you have already read. It files whatever was noted in `memory/inbox.md` and anything durable today held into `memory/`, so the next session starts knowing it. Skip this step in silence if that file is missing.
 
