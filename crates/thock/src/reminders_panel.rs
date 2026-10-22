@@ -188,12 +188,14 @@ impl RemindersPanel {
             &service,
             window,
             |this, _, event: &ReminderEvent, window, cx| match event {
-                ReminderEvent::IndexChanged | ReminderEvent::DayChanged { .. } => {
+                ReminderEvent::IndexChanged
+                | ReminderEvent::DayChanged { .. }
+                | ReminderEvent::SettingsChanged => {
                     this.keep_selection(cx);
                     cx.notify();
                 }
                 ReminderEvent::ShowReminders => this.show_on_desk(window, cx),
-                ReminderEvent::NoteCreated { .. } => {}
+                ReminderEvent::NoteCreated { .. } | ReminderEvent::NoteChanged { .. } => {}
             },
         )];
         self.service = Some(service);

@@ -623,7 +623,9 @@ impl ReminderDaySync {
         cx.new(|cx| {
             let subscription = cx.subscribe(service, |this: &mut Self, _, event, cx| {
                 match event {
-                    ReminderEvent::IndexChanged | ReminderEvent::DayChanged { .. } => {
+                    ReminderEvent::IndexChanged
+                    | ReminderEvent::DayChanged { .. }
+                    | ReminderEvent::SettingsChanged => {
                         this.index_dirty = true;
                     }
                     ReminderEvent::NoteCreated { path } | ReminderEvent::NoteChanged { path } => {
