@@ -712,8 +712,9 @@ fn remove_range(line: &str, range: Range<usize>) -> String {
 }
 
 /// The byte offset where the line's trailing run of HTML comments starts,
-/// or the end of its text.
-fn trailing_comments_start(line: &str) -> usize {
+/// or the end of its text. Anything Thock appends to a line's text (a
+/// token, a completion stamp) goes here, so an id stays last (§4.3).
+pub fn trailing_comments_start(line: &str) -> usize {
     let mut tail = line.trim_end();
     while tail.ends_with(COMMENT_CLOSE) {
         let Some(open) = tail.rfind(COMMENT_OPEN) else {
