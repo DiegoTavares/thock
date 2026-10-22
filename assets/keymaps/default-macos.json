@@ -443,6 +443,7 @@
     "bindings": {
       "cmd-k v": "markdown::OpenPreviewToTheSide",
       "cmd-shift-v": "markdown::OpenPreview",
+      "cmd-alt-shift-d": "thock::PickReminderDate",
     },
   },
   {
@@ -1086,6 +1087,21 @@
       "ctrl-d": "thock::ScrollInboxReaderPageDown",
       "ctrl-u": "thock::ScrollInboxReaderPageUp",
       "tab": "thock::FocusInboxReader",
+    },
+  },
+  {
+    "context": "ThockReminderCalendar",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "menu::Confirm",
+      "escape": "menu::Cancel",
+      "left": "thock::SelectPreviousCalendarDay",
+      "right": "thock::SelectNextCalendarDay",
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "[": "thock::SelectPreviousCalendarMonth",
+      "]": "thock::SelectNextCalendarMonth",
+      "backspace": "thock::ClearReminderTime",
     },
   },
   {

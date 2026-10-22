@@ -7,6 +7,7 @@
 use crate::notes::NoteKind;
 use crate::routines_panel::open_vault_note;
 use crate::thock_theme::on_accent_color;
+use crate::ui::calendar::{monday_of, month_name, weekday_name};
 use crate::vault::{Vault, VaultStatus};
 use chrono::{Datelike, Days, Local, NaiveDate, Weekday};
 use gpui::{
@@ -263,40 +264,6 @@ pub fn next_day(viewed: NaiveDate, today: NaiveDate, notes: &BTreeSet<NaiveDate>
         return *next;
     }
     if viewed < today { today } else { after }
-}
-
-fn monday_of(date: NaiveDate) -> NaiveDate {
-    date - Days::new(date.weekday().num_days_from_monday() as u64)
-}
-
-fn weekday_name(date: NaiveDate) -> &'static str {
-    match date.weekday() {
-        Weekday::Mon => "Monday",
-        Weekday::Tue => "Tuesday",
-        Weekday::Wed => "Wednesday",
-        Weekday::Thu => "Thursday",
-        Weekday::Fri => "Friday",
-        Weekday::Sat => "Saturday",
-        Weekday::Sun => "Sunday",
-    }
-}
-
-fn month_name(date: NaiveDate) -> &'static str {
-    const NAMES: [&str; 12] = [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-    ];
-    NAMES[date.month0() as usize]
 }
 
 /// A short day for tooltips: "Wed 14".

@@ -30,6 +30,7 @@ pub mod notes;
 pub mod plus;
 pub mod readwise;
 pub mod readwise_service;
+pub mod reminder_calendar;
 pub mod routine_collections;
 pub mod routines;
 pub mod routines_panel;
@@ -123,6 +124,7 @@ pub fn init(cx: &mut App) {
     markdown_conceal::init(cx);
     masthead::init(cx);
     wikilink_completion::init(cx);
+    reminder_calendar::init(cx);
     hide_inherited_zed_actions(cx);
 }
 
