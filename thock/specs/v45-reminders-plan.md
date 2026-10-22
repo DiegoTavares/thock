@@ -1,6 +1,6 @@
 # Thock V45 - Reminders: the build plan
 
-**Status:** Planned (2026-10-21). Nothing built yet.
+**Status:** Done (2026-10-22). Every module except P6 is on `v45-reminders`; P6 is on `v45-push`.
 **Owner:** Diego · **Date:** 2026-10-21
 **Companion docs:** `v45-reminders.md` (the spec; it wins wherever this plan disagrees), `CLAUDE.md`,
 `thock/TESTING.md`

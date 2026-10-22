@@ -1,6 +1,7 @@
 # Thock V45 - Reminders: a date on any line, rung on the desk and the phone
 
-**Status:** Planned (2026-10-21). Nothing built yet.
+**Status:** Built (2026-10-22) on `v45-reminders`: everything in §15 steps 1–7 except the silent push wiring,
+which is on `v45-push`. Desk ringing on macOS waits for V35.
 **Owner:** Diego · **Date:** 2026-10-21
 **Build plan:** `v45-reminders-plan.md` (modules, agent lanes and the order of work).
 **Design reference:** the feature flow with the token states, the picker, the index diagram, the day

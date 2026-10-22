@@ -492,7 +492,7 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   service files each report as an issue on a private repository, so a stuck person reaches us
   without a mail app. Spec `specs/v41-phone-problem-reports.md`. _(shipped 2026-10-07 on `main`;
   the backend needs the feedback repository and token from §7 of the spec)_
-- [ ] **Reminders, rung on the desk and the phone:** `(@2026-12-02 10:20)` at the end of any line
+- [x] **Reminders, rung on the desk and the phone:** `(@2026-12-02 10:20)` at the end of any line
   (the Obsidian Reminder plugin's format), or `(@10:20)` inside a daily note, makes a reminder
   where it was written. Typing `(@` opens a suggestion list that reads `tom 10` or `dec 2` without
   taking focus, with a keyboard calendar one row down, and off the cursor's line the token draws as
@@ -504,7 +504,8 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   changed. A Reminders tab joins the Desk; the phone gets a *Reminder* capture chip, *Remind me…*
   on any card, and a Reminders screen. Nothing expires: Week Review sweeps what is still open.
   Design reference: https://claude.ai/artifact/XkxotTy8NuxSNtx9Xk7e6M. Spec
-  `specs/v45-reminders.md`. _(planned)_
+  `specs/v45-reminders.md`. _(shipped on `main` with the V45 PR; desk ringing on macOS waits for V35's
+  bundle identity, and silent push (§10.6) is its own change on `v45-push`)_
 
 ---
 
