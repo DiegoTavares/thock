@@ -1413,6 +1413,11 @@ impl BacklogPanel {
         cx.spawn_in(window, async move |this, cx| {
             let note_result = async {
                 let (note_path, outcome) = ensure.await?;
+                if outcome != EnsureNoteOutcome::AlreadyExisted {
+                    this.update(cx, |_, cx| {
+                        crate::notes::announce_note(&project, &note_path, cx)
+                    })?;
+                }
                 if outcome == EnsureNoteOutcome::CreatedWithoutTemplate {
                     this.update(cx, |this, cx| {
                         this.show_error(

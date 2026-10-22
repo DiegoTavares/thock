@@ -32,6 +32,7 @@ use crate::inbox_service::{self, InboxService, SyncInboxNow};
 use crate::inbox_suggest::format_cost;
 use crate::inbox_view::OpenInbox;
 use crate::readwise_service::{self, ConnectReadwise, ReadwiseService, SyncReadwiseNow};
+use crate::reminder_day::DayHold;
 use crate::reminder_service::{self, ReminderService, ReminderStatus, RetryReminders};
 use crate::vault_sync::{
     self, ConnectPhone, PhoneSyncState, SkippedFile, SyncVaultNow, VaultSyncService,
@@ -498,6 +499,40 @@ pub fn status_for_reminders(status: &ReminderStatus) -> Option<ConnectorStatus> 
     }
 }
 
+/// The Reminders row while today's day section is on hold (V45 §7.2): the
+/// same answers calendar sync's hold offers.
+pub fn status_for_reminder_day(hold: &DayHold) -> ConnectorStatus {
+    match hold {
+        DayHold::NoPlannerHeading { heading } => {
+            ConnectorStatus::new(Connector::Reminders, format!("waiting for “{heading}”"))
+                .detail(format!(
+                    "Today's note has no “{heading}” heading, so today's reminders can't be \
+                     listed under it."
+                ))
+                .attention(Attention::Warning)
+                .action(ActionKind::AddPlannerHeading, "Add heading")
+                .action(ActionKind::ChoosePlannerHeading, "Use another…")
+        }
+        DayHold::PlannerHeadingTooDeep { heading } => {
+            ConnectorStatus::new(Connector::Reminders, format!("“{heading}” is too deep"))
+                .detail(format!(
+                    "“{heading}” is a level-6 heading, so today's reminders have no room for \
+                     a section under it."
+                ))
+                .attention(Attention::Warning)
+                .action(ActionKind::ChoosePlannerHeading, "Use another…")
+        }
+    }
+}
+
+/// The Reminders row for the Day Planner: a failed write first, then a hold.
+pub fn reminder_day_status(service: &ReminderService, cx: &App) -> Option<ConnectorStatus> {
+    status_for_reminders(service.status()).or_else(|| {
+        let day_sync = service.day_sync()?.read(cx);
+        day_sync.hold().map(status_for_reminder_day)
+    })
+}
+
 pub fn calendar_status(service: &CalendarService) -> Option<ConnectorStatus> {
     status_for_calendar(service.state())
 }
@@ -858,7 +893,7 @@ impl SyncStatusIndicator {
         statuses.extend(
             self.reminders
                 .as_ref()
-                .and_then(|service| status_for_reminders(service.read(cx).status())),
+                .and_then(|service| reminder_day_status(service.read(cx), cx)),
         );
         statuses
     }

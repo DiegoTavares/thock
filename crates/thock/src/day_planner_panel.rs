@@ -28,6 +28,7 @@ use crate::calendar_service::{self, CalendarService};
 use crate::day_plan::{self, DayPlan, PlacedBlock, PlanItem, parse_day_plan};
 use crate::markdown_text::render_markdown_row;
 use crate::notes::{NoteKind, format_date};
+use crate::reminder_service;
 use crate::sync_status;
 use crate::vault::VaultStatus;
 
@@ -179,6 +180,12 @@ impl DayPlannerPanel {
             let mut subscriptions = vec![project_subscription, workspace_subscription];
             if let Some(service) = &calendar_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
+            }
+            if let Some(service) = reminder_service::service_for_project(&project, cx) {
+                subscriptions.push(cx.observe(&service, |_, _, cx| cx.notify()));
+                if let Some(day_sync) = service.read(cx).day_sync().cloned() {
+                    subscriptions.push(cx.observe(&day_sync, |_, _, cx| cx.notify()));
+                }
             }
             let mut this = Self {
                 workspace: weak_workspace,
@@ -716,10 +723,20 @@ impl DayPlannerPanel {
     /// The Calendar row at the top of the panel (V32 §4.2), kept only while
     /// it needs the user; healthy status lives in the sync icon's popover.
     fn render_status_row(&self, cx: &App) -> Option<AnyElement> {
-        let status = sync_status::calendar_status(self.calendar_service.as_ref()?.read(cx))?;
-        status
-            .needs_user()
-            .then(|| sync_status::render_inline_row(&status, cx))
+        let calendar = self
+            .calendar_service
+            .as_ref()
+            .and_then(|service| sync_status::calendar_status(service.read(cx)))
+            .filter(|status| status.needs_user());
+        let reminders = reminder_service::service_for_project(&self.project, cx)
+            .and_then(|service| sync_status::reminder_day_status(service.read(cx), cx))
+            .filter(|status| status.needs_user());
+        let rows: Vec<AnyElement> = calendar
+            .into_iter()
+            .chain(reminders)
+            .map(|status| sync_status::render_inline_row(&status, cx))
+            .collect();
+        (!rows.is_empty()).then(|| v_flex().children(rows).into_any_element())
     }
 
     /// The theme colour for an item's subsection, from the `players()`

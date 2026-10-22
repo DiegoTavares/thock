@@ -24,6 +24,7 @@ use thock_sync_core::{ReminderConfig, id_from_bytes};
 use util::ResultExt as _;
 use workspace::Workspace;
 
+use crate::reminder_day::ReminderDaySync;
 use crate::reminder_index::{
     BatchInput, BatchState, Change, HomeEdit, IndexedReminder, ScanLine, apply_changes,
     insert_loose_line, plan_batch, read_index, scan_note,
@@ -162,6 +163,9 @@ pub enum ReminderEvent {
     /// A daily or other in-scope note appeared, by a file event or through
     /// `note_created`. The path is vault-relative.
     NoteCreated { path: String },
+    /// An in-scope note other than the index changed on disk. The path is
+    /// vault-relative.
+    NoteChanged { path: String },
     /// The local date moved.
     DayChanged { today: NaiveDate },
     /// Something asked to show the Reminders tab: the notifier's
@@ -207,6 +211,7 @@ pub struct ReminderService {
     loaded: bool,
     reminders: Vec<IndexedReminder>,
     notifier: Option<Entity<ReminderNotifier>>,
+    day_sync: Option<Entity<ReminderDaySync>>,
     status: ReminderStatus,
     batch_task: Option<Task<()>>,
     recheck_task: Option<Task<()>>,
@@ -284,7 +289,11 @@ impl ReminderService {
                     .by_vault
                     .insert(key, service.downgrade());
                 let notifier = ReminderNotifier::new(&service, cx);
-                service.update(cx, |service, _| service.notifier = Some(notifier));
+                let day_sync = ReminderDaySync::new(&service, cx);
+                service.update(cx, |service, _| {
+                    service.notifier = Some(notifier);
+                    service.day_sync = Some(day_sync);
+                });
                 service
             }
         };
@@ -319,6 +328,7 @@ impl ReminderService {
             loaded: false,
             reminders: Vec::new(),
             notifier: None,
+            day_sync: None,
             status: ReminderStatus::Idle,
             batch_task: None,
             recheck_task: None,
@@ -387,6 +397,11 @@ impl ReminderService {
         self.vault.root.join(relative)
     }
 
+    /// The day reconciler that keeps each daily note's reminders section.
+    pub fn day_sync(&self) -> Option<&Entity<ReminderDaySync>> {
+        self.day_sync.as_ref()
+    }
+
     pub fn status(&self) -> &ReminderStatus {
         &self.status
     }
@@ -434,6 +449,10 @@ impl ReminderService {
             } else if path == self.settings.index || is_reminder_note(&self.vault, path) {
                 if matches!(change, project::PathChange::Added) {
                     cx.emit(ReminderEvent::NoteCreated {
+                        path: path.to_string(),
+                    });
+                } else if path != self.settings.index {
+                    cx.emit(ReminderEvent::NoteChanged {
                         path: path.to_string(),
                     });
                 }
