@@ -522,14 +522,17 @@ const TOKEN_OPEN: &str = "(@";
 fn reminder_query_offset(buffer: &Buffer, position: text::Anchor) -> Option<usize> {
     let query_start = query_offset(buffer, position, reminder_query_start)?;
     let row = position.to_point(buffer).row;
+    let line_end = Point::new(row, buffer.line_len(row));
     let line: String = buffer
-        .text_for_range(Point::new(row, 0)..Point::new(row, buffer.line_len(row)))
+        .text_for_range(Point::new(row, 0)..line_end)
         .collect();
     if line.contains("<!--gcal:") {
         return None;
     }
-    markdown_syntax::is_prose_at(&buffer.text(), query_start - TOKEN_OPEN.len())
-        .then_some(query_start)
+    // Whether a line is in a fence or front matter depends only on the lines
+    // above it, so the text up to the end of this line is enough.
+    let above: String = buffer.text_for_range(Point::zero()..line_end).collect();
+    markdown_syntax::is_prose_at(&above, query_start - TOKEN_OPEN.len()).then_some(query_start)
 }
 
 /// Where the reminder query starts inside `line_prefix`: just after the
@@ -978,6 +981,24 @@ mod tests {
         move_cursor(&mut setup, line.len() - 1);
         type_text(&mut setup, "m");
         assert_eq!(labels(&mut setup), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn no_list_inside_a_fence_opened_above(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "```\nCall ").await;
+        type_text(&mut setup, "(@tom");
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn a_fence_below_the_line_changes_nothing(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "Call \n```\nnever closed").await;
+        move_cursor(&mut setup, "Call ".len());
+        type_text(&mut setup, "(@tom");
+        assert!(
+            !labels(&mut setup).is_empty(),
+            "a fence below the line changes nothing"
+        );
     }
 
     #[gpui::test]

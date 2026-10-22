@@ -167,10 +167,16 @@ impl RemindersPanel {
             // Due labels say Today and Tomorrow, which move at midnight.
             let reminder_day = ReminderDay::global(cx);
             let day_subscription = cx.observe(&reminder_day, |_, _, cx| cx.notify());
+            let focus_handle = cx.focus_handle();
+            // The reschedule menu belongs to the row the keyboard is on; it
+            // closes when focus leaves the tab.
+            let blur_subscription = cx.on_blur(&focus_handle, window, |this: &mut Self, _, cx| {
+                this.close_reschedule(cx)
+            });
             let mut this = Self {
                 workspace: weak_workspace,
                 project,
-                focus_handle: cx.focus_handle(),
+                focus_handle,
                 service: None,
                 selected: None,
                 selected_position: 0,
@@ -178,7 +184,7 @@ impl RemindersPanel {
                 row_above: false,
                 scroll_handle: ScrollHandle::new(),
                 _service_subscriptions: Vec::new(),
-                _subscriptions: vec![project_subscription, day_subscription],
+                _subscriptions: vec![project_subscription, day_subscription, blur_subscription],
             };
             this.ensure_service(window, cx);
             this
@@ -278,10 +284,26 @@ impl RemindersPanel {
             .find(|reminder| &reminder.id == selected)
     }
 
-    /// After a reload, a reminder that left the list (closed, dropped)
-    /// hands the selection to the row now in its place.
+    /// Closes the reschedule menu, if it is open.
+    pub fn close_reschedule(&mut self, cx: &mut Context<Self>) {
+        if self.reschedule.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// After a reload the selection stays on its reminder, wherever that
+    /// row moved; a reminder that left the list (closed, dropped) hands the
+    /// selection to the row now in its place. Either way the row is
+    /// scrolled into view.
     fn keep_selection(&mut self, cx: &mut Context<Self>) {
-        if self.selected.is_none() || self.selection(cx).is_some() {
+        if self.selected.is_none() {
+            return;
+        }
+        if let Some(position) = self.selection(cx) {
+            if position != self.selected_position {
+                self.selected_position = position;
+                self.scroll_handle.scroll_to_item(position);
+            }
             return;
         }
         let rows = self.rows(cx);
@@ -289,6 +311,7 @@ impl RemindersPanel {
         let id = rows.get(position).map(|(_, reminder)| reminder.id.clone());
         self.reschedule = None;
         self.select_id(id, position);
+        self.scroll_handle.scroll_to_item(position);
     }
 
     fn select_id(&mut self, id: Option<String>, position: usize) {
@@ -977,10 +1000,142 @@ mod tests {
         })
     }
 
+    #[test]
+    fn the_reminders_chord_is_bound_once_on_each_platform() {
+        for (keymap, chord) in [
+            (
+                include_str!("../../../assets/keymaps/default-linux.json"),
+                "\"ctrl-alt-k\"",
+            ),
+            (
+                include_str!("../../../assets/keymaps/default-macos.json"),
+                "\"cmd-alt-k\"",
+            ),
+        ] {
+            assert_eq!(keymap.matches(chord).count(), 1, "{chord} is shadowed");
+            assert!(keymap.contains(&format!("{chord}: \"thock::ToggleRemindersFocus\"")));
+        }
+    }
+
+    #[gpui::test]
+    async fn the_selection_follows_its_row_and_the_menu_closes_on_leaving(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        setup.cx.simulate_keystrokes("ctrl-alt-k down down");
+        assert_eq!(selected_text(&setup).as_deref(), Some("Call the plumber"));
+        let position =
+            |setup: &Setup| panel(setup).read_with(&setup.cx, |panel, _| panel.selected_position);
+        assert_eq!(position(&setup), 1);
+
+        // Book flights moves ahead of it; the selection's position follows.
+        let edited = house(&setup)
+            .await
+            .replace("(@2026-10-25)", "(@2026-10-21 08:00)");
+        setup
+            .fs
+            .atomic_write(setup.root.join("projects/house.md"), edited)
+            .await
+            .unwrap();
+        settle(&mut setup);
+        assert_eq!(selected_text(&setup).as_deref(), Some("Call the plumber"));
+        assert_eq!(position(&setup), 2);
+
+        let menu_open = |setup: &Setup| {
+            panel(setup).read_with(&setup.cx, |panel, _| panel.reschedule.is_some())
+        };
+        setup.cx.simulate_keystrokes("s");
+        assert!(menu_open(&setup));
+        setup.cx.simulate_keystrokes("1");
+        settle(&mut setup);
+        assert!(!menu_open(&setup));
+
+        // Leaving the tab closes the menu.
+        setup.cx.simulate_keystrokes("s");
+        assert!(menu_open(&setup));
+        setup.cx.simulate_keystrokes("escape escape");
+        setup.cx.run_until_parked();
+        setup.cx.simulate_keystrokes("ctrl-alt-k s");
+        assert!(menu_open(&setup));
+        setup.desk.update(&mut setup.cx, |desk, cx| {
+            desk.show_tab(DeskTab::Backlog, cx)
+        });
+        assert!(!menu_open(&setup));
+        setup.cx.simulate_keystrokes("escape");
+        setup.cx.run_until_parked();
+        setup.cx.simulate_keystrokes("ctrl-alt-k");
+        setup.cx.run_until_parked();
+        assert!(panel_focused(&mut setup));
+        setup.cx.simulate_keystrokes("s");
+        assert!(menu_open(&setup));
+        let notes = setup.root.join("notes.md");
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.open_abs_path(notes, OpenOptions::default(), window, cx)
+            })
+            .await
+            .unwrap();
+        setup.cx.run_until_parked();
+        assert!(!menu_open(&setup), "focus left the tab");
+    }
+
+    #[gpui::test]
+    async fn a_finished_backlog_task_with_a_reminder_is_one_done_row(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        let done_ids = |setup: &Setup| {
+            setup.desk.read_with(&setup.cx, |desk, cx| {
+                desk.backlog()
+                    .read(cx)
+                    .done_reminders()
+                    .iter()
+                    .map(|reminder| reminder.id.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert!(!done_ids(&setup).contains(&"aaaaaaaaaaaa".to_string()));
+
+        async fn write_backlog(setup: &mut Setup, text: String) {
+            std::fs::write(setup.root.join("backlog.md"), &text).unwrap();
+            setup
+                .fs
+                .atomic_write(setup.root.join("backlog.md"), text)
+                .await
+                .unwrap();
+            settle(setup);
+        }
+        // Closed under a heading of its own: Done shows the reminder alone.
+        let water = "- [x] Water the plants (@2026-10-20) ✅ 2026-10-21 <!--rem:bbbbbbbbbbbb-->\n";
+        write_backlog(&mut setup, format!("## Soon\n\n## Kept\n\n{water}")).await;
+        assert!(done_ids(&setup).contains(&"bbbbbbbbbbbb".to_string()));
+
+        // The heading becomes Completed in the open buffer, unsaved: no file
+        // event and no new reading of the index, only the backlog parses
+        // again, and the task's own row takes over.
+        let buffer = setup
+            .desk
+            .read_with(&setup.cx, |desk, cx| {
+                desk.backlog().read(cx).buffer_for_tests()
+            })
+            .expect("the backlog is open");
+        buffer.update(&mut setup.cx, |buffer, cx| {
+            let at = buffer.text().find("## Kept").unwrap();
+            buffer.edit([(at..at + "## Kept".len(), "## Completed")], None, cx)
+        });
+        setup
+            .cx
+            .executor()
+            .advance_clock(Duration::from_millis(500));
+        setup.cx.run_until_parked();
+        assert!(
+            !done_ids(&setup).contains(&"bbbbbbbbbbbb".to_string()),
+            "the finished task is its Done row: {:?}",
+            done_ids(&setup)
+        );
+    }
+
     #[gpui::test]
     async fn the_tab_closes_reschedules_and_drops_by_keyboard(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false).await;
-        setup.cx.simulate_keystrokes("ctrl-alt-r");
+        setup.cx.simulate_keystrokes("ctrl-alt-k");
         setup.cx.run_until_parked();
         assert_eq!(
             setup.desk.read_with(&setup.cx, |desk, _| desk.tab()),
@@ -1106,7 +1261,7 @@ mod tests {
             .unwrap();
         setup.cx.run_until_parked();
         assert_eq!(active_note(&mut setup), "notes.md");
-        setup.cx.simulate_keystrokes("ctrl-alt-r 4 down");
+        setup.cx.simulate_keystrokes("ctrl-alt-k 4 down");
         let selected = setup
             .desk
             .read_with(&setup.cx, |desk, _| desk.backlog().clone());
@@ -1122,7 +1277,7 @@ mod tests {
     #[gpui::test]
     async fn vim_motions_escape_and_a_new_reminder(cx: &mut TestAppContext) {
         let mut setup = setup(cx, true).await;
-        setup.cx.simulate_keystrokes("ctrl-alt-r");
+        setup.cx.simulate_keystrokes("ctrl-alt-k");
         setup.cx.run_until_parked();
         setup.cx.simulate_keystrokes("j j");
         assert_eq!(selected_text(&setup).as_deref(), Some("Call the plumber"));
@@ -1146,7 +1301,7 @@ mod tests {
         assert!(!panel_focused(&mut setup), "then goes back to the note");
         assert_eq!(active_note(&mut setup), "notes.md");
 
-        setup.cx.simulate_keystrokes("ctrl-alt-r");
+        setup.cx.simulate_keystrokes("ctrl-alt-k");
         setup.cx.run_until_parked();
         setup.cx.simulate_keystrokes("o");
         settle(&mut setup);

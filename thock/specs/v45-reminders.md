@@ -427,7 +427,7 @@ pure function of the query and the clock; the phone's sheet uses presets instead
 into `crates/thock/src/ui/calendar.rs` with the Apache-2.0 notice and the source path, as V41 ported
 the split. It shares its day model with the masthead's two-week strip.
 
-- Arrows or `h` `j` `k` `l` move the day or week, `[` and `]` change month, digits type the time,
+- Arrows, or `h` `j` `k` `l` in vim mode (`vim.json`), move the day or week, `[` and `]` change month, digits type the time,
   `backspace` clears it (no time means date-only), `enter` accepts, `esc` goes back to the list.
 - Key context `ThockReminderCalendar`. Unlike the list it takes focus, because it was asked for.
 - `thock::PickReminderDate` opens it at the cursor from the palette or a binding, and on a line that
@@ -451,7 +451,8 @@ this year), plus the time, through `notes::format_date`. They are recomputed at 
 
 Architecture: `SpanKind` is a `Copy` enum without a payload today, and fold placeholders are chosen
 and diffed by kind (`collapsed_text_for`). `SpanKind::Reminder` carries the chip's label and state;
-the fold diff keys on range and label. The placeholder is a `FoldPlaceholder` render with
+the fold diff keys on range, label and state, since a closed chip can read like an open one
+(*Today*). The placeholder is a `FoldPlaceholder` render with
 `constrain_width: false`. No upstream change.
 
 ### 8.5 Rows outside the editor
@@ -490,9 +491,10 @@ as before; `ActivateDeskTab { tab: "reminders" }`.
 The vim motions are bound under `ThockRemindersPanel` in `vim.json`, gated on vim mode, beside the
 arrow keys every mode gets, and the macOS and Linux keymaps stay in step.
 
-`thock::ToggleRemindersFocus` opens the Desk on this tab: `ctrl-alt-r` on Linux and `cmd-alt-r` on
-macOS, in the Workspace context. Both chords are bound today only in the Terminal context
-(`terminal::RerunTask`), which keeps them when a terminal has focus. Doc comments are written for a
+`thock::ToggleRemindersFocus` opens the Desk on this tab: `ctrl-alt-k` on Linux and `cmd-alt-k` on
+macOS, in the Workspace context. No other context binds either chord, so it works from a terminal,
+the project panel and the outline too (`ctrl-alt-r`/`cmd-alt-r`, the first choice, are the
+terminal's `RerunTask` and the macOS panels' `RevealInFileManager`). Doc comments are written for a
 note-taker (*Show your reminders*, *Stop reminding me, keep the line*), since they are the palette
 text. `thock::RebuildReminders` (*Rebuild the reminders index from your notes*) is palette-only.
 

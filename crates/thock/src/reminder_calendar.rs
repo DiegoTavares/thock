@@ -359,6 +359,9 @@ fn open_fragment(line: &str, cursor: usize) -> Option<Range<usize>> {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct TimeEntry {
     digits: String,
+    /// The digits are the line's own time, not typed: the first digit typed
+    /// replaces them instead of extending them.
+    pristine: bool,
 }
 
 impl TimeEntry {
@@ -367,21 +370,28 @@ impl TimeEntry {
             digits: time
                 .map(|time| format!("{:02}{:02}", time.hour(), time.minute()))
                 .unwrap_or_default(),
+            pristine: time.is_some(),
         }
     }
 
     fn push(&mut self, digit: char) -> bool {
-        let mut digits = self.digits.clone();
+        let mut digits = if self.pristine {
+            String::new()
+        } else {
+            self.digits.clone()
+        };
         digits.push(digit);
         if !could_be_time(&digits) {
             return false;
         }
         self.digits = digits;
+        self.pristine = false;
         true
     }
 
     fn clear(&mut self) {
         self.digits.clear();
+        self.pristine = false;
     }
 
     /// `Ok(None)` when no time was typed, `Err` while the digits are not yet
@@ -740,6 +750,13 @@ mod tests {
         entry.clear();
         assert_eq!(entry.time(), Ok(None));
         assert_eq!(TimeEntry::from_time(Some(time(9, 5))).digits, "0905");
+
+        let mut entry = TimeEntry::from_time(Some(time(10, 20)));
+        assert!(entry.push('9'), "the first digit replaces the line's time");
+        assert_eq!(entry.time(), Ok(Some(time(9, 0))));
+        assert!(entry.push('3'));
+        assert!(entry.push('0'));
+        assert_eq!(entry.time(), Ok(Some(time(9, 30))));
     }
 
     fn keymap_bindings(content: &str, cx: &App) -> Vec<KeyBinding> {
@@ -912,6 +929,30 @@ mod tests {
             "- [ ] Renew passport (@2027-01-02) <!--rem:3f9a1c0d4e21-->",
             "the token is replaced, its time cleared, the id kept"
         );
+    }
+
+    #[gpui::test]
+    async fn typing_a_time_replaces_the_lines_time(cx: &mut TestAppContext) {
+        let line = "- [ ] Renew passport (@2026-12-02 10:20) <!--rem:3f9a1c0d4e21-->";
+        let mut setup = setup(cx, false, "projects/house.md", line, (0, 0)).await;
+        setup.cx.simulate_keystrokes(PICK);
+        setup.cx.run_until_parked();
+        setup.cx.simulate_keystrokes("1 4 3 0 enter");
+        setup.cx.run_until_parked();
+        assert_eq!(
+            text(&mut setup),
+            "- [ ] Renew passport (@2026-12-02 14:30) <!--rem:3f9a1c0d4e21-->"
+        );
+    }
+
+    #[gpui::test]
+    async fn letters_move_nothing_outside_vim_mode(cx: &mut TestAppContext) {
+        let line = "Dentist (@2026-10-21)";
+        let mut setup = setup(cx, false, "projects/house.md", line, (0, 0)).await;
+        setup.cx.simulate_keystrokes(PICK);
+        setup.cx.run_until_parked();
+        setup.cx.simulate_keystrokes("l j");
+        assert_eq!(selected(&mut setup), date(2026, 10, 21));
     }
 
     #[gpui::test]

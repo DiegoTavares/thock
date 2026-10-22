@@ -523,7 +523,7 @@ Agent C · Desk UI · W5 · size L · PR 4 · spec §9
 - Key context `ThockRemindersPanel` plus `menu`, a visible selection kept by id across reloads.
   `enter` opens the line, `x` or `space` closes, `s` opens the reschedule menu (`1`–`3`, *Pick a
   date…*), `d` drops, `o` starts a new line in `reminders.md`, `escape` goes back.
-- `thock::ToggleRemindersFocus` on `ctrl-alt-r` and `cmd-alt-r` in the Workspace context;
+- `thock::ToggleRemindersFocus` on `ctrl-alt-k` and `cmd-alt-k` in the Workspace context;
   `RebuildReminders` stays palette-only. Doc comments are written for a note-taker; vim motions go
   in `vim.json`.
 

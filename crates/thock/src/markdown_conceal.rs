@@ -196,6 +196,10 @@ pub struct MarkdownConcealAddon {
     self_applied: bool,
     /// The last repair `apply_folds` tried and the fold map did not take.
     last_attempt: Option<ApplyAttempt>,
+    /// The state each reminder chip fold was drawn with, by range. A closed
+    /// chip can carry the same label as an open one (*Today*), so the fold
+    /// diff compares the state too.
+    chip_states: HashMap<Range<MultiBufferOffset>, ChipState>,
     /// Whether the wrap overrides were last set for the body face; `None`
     /// until first set. Settings changes only touch the wrap when the face
     /// switches on or off, so a soft-wrap toggle survives a theme change.
@@ -418,6 +422,7 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         default_folds_applied: false,
         self_applied: false,
         last_attempt: None,
+        chip_states: HashMap::default(),
         wrap_set_for_body_face: None,
         reparse: Task::ready(()),
         _subscriptions: subscriptions,
@@ -1634,9 +1639,13 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
     // The diff compares placeholder text as well as range: toggling the
     // email view gives the same `## ` range a different placeholder (marker
     // space vs sender dot), and a range-only diff would keep the stale one.
-    let matches = |(range, text): &(Range<MultiBufferOffset>, Option<SharedString>),
-                   (desired, kind): &(Range<MultiBufferOffset>, SpanKind)| {
-        range == desired && text.as_deref() == Some(collapsed_text_for(kind))
+    let chip_states = editor
+        .addon::<MarkdownConcealAddon>()
+        .map(|addon| addon.chip_states.clone())
+        .unwrap_or_default();
+    let matches = |fold: &(Range<MultiBufferOffset>, Option<SharedString>),
+                   want: &(Range<MultiBufferOffset>, SpanKind)| {
+        fold_matches(fold, want, &chip_states)
     };
     let stale: Vec<Range<MultiBufferOffset>> = existing
         .iter()
@@ -1735,12 +1744,23 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
             )
         })
         .collect();
+    let drawn_states: HashMap<Range<MultiBufferOffset>, ChipState> = desired
+        .iter()
+        .filter(|want| !(deferred && !existing.iter().any(|fold| matches(fold, want))))
+        .filter_map(|(range, kind)| match kind {
+            SpanKind::Reminder { state, .. } => Some((range.clone(), *state)),
+            _ => None,
+        })
+        .collect();
     let converged = applied.len() == desired.len()
-        && desired
-            .iter()
-            .all(|want| applied.iter().any(|fold| matches(fold, want)));
+        && desired.iter().all(|want| {
+            applied
+                .iter()
+                .any(|fold| fold_matches(fold, want, &drawn_states))
+        });
 
     if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        addon.chip_states = drawn_states;
         // The notify below lands back on this editor's own observer; that
         // pass is our echo, not a user fold operation, so mark it.
         addon.self_applied = true;
@@ -1749,6 +1769,22 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
         addon.last_attempt = (!converged && !deferred).then_some(attempt);
     }
     cx.notify();
+}
+
+/// Whether a fold in the display map is the one `want` asks for: the same
+/// range and placeholder text, and for a reminder chip the state it was
+/// drawn with.
+fn fold_matches(
+    (range, text): &(Range<MultiBufferOffset>, Option<SharedString>),
+    (desired, kind): &(Range<MultiBufferOffset>, SpanKind),
+    chip_states: &HashMap<Range<MultiBufferOffset>, ChipState>,
+) -> bool {
+    range == desired
+        && text.as_deref() == Some(collapsed_text_for(kind))
+        && match kind {
+            SpanKind::Reminder { state, .. } => chip_states.get(range) == Some(state),
+            _ => true,
+        }
 }
 
 /// The collapsed text each folded kind's placeholder carries — the fold
@@ -3961,6 +3997,49 @@ mod tests {
             " ☐ Call Today 10:00\nplain tail\n"
         );
         assert_eq!(chip_states(&editor, &mut cx), [ChipState::Today]);
+    }
+
+    #[gpui::test]
+    async fn a_chip_redraws_when_its_state_changes_under_the_same_label(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "- [ ] Water (@2026-10-21)\nplain tail\n").await;
+        move_cursor_to(&editor, 1, &mut cx);
+        let chip_folds = |editor: &Entity<Editor>, cx: &mut VisualTestContext| {
+            editor.update(cx, |editor, cx| {
+                let snapshot = editor.buffer().read(cx).snapshot(cx);
+                editor
+                    .display_map
+                    .update(cx, |map, cx| map.snapshot(cx))
+                    .folds_in_range(MultiBufferOffset(0)..snapshot.len())
+                    .filter(|fold| fold.placeholder.collapsed_text.as_deref() == Some("Today"))
+                    .map(|fold| fold.id)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = chip_folds(&editor, &mut cx);
+        assert_eq!(before.len(), 1);
+        assert_eq!(chip_states(&editor, &mut cx), [ChipState::Today]);
+
+        editor.update(&mut cx, |editor, cx| {
+            editor.buffer().update(cx, |buffer, cx| {
+                buffer.edit(
+                    [(MultiBufferOffset(3)..MultiBufferOffset(4), "x")],
+                    None,
+                    cx,
+                )
+            });
+        });
+        settle(&mut cx);
+        assert_eq!(chip_states(&editor, &mut cx), [ChipState::Closed]);
+        let after = chip_folds(&editor, &mut cx);
+        assert_eq!(after.len(), 1);
+        assert_ne!(after, before, "the chip is drawn again as closed");
+        editor.update(&mut cx, |editor, _| {
+            let addon = editor.addon::<MarkdownConcealAddon>().unwrap();
+            assert_eq!(
+                addon.chip_states.values().copied().collect::<Vec<_>>(),
+                [ChipState::Closed]
+            );
+        });
     }
 
     #[gpui::test]

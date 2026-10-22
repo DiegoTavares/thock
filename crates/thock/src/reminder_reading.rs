@@ -261,7 +261,7 @@ fn parse_at(
         let time = NaiveTime::from_hms_opt(hour, minute, 0)?;
         parsed.times = vec![time];
         // A bare hour on the clock face could be either side of noon.
-        if !word.contains(':') && (1..=12).contains(&hour) {
+        if word.len() <= 2 && (1..=12).contains(&hour) {
             parsed
                 .times
                 .push(NaiveTime::from_hms_opt((hour + 12) % 24, 0, 0)?);
@@ -357,11 +357,16 @@ fn parse_day(word: &str) -> Option<u32> {
     word.parse().ok().filter(|day| (1..=31).contains(day))
 }
 
-/// `10`, `9:30` or `14:05` as an hour and minute.
+/// `10`, `9:30` or `14:05` as an hour and minute, or the compact `930` and
+/// `1430` the calendar's time entry takes.
 fn parse_clock(word: &str) -> Option<(u32, u32)> {
     let (hour, minute) = match word.split_once(':') {
         Some((hour, minute)) if minute.len() == 2 => (hour, minute.parse().ok()?),
         Some(_) => return None,
+        None if word.len() > 2 && word.bytes().all(|byte| byte.is_ascii_digit()) => {
+            let (hour, minute) = word.split_at(word.len() - 2);
+            (hour, minute.parse().ok()?)
+        }
         None => (word, 0),
     };
     if hour.is_empty() || hour.len() > 2 {
@@ -483,6 +488,12 @@ mod tests {
         assert_eq!(readings("12pm"), [at(date(10, 22), 12, 0)]);
         assert_eq!(readings("12am"), [at(date(10, 22), 0, 0)]);
         assert_eq!(readings("14:05"), [at(date(10, 22), 14, 5)]);
+        assert_eq!(readings("1430"), [at(date(10, 21), 14, 30)]);
+        assert_eq!(readings("930"), [at(date(10, 22), 9, 30)]);
+        assert_eq!(readings("930pm"), [at(date(10, 21), 21, 30)]);
+        assert_eq!(readings("tom 0905"), [at(date(10, 22), 9, 5)]);
+        assert!(read("2460", now()).readings.is_empty());
+        assert!(read("12345", now()).readings.is_empty());
     }
 
     #[test]

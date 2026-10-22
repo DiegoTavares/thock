@@ -1203,6 +1203,15 @@
     },
   },
   {
+    "context": "ThockReminderCalendar",
+    "bindings": {
+      "h": "thock::SelectPreviousCalendarDay",
+      "l": "thock::SelectNextCalendarDay",
+      "k": "menu::SelectPrevious",
+      "j": "menu::SelectNext",
+    },
+  },
+  {
     "context": "ThockDayStrip",
     "bindings": {
       "h": "thock::SelectPreviousStripDay",

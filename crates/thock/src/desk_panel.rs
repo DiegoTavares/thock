@@ -11,6 +11,7 @@ use crate::backlog_panel::{BacklogFolds, BacklogPanel, BacklogView, ToggleBacklo
 use crate::day_plan::{DayPlan, ItemTiming, ItemWeight, PlanItem};
 use crate::day_planner_panel::{DayPlannerPanel, ToggleDayPlannerFocus};
 use crate::notes::NoteKind;
+use crate::reminder_service::ReminderEvent;
 use crate::reminders_panel::{
     CloseReminder, DropReminder, NewReminder, RemindersPanel, RescheduleReminder,
     ToggleRemindersFocus,
@@ -267,6 +268,8 @@ pub struct DeskPanel {
     /// cursor sits on it rather than in the view below.
     card_selected: bool,
     now: Arc<dyn Fn() -> NaiveDateTime + Send + Sync>,
+    /// The vault's reminders service, followed once it appears.
+    reminder_subscription: Option<Subscription>,
     _tick: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -299,6 +302,7 @@ impl DeskPanel {
                 |this: &mut Self, _, event, cx| match event {
                     project::Event::WorktreeAdded(_) | project::Event::WorktreeRemoved(_) => {
                         this.refresh_vault(cx);
+                        this.ensure_reminder_service(cx);
                     }
                     project::Event::WorktreeUpdatedEntries(..) => this.refresh_today(cx),
                     _ => {}
@@ -350,10 +354,12 @@ impl DeskPanel {
                 today_open: None,
                 card_selected: false,
                 now: Arc::new(|| Local::now().naive_local()),
+                reminder_subscription: None,
                 _tick: tick,
                 _subscriptions: subscriptions,
             };
             this.refresh_vault(cx);
+            this.ensure_reminder_service(cx);
             this
         })
     }
@@ -386,9 +392,19 @@ impl DeskPanel {
         (self.now)()
     }
 
+    /// Today's plan as the Next card reads it.
+    #[cfg(test)]
+    pub(crate) fn today_plan_for_tests(&self) -> Option<&DayPlan> {
+        self.today.as_ref().map(|today| &today.plan)
+    }
+
     pub fn show_tab(&mut self, tab: DeskTab, cx: &mut Context<Self>) {
         if self.tab == tab {
             return;
+        }
+        if self.tab == DeskTab::Reminders {
+            self.reminders
+                .update(cx, |reminders, cx| reminders.close_reschedule(cx));
         }
         self.tab = tab;
         self.backlog.update(cx, |backlog, cx| {
@@ -481,6 +497,35 @@ impl DeskPanel {
             .log_err();
         });
         self.today_open = Some((today, task));
+    }
+
+    /// Follows the vault's reminders service once it appears with the
+    /// vault's worktree, so the Next card reads a new index or new day
+    /// headings at once.
+    fn ensure_reminder_service(&mut self, cx: &mut Context<Self>) {
+        if self.reminder_subscription.is_some() {
+            return;
+        }
+        let Some(service) = crate::reminder_service::service_for_project(&self.project, cx) else {
+            return;
+        };
+        self.reminder_subscription = Some(cx.subscribe(
+            &service,
+            |this, _, event: &ReminderEvent, cx| {
+                if matches!(
+                    event,
+                    ReminderEvent::IndexChanged
+                        | ReminderEvent::SettingsChanged
+                        | ReminderEvent::DayChanged { .. }
+                ) && let Some(buffer) = this.today.as_ref().map(|today| today._buffer.clone())
+                {
+                    this.reparse_today(&buffer, cx);
+                }
+            },
+        ));
+        if let Some(buffer) = self.today.as_ref().map(|today| today._buffer.clone()) {
+            self.reparse_today(&buffer, cx);
+        }
     }
 
     fn reparse_today(&mut self, buffer: &Entity<Buffer>, cx: &mut Context<Self>) {

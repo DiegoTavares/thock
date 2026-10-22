@@ -283,14 +283,13 @@ impl ReminderNotifier {
         // An answer to a ring the reminder has moved on from (rescheduled,
         // closed, or answered on another device) edits nothing: it shows
         // the reminder as it is now.
-        let current = reminder.is_open() && reminder.due.is_some() && reminder.due == tag_due(&response.tag);
+        let current =
+            reminder.is_open() && reminder.due.is_some() && reminder.due == tag_due(&response.tag);
         let clock = ReminderClock::global(cx);
         let settings = service.read(cx).settings().clone();
         let edit = match response.action_id.as_deref() {
             Some(ACTION_DONE) if current => HomeEdit::Close,
-            Some(ACTION_SNOOZE) if current => {
-                HomeEdit::Rewrite(settings.snoozed_due(clock.now()))
-            }
+            Some(ACTION_SNOOZE) if current => HomeEdit::Rewrite(settings.snoozed_due(clock.now())),
             Some(ACTION_TOMORROW) if current => {
                 HomeEdit::Rewrite(settings.tomorrow_due(clock.today()))
             }
@@ -597,9 +596,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn an_answer_to_a_stale_ring_edits_nothing_and_shows_reminders(
-        cx: &mut TestAppContext,
-    ) {
+    async fn an_answer_to_a_stale_ring_edits_nothing_and_shows_reminders(cx: &mut TestAppContext) {
         let setup = setup(cx, "2026-10-21 14:29", vault_tree()).await;
         advance(cx, Duration::from_secs(60));
         let shown = Arc::new(std::sync::Mutex::new(0));

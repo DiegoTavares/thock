@@ -253,6 +253,7 @@ pub struct BacklogPanel {
     /// The vault's reminders, whose closed and dropped ones Done lists
     /// beside the finished tasks (V45 §9.1).
     reminder_service: Option<Entity<ReminderService>>,
+    _reminder_subscription: Option<Subscription>,
     /// The closed and dropped reminders of the index's `## Done`, newest
     /// first, kept so the Done rows and the cursor share one list.
     done_reminders: Vec<IndexedReminder>,
@@ -357,13 +358,13 @@ impl BacklogPanel {
                         | project::Event::WorktreeUpdatedEntries(..)
                 ) {
                     this.refresh_vault_status(cx);
+                    this.ensure_reminder_service(cx);
                 }
             });
             let gmail_service = gmail_service::service_for_project(&project, cx);
             let inbox_service = inbox_service::service_for_project(&project, cx);
             let readwise_service = readwise_service::service_for_project(&project, cx);
             let vault_sync_service = vault_sync::service_for_project(&project, cx);
-            let reminder_service = reminder_service::service_for_project(&project, cx);
             let mut subscriptions = vec![project_subscription];
             if let Some(service) = &gmail_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
@@ -376,12 +377,6 @@ impl BacklogPanel {
             }
             if let Some(service) = &vault_sync_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
-            }
-            if let Some(service) = &reminder_service {
-                subscriptions.push(cx.subscribe(service, |this, _, _: &ReminderEvent, cx| {
-                    this.refresh_done_reminders(cx);
-                    cx.notify();
-                }));
             }
             // Reminder chips relabel when the day turns.
             let reminder_day = ReminderDay::global(cx);
@@ -416,11 +411,12 @@ impl BacklogPanel {
                 inbox_service,
                 readwise_service,
                 vault_sync_service,
-                reminder_service,
+                reminder_service: None,
+                _reminder_subscription: None,
                 done_reminders: Vec::new(),
                 _subscriptions: subscriptions,
             };
-            this.refresh_done_reminders(cx);
+            this.ensure_reminder_service(cx);
             this.vault_status = this.detect_vault_status(cx);
             this.ensure_buffer(cx);
             this
@@ -588,8 +584,30 @@ impl BacklogPanel {
         if backlog != self.backlog {
             self.backlog = backlog;
             self.refresh_link_folders(cx);
+            // Done lists a finished reminder once: beside its task when the
+            // task is in Completed, on its own otherwise.
+            self.refresh_done_reminders(cx);
             cx.notify();
         }
+    }
+
+    /// Finds the vault's reminders service, which appears with the vault's
+    /// worktree, and follows its index.
+    fn ensure_reminder_service(&mut self, cx: &mut Context<Self>) {
+        if self.reminder_service.is_some() {
+            return;
+        }
+        let Some(service) = reminder_service::service_for_project(&self.project, cx) else {
+            return;
+        };
+        self._reminder_subscription =
+            Some(cx.subscribe(&service, |this, _, _: &ReminderEvent, cx| {
+                this.refresh_done_reminders(cx);
+                cx.notify();
+            }));
+        self.reminder_service = Some(service);
+        self.refresh_done_reminders(cx);
+        cx.notify();
     }
 
     fn show_error(&self, message: String, cx: &mut Context<Self>) {
@@ -2314,6 +2332,11 @@ impl BacklogPanel {
     #[cfg(test)]
     pub(crate) fn done_reminders(&self) -> &[IndexedReminder] {
         &self.done_reminders
+    }
+
+    #[cfg(test)]
+    pub(crate) fn buffer_for_tests(&self) -> Option<Entity<Buffer>> {
+        self.buffer.clone()
     }
 
     /// The selected Done row's reminder id, for keystroke tests.

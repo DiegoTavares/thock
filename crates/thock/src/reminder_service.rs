@@ -13,8 +13,8 @@ use anyhow::{Context as _, Result, anyhow};
 use chrono::{NaiveDate, NaiveDateTime};
 use fs::Fs;
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, SharedString,
-    Subscription, Task, TaskExt as _, WeakEntity, actions,
+    AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter,
+    Global, SharedString, Subscription, Task, TaskExt as _, WeakEntity, actions,
 };
 use language::{Buffer, Point};
 use project::Project;
@@ -1340,11 +1340,7 @@ fn pick_window<W: Copy + PartialEq>(
     active: Option<W>,
 ) -> Option<W> {
     stack
-        .and_then(|stack| {
-            stack
-                .into_iter()
-                .find(|window| registered.contains(window))
-        })
+        .and_then(|stack| stack.into_iter().find(|window| registered.contains(window)))
         .or_else(|| active.filter(|window| registered.contains(window)))
         .or_else(|| registered.last().copied())
 }
@@ -1955,7 +1951,10 @@ mod tests {
 
     #[test]
     fn reminders_show_in_the_frontmost_window_on_the_vault() {
-        assert_eq!(pick_window(&[1, 2, 3], Some(vec![9, 2, 1]), Some(9)), Some(2));
+        assert_eq!(
+            pick_window(&[1, 2, 3], Some(vec![9, 2, 1]), Some(9)),
+            Some(2)
+        );
         assert_eq!(pick_window(&[1, 2, 3], None, Some(1)), Some(1));
         assert_eq!(pick_window(&[1, 2, 3], None, Some(9)), Some(3));
         assert_eq!(pick_window(&[1, 2], Some(vec![9]), None), Some(2));
