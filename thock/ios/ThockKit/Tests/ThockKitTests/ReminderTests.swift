@@ -263,14 +263,14 @@ final class ReminderTests: XCTestCase {
         let note = "# Wed\n\n## Day planner\n- [ ] 16:00 - 17:00 Dentist\n- [ ] Call Ana <!--gmail:ab12-->\n"
         let view = NoteView(text: note, config: VaultConfig(), day: today)
         let dentist = try XCTUnwrap(view.planner.items.first)
-        let writes = try XCTUnwrap(self.writes.remindMe(raw: dentist.raw, path: "daily/2026-10-21.md", heading: dentist.heading, hash: dentist.hash, ordinal: dentist.ordinal, due: try due("2026-10-21 15:30"), id: "5b71c08e3f6d"))
+        let writes = try XCTUnwrap(self.writes.remindMe(raw: dentist.raw, path: "daily/2026-10-21.md", heading: dentist.heading, hash: dentist.hash, ordinal: dentist.ordinal, due: try due("2026-10-21 15:30"), id: "5b71c08e3f6d", indexText: nil))
         XCTAssertEqual(writes.map(\.document.kind), [.replaceLine, .append])
         XCTAssertEqual(writes[0].document.newLine, "- [ ] 16:00 - 17:00 Dentist (@15:30) <!--rem:5b71c08e3f6d-->", "a time on its own day's note")
         XCTAssertEqual(writes[1].document.path, "reminders.md")
         XCTAssertEqual(writes[1].document.lines, ["- [[daily/2026-10-21]] <!--rem:5b71c08e3f6d-->"])
 
         let ana = try XCTUnwrap(view.planner.items.last)
-        let other = try XCTUnwrap(self.writes.remindMe(raw: ana.raw, path: "daily/2026-10-21.md", heading: ana.heading, hash: ana.hash, ordinal: ana.ordinal, due: try due("2026-10-22 09:00"), id: "7d3e55a1c0f2"))
+        let other = try XCTUnwrap(self.writes.remindMe(raw: ana.raw, path: "daily/2026-10-21.md", heading: ana.heading, hash: ana.hash, ordinal: ana.ordinal, due: try due("2026-10-22 09:00"), id: "7d3e55a1c0f2", indexText: nil))
         XCTAssertEqual(other[0].document.newLine, "- [ ] Call Ana (@2026-10-22 09:00) <!--gmail:ab12--> <!--rem:7d3e55a1c0f2-->", "another day's time is a full date; the id goes last")
 
         let files = applied(writes, to: ["daily/2026-10-21.md": note])
@@ -280,10 +280,10 @@ final class ReminderTests: XCTestCase {
 
     func testRemindMeOnAReminderReschedulesItWithoutANewLink() throws {
         let raw = "- [ ] Renew the car insurance (@2026-10-20 09:00) <!--rem:2f6b08e19a5c-->"
-        let writes = try XCTUnwrap(self.writes.remindMe(raw: raw, path: "backlog.md", heading: HeadingRef(text: "Soon", level: 2), hash: SyncCore.lineHash(raw), ordinal: 0, due: try due("2026-10-26 09:00"), id: "999999999999"))
+        let writes = try XCTUnwrap(self.writes.remindMe(raw: raw, path: "backlog.md", heading: HeadingRef(text: "Soon", level: 2), hash: SyncCore.lineHash(raw), ordinal: 0, due: try due("2026-10-26 09:00"), id: "999999999999", indexText: nil))
         XCTAssertEqual(writes.map(\.document.kind), [.replaceLine])
         XCTAssertEqual(writes[0].document.newLine, "- [ ] Renew the car insurance (@2026-10-26 09:00) <!--rem:2f6b08e19a5c-->")
-        XCTAssertNil(self.writes.remindMe(raw: "- [ ] Standup <!--gcal:5d0c2a91b7e4-->", path: "daily/2026-10-21.md", heading: nil, hash: "x", ordinal: 0, due: try due("2026-10-22"), id: "999999999999"), "a calendar line is calendar sync's")
+        XCTAssertNil(self.writes.remindMe(raw: "- [ ] Standup <!--gcal:5d0c2a91b7e4-->", path: "daily/2026-10-21.md", heading: nil, hash: "x", ordinal: 0, due: try due("2026-10-22"), id: "999999999999", indexText: nil), "a calendar line is calendar sync's")
     }
 
     func testRemindMeOnABacklogTaskGoesThroughTheSession() throws {
@@ -509,13 +509,16 @@ final class ReminderScheduleTests: XCTestCase {
         let renamedAfter = alert(3, "2026-10-24 10:00", title: "New words")
         let closed = alert(4, "2026-10-25 10:00")
         let added = alert(5, "2026-10-26 10:00")
-        let pending = [kept, rescheduledBefore, renamedBefore, closed].map { ($0.identifier, $0.title, $0.body) } + [("calendar:other", "x", "y")]
+        func held(_ alert: ReminderAlert) -> ReminderSchedule.Pending {
+            ReminderSchedule.Pending(identifier: alert.identifier, title: alert.title, body: alert.body, date: alert.date, time: alert.time)
+        }
+        let pending = [kept, rescheduledBefore, renamedBefore, closed].map(held) + [ReminderSchedule.Pending(identifier: "calendar:other", title: "x", body: "y", date: nil, time: nil)]
         let changes = ReminderSchedule.changes(pending: pending, wanted: [kept, rescheduledAfter, renamedAfter, added])
         XCTAssertEqual(Set(changes.remove), [rescheduledBefore.identifier, renamedBefore.identifier, closed.identifier])
         XCTAssertEqual(Set(changes.add.map(\.identifier)), [rescheduledAfter.identifier, renamedAfter.identifier, added.identifier])
         XCTAssertFalse(changes.remove.contains("calendar:other"), "notifications that are not reminders are left alone")
 
-        let again = ReminderSchedule.changes(pending: [kept, rescheduledAfter, renamedAfter, added].map { ($0.identifier, $0.title, $0.body) }, wanted: [kept, rescheduledAfter, renamedAfter, added])
+        let again = ReminderSchedule.changes(pending: [kept, rescheduledAfter, renamedAfter, added].map(held), wanted: [kept, rescheduledAfter, renamedAfter, added])
         XCTAssertTrue(again.remove.isEmpty)
         XCTAssertTrue(again.add.isEmpty)
     }
@@ -551,5 +554,137 @@ final class ReminderScheduleTests: XCTestCase {
         let closed = try session(["reminders.md": "## Open\n- [x] Paid (@2026-10-21 09:00) <!--rem:7d3e55a1c0f2-->\n"])
         XCTAssertFalse(try closed.answer(.done, reminderID: "7d3e55a1c0f2", now: now), "closed elsewhere first")
         XCTAssertTrue(closed.store.pending().isEmpty)
+    }
+}
+
+/// The review's fixes (V45 phone lane), one test each.
+final class ReminderReviewTests: XCTestCase {
+    let today = VaultDay(year: 2026, month: 10, day: 21)
+    /// Wednesday 21 October 2026, 14:05 UTC.
+    let now = Date(timeIntervalSince1970: 1_792_591_500)
+
+    var calendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC") ?? .gmt
+        return calendar
+    }
+
+    var writes: PhoneWrites {
+        PhoneWrites(config: VaultConfig(), deviceID: "c41a9e0d7b2f4a61", now: now, calendar: calendar)
+    }
+
+    func session(_ notes: [String: String]) throws -> VaultSession {
+        let store = try VaultStore(url: nil)
+        store.setMeta("vault_id", "vault")
+        store.setMeta("device_id", "c41a9e0d7b2f4a61")
+        for (index, note) in notes.sorted(by: { $0.key < $1.key }).enumerated() {
+            try store.applySnapshot(path: note.key, version: index + 1, content: note.value, contentHash: "hash", blobID: "blob")
+        }
+        return VaultSession(store: store, calendar: calendar)
+    }
+
+    func testATimeOnlyTokenLeavesForSoonWithItsDate() throws {
+        let note = "# Wed\n\n## Day planner\n- [ ] 16:00 Dentist (@15:30) <!--rem:5b71c08e3f6d-->\n"
+        let item = try XCTUnwrap(NoteView(text: note, config: VaultConfig(), day: today).planner.items.first)
+        XCTAssertEqual(writes.moveToSoon(item, note: .day(today)).last?.document.lines, ["- [ ] Dentist (@2026-10-21 15:30) <!--rem:5b71c08e3f6d-->"])
+    }
+
+    func testAPendingAlertWhoseMinuteChangedIsReplaced() {
+        let due = ReminderDue(date: today.adding(days: 1), time: nil)
+        let wanted = ReminderAlert(identifier: ReminderSchedule.identifier(id: "7d3e55a1c0f2", due: due), reminderID: "7d3e55a1c0f2", due: due,
+                                   date: due.date, time: ClockTime(clampingHour: 8, minute: 0), title: "A", body: "today · reminders")
+        let held = ReminderSchedule.Pending(identifier: wanted.identifier, title: "A", body: "today · reminders", date: due.date, time: ClockTime(clampingHour: 9, minute: 0))
+        let changes = ReminderSchedule.changes(pending: [held], wanted: [wanted])
+        XCTAssertEqual(changes.remove, [wanted.identifier])
+        XCTAssertEqual(changes.add, [wanted])
+        var same = held
+        same.time = ClockTime(clampingHour: 8, minute: 0)
+        XCTAssertTrue(ReminderSchedule.changes(pending: [same], wanted: [wanted]).add.isEmpty)
+    }
+
+    func testATickedCopyInTodaysNoteClosesTheReminderHere() throws {
+        let session = try session([
+            "reminders.md": "## Open\n- [[projects/house]] <!--rem:7d3e55a1c0f2-->\n",
+            "projects/house.md": "# House\n\n- [ ] Call the plumber (@2026-10-21 18:30) <!--rem:7d3e55a1c0f2-->\n",
+            "daily/2026-10-21.md": "# Wed\n\n## Day planner\n- [ ] 10:00 Standup\n\n### Reminders\n- [x] 18:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->\n",
+        ])
+        let reminder = try XCTUnwrap(session.reminderIndex(now: now).reminder(id: "7d3e55a1c0f2"))
+        XCTAssertEqual(reminder.status, .closed)
+        XCTAssertTrue(reminder.closedByCopy)
+        XCTAssertEqual(reminder.group(today: today), .done)
+        XCTAssertTrue(session.reminderAlerts(now: now).isEmpty, "a ticked copy stops the phone's ring")
+        XCTAssertEqual(ReminderIndex(config: session.config, content: session.store.content).reminder(id: "7d3e55a1c0f2")?.status, .open, "the home line itself is still open")
+    }
+
+    func testTheBacklogRecordDropsATokenInTheMiddleOfTheWords() throws {
+        let view = BacklogView(text: "## Soon\n- [ ] Ask (@2026-11-02) about the boiler <!--rem:7c11e0b4d2a9-->\n\n## Completed\n", config: VaultConfig())
+        let task = try XCTUnwrap(view.soon.tasks.first)
+        let ticked = writes.backlogTick(task, completed: view.completed, todayNote: nil, template: nil)
+        XCTAssertEqual(ticked.first?.document.lines, ["- [x] Ask about the boiler"])
+    }
+
+    func testIndexEntriesAreReadAsTheDesksParseIndex() {
+        let index = """
+        ## Open
+        - [[projects/house.md]] <!--rem:000000000001-->
+        - [[ projects/house ]] <!--rem:000000000002-->
+        * [[/projects/house|the house]] <!--rem:000000000003-->
+        1. [[projects/house]] <!--rem:000000000004-->
+
+        ## Done
+        ### Open
+        - [[projects/house]] dropped 2026-10-20 <!--rem:000000000005-->
+        - [[projects/house]]dropped 2026-10-20 <!--rem:000000000006-->
+
+        """
+        let house = (1...6).map { "- [ ] Line \($0) (@2026-10-22) <!--rem:\(String(format: "%012x", $0))-->" }.joined(separator: "\n") + "\n"
+        let read = ReminderIndex(config: VaultConfig()) { ["reminders.md": index, "projects/house.md": house][$0] }
+        XCTAssertEqual(read.reminders.map(\.id), ["000000000001", "000000000002", "000000000003", "000000000005", "000000000006"], "a numbered item is not an entry")
+        XCTAssertEqual(read.reminders.map(\.home), Array(repeating: "projects/house.md", count: 5))
+        XCTAssertEqual(read.reminders.map(\.text), ["Line 1", "Line 2", "Line 3", "Line 5", "Line 6"])
+        XCTAssertEqual(read.reminders[3].section, .open, "the innermost matching heading wins")
+        XCTAssertEqual(read.reminders[3].stamp, .dropped(VaultDay(year: 2026, month: 10, day: 20)))
+        XCTAssertNil(read.reminders[4].stamp, "a stamp needs a space before it")
+    }
+
+    func testSettingTimesReadAsChronoReadsThem() {
+        let settings = ReminderSettings("[ring]\ndate_only_at = \"8:30\"\ntomorrow_at = \" 7:5 \"\n")
+        XCTAssertEqual(settings.dateOnlyAt, ClockTime("08:30"))
+        XCTAssertEqual(settings.tomorrowAt, ClockTime(hour: 7, minute: 5))
+        XCTAssertEqual(ReminderSettings("[ring]\ndate_only_at = \"24:00\"\n").dateOnlyAt, ClockTime("09:00"))
+        XCTAssertEqual(ReminderSettings("[ring]\ndate_only_at = \"08:30:00\"\n").dateOnlyAt, ClockTime("09:00"))
+    }
+
+    func testTheSnoozeAnswerSaysHowLong() {
+        var settings = ReminderSettings()
+        XCTAssertEqual(settings.snoozeTitle, "In 1 hour")
+        for (minutes, title) in [(30, "In 30 min"), (120, "In 2 hours"), (90, "In 1 h 30 min"), (1, "In 1 min")] {
+            settings.snoozeMinutes = minutes
+            XCTAssertEqual(settings.snoozeTitle, title)
+        }
+    }
+
+    func testUndoPutsTheHomeLineBackAsItWas() throws {
+        let line = "- [ ] Water the plants (@18:00) <!--rem:e5e5e5e5e5e5-->"
+        let session = try session(["reminders.md": "## Open\n\(line)\n"])
+        let before = try XCTUnwrap(session.reminderIndex(now: now).reminders.first)
+        try session.dropReminder(before, now: now)
+        XCTAssertEqual(session.reminderIndex(now: now).reminders.first?.raw, "- [ ] Water the plants <!--rem:e5e5e5e5e5e5-->")
+        try session.restoreReminderLine(before, now: now)
+        XCTAssertEqual(session.reminderIndex(now: now).reminders.first?.raw, line, "a token with no day comes back too")
+    }
+
+    func testANotificationTitleIsPlainText() {
+        let index = ReminderIndex(config: VaultConfig()) { $0 == "reminders.md" ? "## Open\n- [ ] Call **Ana** about [[projects/house|the house]] (@2026-10-22 10:00) <!--rem:000000000001-->\n" : nil }
+        let alerts = ReminderSchedule.alerts(index: index, settings: ReminderSettings(), today: today, now: ClockTime(clampingHour: 14, minute: 5))
+        XCTAssertEqual(alerts.first?.title, "Call Ana about the house")
+    }
+
+    func testANewReminderJoinsTheOpenHeadingTheIndexHas() {
+        var config = VaultConfig()
+        config.reminders.openHeadings = ["Open", "Abertos"]
+        let builder = PhoneWrites(config: config, deviceID: "c41a9e0d7b2f4a61", now: now, calendar: calendar)
+        XCTAssertEqual(builder.indexAppend(["- x"], indexText: "# Lembretes\n\n## **Abertos**:\n").document.heading, HeadingRef(text: "**Abertos**:", level: 2))
+        XCTAssertEqual(builder.indexAppend(["- x"], indexText: nil).document.heading, HeadingRef(text: "Open", level: 2))
     }
 }

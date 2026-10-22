@@ -50,7 +50,7 @@ public enum ReminderSchedule {
             alerts.append(ReminderAlert(
                 identifier: identifier(id: reminder.id, due: due), reminderID: reminder.id, due: due,
                 date: moment.date, time: moment.time,
-                title: Reminders.cutText(reminder.label, maxCharacters: 80),
+                title: Reminders.cutText(Inline.plainText(reminder.label), maxCharacters: 80),
                 body: "\(when) · \(Reminders.noteLink(reminder.home))"
             ))
         }
@@ -62,17 +62,35 @@ public enum ReminderSchedule {
         return Array(sorted.prefix(limit).map(\.element))
     }
 
-    /// What to take back and what to add, given the identifiers iOS holds.
-    /// Notifications that are not reminders are never touched; one that is
-    /// still wanted is left alone, but its words are compared too, so a
-    /// reworded reminder is replaced.
-    public static func changes(pending: [(identifier: String, title: String, body: String)], wanted: [ReminderAlert]) -> (remove: [String], add: [ReminderAlert]) {
+    /// A notification iOS holds: what it says and the minute it rings.
+    public struct Pending: Equatable, Sendable {
+        public var identifier: String
+        public var title: String
+        public var body: String
+        public var date: VaultDay?
+        public var time: ClockTime?
+
+        public init(identifier: String, title: String, body: String, date: VaultDay?, time: ClockTime?) {
+            self.identifier = identifier
+            self.title = title
+            self.body = body
+            self.date = date
+            self.time = time
+        }
+    }
+
+    /// What to take back and what to add, given what iOS holds. Notifications
+    /// that are not reminders are never touched; one that is still wanted is
+    /// left alone, but its words and its minute are compared too, so a
+    /// reworded reminder, or a date-only one whose hour changed, is replaced.
+    public static func changes(pending: [Pending], wanted: [ReminderAlert]) -> (remove: [String], add: [ReminderAlert]) {
         let ours = pending.filter { $0.identifier.hasPrefix(identifierPrefix) }
         let wantedByIdentifier = Dictionary(wanted.map { ($0.identifier, $0) }, uniquingKeysWith: { first, _ in first })
         var kept: Set<String> = []
         var remove: [String] = []
         for request in ours {
-            if let alert = wantedByIdentifier[request.identifier], alert.title == request.title, alert.body == request.body, !kept.contains(request.identifier) {
+            if let alert = wantedByIdentifier[request.identifier], alert.title == request.title, alert.body == request.body,
+               alert.date == request.date, alert.time == request.time, !kept.contains(request.identifier) {
                 kept.insert(request.identifier)
             } else {
                 remove.append(request.identifier)
@@ -96,7 +114,7 @@ extension VaultSession {
     /// closed elsewhere).
     @discardableResult
     public func answer(_ answer: ReminderAnswer, reminderID: String, now: Date = Date()) throws -> Bool {
-        guard let reminder = reminderIndex().reminder(id: reminderID), reminder.status == .open,
+        guard let reminder = reminderIndex(now: now).reminder(id: reminderID), reminder.status == .open,
               let note = store.content(reminder.home)
         else { return false }
         let builder = writes(now: now)
@@ -115,6 +133,6 @@ extension VaultSession {
     /// The alerts to hand iOS now.
     public func reminderAlerts(now: Date = Date()) -> [ReminderAlert] {
         let parts = calendar.dateComponents([.hour, .minute], from: now)
-        return ReminderSchedule.alerts(index: reminderIndex(), settings: config.reminders, today: today(now: now), now: ClockTime(clampingHour: parts.hour ?? 0, minute: parts.minute ?? 0))
+        return ReminderSchedule.alerts(index: reminderIndex(now: now), settings: config.reminders, today: today(now: now), now: ClockTime(clampingHour: parts.hour ?? 0, minute: parts.minute ?? 0))
     }
 }

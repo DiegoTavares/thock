@@ -9,16 +9,23 @@ import UserNotifications
 final class ReminderNotifier: NSObject, UNUserNotificationCenterDelegate {
     private var center: UNUserNotificationCenter { .current() }
 
-    /// The three answers. Registered on every launch: it needs no permission,
-    /// and a notification delivered before the app runs still finds them.
-    func registerCategories(tomorrowAt: ClockTime) {
+    private var registered: ReminderSettings?
+
+    /// The three answers, titled from the vault's settings. Registered on
+    /// every launch (it needs no permission, and a notification delivered
+    /// before the app runs still finds them) and again when the settings
+    /// change.
+    func registerCategories(_ settings: ReminderSettings) {
+        guard registered != settings else { return }
+        registered = settings
         let actions = [
             UNNotificationAction(identifier: ReminderAnswer.done.rawValue, title: "Done", options: []),
-            UNNotificationAction(identifier: ReminderAnswer.snooze.rawValue, title: "In 1 hour", options: []),
-            UNNotificationAction(identifier: ReminderAnswer.tomorrow.rawValue, title: "Tomorrow \(tomorrowAt)", options: []),
+            UNNotificationAction(identifier: ReminderAnswer.snooze.rawValue, title: settings.snoozeTitle, options: []),
+            UNNotificationAction(identifier: ReminderAnswer.tomorrow.rawValue, title: "Tomorrow \(settings.tomorrowAt)", options: []),
         ]
         center.setNotificationCategories([UNNotificationCategory(identifier: ReminderSchedule.category, actions: actions, intentIdentifiers: [])])
     }
+
 
     /// Whether reminders can ring: asked the first time a reminder is made,
     /// never at launch.
@@ -37,7 +44,14 @@ final class ReminderNotifier: NSObject, UNUserNotificationCenterDelegate {
     func refresh(alerts: [ReminderAlert]) async {
         let status = await authorization()
         guard status == .authorized || status == .provisional || status == .ephemeral else { return }
-        let pending = await center.pendingNotificationRequests().map { ($0.identifier, $0.content.title, $0.content.body) }
+        let pending = await center.pendingNotificationRequests().map { request in
+            // The minute the request rings, so a changed `date_only_at` is
+            // replaced even though the identifier stays.
+            let moment = (request.trigger as? UNCalendarNotificationTrigger)?.dateComponents
+            let date = moment.flatMap { parts in parts.year.flatMap { year in parts.month.flatMap { month in parts.day.map { VaultDay(year: year, month: month, day: $0) } } } }
+            let time = moment.flatMap { parts in parts.hour.flatMap { hour in parts.minute.flatMap { ClockTime(hour: hour, minute: $0) } } }
+            return ReminderSchedule.Pending(identifier: request.identifier, title: request.content.title, body: request.content.body, date: date, time: time)
+        }
         let changes = ReminderSchedule.changes(pending: pending, wanted: alerts)
         if !changes.remove.isEmpty {
             center.removePendingNotificationRequests(withIdentifiers: changes.remove)

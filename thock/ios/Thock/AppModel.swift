@@ -154,7 +154,18 @@ final class AppModel {
 
     // MARK: Launch
 
+    @ObservationIgnored private var bootTask: Task<Void, Never>?
+
+    /// Opens the notebook once. The scene and a notification's answer can
+    /// both ask while the first opening is still connecting; they share it.
     func boot() async {
+        if bootTask == nil {
+            bootTask = Task { await self.openNotebook() }
+        }
+        await bootTask?.value
+    }
+
+    private func openNotebook() async {
         guard phase == .loading else { return }
         do {
             let store = try ThockEnvironment.openStore()
@@ -183,7 +194,11 @@ final class AppModel {
             pairingError = "Thock could not open its notebook on this phone."
             phase = .welcome
         }
-        becameActive()
+        // Launched in the background to answer a notification, there is no
+        // one to greet; the scene does it when the app comes forward.
+        if UIApplication.shared.applicationState != .background {
+            becameActive()
+        }
         await applyLaunchArguments()
     }
 
@@ -315,7 +330,7 @@ final class AppModel {
         reminderRefresh = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled, phase == .ready, let session else { return }
-            AppDelegate.notifier.registerCategories(tomorrowAt: session.config.reminders.tomorrowAt)
+            AppDelegate.notifier.registerCategories(session.config.reminders)
             await AppDelegate.notifier.refresh(alerts: session.reminderAlerts())
         }
     }
@@ -587,10 +602,9 @@ final class AppModel {
     }
 
     /// Undo for a reschedule or a drop: the token as it was.
+    /// Undo for a reschedule or a drop: the home line exactly as it was.
     private func restoreDue(of reminder: IndexedReminder) {
-        if let due = reminder.due, let now = self.reminder(id: reminder.id) {
-            perform { try $0.rescheduleReminder(now, to: due) }
-        }
+        perform { try $0.restoreReminderLine(reminder) }
         withAnimation(.snappy) { toast = nil }
     }
 

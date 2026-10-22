@@ -186,8 +186,11 @@ public struct ReminderSettings: Equatable, Sendable {
         doneHeadings = names("done", doneHeadings)
         dayHeadings = names("day", dayHeadings)
         func time(_ key: String, _ fallback: ClockTime) -> ClockTime {
-            guard let text = values["ring.\(key)"]?.string?.trimmingCharacters(in: .whitespaces),
-                  text.utf8.count == 5, let time = ClockTime(text)
+            guard let text = values["ring.\(key)"]?.string?.trimmingCharacters(in: .whitespaces) else { return fallback }
+            // chrono's `%H:%M`, as the desk reads it: one or two digits each.
+            let parts = text.split(separator: ":", omittingEmptySubsequences: false)
+            guard parts.count == 2, parts.allSatisfy({ (1...2).contains($0.count) && $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) }),
+                  let hour = Int(parts[0]), let minute = Int(parts[1]), let time = ClockTime(hour: hour, minute: minute)
             else { return fallback }
             return time
         }

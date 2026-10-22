@@ -417,6 +417,31 @@ final class SyncCoreFixtureTests: XCTestCase {
         }
     }
 
+    func testTheDesksUnitCasesForRowsAndMetadata() throws {
+        XCTAssertEqual(Reminders.stripReminder("Renew passport (@2026-12-02 09:00) <!--gmail:ab--> <!--rem:3f9a1c0d4e21-->"), "Renew passport")
+        XCTAssertEqual(Reminders.stripReminder("Call (@tom) mum (@14:30) now"), "Call (@tom) mum now")
+        XCTAssertEqual(Reminders.stripReminder("a <!-- b --> c"), "a <!-- b --> c")
+        XCTAssertEqual(Reminders.stripReminder("plain"), "plain")
+
+        func edited(_ line: String) -> String {
+            Bytes.string(Array(line.utf8).prefix(Reminders.trailingMetadataStart(line))[...])
+        }
+        XCTAssertEqual(edited("Renew passport (@2026-12-02) <!--rem:3f9a1c0d4e21-->"), "Renew passport")
+        XCTAssertEqual(edited("Call (@2026-12-02) mum <!--x-->"), "Call (@2026-12-02) mum")
+        XCTAssertEqual(Reminders.trailingMetadataStart("plain"), 5)
+
+        let due = try XCTUnwrap(ReminderDue("2026-12-02 10:20"))
+        XCTAssertEqual(Reminders.placeToken("- [ ] Renew passport <!-- note -->", due: due, homeDay: nil), "- [ ] Renew passport (@2026-12-02 10:20) <!-- note -->")
+        XCTAssertEqual(Reminders.placeToken("Renew (@2026-11-01) soon <!--rem:3f9a1c0d4e21-->", due: due, homeDay: nil), "Renew (@2026-12-02 10:20) soon <!--rem:3f9a1c0d4e21-->")
+        XCTAssertEqual(Reminders.placeToken("Water", due: due, homeDay: VaultDay(year: 2026, month: 12, day: 2)), "Water (@10:20)")
+        XCTAssertNil(Reminders.placeToken("Standup <!--gcal:abc-->", due: due, homeDay: nil))
+
+        let line = "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it (@11:00) -->"
+        XCTAssertEqual(Reminders.trailingCommentsStart(line), line.utf8.count)
+        XCTAssertEqual(Reminders.trailingMetadataStart(line), line.utf8.count)
+        XCTAssertEqual(Reminders.stripReminder(line), "- [ ] 10:00 Ping Bob <!--gmail:ab--> about it -->")
+    }
+
     /// The index cases read as the desk's runner reads them: each entry's
     /// home line found by id, with its state, due and group. `ReminderIndex`
     /// (V45 P1) reads the same cases its own way.
@@ -457,7 +482,11 @@ final class SyncCoreFixtureTests: XCTestCase {
                 let today = try XCTUnwrap(VaultDay(iso: String(vector.now.prefix(10))))
                 let dateOnlyAt = try XCTUnwrap(ClockTime(vector.date_only_at))
                 let indexText = vector.files[vector.index] ?? ""
-                let entries = Reminders.parseNote(indexText, path: vector.index, config: config).filter { $0.reminder.id != nil }
+                let indexLines = Self.lines(indexText)
+                // Top-level list items only: indented lines are a loose entry's children.
+                let entries = Reminders.parseNote(indexText, path: vector.index, config: config).filter { entry in
+                    entry.reminder.id != nil && ["- ", "* ", "+ "].contains { indexLines[entry.line].hasPrefix($0) }
+                }
                 XCTAssertEqual(entries.compactMap(\.reminder.id), vector.reminders.map(\.id), "\(vector.name): entries")
                 for expected in vector.reminders {
                     let label = "\(vector.name) \(expected.id)"

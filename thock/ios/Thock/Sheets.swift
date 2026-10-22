@@ -764,6 +764,22 @@ struct RemindMeSheet: View {
 
     private var today: VaultDay { .today() }
 
+    /// The moment picked by hand. A date-only today still rings at
+    /// `date_only_at` or, past it, sits in Today; a time already gone never
+    /// rings and would be overdue at once.
+    private var picked: ReminderDue {
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: time)
+        return ReminderDue(date: VaultDay(day), time: noTime ? nil : ClockTime(clampingHour: parts.hour ?? 9, minute: parts.minute ?? 0))
+    }
+
+    private var pickedIsAhead: Bool {
+        let due = picked
+        let now = Calendar.current.dateComponents([.hour, .minute], from: Date())
+        let current = ClockTime(clampingHour: now.hour ?? 0, minute: now.minute ?? 0)
+        guard let time = due.time else { return due.date >= today }
+        return (due.date, time.minutes) > (today, current.minutes)
+    }
+
     private func pick(_ due: ReminderDue) {
         UISelectionFeedbackGenerator().selectionChanged()
         onPick(due)
@@ -772,11 +788,11 @@ struct RemindMeSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SheetHeader(leading: "Cancel", title: "Remind me", trailing: "Done") {
+            SheetHeader(leading: "Cancel", title: "Remind me", trailing: "Done", trailingEnabled: pickedIsAhead) {
                 dismiss()
             } onTrailing: {
-                let parts = Calendar.current.dateComponents([.hour, .minute], from: time)
-                pick(ReminderDue(date: VaultDay(day), time: noTime ? nil : ClockTime(clampingHour: parts.hour ?? 9, minute: parts.minute ?? 0)))
+                guard pickedIsAhead else { return }
+                pick(picked)
             }
             if !subject.isEmpty {
                 Text(subject)
@@ -807,6 +823,11 @@ struct RemindMeSheet: View {
             }
             Toggle("No time", isOn: $noTime)
                 .toggleStyle(ThockToggleStyle())
+            if !pickedIsAhead {
+                Text("That time has passed. Pick a later one.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.warn)
+            }
             if model.notificationsDenied {
                 Text("Notifications are off for Thock, so this won't ring on this phone. It still waits in Reminders.")
                     .font(.system(size: 13))
