@@ -8,9 +8,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use thock_sync_core::{
     Applied, Context, DailyNotes, Due, Group, Heading, MirrorLine, MirrorMark, Operation, Outcome,
     Place, Placement, ReminderConfig, ReminderState, Task, When, Write, add_id, apply, attach,
@@ -533,7 +533,11 @@ fn reminder_vectors_match() {
                 expected.due,
                 "{label}: due"
             );
-            assert_eq!(state_text(reminder.state()), expected.state, "{label}: state");
+            assert_eq!(
+                state_text(reminder.state()),
+                expected.state,
+                "{label}: state"
+            );
             assert_eq!(appearance.mirror, expected.mirror, "{label}: mirror");
             assert_eq!(reminder_text(line), expected.text, "{label}: text");
             if !case.note.contains('\n') {
@@ -692,7 +696,10 @@ fn reminder_index_cases_agree_with_the_grammar() {
     let mut paths: Vec<PathBuf> = fs::read_dir(&dir)
         .expect("reminder_index readable")
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
         .collect();
     paths.sort();
     assert!(paths.len() >= 2);
@@ -756,7 +763,11 @@ fn reminder_index_cases_agree_with_the_grammar() {
                     assert_eq!(Some(entry.line), expected.line, "{label}: loose line");
                 }
             }
-            let stamps = [("done", "✅ "), ("dropped", "dropped "), ("removed", "removed ")];
+            let stamps = [
+                ("done", "✅ "),
+                ("dropped", "dropped "),
+                ("removed", "removed "),
+            ];
             for (kind, prefix) in stamps {
                 let stated = expected
                     .stamp
@@ -819,7 +830,11 @@ fn reminder_index_cases_agree_with_the_grammar() {
                 expected.rings_at,
                 "{label}: rings at"
             );
-            assert_eq!(state_text(reminder.state()), expected.state, "{label}: state");
+            assert_eq!(
+                state_text(reminder.state()),
+                expected.state,
+                "{label}: state"
+            );
             assert_eq!(
                 group(reminder.state(), reminder.due, now.date()).map(group_text),
                 expected.group.as_deref(),

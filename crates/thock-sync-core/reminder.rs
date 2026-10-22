@@ -12,7 +12,9 @@ use std::ops::Range;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 use crate::dates::{names_a_day, parse_date};
-use crate::markdown::{Document, heading_key, strip_checkbox, strip_list_marker, strip_time_prefix};
+use crate::markdown::{
+    Document, heading_key, strip_checkbox, strip_list_marker, strip_time_prefix,
+};
 
 /// The number of lowercase hex digits in a reminder id.
 pub const ID_LENGTH: usize = 12;
@@ -92,14 +94,14 @@ pub fn is_reminder_path(path: &str, template_paths: &[&str]) -> bool {
     if !is_markdown || path.starts_with(".thock/") || path.starts_with("routines/") {
         return false;
     }
-    !template_paths
-        .iter()
-        .any(|template| match template.trim_start_matches('/').rsplit_once('/') {
+    !template_paths.iter().any(
+        |template| match template.trim_start_matches('/').rsplit_once('/') {
             Some((folder, _)) => path
                 .strip_prefix(folder)
                 .is_some_and(|rest| rest.starts_with('/')),
             None => path == template.trim_start_matches('/'),
-        })
+        },
+    )
 }
 
 /// When a reminder is due: a day, and a time unless it is date-only.
@@ -202,8 +204,10 @@ pub enum Group {
 }
 
 /// The group a reminder belongs in on `today`: closed and dropped ones are
-/// Done; an open one is Overdue before its day, Today on it (a time already
-/// past included) and Upcoming after. An open reminder with no day has none.
+/// Done; an open one is Overdue before its day, Today on it and Upcoming
+/// after. Groups go by day, not by instant: a reminder whose time (or, when
+/// date-only, `date_only_at`) has passed stays in Today until the day ends,
+/// and is Overdue from the next day. An open reminder with no day has none.
 pub fn group(state: ReminderState, due: Option<Due>, today: NaiveDate) -> Option<Group> {
     if state != ReminderState::Open {
         return Some(Group::Done);
@@ -297,7 +301,11 @@ fn day_sections(document: &Document, names: &[String]) -> Vec<Range<usize>> {
     let headings = document.headings();
     headings
         .iter()
-        .filter(|heading| names.iter().any(|name| heading_matches(&heading.text, name)))
+        .filter(|heading| {
+            names
+                .iter()
+                .any(|name| heading_matches(&heading.text, name))
+        })
         .map(|heading| {
             let end = headings
                 .iter()
@@ -378,8 +386,8 @@ fn scan_inline(line: &str, in_comment: bool) -> InlineScan {
     let bytes = line.as_bytes();
     while cursor < line.len() {
         let rest = &line[cursor..];
-        if rest.starts_with(COMMENT_OPEN) {
-            match rest[COMMENT_OPEN.len()..].find(COMMENT_CLOSE) {
+        if let Some(inside) = rest.strip_prefix(COMMENT_OPEN) {
+            match inside.find(COMMENT_CLOSE) {
                 Some(offset) => {
                     let end = cursor + COMMENT_OPEN.len() + offset + COMMENT_CLOSE.len();
                     if let Some(found) = id_in_comment(&line[cursor..end]) {
@@ -423,7 +431,10 @@ fn closing_backticks(line: &str, from: usize, run: usize) -> Option<usize> {
     let mut search = from;
     while let Some(offset) = line.get(search..)?.find('`') {
         let start = search + offset;
-        let length = line[start..].bytes().take_while(|byte| *byte == b'`').count();
+        let length = line[start..]
+            .bytes()
+            .take_while(|byte| *byte == b'`')
+            .count();
         if length == run {
             return Some(start + length);
         }
@@ -528,7 +539,10 @@ fn parse_clock(text: &str) -> Option<NaiveTime> {
     let (hours, minutes) = text.split_once(':')?;
     if !(1..=2).contains(&hours.len())
         || minutes.len() != 2
-        || !hours.bytes().chain(minutes.bytes()).all(|byte| byte.is_ascii_digit())
+        || !hours
+            .bytes()
+            .chain(minutes.bytes())
+            .all(|byte| byte.is_ascii_digit())
     {
         return None;
     }
@@ -556,7 +570,9 @@ fn task_of(line: &str) -> Option<(Task, usize)> {
 /// due has a time, the full date otherwise.
 pub fn token_text(due: Due, home_day: Option<NaiveDate>) -> String {
     match due.time {
-        Some(time) if home_day == Some(due.date) => format!("{TOKEN_OPEN}{})", time.format("%H:%M")),
+        Some(time) if home_day == Some(due.date) => {
+            format!("{TOKEN_OPEN}{})", time.format("%H:%M"))
+        }
         _ => format!("{TOKEN_OPEN}{due})"),
     }
 }
@@ -578,7 +594,7 @@ pub fn close(line: &str) -> Option<String> {
     let text = &line[token.range.clone()];
     Some(replace_range(
         line,
-        token.range.clone(),
+        token.range,
         &format!("{STRIKE}{text}{STRIKE}"),
     ))
 }
@@ -593,7 +609,7 @@ pub fn reopen(line: &str) -> Option<String> {
     let mut edited = line.to_string();
     if token.struck {
         let inner = token.range.start + STRIKE.len()..token.range.end - STRIKE.len();
-        edited = replace_range(&edited, token.range.clone(), &line[inner]);
+        edited = replace_range(&edited, token.range, &line[inner]);
     }
     if let Some((Task::Done, mark)) = task_of(&edited) {
         edited = replace_range(&edited, mark..mark + 1, " ");

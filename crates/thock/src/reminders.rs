@@ -128,13 +128,21 @@ pub fn parse_reminder_settings(text: &str) -> Result<ReminderSettings> {
         open_headings: headings(content.headings.open, defaults.open_headings),
         done_headings: headings(content.headings.done, defaults.done_headings),
         day_headings: headings(content.headings.day, defaults.day_headings),
-        date_only_at: time(content.ring.date_only_at, "date_only_at", defaults.date_only_at)?,
+        date_only_at: time(
+            content.ring.date_only_at,
+            "date_only_at",
+            defaults.date_only_at,
+        )?,
         snooze_minutes: content
             .ring
             .snooze_minutes
             .unwrap_or(defaults.snooze_minutes)
             .clamp(1, 24 * 60),
-        tomorrow_at: time(content.ring.tomorrow_at, "tomorrow_at", defaults.tomorrow_at)?,
+        tomorrow_at: time(
+            content.ring.tomorrow_at,
+            "tomorrow_at",
+            defaults.tomorrow_at,
+        )?,
         ring_on_desk: content.ring.desk.unwrap_or(defaults.ring_on_desk),
     })
 }
@@ -186,7 +194,11 @@ impl ReminderSettings {
         let rounded = if later.second() == 0 && later.nanosecond() == 0 {
             later
         } else {
-            later.with_second(0).unwrap_or(later).with_nanosecond(0).unwrap_or(later)
+            later
+                .with_second(0)
+                .unwrap_or(later)
+                .with_nanosecond(0)
+                .unwrap_or(later)
                 + chrono::Duration::minutes(1)
         };
         Due::new(rounded.date(), Some(rounded.time()))
@@ -257,7 +269,8 @@ pub struct ReminderChip {
 }
 
 /// The chip a line's token draws as on `today`, or `None` when the line has
-/// no token. Labels follow §8.4: *Tomorrow 10:00*, *Today 14:30*, *Tue 20 Oct
+/// no token. State follows `thock_sync_core::group`, by day: a reminder due
+/// today is *Today* even after its time, and *Overdue* only from the next day. Labels follow §8.4: *Tomorrow 10:00*, *Today 14:30*, *Tue 20 Oct
 /// 18:00 · overdue*, *Mon 19 Oct* when closed, *17:00 · which day?*.
 pub fn reminder_chip(reminder: &LineReminder, today: NaiveDate) -> Option<ReminderChip> {
     let token = reminder.token.as_ref()?;
@@ -703,7 +716,12 @@ mod tests {
                 ChipState::Closed,
                 "Tomorrow",
             ),
-            ("Stretch (@17:00)", None, ChipState::NoDay, "17:00 · which day?"),
+            (
+                "Stretch (@17:00)",
+                None,
+                ChipState::NoDay,
+                "17:00 · which day?",
+            ),
         ];
         for (line, day, state, label) in cases {
             assert_eq!(
