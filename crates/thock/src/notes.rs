@@ -131,6 +131,21 @@ pub async fn ensure_note_at(
     Ok(outcome)
 }
 
+/// Tells the vault's reminders service that the note at `path` was just
+/// ensured, so its day section is written now rather than on the next file
+/// event (V45 §7.2). Nothing happens outside a vault.
+pub fn announce_note(project: &gpui::Entity<project::Project>, path: &Path, cx: &mut gpui::App) {
+    let Some(service) = crate::reminder_service::service_for_project(project, cx) else {
+        return;
+    };
+    service.update(cx, |service, cx| {
+        if let Ok(relative) = path.strip_prefix(&service.vault().root) {
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            service.note_created(&relative, cx);
+        }
+    });
+}
+
 /// Writes the shipped example day (`vault::EXAMPLE_DAY_NOTE`) as today's
 /// daily note, so a brand-new vault opens on a filled-in page rather than an
 /// empty template. Returns the note's path when it was created, `None` when

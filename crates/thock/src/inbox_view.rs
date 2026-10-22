@@ -2732,6 +2732,9 @@ async fn file_one(
                     "Thock: the daily template is missing, so today's note was created empty"
                 );
             }
+            if outcome != EnsureNoteOutcome::AlreadyExisted {
+                cx.update(|_, cx| crate::notes::announce_note(project, &path, cx))?;
+            }
             let heading = vault.config.day_planner.heading_names();
             let block = format!("{task_line}\n");
             edit_buffer(

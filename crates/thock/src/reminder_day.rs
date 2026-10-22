@@ -2,19 +2,33 @@
 //! reconciler that keeps a daily note's `### Reminders` subsection, under the
 //! Day Planner, in step with the reminders due that day. It follows calendar
 //! sync's rules (`calendar.rs`): the same heading resolution and holds, insert
-//! and replace only, and a line the person edited is theirs. Pure
-//! string-in/edits-out; `reminder_service.rs` runs it and writes the result.
+//! and replace only, and a line the person edited is theirs. `reconcile` is
+//! pure; `ReminderDaySync`, one per vault and owned by the `ReminderService`,
+//! runs it and writes the result through the service.
 
+use anyhow::Context as _;
 use chrono::{NaiveDate, NaiveTime};
-use std::collections::{HashMap, HashSet};
+use fs::Fs;
+use gpui::{
+    App, AppContext as _, AsyncApp, Context, Entity, SharedString, Subscription, Task, WeakEntity,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use thock_sync_core::{
     Due, MirrorLine, MirrorMark, ReminderState, cut_text, note_link, parse_line, reminder_text,
 };
+use util::ResultExt as _;
 
-use crate::calendar::{LineEdit, LineEditKind};
+use crate::calendar::{LineEdit, LineEditKind, apply_line_edits};
 use crate::day_plan;
-use crate::reminders::ReminderSettings;
+use crate::notes::NoteKind;
+use crate::reminder_index::IndexedState;
+use crate::reminder_service::{ReminderEvent, ReminderService};
+use crate::reminders::{ReminderClock, ReminderSettings};
+use crate::vault::{VAULT_MARKER_DIR, Vault};
 
 /// How long a mirror line's text may be, in characters (§7.1).
 pub const MIRROR_TEXT_CHARS: usize = 80;
@@ -49,6 +63,10 @@ pub struct DayReminder {
     /// saw them. A mirror still showing these follows the change; one showing
     /// anything else was edited by the person and is frozen.
     pub previous_text: Option<String>,
+    /// The home line was closed when last read and is open again, so its
+    /// mirrors are unticked. Otherwise a ticked mirror stays ticked: it is a
+    /// copy tick the service carries to the home line (§5.3).
+    pub reopened: bool,
 }
 
 impl DayReminder {
@@ -74,6 +92,7 @@ impl DayReminder {
             due: reminder.due,
             status,
             previous_text: None,
+            reopened: false,
         })
     }
 
@@ -86,6 +105,7 @@ impl DayReminder {
             due: None,
             status: DayStatus::Removed,
             previous_text: None,
+            reopened: false,
         }
     }
 }
@@ -338,8 +358,7 @@ fn sort_key(mirror: &MirrorLine) -> SortKey {
 }
 
 /// The mirror as it should read now, or `None` when the person edited its
-/// words and it is frozen. A mirror is never unticked: a tick the person
-/// made is a copy tick the service carries to the home line (§5.3).
+/// words and it is frozen.
 fn updated_mirror(
     mirror: &MirrorLine,
     reminder: &DayReminder,
@@ -373,7 +392,10 @@ fn updated_mirror(
             let Some(due) = reminder.due else {
                 return Some(mirror.clone());
             };
-            let checked = mirror.checked || reminder.status == DayStatus::Closed;
+            let checked = match reminder.status {
+                DayStatus::Closed => true,
+                _ => mirror.checked && !reminder.reopened,
+            };
             match placement(due, day, today) {
                 Placement::Day(time) => MirrorLine {
                     checked,
@@ -506,10 +528,478 @@ fn section_creation_edits(
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// The wiring: one per vault, owned by its `ReminderService`, so two windows
+// never write a day section twice.
+
+/// What the reconciler remembers of each reminder between runs, so a home
+/// line edited while Thock was closed still carries its mirrors along.
+const MEMORY_FILE: &str = "cache/reminders/day.json";
+/// Where frozen mirrors are logged, one JSON object per line.
+const LOG_FILE: &str = "cache/reminders/log.jsonl";
+
+/// Why today's day section can't be written; the Day Planner's status row
+/// offers the fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DayHold {
+    NoPlannerHeading { heading: SharedString },
+    PlannerHeadingTooDeep { heading: SharedString },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Remembered {
+    text: String,
+    #[serde(default)]
+    previous: Option<String>,
+    #[serde(default)]
+    closed: bool,
+    /// Every day from today on that the reminder was due, so a note it moved
+    /// away from is revisited to strike its mirror.
+    #[serde(default)]
+    days: BTreeSet<NaiveDate>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Memory {
+    version: u32,
+    reminders: BTreeMap<String, Remembered>,
+    /// Frozen mirrors already logged, as `id` and line.
+    #[serde(default)]
+    logged: BTreeSet<(String, String)>,
+}
+
+#[derive(Serialize)]
+struct FrozenLogEntry<'a> {
+    at: String,
+    path: &'a str,
+    id: &'a str,
+    line: &'a str,
+    home_text: &'a str,
+    reason: &'static str,
+}
+
+/// Runs `reconcile` on the daily notes the index touches, whenever the index
+/// changes, a note is created or changed, or the day turns over (§7.2). It
+/// never creates a note and writes only through the service.
+pub struct ReminderDaySync {
+    service: WeakEntity<ReminderService>,
+    memory: Memory,
+    memory_loaded: bool,
+    /// Vault-relative notes to reconcile next.
+    pending: BTreeSet<String>,
+    /// Read the index into memory and visit every day it names.
+    index_dirty: bool,
+    running: bool,
+    hold: Option<DayHold>,
+    /// Notes whose last write failed, reconciled again on the next run.
+    retry: BTreeSet<String>,
+    load_task: Option<Task<()>>,
+    run_task: Option<Task<()>>,
+    _subscription: Subscription,
+}
+
+struct NoteOutcome {
+    path: String,
+    /// `None` when the note doesn't exist.
+    reconciled: Option<DayReconciled>,
+    failed: bool,
+}
+
+struct DayJob {
+    service: WeakEntity<ReminderService>,
+    fs: Arc<dyn Fs>,
+    root: PathBuf,
+    notes: Vec<(String, NaiveDate)>,
+    today: NaiveDate,
+    today_path: String,
+    reminders: Arc<Vec<DayReminder>>,
+    config: Arc<DayConfig>,
+    planner_heading: SharedString,
+    memory: Option<String>,
+}
+
+impl ReminderDaySync {
+    pub fn new(service: &Entity<ReminderService>, cx: &mut App) -> Entity<Self> {
+        cx.new(|cx| {
+            let subscription = cx.subscribe(service, |this: &mut Self, _, event, cx| {
+                match event {
+                    ReminderEvent::IndexChanged | ReminderEvent::DayChanged { .. } => {
+                        this.index_dirty = true;
+                    }
+                    ReminderEvent::NoteCreated { path } | ReminderEvent::NoteChanged { path } => {
+                        this.pending.insert(path.clone());
+                    }
+                    ReminderEvent::ShowReminders => return,
+                }
+                this.schedule(cx);
+            });
+            let mut this = Self {
+                service: service.downgrade(),
+                memory: Memory::default(),
+                memory_loaded: false,
+                pending: BTreeSet::new(),
+                index_dirty: false,
+                running: false,
+                hold: None,
+                retry: BTreeSet::new(),
+                load_task: None,
+                run_task: None,
+                _subscription: subscription,
+            };
+            this.load_memory(cx);
+            this
+        })
+    }
+
+    /// Why today's section is on hold, if it is.
+    pub fn hold(&self) -> Option<&DayHold> {
+        self.hold.as_ref()
+    }
+
+    fn load_memory(&mut self, cx: &mut Context<Self>) {
+        let Some(service) = self.service.upgrade() else {
+            return;
+        };
+        let (fs, path) = {
+            let service = service.read(cx);
+            (
+                service.fs(cx),
+                service
+                    .vault()
+                    .root
+                    .join(VAULT_MARKER_DIR)
+                    .join(MEMORY_FILE),
+            )
+        };
+        self.load_task = Some(cx.spawn(async move |this, cx| {
+            let memory = match fs {
+                Some(fs) if fs.is_file(&path).await => fs
+                    .load(&path)
+                    .await
+                    .log_err()
+                    .and_then(|text| serde_json::from_str::<Memory>(&text).log_err()),
+                _ => None,
+            };
+            this.update(cx, |this, cx| {
+                if let Some(memory) = memory {
+                    this.memory = memory;
+                }
+                this.memory_loaded = true;
+                this.schedule(cx);
+            })
+            .log_err();
+        }));
+    }
+
+    fn schedule(&mut self, cx: &mut Context<Self>) {
+        if !self.memory_loaded || self.running {
+            return;
+        }
+        if self.pending.is_empty() && !self.index_dirty {
+            return;
+        }
+        self.running = true;
+        self.run_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(Some(job)) = this.update(cx, |this, cx| this.take_job(cx)) else {
+                    break;
+                };
+                let outcomes = run_job(&job, cx).await;
+                if this
+                    .update(cx, |this, cx| this.finish_job(job, outcomes, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            this.update(cx, |this, _| this.running = false).log_err();
+        }));
+    }
+
+    fn take_job(&mut self, cx: &mut Context<Self>) -> Option<DayJob> {
+        let service = self.service.upgrade()?;
+        if self.pending.is_empty() && !self.index_dirty {
+            return None;
+        }
+        let today = ReminderClock::global(cx).today();
+        let service_state = service.read(cx);
+        if !service_state.is_loaded() {
+            return None;
+        }
+        let fs = service_state.fs(cx)?;
+        let vault = service_state.vault().clone();
+        let reminder_config = service_state.config();
+        let config = DayConfig::new(&vault.config.day_planner, service_state.settings());
+        let planner_heading: SharedString =
+            vault.config.day_planner.heading.trim().to_string().into();
+        let indexed = service_state.reminders().to_vec();
+
+        let mut reopened = HashSet::new();
+        let mut memory_changed = false;
+        if std::mem::take(&mut self.index_dirty) {
+            for reminder in &indexed {
+                if reminder.state == IndexedState::Missing {
+                    continue;
+                }
+                let text = reminder.text.clone().unwrap_or_default();
+                let closed = reminder.state == IndexedState::Closed;
+                let entry = self
+                    .memory
+                    .reminders
+                    .entry(reminder.id.clone())
+                    .or_default();
+                let before = entry.clone();
+                if entry.text != text && !text.is_empty() {
+                    if !entry.text.is_empty() {
+                        entry.previous = Some(std::mem::take(&mut entry.text));
+                    }
+                    entry.text = text;
+                }
+                if entry.closed && reminder.state == IndexedState::Open {
+                    reopened.insert(reminder.id.clone());
+                }
+                entry.closed = closed;
+                entry.days.retain(|day| *day >= today);
+                if let Some(due) = reminder.due.filter(|due| due.date >= today) {
+                    entry.days.insert(due.date);
+                }
+                memory_changed |= *entry != before;
+            }
+            let days: BTreeSet<NaiveDate> = std::iter::once(today)
+                .chain(
+                    self.memory
+                        .reminders
+                        .values()
+                        .flat_map(|entry| entry.days.iter().copied()),
+                )
+                .collect();
+            for day in days {
+                self.pending.insert(relative_path(
+                    &vault,
+                    &vault.note_path(NoteKind::Daily, day),
+                ));
+            }
+        }
+
+        let mut paths = std::mem::take(&mut self.pending);
+        paths.append(&mut self.retry);
+        let notes: Vec<(String, NaiveDate)> = paths
+            .into_iter()
+            .filter_map(|path| {
+                let day = reminder_config.daily.day_of(&path)?;
+                (day >= today).then_some((path, day))
+            })
+            .collect();
+        let reminders = indexed
+            .iter()
+            .filter_map(|reminder| {
+                let status = match reminder.state {
+                    IndexedState::Open => DayStatus::Open,
+                    IndexedState::Closed => DayStatus::Closed,
+                    IndexedState::Dropped => DayStatus::Dropped,
+                    IndexedState::Removed => DayStatus::Removed,
+                    IndexedState::Missing => return None,
+                };
+                let remembered = self.memory.reminders.get(&reminder.id);
+                Some(DayReminder {
+                    id: reminder.id.clone(),
+                    home: reminder.home.clone(),
+                    text: reminder.text.clone().unwrap_or_default(),
+                    due: reminder.due,
+                    status,
+                    previous_text: remembered.and_then(|entry| entry.previous.clone()),
+                    reopened: reopened.contains(&reminder.id),
+                })
+            })
+            .collect();
+        let memory = memory_changed
+            .then(|| serde_json::to_string(&self.memory).log_err())
+            .flatten();
+        if notes.is_empty() && memory.is_none() {
+            return None;
+        }
+        Some(DayJob {
+            service: service.downgrade(),
+            fs,
+            today_path: relative_path(&vault, &vault.note_path(NoteKind::Daily, today)),
+            root: vault.root.clone(),
+            notes,
+            today,
+            reminders: Arc::new(reminders),
+            config: Arc::new(config),
+            planner_heading,
+            memory,
+        })
+    }
+
+    fn finish_job(&mut self, job: DayJob, outcomes: Vec<NoteOutcome>, cx: &mut Context<Self>) {
+        let mut log = String::new();
+        let now = ReminderClock::global(cx)
+            .now()
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        for NoteOutcome {
+            path,
+            reconciled: outcome,
+            failed,
+        } in &outcomes
+        {
+            if *failed {
+                // Tried again on the next trigger, never in a loop.
+                self.retry.insert(path.clone());
+            }
+            if *path == job.today_path {
+                let hold = match outcome {
+                    Some(DayReconciled::NoPlannerSection) => Some(DayHold::NoPlannerHeading {
+                        heading: job.planner_heading.clone(),
+                    }),
+                    Some(DayReconciled::NoSectionRoom) => Some(DayHold::PlannerHeadingTooDeep {
+                        heading: job.planner_heading.clone(),
+                    }),
+                    _ => None,
+                };
+                if hold != self.hold {
+                    self.hold = hold;
+                    cx.notify();
+                    // The status rows observe the service, not this entity.
+                    job.service.update(cx, |_, cx| cx.notify()).log_err();
+                }
+            }
+            let Some(DayReconciled::Edits { frozen, .. }) = outcome else {
+                continue;
+            };
+            for frozen in frozen {
+                if !self
+                    .memory
+                    .logged
+                    .insert((frozen.id.clone(), frozen.line.clone()))
+                {
+                    continue;
+                }
+                let entry = FrozenLogEntry {
+                    at: now.clone(),
+                    path,
+                    id: &frozen.id,
+                    line: &frozen.line,
+                    home_text: &frozen.text,
+                    reason: "the mirror was edited by hand",
+                };
+                if let Some(line) = serde_json::to_string(&entry).log_err() {
+                    log.push_str(&line);
+                    log.push('\n');
+                }
+            }
+        }
+        let memory = if log.is_empty() {
+            job.memory
+        } else {
+            serde_json::to_string(&self.memory).log_err()
+        };
+        if memory.is_none() && log.is_empty() {
+            return;
+        }
+        let fs = job.fs.clone();
+        let cache = job.root.join(VAULT_MARKER_DIR);
+        cx.background_spawn(async move {
+            let written: anyhow::Result<()> = async {
+                if let Some(memory) = memory {
+                    let path = cache.join(MEMORY_FILE);
+                    if let Some(parent) = path.parent() {
+                        fs.create_dir(parent).await?;
+                    }
+                    fs.atomic_write(path, memory).await?;
+                }
+                if !log.is_empty() {
+                    let path = cache.join(LOG_FILE);
+                    let existing = if fs.is_file(&path).await {
+                        fs.load(&path).await?
+                    } else {
+                        String::new()
+                    };
+                    fs.atomic_write(path, format!("{existing}{log}")).await?;
+                }
+                anyhow::Ok(())
+            }
+            .await;
+            written
+                .context("saving the day reconciler's cache")
+                .log_err();
+        })
+        .detach();
+    }
+}
+
+fn relative_path(vault: &Vault, path: &Path) -> String {
+    path.strip_prefix(&vault.root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Reconciles each note of `job` through the service, one after another.
+/// A note that is missing is left missing (`None`). A failed write surfaces
+/// in the service's status row, and the note is tried again on the next run.
+async fn run_job(job: &DayJob, cx: &mut AsyncApp) -> Vec<NoteOutcome> {
+    let mut outcomes = Vec::new();
+    for (path, day) in &job.notes {
+        // A missing note stays missing, and asking the service to write it
+        // would only make it read the path again.
+        if !job.fs.is_file(&job.root.join(path)).await {
+            outcomes.push(NoteOutcome {
+                path: path.clone(),
+                reconciled: None,
+                failed: false,
+            });
+            continue;
+        }
+        let outcome = Arc::new(Mutex::new(None));
+        let Ok(write) = job.service.update(cx, |service, cx| {
+            let outcome = outcome.clone();
+            let reminders = job.reminders.clone();
+            let config = job.config.clone();
+            let note_path = path.clone();
+            let (day, today) = (*day, job.today);
+            service.write_note(
+                path,
+                move |text| {
+                    let text = text?;
+                    let reconciled = reconcile(text, &note_path, day, today, &reminders, &config);
+                    let edited = match &reconciled {
+                        DayReconciled::Edits { edits, .. } if !edits.is_empty() => {
+                            Some(apply_line_edits(text, edits))
+                        }
+                        _ => None,
+                    };
+                    if let Ok(mut outcome) = outcome.lock() {
+                        *outcome = Some(reconciled);
+                    }
+                    edited
+                },
+                cx,
+            )
+        }) else {
+            break;
+        };
+        let failed = match write.await {
+            Ok(_) => false,
+            Err(error) => {
+                log::warn!("Thock reminders: writing the day section of {path} failed: {error:#}");
+                true
+            }
+        };
+        let reconciled = outcome.lock().ok().and_then(|mut outcome| outcome.take());
+        outcomes.push(NoteOutcome {
+            path: path.clone(),
+            reconciled,
+            failed,
+        });
+    }
+    outcomes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::calendar::apply_line_edits;
 
     const NOTE: &str = "daily/2026-10-21.md";
 
@@ -540,6 +1030,7 @@ mod tests {
             due: Some(due),
             status: DayStatus::Open,
             previous_text: None,
+            reopened: false,
         }
     }
 
@@ -784,7 +1275,7 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_reminder_is_never_inserted_and_a_ticked_mirror_never_unticked() {
+    fn a_closed_reminder_is_never_inserted_and_a_mirror_unticks_only_on_reopen() {
         let note = "## Day planner\n### Reminders\n\
                     - [x] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->\n";
         let mut closed = open(
@@ -800,8 +1291,18 @@ mod tests {
             "Call the plumber",
             at(10, 21, 14, 30),
         );
-        let (applied, _) = run(note, &[closed, still_open]);
-        assert_eq!(applied, note);
+        let (applied, _) = run(note, &[closed, still_open.clone()]);
+        assert_eq!(applied, note, "a person's tick waits for the service");
+
+        let reopened = DayReminder {
+            reopened: true,
+            ..still_open
+        };
+        let (applied, _) = run(note, &[reopened]);
+        assert!(
+            applied.contains("- [ ] 14:30 Call the plumber · [[projects/house]]"),
+            "a reopened home unticks its mirror: {applied}"
+        );
     }
 
     #[test]
@@ -1018,5 +1519,260 @@ mod tests {
         .unwrap();
         assert_eq!(dropped.status, DayStatus::Dropped);
         assert_eq!(dropped.due, None);
+    }
+}
+
+#[cfg(test)]
+mod wiring_tests {
+    use super::*;
+    use crate::reminders::TestClock;
+    use crate::vault::VaultConfig;
+    use chrono::NaiveDateTime;
+    use fs::FakeFs;
+    use gpui::TestAppContext;
+    use project::Project;
+    use serde_json::json;
+    use settings::SettingsStore;
+    use std::time::Duration;
+
+    const HOUSE: &str = "projects/house.md";
+    const TODAY: &str = "daily/2026-10-21.md";
+    const TOMORROW: &str = "daily/2026-10-22.md";
+
+    struct Setup {
+        fs: Arc<FakeFs>,
+        _project: Entity<Project>,
+        service: Entity<ReminderService>,
+    }
+
+    async fn setup(cx: &mut TestAppContext, tree: serde_json::Value) -> Setup {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            let start =
+                NaiveDateTime::parse_from_str("2026-10-21 14:05", "%Y-%m-%d %H:%M").unwrap();
+            TestClock::install(start, cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/vault", tree).await;
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+        let vault = Vault {
+            root: PathBuf::from("/vault"),
+            config: VaultConfig::default(),
+        };
+        let service = cx.update(|cx| ReminderService::attach(vault, &project, None, cx));
+        settle(cx);
+        Setup {
+            fs,
+            _project: project,
+            service,
+        }
+    }
+
+    fn settle(cx: &mut TestAppContext) {
+        for _ in 0..16 {
+            cx.executor().advance_clock(Duration::from_millis(500));
+            cx.run_until_parked();
+        }
+    }
+
+    async fn read(setup: &Setup, path: &str) -> String {
+        setup
+            .fs
+            .load(&Path::new("/vault").join(path))
+            .await
+            .unwrap_or_default()
+    }
+
+    async fn write(setup: &Setup, cx: &mut TestAppContext, path: &str, text: &str) {
+        setup
+            .fs
+            .atomic_write(Path::new("/vault").join(path), text.to_string())
+            .await
+            .unwrap();
+        settle(cx);
+    }
+
+    /// The house note's reminder line, with the id the service gave it.
+    async fn house_line(setup: &Setup) -> String {
+        read(setup, HOUSE)
+            .await
+            .lines()
+            .find(|line| line.contains("<!--rem:"))
+            .unwrap_or_else(|| panic!("no id yet"))
+            .to_string()
+    }
+
+    #[gpui::test]
+    async fn a_new_daily_note_gets_its_section_and_follows_the_index(cx: &mut TestAppContext) {
+        let setup = setup(
+            cx,
+            json!({
+                "projects": { "house.md": "- [ ] Call the plumber (@2026-10-21 14:30)\n" },
+                "daily": {},
+            }),
+        )
+        .await;
+        let line = house_line(&setup).await;
+
+        write(&setup, cx, TODAY, "## Day planner\n- [ ] Walk\n").await;
+        let note = read(&setup, TODAY).await;
+        assert!(note.contains("\n### Reminders\n"), "{note}");
+        assert!(
+            note.contains("- [ ] 14:30 Call the plumber · [[projects/house]] <!--rem:"),
+            "{note}"
+        );
+
+        let moved = line.replace("14:30", "15:00");
+        write(&setup, cx, HOUSE, &format!("{moved}\n")).await;
+        let note = read(&setup, TODAY).await;
+        assert!(note.contains("- [ ] 15:00 Call the plumber ·"), "{note}");
+
+        let closed = thock_sync_core::close(&moved).unwrap();
+        write(&setup, cx, HOUSE, &format!("{closed}\n")).await;
+        let note = read(&setup, TODAY).await;
+        assert!(note.contains("- [x] 15:00 Call the plumber ·"), "{note}");
+
+        write(&setup, cx, HOUSE, &format!("{moved}\n")).await;
+        let note = read(&setup, TODAY).await;
+        assert!(
+            note.contains("- [ ] 15:00 Call the plumber ·"),
+            "reopened: {note}"
+        );
+        assert_eq!(note.matches("<!--rem:").count(), 1, "{note}");
+    }
+
+    #[gpui::test]
+    async fn a_note_without_a_planner_heading_holds(cx: &mut TestAppContext) {
+        let setup = setup(
+            cx,
+            json!({
+                "projects": { "house.md": "- [ ] Call the plumber (@2026-10-21 14:30)\n" },
+                "daily": {},
+            }),
+        )
+        .await;
+        write(&setup, cx, TODAY, "# Wednesday\n").await;
+        assert_eq!(read(&setup, TODAY).await, "# Wednesday\n");
+        let hold = setup.service.read_with(cx, |service, cx| {
+            service
+                .day_sync()
+                .and_then(|day| day.read(cx).hold().cloned())
+        });
+        assert_eq!(
+            hold,
+            Some(DayHold::NoPlannerHeading {
+                heading: "Day planner".into()
+            })
+        );
+
+        write(&setup, cx, TODAY, "# Wednesday\n\n## Day planner\n").await;
+        let note = read(&setup, TODAY).await;
+        assert!(note.contains("14:30 Call the plumber"), "{note}");
+        let hold = setup.service.read_with(cx, |service, cx| {
+            service
+                .day_sync()
+                .and_then(|day| day.read(cx).hold().cloned())
+        });
+        assert_eq!(hold, None);
+    }
+
+    #[gpui::test]
+    async fn an_edited_mirror_is_frozen_and_logged_once(cx: &mut TestAppContext) {
+        let setup = setup(
+            cx,
+            json!({
+                "projects": { "house.md": "- [ ] Call the plumber (@2026-10-21 14:30)\n" },
+                "daily": { "2026-10-21.md": "## Day planner\n" },
+            }),
+        )
+        .await;
+        let note = read(&setup, TODAY).await;
+        let mirror = note
+            .lines()
+            .find(|line| line.contains("<!--rem:"))
+            .unwrap()
+            .to_string();
+        let edited = mirror.replace("Call the plumber", "Ring Bob");
+        write(&setup, cx, TODAY, &note.replace(&mirror, &edited)).await;
+        let line = house_line(&setup).await;
+        write(
+            &setup,
+            cx,
+            HOUSE,
+            &format!("{}\n", line.replace("14:30", "16:00")),
+        )
+        .await;
+        write(
+            &setup,
+            cx,
+            HOUSE,
+            &format!("{}\n", line.replace("14:30", "17:00")),
+        )
+        .await;
+
+        assert!(read(&setup, TODAY).await.contains(&edited));
+        let log = read(&setup, ".thock/cache/reminders/log.jsonl").await;
+        assert_eq!(log.lines().count(), 1, "{log}");
+        assert!(log.contains("Ring Bob"), "{log}");
+    }
+
+    #[gpui::test]
+    async fn midnight_carries_an_overdue_reminder_into_the_new_today(cx: &mut TestAppContext) {
+        let setup = setup(
+            cx,
+            json!({
+                "projects": { "house.md": "- [ ] Call the plumber (@2026-10-21 14:30)\n" },
+                "daily": { "2026-10-22.md": "## Day planner\n- [ ] Walk\n" },
+            }),
+        )
+        .await;
+        assert!(!read(&setup, TOMORROW).await.contains("Reminders"));
+
+        cx.executor()
+            .advance_clock(Duration::from_secs(10 * 60 * 60));
+        settle(cx);
+        let note = read(&setup, TOMORROW).await;
+        assert!(
+            note.contains(
+                "- [ ] Call the plumber · 2026-10-21 14:30 · [[projects/house]] <!--rem:"
+            ),
+            "{note}"
+        );
+    }
+
+    #[gpui::test]
+    async fn previous_words_survive_a_restart(cx: &mut TestAppContext) {
+        let setup = setup(
+            cx,
+            json!({
+                "projects": { "house.md": "- [ ] Call the plumber (@2026-10-21 14:30)\n" },
+                "daily": { "2026-10-21.md": "## Day planner\n" },
+            }),
+        )
+        .await;
+        let memory = read(&setup, ".thock/cache/reminders/day.json").await;
+        assert!(memory.contains("Call the plumber"), "{memory}");
+        let line = house_line(&setup).await;
+
+        // Forget everything in memory, as a restart would, and change the
+        // home line before the next run.
+        let day = setup
+            .service
+            .read_with(cx, |service, _| service.day_sync().cloned())
+            .unwrap();
+        day.update(cx, |day, cx| {
+            day.memory = Memory::default();
+            day.memory_loaded = false;
+            day.load_memory(cx);
+        });
+        let renamed = line.replace("Call the plumber", "Call the plumber about the boiler");
+        write(&setup, cx, HOUSE, &format!("{renamed}\n")).await;
+        let note = read(&setup, TODAY).await;
+        assert!(
+            note.contains("14:30 Call the plumber about the boiler ·"),
+            "{note}"
+        );
     }
 }

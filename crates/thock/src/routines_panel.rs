@@ -160,6 +160,13 @@ pub(crate) fn open_vault_note(
         cx.background_spawn(async move { ensure_note(&fs, &vault, kind, date, time).await });
     window.spawn(cx, async move |cx| match ensure_note.await {
         Ok((path, outcome)) => {
+            if outcome != EnsureNoteOutcome::AlreadyExisted {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        crate::notes::announce_note(workspace.project(), &path, cx)
+                    })
+                    .log_err();
+            }
             if outcome == EnsureNoteOutcome::CreatedWithoutTemplate {
                 workspace
                     .update(cx, |workspace, cx| {
@@ -1198,6 +1205,11 @@ impl RoutinesPanel {
                     this.show_missing_file_toast(resolved.relative_path, routine_id, cx);
                 })?;
                 return Ok(());
+            }
+            if link.create && resolved.note.is_some() {
+                this.update(cx, |this, cx| {
+                    crate::notes::announce_note(&this.project, &path, cx)
+                })?;
             }
             match link.kind {
                 LinkKind::Editor => {
