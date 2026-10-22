@@ -537,6 +537,8 @@ fn section_creation_edits(
 const MEMORY_FILE: &str = "cache/reminders/day.json";
 /// Where frozen mirrors are logged, one JSON object per line.
 const LOG_FILE: &str = "cache/reminders/log.jsonl";
+/// The most lines the log keeps; older ones are dropped as new ones arrive.
+const LOG_LINES: usize = 500;
 
 /// Why today's day section can't be written; the Day Planner's status row
 /// offers the fix.
@@ -563,9 +565,10 @@ struct Remembered {
 struct Memory {
     version: u32,
     reminders: BTreeMap<String, Remembered>,
-    /// Frozen mirrors already logged, as `id` and line.
+    /// Frozen mirrors already logged, as the note's day, the id and the
+    /// line. Past days are never reconciled again, so their entries go.
     #[serde(default)]
-    logged: BTreeSet<(String, String)>,
+    frozen_logged: BTreeSet<(NaiveDate, String, String)>,
 }
 
 #[derive(Serialize)]
@@ -591,18 +594,26 @@ pub struct ReminderDaySync {
     index_dirty: bool,
     running: bool,
     hold: Option<DayHold>,
-    /// Notes whose last write failed, reconciled again on the next run.
+    /// The last failed write of a day section, until a retry or a later
+    /// write of that note goes through.
+    failure: Option<SharedString>,
+    /// Notes whose last write failed, reconciled again on `retry` or the
+    /// next run.
     retry: BTreeSet<String>,
     load_task: Option<Task<()>>,
     run_task: Option<Task<()>>,
+    /// Makes every day-section write fail, for the retry tests.
+    #[cfg(test)]
+    fail_writes: bool,
     _subscription: Subscription,
 }
 
 struct NoteOutcome {
     path: String,
+    day: NaiveDate,
     /// `None` when the note doesn't exist.
     reconciled: Option<DayReconciled>,
-    failed: bool,
+    error: Option<String>,
 }
 
 struct DayJob {
@@ -616,6 +627,8 @@ struct DayJob {
     config: Arc<DayConfig>,
     planner_heading: SharedString,
     memory: Option<String>,
+    #[cfg(test)]
+    fail_writes: bool,
 }
 
 impl ReminderDaySync {
@@ -643,9 +656,12 @@ impl ReminderDaySync {
                 index_dirty: false,
                 running: false,
                 hold: None,
+                failure: None,
                 retry: BTreeSet::new(),
                 load_task: None,
                 run_task: None,
+                #[cfg(test)]
+                fail_writes: false,
                 _subscription: subscription,
             };
             this.load_memory(cx);
@@ -656,6 +672,18 @@ impl ReminderDaySync {
     /// Why today's section is on hold, if it is.
     pub fn hold(&self) -> Option<&DayHold> {
         self.hold.as_ref()
+    }
+
+    /// The error of the last day-section write that failed, while it stands.
+    pub fn failure(&self) -> Option<&SharedString> {
+        self.failure.as_ref()
+    }
+
+    /// Writes the day sections that failed again (`thock::RetryReminders`).
+    pub fn retry(&mut self, cx: &mut Context<Self>) {
+        let mut failed = std::mem::take(&mut self.retry);
+        self.pending.append(&mut failed);
+        self.schedule(cx);
     }
 
     fn load_memory(&mut self, cx: &mut Context<Self>) {
@@ -831,6 +859,8 @@ impl ReminderDaySync {
             config: Arc::new(config),
             planner_heading,
             memory,
+            #[cfg(test)]
+            fail_writes: self.fail_writes,
         })
     }
 
@@ -840,15 +870,24 @@ impl ReminderDaySync {
             .now()
             .format("%Y-%m-%dT%H:%M:%S")
             .to_string();
+        let failure_before = self.failure.clone();
         for NoteOutcome {
             path,
+            day,
             reconciled: outcome,
-            failed,
+            error,
         } in &outcomes
         {
-            if *failed {
-                // Tried again on the next trigger, never in a loop.
-                self.retry.insert(path.clone());
+            match error {
+                Some(error) => {
+                    // Tried again on `retry` or the next trigger, never in a
+                    // loop.
+                    self.retry.insert(path.clone());
+                    self.failure = Some(error.clone().into());
+                }
+                None => {
+                    self.retry.remove(path);
+                }
             }
             if *path == job.today_path {
                 let hold = match outcome {
@@ -873,8 +912,8 @@ impl ReminderDaySync {
             for frozen in frozen {
                 if !self
                     .memory
-                    .logged
-                    .insert((frozen.id.clone(), frozen.line.clone()))
+                    .frozen_logged
+                    .insert((*day, frozen.id.clone(), frozen.line.clone()))
                 {
                     continue;
                 }
@@ -892,7 +931,20 @@ impl ReminderDaySync {
                 }
             }
         }
-        let memory = if log.is_empty() {
+        if self.retry.is_empty() {
+            self.failure = None;
+        }
+        if self.failure != failure_before {
+            cx.notify();
+            // The status rows observe the service, not this entity.
+            job.service.update(cx, |_, cx| cx.notify()).log_err();
+        }
+        let logged_before = self.memory.frozen_logged.len();
+        self.memory
+            .frozen_logged
+            .retain(|(day, _, _)| *day >= job.today);
+        let pruned = self.memory.frozen_logged.len() != logged_before;
+        let memory = if log.is_empty() && !pruned {
             job.memory
         } else {
             serde_json::to_string(&self.memory).log_err()
@@ -918,7 +970,7 @@ impl ReminderDaySync {
                     } else {
                         String::new()
                     };
-                    fs.atomic_write(path, format!("{existing}{log}")).await?;
+                    fs.atomic_write(path, appended_log(&existing, &log)).await?;
                 }
                 anyhow::Ok(())
             }
@@ -931,6 +983,16 @@ impl ReminderDaySync {
     }
 }
 
+/// `existing` with `new` lines after it, keeping only the last `LOG_LINES`.
+/// `Fs` has no append, so the log is written whole; the cap keeps that cheap.
+fn appended_log(existing: &str, new: &str) -> String {
+    let lines: Vec<&str> = existing.lines().chain(new.lines()).collect();
+    let start = lines.len().saturating_sub(LOG_LINES);
+    let mut log = lines[start..].join("\n");
+    log.push('\n');
+    log
+}
+
 fn relative_path(vault: &Vault, path: &Path) -> String {
     path.strip_prefix(&vault.root)
         .unwrap_or(path)
@@ -940,7 +1002,8 @@ fn relative_path(vault: &Vault, path: &Path) -> String {
 
 /// Reconciles each note of `job` through the service, one after another.
 /// A note that is missing is left missing (`None`). A failed write surfaces
-/// in the service's status row, and the note is tried again on the next run.
+/// in this entity's `failure`, and the note is tried again on `retry` or the
+/// next run.
 async fn run_job(job: &DayJob, cx: &mut AsyncApp) -> Vec<NoteOutcome> {
     let mut outcomes = Vec::new();
     for (path, day) in &job.notes {
@@ -949,8 +1012,19 @@ async fn run_job(job: &DayJob, cx: &mut AsyncApp) -> Vec<NoteOutcome> {
         if !job.fs.is_file(&job.root.join(path)).await {
             outcomes.push(NoteOutcome {
                 path: path.clone(),
+                day: *day,
                 reconciled: None,
-                failed: false,
+                error: None,
+            });
+            continue;
+        }
+        #[cfg(test)]
+        if job.fail_writes {
+            outcomes.push(NoteOutcome {
+                path: path.clone(),
+                day: *day,
+                reconciled: None,
+                error: Some(format!("{path}: the disk is full")),
             });
             continue;
         }
@@ -982,18 +1056,19 @@ async fn run_job(job: &DayJob, cx: &mut AsyncApp) -> Vec<NoteOutcome> {
         }) else {
             break;
         };
-        let failed = match write.await {
-            Ok(_) => false,
+        let error = match write.await {
+            Ok(_) => None,
             Err(error) => {
                 log::warn!("Thock reminders: writing the day section of {path} failed: {error:#}");
-                true
+                Some(format!("{path}: {error:#}"))
             }
         };
         let reconciled = outcome.lock().ok().and_then(|mut outcome| outcome.take());
         outcomes.push(NoteOutcome {
             path: path.clone(),
+            day: *day,
             reconciled,
-            failed,
+            error,
         });
     }
     outcomes
@@ -1718,6 +1793,104 @@ mod wiring_tests {
         let log = read(&setup, ".thock/cache/reminders/log.jsonl").await;
         assert_eq!(log.lines().count(), 1, "{log}");
         assert!(log.contains("Ring Bob"), "{log}");
+    }
+
+    fn day_sync(setup: &Setup, cx: &mut TestAppContext) -> Entity<ReminderDaySync> {
+        setup
+            .service
+            .read_with(cx, |service, _| service.day_sync().cloned())
+            .unwrap()
+    }
+
+    fn reminders_row(setup: &Setup, cx: &mut TestAppContext) -> Option<String> {
+        setup.service.read_with(cx, |service, cx| {
+            crate::sync_status::reminder_day_status(service, cx)
+                .map(|status| format!("{} | {:?}", status.summary, status.detail))
+        })
+    }
+
+    #[gpui::test]
+    async fn a_failed_day_write_stands_until_retry_writes_it(cx: &mut TestAppContext) {
+        let setup = setup(
+            cx,
+            json!({
+                "projects": { "house.md": "- [ ] Call the plumber (@2026-10-21 14:30)\n" },
+                "daily": { "2026-10-21.md": "## Day planner\n" },
+                "other.md": "Plain\n",
+            }),
+        )
+        .await;
+        let day = day_sync(&setup, cx);
+        let line = house_line(&setup).await;
+        day.update(cx, |day, _| day.fail_writes = true);
+        write(
+            &setup,
+            cx,
+            HOUSE,
+            &format!("{}\n", line.replace("14:30", "16:00")),
+        )
+        .await;
+        assert!(read(&setup, TODAY).await.contains("14:30 Call the plumber"));
+        let row = reminders_row(&setup, cx).expect("a failure row");
+        assert!(row.contains("the disk is full"), "{row}");
+
+        // A batch for another note leaves the failure standing.
+        write(&setup, cx, "other.md", "Plain, edited\n").await;
+        assert!(reminders_row(&setup, cx).is_some());
+
+        day.update(cx, |day, cx| {
+            day.fail_writes = false;
+            day.retry(cx);
+        });
+        settle(cx);
+        assert!(read(&setup, TODAY).await.contains("16:00 Call the plumber"));
+        assert_eq!(reminders_row(&setup, cx), None);
+        assert_eq!(day.read_with(cx, |day, _| day.failure().cloned()), None);
+    }
+
+    #[test]
+    fn the_log_keeps_only_its_last_lines() {
+        let existing: String = (0..LOG_LINES).map(|line| format!("{line}\n")).collect();
+        let log = appended_log(&existing, "new\n");
+        assert_eq!(log.lines().count(), LOG_LINES);
+        assert!(log.starts_with("1\n"));
+        assert!(log.ends_with("new\n"));
+        assert_eq!(appended_log("", "a\n"), "a\n");
+    }
+
+    #[gpui::test]
+    async fn logged_frozen_lines_of_past_days_are_forgotten(cx: &mut TestAppContext) {
+        let setup = setup(
+            cx,
+            json!({
+                "projects": { "house.md": "- [ ] Call the plumber (@2026-10-21 14:30)\n" },
+                "daily": { "2026-10-21.md": "## Day planner\n" },
+            }),
+        )
+        .await;
+        let note = read(&setup, TODAY).await;
+        let mirror = note
+            .lines()
+            .find(|line| line.contains("<!--rem:"))
+            .unwrap()
+            .to_string();
+        let edited = mirror.replace("Call the plumber", "Ring Bob");
+        write(&setup, cx, TODAY, &note.replace(&mirror, &edited)).await;
+        let day = day_sync(&setup, cx);
+        assert_eq!(
+            day.read_with(cx, |day, _| day.memory.frozen_logged.len()),
+            1
+        );
+
+        cx.executor()
+            .advance_clock(Duration::from_secs(10 * 60 * 60));
+        settle(cx);
+        assert_eq!(
+            day.read_with(cx, |day, _| day.memory.frozen_logged.len()),
+            0
+        );
+        let memory = read(&setup, ".thock/cache/reminders/day.json").await;
+        assert!(!memory.contains("Ring Bob"), "{memory}");
     }
 
     #[gpui::test]

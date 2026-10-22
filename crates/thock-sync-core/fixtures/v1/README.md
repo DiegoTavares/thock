@@ -123,8 +123,9 @@ files          {path: text} for the index and every note that exists; nothing el
 reminders      one per index entry, in file order
 ```
 
-An entry is a list item with a reminder id under the Open or Done heading, outside fences, front
-matter and comments. Each expected reminder:
+An entry is a top-level list item (no indentation) with a reminder id under the Open or Done
+heading, outside fences, front matter and comments. Indented lines below a loose entry are its
+children (a phone capture's extra lines and pictures): never entries, and they move with it. Each expected reminder:
 
 ```
 id         the entry's id

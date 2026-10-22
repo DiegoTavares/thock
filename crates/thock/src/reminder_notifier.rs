@@ -18,7 +18,7 @@ use release_channel::ReleaseChannel;
 use thock_sync_core::{Due, cut_text, note_link};
 use util::ResultExt as _;
 
-use crate::reminder_index::{HomeEdit, IndexedReminder};
+use crate::reminder_index::{HomeEdit, IndexedReminder, IndexedState};
 use crate::reminder_service::{ReminderEvent, ReminderService};
 use crate::reminders::{ReminderClock, due_label};
 use crate::vault::VAULT_MARKER_DIR;
@@ -212,8 +212,18 @@ impl ReminderNotifier {
             }
             self.summarized = true;
             let before = self.fired.len();
-            self.fired
-                .retain(|id, _| reminders.iter().any(|reminder| &reminder.id == id));
+            // Forget a ring only once its reminder is known to be over; a
+            // reminder missing from one reading (an unreadable index, a move
+            // not settled) must not ring again.
+            self.fired.retain(|id, _| {
+                !reminders.iter().any(|reminder| {
+                    &reminder.id == id
+                        && matches!(
+                            reminder.state,
+                            IndexedState::Closed | IndexedState::Dropped | IndexedState::Removed
+                        )
+                })
+            });
             if changed || before != self.fired.len() {
                 self.save_fired(cx);
             }
@@ -557,5 +567,31 @@ mod tests {
         assert_eq!(tag, "rem:7d3e55a1c0f2:2026-10-21 14:30");
         assert_eq!(tag_id(&tag), Some("7d3e55a1c0f2"));
         assert_eq!(tag_id("gcal:x"), None);
+    }
+
+    #[gpui::test]
+    async fn a_reminder_missing_from_one_reading_never_rings_again(cx: &mut TestAppContext) {
+        let setup = setup(cx, "2026-10-21 14:29", vault_tree()).await;
+        advance(cx, Duration::from_secs(60));
+        assert_eq!(tags(cx).len(), 1);
+        // The link is deleted by hand; the service puts it back.
+        setup
+            .fs
+            .atomic_write(
+                "/vault/reminders.md".into(),
+                "## Open\n- [[projects/house]] <!--rem:7c11e0b4d2a9-->\n\n## Done\n".into(),
+            )
+            .await
+            .unwrap();
+        advance(cx, Duration::from_secs(120));
+        assert!(
+            setup
+                .fs
+                .load(Path::new("/vault/reminders.md"))
+                .await
+                .unwrap()
+                .contains("7d3e55a1c0f2")
+        );
+        assert_eq!(tags(cx).len(), 1, "{:?}", tags(cx));
     }
 }

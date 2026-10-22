@@ -160,6 +160,34 @@ impl DayPlan {
 /// whole note when the heading is absent. Malformed times never drop a task —
 /// it just becomes unscheduled with its raw text as the label.
 pub fn parse_day_plan(text: &str, config: &DayPlannerConfig) -> DayPlan {
+    parse_day_plan_for(text, config, &PlanReminders::default())
+}
+
+/// What the plan needs to know about reminders (V45 §7.3): the day the note
+/// is for, so a token dated that day adds a point, and the day section's
+/// heading names, under which mirror lines are recognised.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanReminders {
+    pub day: Option<chrono::NaiveDate>,
+    pub day_headings: Vec<String>,
+}
+
+impl Default for PlanReminders {
+    fn default() -> Self {
+        Self {
+            day: None,
+            day_headings: vec![thock_sync_core::DEFAULT_DAY_HEADING.to_string()],
+        }
+    }
+}
+
+/// `parse_day_plan` for a daily note of `reminders.day`, reading its
+/// reminder points.
+pub fn parse_day_plan_for(
+    text: &str,
+    config: &DayPlannerConfig,
+    reminders: &PlanReminders,
+) -> DayPlan {
     let lines: Vec<&str> = text.lines().collect();
     let (range, planner_level) = match planner_section(&lines, &config.heading_names()) {
         Some((range, level)) => (range, Some(level)),
@@ -180,9 +208,13 @@ pub fn parse_day_plan(text: &str, config: &DayPlannerConfig) -> DayPlan {
             current_section = Some(heading_text.to_string());
             continue;
         }
-        if current_section.is_some()
-            && let Some(mirror) = thock_sync_core::MirrorLine::parse(line)
-        {
+        let in_day_section = current_section.as_deref().is_some_and(|section| {
+            reminders
+                .day_headings
+                .iter()
+                .any(|name| thock_sync_core::heading_matches(section, name))
+        });
+        if in_day_section && let Some(mirror) = thock_sync_core::MirrorLine::parse(line) {
             items.push(mirror_item(row as u32, mirror, current_section.clone()));
             continue;
         }
@@ -216,7 +248,7 @@ pub fn parse_day_plan(text: &str, config: &DayPlannerConfig) -> DayPlan {
             label: label.to_string(),
             timing,
             section: current_section.clone(),
-            reminder_min: token_minute(line),
+            reminder_min: token_minute(line, reminders.day),
             carried_from: None,
         });
     }
@@ -244,13 +276,16 @@ fn mirror_item(row: u32, mirror: thock_sync_core::MirrorLine, section: Option<St
     }
 }
 
-/// The minute a planner line's own reminder rings. Only a time-only token
-/// counts: it is what a daily note's reminders are written as, and a dated
-/// token may name another day, which this parse can't tell from the text.
-fn token_minute(line: &str) -> Option<u32> {
-    let token = thock_sync_core::parse_line(line, None)?.token?;
+/// The minute a planner line's own reminder rings on the note's `day`: a
+/// time-only token, or one dated that day. With no day known, only a
+/// time-only token counts, since a dated one may name another day.
+fn token_minute(line: &str, day: Option<chrono::NaiveDate>) -> Option<u32> {
+    let token = thock_sync_core::parse_line(line, day)?.token?;
     match token.when {
         thock_sync_core::When::Time(time) => Some(minute_of_day(time)),
+        thock_sync_core::When::DateTime(date, time) if Some(date) == day => {
+            Some(minute_of_day(time))
+        }
         _ => None,
     }
 }
@@ -1197,6 +1232,20 @@ mod tests {
             plan.items[1].reminder_min, None,
             "a dated token may be another day's"
         );
+        let reminders = PlanReminders {
+            day: chrono::NaiveDate::from_ymd_opt(2026, 12, 2),
+            ..PlanReminders::default()
+        };
+        let on_its_day =
+            parse_day_plan_for("- [ ] Call (@2026-12-02 10:00)\n", &config(), &reminders);
+        assert_eq!(
+            on_its_day.items[0].reminder_min,
+            Some(600),
+            "dated the note's day"
+        );
+        let other_day =
+            parse_day_plan_for("- [ ] Call (@2026-12-03 10:00)\n", &config(), &reminders);
+        assert_eq!(other_day.items[0].reminder_min, None);
         let plumber = &plan.items[2];
         assert_eq!(plumber.label, "Call the plumber");
         assert_eq!(plumber.timing, ItemTiming::Point { at_min: 870 });
@@ -1216,6 +1265,33 @@ mod tests {
             2,
             "points are never blocks: only Dentist and Team sync are"
         );
+    }
+
+    #[test]
+    fn mirror_lines_count_only_under_the_day_headings() {
+        let text = "## Day planner\n\
+             ### Errands\n\
+             - [ ] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->\n\
+             ### Lembretes\n\
+             - [ ] 15:30 Pay rent · [[projects/house]] <!--rem:3f9a1c0d4e21-->\n";
+        let plan = parse_day_plan(text, &config());
+        assert!(
+            plan.items
+                .iter()
+                .all(|item| !matches!(item.timing, ItemTiming::Point { .. })),
+            "neither heading is the default Reminders"
+        );
+        let reminders = PlanReminders {
+            day: None,
+            day_headings: vec!["lembretes".to_string()],
+        };
+        let plan = parse_day_plan_for(text, &config(), &reminders);
+        assert_eq!(
+            plan.items[0].timing,
+            timed(870, 900),
+            "Errands is a planner line"
+        );
+        assert_eq!(plan.items[1].timing, ItemTiming::Point { at_min: 930 });
     }
 
     #[test]

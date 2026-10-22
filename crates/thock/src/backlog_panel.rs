@@ -183,6 +183,10 @@ enum BacklogRow<'a> {
     Task {
         task: &'a BacklogTask,
     },
+    /// A closed or dropped reminder among the finished tasks (V45 §9.1).
+    Reminder {
+        reminder: &'a IndexedReminder,
+    },
 }
 
 /// The keyboard cursor: a column plus a row index into the tasks that column
@@ -249,6 +253,9 @@ pub struct BacklogPanel {
     /// The vault's reminders, whose closed and dropped ones Done lists
     /// beside the finished tasks (V45 §9.1).
     reminder_service: Option<Entity<ReminderService>>,
+    /// The closed and dropped reminders of the index's `## Done`, newest
+    /// first, kept so the Done rows and the cursor share one list.
+    done_reminders: Vec<IndexedReminder>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -371,8 +378,10 @@ impl BacklogPanel {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
             }
             if let Some(service) = &reminder_service {
-                subscriptions
-                    .push(cx.subscribe(service, |_, _, _: &ReminderEvent, cx| cx.notify()));
+                subscriptions.push(cx.subscribe(service, |this, _, _: &ReminderEvent, cx| {
+                    this.refresh_done_reminders(cx);
+                    cx.notify();
+                }));
             }
             // Reminder chips relabel when the day turns.
             let reminder_day = ReminderDay::global(cx);
@@ -408,8 +417,10 @@ impl BacklogPanel {
                 readwise_service,
                 vault_sync_service,
                 reminder_service,
+                done_reminders: Vec::new(),
                 _subscriptions: subscriptions,
             };
+            this.refresh_done_reminders(cx);
             this.vault_status = this.detect_vault_status(cx);
             this.ensure_buffer(cx);
             this
@@ -629,12 +640,14 @@ impl BacklogPanel {
 
     // --- Keyboard navigation (spec §6.6) ---
 
-    fn completed_tasks(&self) -> Vec<&BacklogTask> {
-        completed_tasks(&self.backlog)
-    }
-
     fn visible_rows(&self, section: SectionKind) -> Vec<BacklogRow<'_>> {
-        column_rows(&self.backlog, section, &self.collapsed, &self.folded_lanes)
+        column_rows(
+            &self.backlog,
+            section,
+            &self.collapsed,
+            &self.folded_lanes,
+            &self.done_reminders,
+        )
     }
 
     /// The lanes the current view lays out, in order.
@@ -714,7 +727,18 @@ impl BacklogPanel {
         let selection = self.selection()?;
         match self.visible_rows(selection.section).get(selection.index)? {
             BacklogRow::Task { task } => Some((selection.section, (*task).clone())),
-            BacklogRow::Category { .. } | BacklogRow::Lane { .. } => None,
+            BacklogRow::Category { .. } | BacklogRow::Lane { .. } | BacklogRow::Reminder { .. } => {
+                None
+            }
+        }
+    }
+
+    /// The selected row's reminder, when it is a finished reminder.
+    fn selected_reminder(&self) -> Option<IndexedReminder> {
+        let selection = self.selection()?;
+        match self.visible_rows(selection.section).get(selection.index)? {
+            BacklogRow::Reminder { reminder } => Some((*reminder).clone()),
+            _ => None,
         }
     }
 
@@ -727,7 +751,7 @@ impl BacklogPanel {
             BacklogRow::Task { task } => {
                 task.category.clone().map(|name| (selection.section, name))
             }
-            BacklogRow::Lane { .. } => None,
+            BacklogRow::Lane { .. } | BacklogRow::Reminder { .. } => None,
         }
     }
 
@@ -737,7 +761,7 @@ impl BacklogPanel {
         let selection = self.selection()?;
         match self.visible_rows(selection.section).get(selection.index)? {
             BacklogRow::Category { collapsed, .. } => Some(*collapsed),
-            BacklogRow::Task { .. } | BacklogRow::Lane { .. } => None,
+            BacklogRow::Task { .. } | BacklogRow::Lane { .. } | BacklogRow::Reminder { .. } => None,
         }
     }
 
@@ -1241,6 +1265,10 @@ impl BacklogPanel {
             self.set_category_collapsed(!collapsed, cx);
             return;
         }
+        if let Some(reminder) = self.selected_reminder() {
+            self.reveal_reminder(&reminder, window, cx);
+            return;
+        }
         self.edit_selected_task(&EditBacklogTask, window, cx);
     }
 
@@ -1591,6 +1619,17 @@ impl BacklogPanel {
         let Some(path) = self.vault().map(Vault::backlog_path) else {
             return;
         };
+        self.reveal_path(path, line, window, cx);
+    }
+
+    /// Opens `path` with the cursor at the start of `line`.
+    fn reveal_path(
+        &mut self,
+        path: PathBuf,
+        line: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let workspace = self.workspace.clone();
         cx.spawn_in(window, async move |_, cx| {
             let item = workspace
@@ -2155,6 +2194,8 @@ impl BacklogPanel {
                     BacklogRow::Task { task } => {
                         list = list.child(self.render_open_task_row(section, index, task, cx));
                     }
+                    // Only the Done view lists reminders.
+                    BacklogRow::Reminder { .. } => {}
                 }
             }
             if self.is_adding_to(section, group)
@@ -2174,28 +2215,27 @@ impl BacklogPanel {
     /// The Done tab: completed tasks newest first, each with its date.
     fn render_done_view(&self, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
-        let completed = self.completed_tasks();
-        let mut reminders = self.done_reminders(cx).into_iter().peekable();
+        let rows = self.visible_rows(SectionKind::Completed);
         let mut list = v_flex().py_1();
-        if completed.is_empty() && reminders.peek().is_none() {
+        if rows.is_empty() {
             list = list.child(self.render_hint("Nothing finished yet."));
         }
-        for (index, task) in completed.into_iter().enumerate() {
-            let task_date = backlog::completion_date(&task.text);
-            // Both lists run newest first; a reminder closed on a later day
-            // than this task goes above it.
-            while let Some(reminder) = reminders
-                .next_if(|reminder| task_date.is_none_or(|date| done_date(reminder) > Some(date)))
-            {
-                list = list.child(self.render_done_reminder(reminder, cx));
-            }
-            let (label, date) = split_completion(&task.text);
-            let row = TaskSelection {
+        for (index, row) in rows.into_iter().enumerate() {
+            let selection = TaskSelection {
                 section: SectionKind::Completed,
                 index,
             };
+            let task = match row {
+                BacklogRow::Task { task } => task,
+                BacklogRow::Reminder { reminder } => {
+                    list = list.child(self.render_done_reminder(selection, reminder, cx));
+                    continue;
+                }
+                BacklogRow::Lane { .. } | BacklogRow::Category { .. } => continue,
+            };
+            let (label, date) = split_completion(&task.text);
             list = list.child(
-                self.row_frame(row, cx)
+                self.row_frame(selection, cx)
                     .items_start()
                     .child(
                         div().pt_0p5().child(
@@ -2234,9 +2274,6 @@ impl BacklogPanel {
                     ),
             );
         }
-        for reminder in reminders {
-            list = list.child(self.render_done_reminder(reminder, cx));
-        }
         list.id("backlog-completed-list")
             .flex_1()
             .min_h_0()
@@ -2245,12 +2282,20 @@ impl BacklogPanel {
             .into_any_element()
     }
 
-    /// Closed and dropped reminders from the index's `## Done`, newest first.
-    pub(crate) fn done_reminders<'a>(&self, cx: &'a App) -> Vec<&'a IndexedReminder> {
+    /// Reads the closed and dropped reminders from the index's `## Done`,
+    /// newest first.
+    fn refresh_done_reminders(&mut self, cx: &App) {
         let Some(service) = &self.reminder_service else {
-            return Vec::new();
+            self.done_reminders.clear();
+            return;
         };
-        let mut reminders: Vec<&IndexedReminder> = service
+        let finished_task_ids: HashSet<String> = self
+            .backlog
+            .completed
+            .iter()
+            .filter_map(|task| thock_sync_core::parse_line(&task.text, None)?.id)
+            .collect();
+        let mut reminders: Vec<IndexedReminder> = service
             .read(cx)
             .reminders()
             .iter()
@@ -2258,15 +2303,48 @@ impl BacklogPanel {
                 reminder.section == IndexSection::Done
                     && matches!(reminder.state, IndexedState::Closed | IndexedState::Dropped)
             })
+            // A finished backlog task already has its own Done row.
+            .filter(|reminder| !finished_task_ids.contains(&reminder.id))
+            .cloned()
             .collect();
         reminders.sort_by_key(|reminder| Reverse(done_date(reminder)));
-        reminders
+        self.done_reminders = reminders;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn done_reminders(&self) -> &[IndexedReminder] {
+        &self.done_reminders
+    }
+
+    /// The selected Done row's reminder id, for keystroke tests.
+    #[cfg(test)]
+    pub(crate) fn selected_reminder_for_tests(&self) -> Option<String> {
+        self.selected_reminder().map(|reminder| reminder.id)
+    }
+
+    /// Opens a finished reminder's home note at its line.
+    fn reveal_reminder(
+        &mut self,
+        reminder: &IndexedReminder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(service) = &self.reminder_service else {
+            return;
+        };
+        let path = service.read(cx).abs_path(&reminder.home);
+        let line = reminder.line.and_then(|line| u32::try_from(line).ok());
+        self.reveal_path(path, line.unwrap_or(0), window, cx);
     }
 
     /// A finished reminder among the finished tasks: its words struck, over
-    /// the day it was closed or dropped. It is read-only here; the line
-    /// lives in its home note.
-    fn render_done_reminder(&self, reminder: &IndexedReminder, cx: &Context<Self>) -> AnyElement {
+    /// the day it was closed or dropped. `enter` opens its home line.
+    fn render_done_reminder(
+        &self,
+        selection: TaskSelection,
+        reminder: &IndexedReminder,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let colors = cx.theme().colors();
         let text = reminder.text.clone().unwrap_or_default();
         let dropped = reminder.state == IndexedState::Dropped
@@ -2279,12 +2357,7 @@ impl BacklogPanel {
             (None, true) => "dropped".to_string(),
             (None, false) => String::new(),
         };
-        h_flex()
-            .w_full()
-            .gap_2()
-            .pl(px(12.))
-            .pr_2()
-            .py_1()
+        self.row_frame(selection, cx)
             .items_start()
             .child(
                 div().pt_0p5().child(
@@ -2401,14 +2474,36 @@ fn task_link(text: &str) -> Option<TaskLink> {
     Some(TaskLink { target, date })
 }
 
-/// The completed audit trail in render order. The file stays append-ordered
-/// (oldest first); reversing before the sort puts same-day completions
-/// newest-first too, and the sort is stable so that survives.
+/// Finished tasks and finished reminders as one list. Both run newest
+/// first; a reminder closed on a later day than a task goes above it, and
+/// undated ones of either kind sink to the end.
+fn done_rows<'a>(
+    tasks: Vec<&'a BacklogTask>,
+    reminders: &'a [IndexedReminder],
+) -> Vec<BacklogRow<'a>> {
+    let mut reminders = reminders.iter().peekable();
+    let mut rows = Vec::new();
+    for task in tasks {
+        let task_date = backlog::completion_date(&task.text);
+        while let Some(reminder) = reminders
+            .next_if(|reminder| task_date.is_none_or(|date| done_date(reminder) > Some(date)))
+        {
+            rows.push(BacklogRow::Reminder { reminder });
+        }
+        rows.push(BacklogRow::Task { task });
+    }
+    rows.extend(reminders.map(|reminder| BacklogRow::Reminder { reminder }));
+    rows
+}
+
 /// The day a finished reminder was closed or dropped, from its stamp.
 fn done_date(reminder: &IndexedReminder) -> Option<NaiveDate> {
     reminder.stamp.map(|stamp| stamp.date)
 }
 
+/// The completed audit trail in render order. The file stays append-ordered
+/// (oldest first); reversing before the sort puts same-day completions
+/// newest-first too, and the sort is stable so that survives.
 fn completed_tasks(backlog: &Backlog) -> Vec<&BacklogTask> {
     let mut tasks: Vec<&BacklogTask> = backlog.completed.iter().rev().collect();
     tasks.sort_by_key(|task| Reverse(backlog::completion_date(&task.text)));
@@ -2424,12 +2519,10 @@ fn column_rows<'a>(
     section: SectionKind,
     collapsed: &HashSet<(SectionKind, String)>,
     folded_lanes: &HashSet<SectionKind>,
+    done_reminders: &'a [IndexedReminder],
 ) -> Vec<BacklogRow<'a>> {
     if section == SectionKind::Completed {
-        return completed_tasks(backlog)
-            .into_iter()
-            .map(|task| BacklogRow::Task { task })
-            .collect();
+        return done_rows(completed_tasks(backlog), done_reminders);
     }
     let open: Vec<&BacklogTask> = backlog
         .section(section)
@@ -2557,16 +2650,23 @@ mod tests {
             .iter()
             .map(|(section, name)| (*section, (*name).to_string()))
             .collect();
-        column_rows(&backlog, SectionKind::Soon, &collapsed, &HashSet::default())
-            .into_iter()
-            .map(|row| match row {
-                BacklogRow::Lane { count, folded, .. } => {
-                    format!("## Soon ({count}{})", if folded { ", folded" } else { "" })
-                }
-                BacklogRow::Category { name, count, .. } => format!("# {name} ({count})"),
-                BacklogRow::Task { task } => task.text.clone(),
-            })
-            .collect()
+        column_rows(
+            &backlog,
+            SectionKind::Soon,
+            &collapsed,
+            &HashSet::default(),
+            &[],
+        )
+        .into_iter()
+        .map(|row| match row {
+            BacklogRow::Lane { count, folded, .. } => {
+                format!("## Soon ({count}{})", if folded { ", folded" } else { "" })
+            }
+            BacklogRow::Category { name, count, .. } => format!("# {name} ({count})"),
+            BacklogRow::Task { task } => task.text.clone(),
+            BacklogRow::Reminder { reminder } => reminder.id.clone(),
+        })
+        .collect()
     }
 
     #[test]
@@ -2618,6 +2718,7 @@ mod tests {
             SectionKind::Soon,
             &HashSet::default(),
             &HashSet::from_iter([SectionKind::Soon]),
+            &[],
         );
         assert_eq!(rows.len(), 1);
         assert!(matches!(

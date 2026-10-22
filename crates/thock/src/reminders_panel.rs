@@ -6,7 +6,7 @@
 use crate::reminder_calendar::pick_due;
 use crate::reminder_index::{HomeEdit, IndexSection, IndexedReminder, IndexedState};
 use crate::reminder_service::{self, ReminderEvent, ReminderService};
-use crate::reminders::{ReminderClock, ReminderDay, day_label};
+use crate::reminders::{ReminderClock, ReminderDay, ReminderSettings, day_label, due_label};
 use anyhow::Result;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use editor::{Editor, SelectionEffects, scroll::Autoscroll};
@@ -119,6 +119,16 @@ pub fn row_meta(reminder: &IndexedReminder, today: NaiveDate) -> String {
     }
     parts.push(note_link(&reminder.home).to_string());
     parts.join(" · ")
+}
+
+/// The reschedule menu's choices on `today`, dated: *Tomorrow 09:00*,
+/// *Mon 26 Oct 09:00*, *Pick a date…*.
+pub fn reschedule_labels(settings: &ReminderSettings, today: NaiveDate) -> [String; 3] {
+    [
+        due_label(settings.tomorrow_due(today), today),
+        due_label(settings.monday_due(today), today),
+        "Pick a date…".to_string(),
+    ]
 }
 
 pub struct RemindersPanel {
@@ -382,11 +392,16 @@ impl RemindersPanel {
     }
 
     fn close_reminder(&mut self, _: &CloseReminder, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit_selected(HomeEdit::Close, cx);
+        // While the reschedule menu is open, keys belong to it.
+        if self.reschedule.is_none() {
+            self.edit_selected(HomeEdit::Close, cx);
+        }
     }
 
     fn drop_reminder(&mut self, _: &DropReminder, _: &mut Window, cx: &mut Context<Self>) {
-        self.edit_selected(HomeEdit::Drop, cx);
+        if self.reschedule.is_none() {
+            self.edit_selected(HomeEdit::Drop, cx);
+        }
     }
 
     fn reschedule_reminder(
@@ -481,6 +496,9 @@ impl RemindersPanel {
     }
 
     fn new_reminder(&mut self, _: &NewReminder, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reschedule.is_some() {
+            return;
+        }
         let Some(service) = self.service.clone() else {
             self.show_error(
                 "This workspace isn't a Thock vault, so it has no reminders.",
@@ -645,25 +663,12 @@ impl RemindersPanel {
 
     fn render_reschedule_menu(&self, option: usize, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
-        let labels = ["Tomorrow 09:00", "Monday 09:00", "Pick a date…"];
-        let (tomorrow, monday) = match &self.service {
-            Some(service) => {
-                let settings = service.read(cx).settings();
-                let today = self.today(cx);
-                let label = |due: Due| match due.time {
-                    Some(time) => {
-                        format!("{} {}", day_label(due.date, today), time.format("%H:%M"))
-                    }
-                    None => day_label(due.date, today),
-                };
-                (
-                    label(settings.tomorrow_due(today)),
-                    format!("Monday {}", settings.tomorrow_at.format("%H:%M")),
-                )
-            }
-            None => (labels[0].to_string(), labels[1].to_string()),
-        };
-        let labels = [tomorrow, monday, labels[2].to_string()];
+        let settings = self
+            .service
+            .as_ref()
+            .map(|service| service.read(cx).settings().clone())
+            .unwrap_or_default();
+        let labels = reschedule_labels(&settings, self.today(cx));
         v_flex()
             .mx_3()
             .my_1()
@@ -798,7 +803,10 @@ mod tests {
     const INDEX: &str = "# Reminders\n\n## Open\n\
         - [[projects/house]] <!--rem:7d3e55a1c0f2-->\n\
         - [[projects/house]] <!--rem:3f9a1c0d4e21-->\n\
-        - [[projects/house]] <!--rem:2f6b08e19a5c-->\n\n## Done\n";
+        - [[projects/house]] <!--rem:2f6b08e19a5c-->\n\
+        - [[backlog]] <!--rem:aaaaaaaaaaaa-->\n\n## Done\n";
+    const BACKLOG: &str = "## Soon\n\n## Completed\n\n\
+        - [x] Pay the bill (@2026-10-19) ✅ 2026-10-19 <!--rem:aaaaaaaaaaaa-->\n";
 
     fn keymap_bindings(content: &str, cx: &App) -> Vec<KeyBinding> {
         match KeymapFile::load(content, cx) {
@@ -854,6 +862,8 @@ mod tests {
         let root = vault_dir.path().to_path_buf();
         std::fs::create_dir_all(root.join(".thock")).unwrap();
         std::fs::write(root.join(".thock/config.toml"), "schema = 1\n").unwrap();
+        // `backlog.md` must exist on disk for the Backlog view to adopt it.
+        std::fs::write(root.join("backlog.md"), BACKLOG).unwrap();
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree(
             &root,
@@ -861,6 +871,7 @@ mod tests {
                 ".thock": { "config.toml": "schema = 1\n" },
                 "projects": { "house.md": HOUSE },
                 "reminders.md": INDEX,
+                "backlog.md": BACKLOG,
                 "notes.md": "# Notes\n",
             }),
         )
@@ -1061,8 +1072,8 @@ mod tests {
         let mut done = setup.desk.read_with(&setup.cx, |desk, cx| {
             desk.backlog()
                 .read(cx)
-                .done_reminders(cx)
-                .into_iter()
+                .done_reminders()
+                .iter()
                 .map(|reminder| reminder.text.clone().unwrap_or_default())
                 .collect::<Vec<_>>()
         });
@@ -1072,6 +1083,30 @@ mod tests {
             vec!["Call the plumber".to_string(), "Renew passport".to_string()]
         );
 
+        setup.cx.simulate_keystrokes("enter");
+        setup.cx.run_until_parked();
+        assert_eq!(active_note(&mut setup), "projects/house.md");
+
+        // On Done the cursor walks the finished reminders, and enter opens
+        // the home line.
+        let notes = setup.root.join("notes.md");
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.open_abs_path(notes, OpenOptions::default(), window, cx)
+            })
+            .await
+            .unwrap();
+        setup.cx.run_until_parked();
+        assert_eq!(active_note(&mut setup), "notes.md");
+        setup.cx.simulate_keystrokes("ctrl-alt-r 4 down");
+        let selected = setup
+            .desk
+            .read_with(&setup.cx, |desk, _| desk.backlog().clone());
+        let selected = selected.read_with(&setup.cx, |backlog, _| {
+            backlog.selected_reminder_for_tests()
+        });
+        assert!(selected.is_some(), "the first Done row is a reminder");
         setup.cx.simulate_keystrokes("enter");
         setup.cx.run_until_parked();
         assert_eq!(active_note(&mut setup), "projects/house.md");
@@ -1089,7 +1124,15 @@ mod tests {
         setup.cx.simulate_keystrokes("shift-g");
         assert_eq!(selected_text(&setup).as_deref(), Some("Book flights"));
 
-        setup.cx.simulate_keystrokes("s escape");
+        setup.cx.simulate_keystrokes("s x d o");
+        settle(&mut setup);
+        assert_eq!(
+            house(&setup).await,
+            HOUSE,
+            "row keys do nothing while the reschedule menu is open"
+        );
+        assert_eq!(active_note(&mut setup), "notes.md");
+        setup.cx.simulate_keystrokes("escape");
         assert!(panel_focused(&mut setup), "escape closes the menu first");
         setup.cx.simulate_keystrokes("escape");
         setup.cx.run_until_parked();
@@ -1171,6 +1214,24 @@ mod tests {
                 (RowGroup::Upcoming, "upcoming"),
                 (RowGroup::NotFound, "missing"),
             ]
+        );
+    }
+
+    #[test]
+    fn the_reschedule_choices_are_dated() {
+        let settings = ReminderSettings::default();
+        assert_eq!(
+            reschedule_labels(&settings, date(2026, 10, 21)),
+            [
+                "Tomorrow 09:00".to_string(),
+                "Mon 26 Oct 09:00".to_string(),
+                "Pick a date…".to_string()
+            ]
+        );
+        assert_eq!(
+            reschedule_labels(&settings, date(2026, 10, 25))[1],
+            "Tomorrow 09:00",
+            "on a Sunday, Monday is tomorrow"
         );
     }
 
