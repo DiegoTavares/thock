@@ -18,11 +18,12 @@ use menu::{Cancel, Confirm, SelectNext, SelectPrevious};
 use multi_buffer::MultiBufferRow;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 use text::Point as BufferPoint;
 use thock_sync_core::{Due, When, parse_line, place_token, token_text};
 use ui::prelude::*;
 use util::ResultExt as _;
-use workspace::ModalView;
+use workspace::{ModalView, Workspace};
 
 actions!(
     thock,
@@ -117,9 +118,22 @@ struct Target {
     from_suggestions: bool,
 }
 
+/// Where the picked due goes.
+#[derive(Clone)]
+enum Destination {
+    /// A token on the cursor's line of a note.
+    Line(Target),
+    /// A caller's handler, such as the Reminders tab's reschedule; focus
+    /// goes back to `focus` either way.
+    Handler {
+        on_pick: Rc<dyn Fn(Due, &mut Window, &mut App)>,
+        focus: FocusHandle,
+    },
+}
+
 /// What the picker starts on, read from the cursor's line.
 struct Opening {
-    target: Target,
+    destination: Destination,
     date: Option<NaiveDate>,
     time: Option<NaiveTime>,
     position: Option<Point<Pixels>>,
@@ -139,6 +153,32 @@ fn pick_reminder_date(editor: &Entity<Editor>, vault: &Vault, window: &mut Windo
         workspace.toggle_modal(window, cx, |_, cx| {
             ReminderCalendar::new(opening, today, cx)
         });
+    });
+}
+
+/// Opens the calendar on `start` (today when `None`) and hands the picked
+/// due to `on_pick`. Focus returns to `focus` whether a date is picked or
+/// not. The popover sits near the top of the window.
+pub fn pick_due(
+    workspace: &mut Workspace,
+    start: Option<Due>,
+    focus: FocusHandle,
+    on_pick: impl Fn(Due, &mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let opening = Opening {
+        destination: Destination::Handler {
+            on_pick: Rc::new(on_pick),
+            focus,
+        },
+        date: start.map(|due| due.date),
+        time: start.and_then(|due| due.time),
+        position: None,
+    };
+    let today = ReminderClock::global(cx).today();
+    workspace.toggle_modal(window, cx, |_, cx| {
+        ReminderCalendar::new(opening, today, cx)
     });
 }
 
@@ -180,12 +220,12 @@ fn read_opening(
             When::Date(_) => None,
         });
     Some(Opening {
-        target: Target {
+        destination: Destination::Line(Target {
             editor: cx.weak_entity(),
             cursor,
             daily_day,
             from_suggestions: open_fragment(&line, column).is_some(),
-        },
+        }),
         date,
         time,
         position: cursor_position(editor, window, cx),
@@ -373,7 +413,7 @@ fn could_be_time(digits: &str) -> bool {
 /// so it can sit at the cursor rather than at the top of the window.
 pub struct ReminderCalendar {
     focus_handle: FocusHandle,
-    target: Target,
+    destination: Destination,
     selected: NaiveDate,
     today: NaiveDate,
     time: TimeEntry,
@@ -386,7 +426,7 @@ impl ReminderCalendar {
             focus_handle: cx.focus_handle(),
             selected: opening.date.unwrap_or(today),
             time: TimeEntry::from_time(opening.time),
-            target: opening.target,
+            destination: opening.destination,
             today,
             position: opening.position,
         }
@@ -465,8 +505,13 @@ impl ReminderCalendar {
     /// Closes the popover and gives focus back to the note. Drawn bare, the
     /// popover is outside the modal layer's focus, so the layer can't.
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(editor) = self.target.editor.upgrade() {
-            editor.focus_handle(cx).focus(window, cx);
+        match &self.destination {
+            Destination::Line(target) => {
+                if let Some(editor) = target.editor.upgrade() {
+                    editor.focus_handle(cx).focus(window, cx);
+                }
+            }
+            Destination::Handler { focus, .. } => focus.focus(window, cx),
         }
         cx.emit(DismissEvent);
     }
@@ -477,20 +522,27 @@ impl ReminderCalendar {
             return;
         };
         let due = Due::new(self.selected, time);
-        let target = self.target.clone();
+        let destination = self.destination.clone();
         self.dismiss(window, cx);
-        target
-            .editor
-            .update(cx, |editor, cx| {
-                write_token(editor, &target, due, window, cx)
-            })
-            .log_err();
+        match destination {
+            Destination::Line(target) => {
+                target
+                    .editor
+                    .update(cx, |editor, cx| {
+                        write_token(editor, &target, due, window, cx)
+                    })
+                    .log_err();
+            }
+            Destination::Handler { on_pick, .. } => on_pick(due, window, cx),
+        }
     }
 
     fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss(window, cx);
-        if self.target.from_suggestions {
-            let editor = self.target.editor.clone();
+        if let Destination::Line(target) = &self.destination
+            && target.from_suggestions
+        {
+            let editor = target.editor.clone();
             window.defer(cx, move |window, cx| {
                 editor
                     .update(cx, |editor, cx| {
@@ -601,7 +653,7 @@ mod tests {
     use project::Project;
     use serde_json::json;
     use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
-    use workspace::{MultiWorkspace, Workspace};
+    use workspace::MultiWorkspace;
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).unwrap()

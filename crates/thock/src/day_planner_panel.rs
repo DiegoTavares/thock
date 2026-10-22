@@ -1514,6 +1514,8 @@ mod tests {
         assert_eq!(tab(&setup), DeskTab::Today, "from the Backlog");
         assert!(panel_focused(&mut setup));
         setup.cx.simulate_keystrokes("3");
+        assert_eq!(tab(&setup), DeskTab::Reminders);
+        setup.cx.simulate_keystrokes("4");
         assert_eq!(tab(&setup), DeskTab::Done);
     }
 

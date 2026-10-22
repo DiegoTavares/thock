@@ -37,6 +37,7 @@ pub mod reminder_notifier;
 pub mod reminder_reading;
 pub mod reminder_service;
 pub mod reminders;
+pub mod reminders_panel;
 pub mod routine_collections;
 pub mod routines;
 pub mod routines_panel;

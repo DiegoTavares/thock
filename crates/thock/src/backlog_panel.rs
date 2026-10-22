@@ -41,6 +41,8 @@ use crate::markdown_conceal::resolve_wikilink_target;
 use crate::markdown_text::{LinkTarget, parse_inline_spans, render_markdown_row};
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
 use crate::readwise_service::{self, ReadwiseService};
+use crate::reminder_index::{IndexSection, IndexedReminder, IndexedState, StampKind};
+use crate::reminder_service::{self, ReminderEvent, ReminderService};
 use crate::reminders::{ChipState, ReminderClock, ReminderDay, reminder_chip};
 use crate::sync_status;
 use crate::vault::{Vault, VaultStatus};
@@ -244,6 +246,9 @@ pub struct BacklogPanel {
     /// only, like the other two.
     readwise_service: Option<Entity<ReadwiseService>>,
     vault_sync_service: Option<Entity<VaultSyncService>>,
+    /// The vault's reminders, whose closed and dropped ones Done lists
+    /// beside the finished tasks (V45 §9.1).
+    reminder_service: Option<Entity<ReminderService>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -351,6 +356,7 @@ impl BacklogPanel {
             let inbox_service = inbox_service::service_for_project(&project, cx);
             let readwise_service = readwise_service::service_for_project(&project, cx);
             let vault_sync_service = vault_sync::service_for_project(&project, cx);
+            let reminder_service = reminder_service::service_for_project(&project, cx);
             let mut subscriptions = vec![project_subscription];
             if let Some(service) = &gmail_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
@@ -363,6 +369,10 @@ impl BacklogPanel {
             }
             if let Some(service) = &vault_sync_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
+            }
+            if let Some(service) = &reminder_service {
+                subscriptions
+                    .push(cx.subscribe(service, |_, _, _: &ReminderEvent, cx| cx.notify()));
             }
             // Reminder chips relabel when the day turns.
             let reminder_day = ReminderDay::global(cx);
@@ -397,6 +407,7 @@ impl BacklogPanel {
                 inbox_service,
                 readwise_service,
                 vault_sync_service,
+                reminder_service,
                 _subscriptions: subscriptions,
             };
             this.vault_status = this.detect_vault_status(cx);
@@ -2159,11 +2170,20 @@ impl BacklogPanel {
     fn render_done_view(&self, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
         let completed = self.completed_tasks();
+        let mut reminders = self.done_reminders(cx).into_iter().peekable();
         let mut list = v_flex().py_1();
-        if completed.is_empty() {
+        if completed.is_empty() && reminders.peek().is_none() {
             list = list.child(self.render_hint("Nothing finished yet."));
         }
         for (index, task) in completed.into_iter().enumerate() {
+            let task_date = backlog::completion_date(&task.text);
+            // Both lists run newest first; a reminder closed on a later day
+            // than this task goes above it.
+            while let Some(reminder) = reminders
+                .next_if(|reminder| task_date.is_none_or(|date| done_date(reminder) > Some(date)))
+            {
+                list = list.child(self.render_done_reminder(reminder, cx));
+            }
             let (label, date) = split_completion(&task.text);
             let row = TaskSelection {
                 section: SectionKind::Completed,
@@ -2209,11 +2229,89 @@ impl BacklogPanel {
                     ),
             );
         }
+        for reminder in reminders {
+            list = list.child(self.render_done_reminder(reminder, cx));
+        }
         list.id("backlog-completed-list")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handles[BacklogView::Done.index()])
+            .into_any_element()
+    }
+
+    /// Closed and dropped reminders from the index's `## Done`, newest first.
+    pub(crate) fn done_reminders<'a>(&self, cx: &'a App) -> Vec<&'a IndexedReminder> {
+        let Some(service) = &self.reminder_service else {
+            return Vec::new();
+        };
+        let mut reminders: Vec<&IndexedReminder> = service
+            .read(cx)
+            .reminders()
+            .iter()
+            .filter(|reminder| {
+                reminder.section == IndexSection::Done
+                    && matches!(reminder.state, IndexedState::Closed | IndexedState::Dropped)
+            })
+            .collect();
+        reminders.sort_by_key(|reminder| Reverse(done_date(reminder)));
+        reminders
+    }
+
+    /// A finished reminder among the finished tasks: its words struck, over
+    /// the day it was closed or dropped. It is read-only here; the line
+    /// lives in its home note.
+    fn render_done_reminder(&self, reminder: &IndexedReminder, cx: &Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors();
+        let text = reminder.text.clone().unwrap_or_default();
+        let dropped = reminder.state == IndexedState::Dropped
+            || reminder
+                .stamp
+                .is_some_and(|stamp| stamp.kind == StampKind::Dropped);
+        let meta = match (done_date(reminder), dropped) {
+            (Some(date), true) => format!("{date} · dropped"),
+            (Some(date), false) => date.to_string(),
+            (None, true) => "dropped".to_string(),
+            (None, false) => String::new(),
+        };
+        h_flex()
+            .w_full()
+            .gap_2()
+            .pl(px(12.))
+            .pr_2()
+            .py_1()
+            .items_start()
+            .child(
+                div().pt_0p5().child(
+                    Icon::new(IconName::Bell)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(rems(0.875))
+                            .text_color(colors.text_muted)
+                            .line_clamp(2)
+                            .child(
+                                LabelLike::new()
+                                    .strikethrough()
+                                    .child(SharedString::from(text)),
+                            ),
+                    )
+                    .when(!meta.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_size(rems(0.71875))
+                                .text_color(colors.text_placeholder)
+                                .child(SharedString::from(meta)),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 
@@ -2301,6 +2399,11 @@ fn task_link(text: &str) -> Option<TaskLink> {
 /// The completed audit trail in render order. The file stays append-ordered
 /// (oldest first); reversing before the sort puts same-day completions
 /// newest-first too, and the sort is stable so that survives.
+/// The day a finished reminder was closed or dropped, from its stamp.
+fn done_date(reminder: &IndexedReminder) -> Option<NaiveDate> {
+    reminder.stamp.map(|stamp| stamp.date)
+}
+
 fn completed_tasks(backlog: &Backlog) -> Vec<&BacklogTask> {
     let mut tasks: Vec<&BacklogTask> = backlog.completed.iter().rev().collect();
     tasks.sort_by_key(|task| Reverse(backlog::completion_date(&task.text)));

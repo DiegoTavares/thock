@@ -1192,6 +1192,17 @@
     },
   },
   {
+    "context": "ThockRemindersPanel",
+    "bindings": {
+      "j": "vim::MenuSelectNext",
+      "k": "vim::MenuSelectPrevious",
+      "down": "vim::MenuSelectNext",
+      "up": "vim::MenuSelectPrevious",
+      "g g": "menu::SelectFirst",
+      "shift-g": "menu::SelectLast",
+    },
+  },
+  {
     "context": "ThockReminderCalendar",
     "bindings": {
       "h": "thock::SelectPreviousCalendarDay",
