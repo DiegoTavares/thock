@@ -7,6 +7,8 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::reminders::ChipState;
+
 /// What a scanned span means for display. `Marker` and `Rule` become folds;
 /// the label/heading kinds become text colours.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,18 +80,6 @@ pub enum SpanKind {
     /// A reminder token, `(@2026-12-02 14:30)`, folded into a chip that
     /// reads `label` and is drawn for `state` (V45 §8.4).
     Reminder { label: Arc<str>, state: ChipState },
-}
-
-/// How a reminder's chip is drawn (V45 §8.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChipState {
-    Upcoming,
-    Today,
-    Overdue,
-    /// A ticked task's reminder, or a struck token in prose.
-    Closed,
-    /// A time-only token outside a daily note, which has no day to ring on.
-    NoDay,
 }
 
 /// A byte range of the scanned text and how it should display.
@@ -1370,75 +1360,6 @@ fn scan_quotes(text: &str, body: Range<usize>, plan: &mut EmailPlan) {
     }
 }
 
-/// A reminder token found in a note: the whole `(@…)` and the text between
-/// `(@` and `)`, as byte ranges of the scanned text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReminderToken {
-    pub range: Range<usize>,
-    pub when: Range<usize>,
-    /// The token's line is a ticked task, or the token sits inside `~~`.
-    pub closed: bool,
-}
-
-/// The reminder tokens of `text`, at most one per line (the last), skipping
-/// fences, front matter, inline code, HTML comments, escaped tokens and
-/// calendar lines (V45 §4.2).
-// STUB(S1): the token grammar is the sync core's. Swap `parse_reminder_when`
-// for S1's parser once it lands; the exclusions here stay.
-pub fn reminder_tokens(text: &str) -> Vec<ReminderToken> {
-    let mut tokens = Vec::new();
-    each_content_line(text, |line_start, line| {
-        if line.contains("<!--gcal:") || image_line(line).is_some() {
-            return;
-        }
-        // A token inside a link would fold across the link's own folds.
-        let mut excluded = inline_exclusions(line);
-        excluded.extend(inline_links(line).into_iter().map(|link| link.range));
-        let mut last = None;
-        let mut cursor = 0;
-        while let Some(open) = line[cursor..].find("(@").map(|index| index + cursor) {
-            cursor = open + 2;
-            let Some(close) = line[cursor..].find(')').map(|index| index + cursor) else {
-                break;
-            };
-            let range = open..close + 1;
-            let escaped = line[..open].ends_with('\\');
-            if !escaped
-                && !overlaps_excluded(&excluded, &range)
-                && parse_reminder_when(&line[open + 2..close])
-            {
-                last = Some(range.clone());
-                cursor = range.end;
-            }
-        }
-        if let Some(range) = last {
-            let ticked = task_checkbox(line).is_some_and(|(_, checked)| checked);
-            let struck = line[..range.start].ends_with("~~") && line[range.end..].starts_with("~~");
-            tokens.push(ReminderToken {
-                range: line_start + range.start..line_start + range.end,
-                when: line_start + range.start + 2..line_start + range.end - 1,
-                closed: ticked || struck,
-            });
-        }
-    });
-    tokens
-}
-
-/// Whether `when` is `YYYY-MM-DD`, `YYYY-MM-DD H:MM` or `H:MM`.
-// STUB(S1): replaced by the sync core's grammar.
-fn parse_reminder_when(when: &str) -> bool {
-    let is_date = |text: &str| {
-        text.len() == 10 && chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").is_ok()
-    };
-    let is_time = |text: &str| {
-        (4..=5).contains(&text.len()) && chrono::NaiveTime::parse_from_str(text, "%H:%M").is_ok()
-    };
-    match when.split_once(' ') {
-        Some((date, time)) => is_date(date) && is_time(time),
-        None => is_date(when) || is_time(when),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2454,54 +2375,6 @@ mod tests {
                 .map(|span| &text[span.range.clone()])
                 .collect::<Vec<_>>(),
             vec!["# ", "a", "[[", "b", "]]"]
-        );
-    }
-
-    fn tokens(text: &str) -> Vec<(&str, bool)> {
-        reminder_tokens(text)
-            .into_iter()
-            .map(|token| {
-                assert_eq!(token.when, token.range.start + 2..token.range.end - 1);
-                (&text[token.range], token.closed)
-            })
-            .collect()
-    }
-
-    #[test]
-    fn reminder_tokens_take_the_last_well_formed_token_on_each_line() {
-        assert_eq!(
-            tokens(
-                "- [ ] Renew passport (@2026-12-02)\n\
-                 Call (@10:00) or (@2026-12-02 9:30) <!--rem:0123456789ab-->\n\
-                 not (@tomorrow) nor (@2026-13-01) nor (@25:00)\n"
-            ),
-            vec![("(@2026-12-02)", false), ("(@2026-12-02 9:30)", false)]
-        );
-    }
-
-    #[test]
-    fn reminder_tokens_skip_code_comments_escapes_links_and_calendar_lines() {
-        let text = "```\n(@2026-12-02)\n```\n\
-                    `(@2026-12-02)` and <!-- (@2026-12-02) --> and \\(@2026-12-02)\n\
-                    [see (@2026-12-02)](x)\n\
-                    - [ ] 10:00 - 10:30 Sync (@09:50) <!--gcal:abc-->\n";
-        assert_eq!(tokens(text), vec![]);
-        assert_eq!(tokens("---\ndue: (@2026-12-02)\n---\n"), vec![]);
-    }
-
-    #[test]
-    fn reminder_tokens_know_when_they_are_closed() {
-        assert_eq!(
-            tokens(
-                "- [x] Done (@2026-10-19)\n\
-                 Prose ~~(@2026-10-19)~~ struck\n\
-                 - [ ] Open (@2026-10-19)\n"
-            ),
-            vec![
-                ("(@2026-10-19)", true),
-                ("(@2026-10-19)", true),
-                ("(@2026-10-19)", false)
-            ]
         );
     }
 }

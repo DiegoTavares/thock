@@ -18,11 +18,15 @@
 //! the cursor is on it.
 
 use crate::ThockSettings;
-use crate::markdown_syntax::{self, ChipState, ConcealSpan, SpanKind};
+use crate::markdown_syntax::{self, ConcealSpan, SpanKind};
 use crate::markdown_text;
+use crate::reminders::{
+    ChipState, DayChanged, ReminderClock, ReminderDay, ReminderSettings, is_reminder_note,
+    reminder_chip,
+};
 use crate::thock_theme::on_accent_color;
 use crate::vault::{Vault, VaultStatus};
-use chrono::{Datelike as _, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::NaiveDate;
 use collections::{HashMap, HashSet};
 use editor::actions::GoToDefinition;
 use editor::display_map::{
@@ -49,6 +53,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use thock_sync_core::{ReminderConfig, parse_note};
 use ui::prelude::FluentBuilder as _;
 use ui::{ActiveTheme as _, Color, Icon, IconName, IconSize};
 use util::paths::PathStyle;
@@ -120,9 +125,17 @@ pub struct ConcealSettings {
     /// The vault's images folder, which a bare `images/x.png` resolves
     /// against the root rather than the note (V39 §4.3).
     pub images_dir: String,
-    /// The day of the daily note this is, which a time-only reminder token
-    /// rings on; `None` for every other note (V45 §4.2).
-    pub note_day: Option<NaiveDate>,
+    /// Where the note sits for reminders, or `None` where a token is text
+    /// (V45 §4.2).
+    pub reminder_note: Option<ReminderNote>,
+}
+
+/// A note that can hold reminders: its vault-relative path and how the vault
+/// reads them.
+#[derive(Clone)]
+pub struct ReminderNote {
+    pub path: String,
+    pub config: ReminderConfig,
 }
 
 /// One `#` or `##` line drawn as a block (V43 §7.2): the line it stands on,
@@ -162,7 +175,7 @@ pub struct MarkdownConcealAddon {
     email_enabled: bool,
     account: Option<String>,
     images_dir: String,
-    note_day: Option<NaiveDate>,
+    reminder_note: Option<ReminderNote>,
     spans: Vec<AnchorSpan>,
     email: Option<EmailAnchors>,
     images: Vec<ImageEntry>,
@@ -272,13 +285,17 @@ fn vault_markdown_settings(editor: &Editor, cx: &App) -> Option<ConcealSettings>
                     .account
                 })
                 .flatten();
-            let note_day = vault.daily_note_date(&vault_root.join(file.path.as_std_path()));
+            let path = file.path.as_unix_str().to_string();
+            let reminder_note = is_reminder_note(&vault, &path).then(|| ReminderNote {
+                path,
+                config: ReminderSettings::default().reminder_config(&vault),
+            });
             Some(ConcealSettings {
                 conceal: vault.config.markdown.conceal,
                 email_view,
                 account,
                 images_dir: vault.config.images.dir,
-                note_day,
+                reminder_note,
             })
         }
         _ => None,
@@ -321,6 +338,13 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         apply_folds(editor, cx);
         apply_heading_blocks(editor, cx);
     }));
+    // Chips say *Today* and *Tomorrow*, so they relabel when the day turns.
+    let reminder_day = ReminderDay::global(cx);
+    subscriptions.push(
+        cx.subscribe(&reminder_day, |editor, _, _: &DayChanged, cx| {
+            schedule_reparse(editor, cx)
+        }),
+    );
     // Highlight styles capture theme colours, so a theme change needs a
     // re-apply to pick up the new palette; the body face is a setting too.
     // Heading blocks read their face at render time, so they follow on
@@ -379,7 +403,7 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         email_enabled: settings.email_view,
         account: settings.account,
         images_dir: settings.images_dir,
-        note_day: settings.note_day,
+        reminder_note: settings.reminder_note,
         spans: Vec::new(),
         email: None,
         images: Vec::new(),
@@ -1330,8 +1354,8 @@ fn schedule_reparse(editor: &mut Editor, cx: &mut Context<Editor>) {
     };
     let email_enabled = addon.email_enabled;
     let account = addon.account.clone();
-    let note_day = addon.note_day;
-    let now = reminder_now(cx);
+    let reminder_note = addon.reminder_note.clone();
+    let today = ReminderClock::global(cx).today();
     let task = cx.spawn(async move |editor, cx| {
         cx.background_executor().timer(REPARSE_DEBOUNCE).await;
         let Ok(snapshot) = editor.read_with(cx, |editor, cx| editor.buffer().read(cx).snapshot(cx))
@@ -1366,7 +1390,9 @@ fn schedule_reparse(editor: &mut Editor, cx: &mut Context<Editor>) {
                     }
                     None => {
                         let mut spans = markdown_syntax::conceal_spans(&text);
-                        spans.extend(reminder_spans(&text, now, note_day));
+                        if let Some(note) = &reminder_note {
+                            spans.extend(reminder_spans(&text, note, today));
+                        }
                         (spans, None)
                     }
                 };
@@ -1710,86 +1736,40 @@ fn is_folded(kind: &SpanKind) -> bool {
 }
 
 /// The reminder chips of `text`, as fold spans (V45 §8.4).
-fn reminder_spans(
-    text: &str,
-    now: NaiveDateTime,
-    note_day: Option<NaiveDate>,
-) -> impl Iterator<Item = ConcealSpan> {
-    markdown_syntax::reminder_tokens(text)
+fn reminder_spans(text: &str, note: &ReminderNote, today: NaiveDate) -> Vec<ConcealSpan> {
+    let mut line_starts = vec![0];
+    line_starts.extend(text.match_indices('\n').map(|(index, _)| index + 1));
+    parse_note(text, &note.path, &note.config)
         .into_iter()
-        .filter_map(move |token| {
-            let (label, state) = reminder_chip(&text[token.when], token.closed, now, note_day)?;
+        .filter_map(|appearance| {
+            let token = appearance.reminder.token.as_ref()?;
+            let line_start = *line_starts.get(appearance.line)?;
+            let line = text[line_start..].split('\n').next()?;
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            // A struck token's `~~` fold on their own, as every struck run's do.
+            let mut range = token.range.clone();
+            if token.struck {
+                range = range.start + 2..range.end - 2;
+            }
+            // A token inside a link or an image line would fold across the
+            // link's own folds; it stays text.
+            if markdown_syntax::image_line(line).is_some()
+                || markdown_syntax::inline_links(line)
+                    .iter()
+                    .any(|link| link.range.start < range.end && range.start < link.range.end)
+            {
+                return None;
+            }
+            let chip = reminder_chip(&appearance.reminder, today)?;
             Some(ConcealSpan {
-                range: token.range,
-                kind: SpanKind::Reminder { label, state },
+                range: line_start + range.start..line_start + range.end,
+                kind: SpanKind::Reminder {
+                    label: chip.label.into(),
+                    state: chip.state,
+                },
             })
         })
-}
-
-/// The current local time the chips are labelled against.
-// STUB(S3): S3 owns the injectable wall clock; read it here once it lands.
-fn reminder_now(_cx: &App) -> NaiveDateTime {
-    #[cfg(test)]
-    if let Some(clock) = _cx.try_global::<tests::PinnedClock>() {
-        return clock.0;
-    }
-    chrono::Local::now().naive_local()
-}
-
-/// A token's chip label and state: *Tomorrow 10:00*, *Tue 20 Oct 18:00 ·
-/// overdue*, *17:00 · which day?*.
-// STUB(S3): the chip model is S3's; call it here once it lands.
-fn reminder_chip(
-    when: &str,
-    closed: bool,
-    now: NaiveDateTime,
-    note_day: Option<NaiveDate>,
-) -> Option<(Arc<str>, ChipState)> {
-    let (date, time) = match when.split_once(' ') {
-        Some((date, time)) => (Some(date), Some(time)),
-        None if when.contains(':') => (None, Some(when)),
-        None => (Some(when), None),
-    };
-    let time = time
-        .map(|time| NaiveTime::parse_from_str(time, "%H:%M"))
-        .transpose()
-        .ok()?;
-    let date = match date {
-        Some(date) => Some(NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?),
-        None => note_day,
-    };
-    let clock = time.map(|time| time.format("%H:%M").to_string());
-    let Some(date) = date else {
-        return Some((
-            format!("{} · which day?", clock.unwrap_or_default()).into(),
-            ChipState::NoDay,
-        ));
-    };
-
-    let today = now.date();
-    let mut label = match (date - today).num_days() {
-        0 => "Today".to_string(),
-        1 => "Tomorrow".to_string(),
-        -1 => "Yesterday".to_string(),
-        _ if date.year() == today.year() => crate::notes::format_date(date, "ddd D MMM"),
-        _ => crate::notes::format_date(date, "ddd D MMM YYYY"),
-    };
-    if let Some(clock) = clock {
-        label.push(' ');
-        label.push_str(&clock);
-    }
-    let overdue = date < today || (date == today && time.is_some_and(|time| time <= now.time()));
-    let state = if closed {
-        ChipState::Closed
-    } else if overdue {
-        label.push_str(" · overdue");
-        ChipState::Overdue
-    } else if date == today {
-        ChipState::Today
-    } else {
-        ChipState::Upcoming
-    };
-    Some((label.into(), state))
+        .collect()
 }
 
 /// Placeholder for a reminder token: a chip with its label, outlined in the
@@ -2333,13 +2313,8 @@ mod tests {
 
     const NOTE: &str = "# Title\nsee [[wiki]] and [docs](https://a.example)\n___\nplain tail\n";
 
-    /// The clock the reminder chips are labelled against in tests.
-    pub(super) struct PinnedClock(pub NaiveDateTime);
-
-    impl gpui::Global for PinnedClock {}
-
     /// Wednesday 21 October 2026 at 14:05, the V45 spec's clock.
-    fn pinned_now() -> NaiveDateTime {
+    fn pinned_now() -> chrono::NaiveDateTime {
         NaiveDate::from_ymd_opt(2026, 10, 21)
             .unwrap()
             .and_hms_opt(14, 5, 0)
@@ -2353,7 +2328,7 @@ mod tests {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             release_channel::init(semver::Version::new(0, 0, 0), cx);
             editor::init(cx);
-            cx.set_global(PinnedClock(pinned_now()));
+            crate::reminders::TestClock::install(pinned_now(), cx);
         });
     }
 
@@ -2391,7 +2366,10 @@ mod tests {
             email_view: true,
             account: Some("diego.exodo@gmail.com".to_string()),
             images_dir: "images".to_string(),
-            note_day: None,
+            reminder_note: Some(ReminderNote {
+                path: "note.md".to_string(),
+                config: ReminderConfig::default(),
+            }),
         }
     }
 
@@ -3894,7 +3872,10 @@ mod tests {
     #[gpui::test]
     async fn a_time_only_token_in_a_daily_note_rings_on_its_day(cx: &mut TestAppContext) {
         let settings = ConcealSettings {
-            note_day: NaiveDate::from_ymd_opt(2026, 10, 21),
+            reminder_note: Some(ReminderNote {
+                path: "daily/2026-10-21.md".to_string(),
+                config: ReminderConfig::default(),
+            }),
             ..test_settings()
         };
         let (editor, mut cx) =
@@ -3905,6 +3886,36 @@ mod tests {
             " ☐ Dentist Today 17:00\nplain tail\n"
         );
         assert_eq!(chip_states(&editor, &mut cx), [ChipState::Today]);
+    }
+
+    #[gpui::test]
+    async fn chips_relabel_when_the_day_turns(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "- [ ] Call (@2026-10-22 10:00)\nplain tail\n").await;
+        move_cursor_to(&editor, 1, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            " ☐ Call Tomorrow 10:00\nplain tail\n"
+        );
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(10 * 60 * 60));
+        settle(&mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            " ☐ Call Today 10:00\nplain tail\n"
+        );
+        assert_eq!(chip_states(&editor, &mut cx), [ChipState::Today]);
+    }
+
+    #[gpui::test]
+    async fn a_note_outside_reminder_scope_draws_no_chip(cx: &mut TestAppContext) {
+        let settings = ConcealSettings {
+            reminder_note: None,
+            ..test_settings()
+        };
+        let (editor, mut cx) =
+            setup_with(cx, "- [ ] Call (@2026-10-22 10:00)\nplain tail\n", settings).await;
+        move_cursor_to(&editor, 1, &mut cx);
+        assert_eq!(chip_states(&editor, &mut cx), []);
     }
 
     #[gpui::test]
