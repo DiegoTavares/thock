@@ -4,6 +4,9 @@ public enum VaultSessionError: Error, Equatable {
     /// Plus lapsed: the phone shows what it has and writes nothing.
     case readOnly
     case notConnected
+    /// A reminder's line no longer reads as the list drawn it, so the edit
+    /// had nothing to change.
+    case reminderChanged
 }
 
 /// Everything the app, the share sheet and the widgets do to the vault, in
@@ -94,11 +97,7 @@ public struct VaultSession: Sendable {
     /// from its template and is not in the vault yet, it is created from the
     /// template first: without that both ends would make a bare note holding
     /// only the heading the write names.
-    func recordOnNote(_ writes: [PlannedWrite], note: NoteID, now: Date = Date()) throws {
-        try record(writes, on: note, now: now)
-    }
-
-    private func record(_ writes: [PlannedWrite], on note: NoteID, now: Date = Date()) throws {
+    func record(_ writes: [PlannedWrite], on note: NoteID, now: Date = Date()) throws {
         guard !writes.isEmpty else { return }
         let builder = self.writes(now: now)
         if noteText(note) == nil, store.seedText(builder.seed(for: note)) != nil {
@@ -108,8 +107,8 @@ public struct VaultSession: Sendable {
         }
     }
 
-    @discardableResult
     /// `due` is when a `.reminder` capture rings; other destinations ignore it.
+    @discardableResult
     public func capture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], due: ReminderDue? = nil, now: Date = Date()) throws -> CaptureRecord? {
         let builder = writes(now: now)
         let template = store.content(config.daily.template)

@@ -436,7 +436,7 @@ extension VaultSession {
 
     public func remindMe(_ item: PlannerItem, note: NoteID, due: ReminderDue, now: Date = Date()) throws {
         guard let writes = writes(now: now).remindMe(raw: item.raw, path: config.path(note), heading: item.heading, hash: item.hash, ordinal: item.ordinal, due: due, id: newReminderID(), indexText: store.content(config.reminders.index)) else { return }
-        try recordOnNote(writes, note: note, now: now)
+        try record(writes, on: note, now: now)
     }
 
     public func remindMe(_ task: BacklogTask, due: ReminderDue, now: Date = Date()) throws {
@@ -444,31 +444,44 @@ extension VaultSession {
         try record(writes)
     }
 
+    // Each edit finds the reminder again by its id, so a list drawn before
+    // the last sync edits the line as it is now; an edit that has nothing to
+    // change throws `reminderChanged` rather than reporting a move that never
+    // happened.
+
     public func closeReminder(_ reminder: IndexedReminder, now: Date = Date()) throws {
-        try editReminder(reminder, now: now) { builder, note in builder.closeReminder(reminder, note: note) }
+        try editReminder(reminder, now: now) { builder, current, note in builder.closeReminder(current, note: note) }
     }
 
     public func reopenReminder(_ reminder: IndexedReminder, now: Date = Date()) throws {
-        try editReminder(reminder, now: now) { builder, note in builder.reopenReminder(reminder, note: note) }
+        try editReminder(reminder, now: now) { builder, current, note in builder.reopenReminder(current, note: note) }
     }
 
     public func rescheduleReminder(_ reminder: IndexedReminder, to due: ReminderDue, now: Date = Date()) throws {
-        try editReminder(reminder, now: now) { builder, note in builder.rescheduleReminder(reminder, to: due, note: note) }
+        try editReminder(reminder, now: now) { builder, current, note in builder.rescheduleReminder(current, to: due, note: note) }
     }
 
     public func dropReminder(_ reminder: IndexedReminder, now: Date = Date()) throws {
-        try editReminder(reminder, now: now) { builder, note in builder.dropReminder(reminder, note: note) }
+        try editReminder(reminder, now: now) { builder, current, note in builder.dropReminder(current, note: note) }
     }
 
     /// Undo for a reschedule or a drop: the home line as it was before, found
-    /// again by its id. Nothing is written when it moved to another note.
+    /// again by its id. Nothing is written when it moved to another note or
+    /// already reads as it did.
     public func restoreReminderLine(_ before: IndexedReminder, now: Date = Date()) throws {
         guard let current = reminderIndex(now: now).reminder(id: before.id), current.home == before.home else { return }
-        try editReminder(current, now: now) { builder, note in builder.homeLineEdit(current, note: note, newLine: before.raw) }
+        try editReminder(current, now: now, required: false) { builder, current, note in
+            builder.homeLineEdit(current, note: note, newLine: before.raw)
+        }
     }
 
-    private func editReminder(_ reminder: IndexedReminder, now: Date = Date(), _ build: (PhoneWrites, String) -> PlannedWrite?) throws {
-        guard let note = store.content(reminder.home), let write = build(writes(now: now), note) else { return }
+    private func editReminder(_ reminder: IndexedReminder, now: Date = Date(), required: Bool = true, _ build: (PhoneWrites, IndexedReminder, String) -> PlannedWrite?) throws {
+        guard let current = reminderIndex(now: now).reminder(id: reminder.id), let note = store.content(current.home),
+              let write = build(writes(now: now), current, note)
+        else {
+            if required { throw VaultSessionError.reminderChanged }
+            return
+        }
         try record([write])
     }
 }

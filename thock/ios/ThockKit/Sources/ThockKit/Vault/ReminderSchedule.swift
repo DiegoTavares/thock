@@ -37,6 +37,30 @@ public enum ReminderSchedule {
         return Reminders.isID(String(id)) ? String(id) : nil
     }
 
+    /// The due an identifier was scheduled for, `nil` when it names none.
+    public static func due(in identifier: String) -> ReminderDue? {
+        guard let id = reminderID(in: identifier) else { return nil }
+        let rest = identifier.dropFirst(identifierPrefix.count + id.count)
+        guard rest.first == ":" else { return nil }
+        return ReminderDue(String(rest.dropFirst()))
+    }
+
+    /// The identifier of every open reminder with a day, at its current due,
+    /// whether it is still to ring or has rung.
+    public static func openIdentifiers(index: ReminderIndex) -> Set<String> {
+        Set(index.reminders.compactMap { reminder in
+            guard reminder.status == .open, let due = reminder.due else { return nil }
+            return identifier(id: reminder.id, due: due)
+        })
+    }
+
+    /// Delivered reminder notifications that no longer stand for an open
+    /// reminder at that due, to take off the lock screen. Others are never
+    /// touched.
+    public static func staleDelivered(_ delivered: [String], open: Set<String>) -> [String] {
+        delivered.filter { $0.hasPrefix(identifierPrefix) && !open.contains($0) }
+    }
+
     /// The soonest `limit` open reminders that ring after `now` (a day and a
     /// minute of local wall-clock time), soonest first.
     public static func alerts(index: ReminderIndex, settings: ReminderSettings, today: VaultDay, now: ClockTime, limit: Int = limit) -> [ReminderAlert] {
@@ -108,14 +132,14 @@ public enum ReminderAnswer: String, CaseIterable, Sendable {
 }
 
 extension VaultSession {
-    /// Answers a notification with one write on the home line: *Done* closes
-    /// it, *In 1 hour* and *Tomorrow 09:00* rewrite its token. Returns false
-    /// when there was nothing to write (the reminder is gone or already
-    /// closed elsewhere).
+    /// Answers a notification rung for `due` with one write on the home
+    /// line: *Done* closes it, *In 1 hour* and *Tomorrow 09:00* rewrite its
+    /// token. Returns false when there was nothing to write: the reminder is
+    /// gone, closed elsewhere, or no longer due at `due` (the ring is stale).
     @discardableResult
-    public func answer(_ answer: ReminderAnswer, reminderID: String, now: Date = Date()) throws -> Bool {
-        guard let reminder = reminderIndex(now: now).reminder(id: reminderID), reminder.status == .open,
-              let note = store.content(reminder.home)
+    public func answer(_ answer: ReminderAnswer, reminderID: String, due: ReminderDue?, now: Date = Date()) throws -> Bool {
+        guard let due, let reminder = reminderIndex(now: now).reminder(id: reminderID), reminder.status == .open,
+              reminder.due == due, let note = store.content(reminder.home)
         else { return false }
         let builder = writes(now: now)
         let settings = config.reminders
@@ -128,6 +152,11 @@ extension VaultSession {
         guard let write else { return false }
         try record([write])
         return true
+    }
+
+    /// Every open reminder's notification identifier, rung or not.
+    public func openReminderIdentifiers(now: Date = Date()) -> Set<String> {
+        ReminderSchedule.openIdentifiers(index: reminderIndex(now: now))
     }
 
     /// The alerts to hand iOS now.

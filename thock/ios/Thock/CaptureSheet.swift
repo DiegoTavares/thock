@@ -32,7 +32,10 @@ struct CaptureSheet: View {
         case .reminder:
             let settings = model.session?.config.reminders ?? ReminderSettings()
             guard let due else { return "Rings when you choose and waits in \(settings.index)." }
-            return "\(due.ringsSentence(today: .today(), dateOnlyAt: settings.dateOnlyAt)) and waits in \(settings.index)."
+            guard due.stillRings(today: .today(), now: .now(), dateOnlyAt: settings.dateOnlyAt) else {
+                return "Waits in Today, in \(settings.index)."
+            }
+            return "\(due.ringsSentence(today: .today(), now: .now(), dateOnlyAt: settings.dateOnlyAt)) and waits in \(settings.index)."
         }
     }
 

@@ -517,8 +517,10 @@ the desk does (§5.2). The vectors in §11 keep the two in agreement.
 - **Save** appends `- [ ] <first line> (@…) <!--rem:<new id>-->` under `## Open` in
   `reminders.md`, with extra lines and pictures indented as children (V38, V39). It schedules the
   alert at once, so it rings even if the phone never reaches the server.
-- **Permission** to notify is asked the first time the chip or *Remind me…* is used, never at launch.
-  Denied, reminders still save and list, and the sheet says notifications are off.
+- **Permission** to notify is asked the first time the chip, *Remind me…* or the Reminders screen is
+  used, never at launch: reminders made at the desk ring on the phone too (decision 5), so opening
+  the screen asks as well. Denied, reminders still save and list, and the sheet says notifications
+  are off.
 
 ### 10.3 *Remind me…* on an existing line
 
@@ -548,7 +550,10 @@ Backlog cards and planner rows gain *Remind me…* beside *Set a time…*. The s
   `rem:<id>:<due>`, so a refresh replaces only what changed.
 - **Actions:** a `thock.reminder` category with *Done*, *In 1 hour* and *Tomorrow 09:00*, handled in
   the background. Each records one write in the store (tick or strike, or a token rewrite on the home
-  line) and starts a sync under a background task.
+  line), hands iOS the new alerts at once and starts a sync under a background task. An answer to a
+  ring whose due is no longer the reminder's, or to a reminder no longer open, writes nothing and
+  opens the Reminders screen. Each refresh also takes delivered notifications off the lock screen
+  when their reminder has closed or moved to another due.
 - **Both devices ring.** The phone does not try to know whether the desk rang. A reminder closed on
   either device stops the other's ring once they have synced.
 

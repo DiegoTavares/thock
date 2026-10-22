@@ -11,6 +11,10 @@ final class ReminderNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     private var registered: ReminderSettings?
 
+    /// The refresh in flight; the next one waits for it, so two never read
+    /// the same pending list and add a request twice.
+    private var refreshing: Task<Void, Never>?
+
     /// The three answers, titled from the vault's settings. Registered on
     /// every launch (it needs no permission, and a notification delivered
     /// before the app runs still finds them) and again when the settings
@@ -39,11 +43,28 @@ final class ReminderNotifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     /// Brings iOS's pending reminder notifications in line with `alerts`,
-    /// replacing only what changed. Without permission there is nothing to
-    /// hand over.
-    func refresh(alerts: [ReminderAlert]) async {
+    /// replacing only what changed, and takes back delivered ones whose
+    /// identifier is not in `open` (the reminder closed, or moved to another
+    /// due). Without permission there is nothing to hand over. Refreshes run
+    /// one after another.
+    func refresh(alerts: [ReminderAlert], open: Set<String>) async {
+        let previous = refreshing
+        let task = Task { @MainActor in
+            await previous?.value
+            await self.apply(alerts: alerts, open: open)
+        }
+        refreshing = task
+        await task.value
+    }
+
+    private func apply(alerts: [ReminderAlert], open: Set<String>) async {
         let status = await authorization()
         guard status == .authorized || status == .provisional || status == .ephemeral else { return }
+        let delivered = await center.deliveredNotifications().map(\.request.identifier)
+        let stale = ReminderSchedule.staleDelivered(delivered, open: open)
+        if !stale.isEmpty {
+            center.removeDeliveredNotifications(withIdentifiers: stale)
+        }
         let pending = await center.pendingNotificationRequests().map { request in
             // The minute the request rings, so a changed `date_only_at` is
             // replaced even though the identifier stays.
@@ -97,7 +118,7 @@ final class ReminderNotifier: NSObject, UNUserNotificationCenterDelegate {
                 return
             }
             if let answer = ReminderAnswer(rawValue: action) {
-                await AppDelegate.model.answer(answer, reminderID: reminderID)
+                await AppDelegate.model.answer(answer, reminderID: reminderID, due: ReminderSchedule.due(in: identifier))
             } else if action == UNNotificationDefaultActionIdentifier {
                 AppDelegate.model.openRemindersFromNotification()
             }

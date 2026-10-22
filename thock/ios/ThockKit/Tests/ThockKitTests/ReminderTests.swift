@@ -544,15 +544,18 @@ final class ReminderScheduleTests: XCTestCase {
                 "reminders.md": "## Open\n- [[projects/house]] <!--rem:7d3e55a1c0f2-->\n",
                 "projects/house.md": "# House\n\n- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->\n",
             ])
-            XCTAssertTrue(try session.answer(answer, reminderID: "7d3e55a1c0f2", now: now))
+            let rung = ReminderDue("2026-10-21 14:30")
+            XCTAssertFalse(try session.answer(answer, reminderID: "7d3e55a1c0f2", due: ReminderDue("2026-10-21 14:00"), now: now), "a stale ring writes nothing")
+            XCTAssertTrue(session.store.pending().isEmpty)
+            XCTAssertTrue(try session.answer(answer, reminderID: "7d3e55a1c0f2", due: rung, now: now))
             let queued = session.store.pending()
             XCTAssertEqual(queued.count, 1, "\(answer)")
             XCTAssertEqual(queued.first?.document.kind, .replaceLine)
             XCTAssertEqual(queued.first?.document.newLine, expected[answer], "\(answer)")
-            XCTAssertFalse(try session.answer(answer, reminderID: "000000000000", now: now), "an unknown reminder writes nothing")
+            XCTAssertFalse(try session.answer(answer, reminderID: "000000000000", due: rung, now: now), "an unknown reminder writes nothing")
         }
         let closed = try session(["reminders.md": "## Open\n- [x] Paid (@2026-10-21 09:00) <!--rem:7d3e55a1c0f2-->\n"])
-        XCTAssertFalse(try closed.answer(.done, reminderID: "7d3e55a1c0f2", now: now), "closed elsewhere first")
+        XCTAssertFalse(try closed.answer(.done, reminderID: "7d3e55a1c0f2", due: ReminderDue("2026-10-21 09:00"), now: now), "closed elsewhere first")
         XCTAssertTrue(closed.store.pending().isEmpty)
     }
 }
@@ -672,6 +675,38 @@ final class ReminderReviewTests: XCTestCase {
         XCTAssertEqual(session.reminderIndex(now: now).reminders.first?.raw, "- [ ] Water the plants <!--rem:e5e5e5e5e5e5-->")
         try session.restoreReminderLine(before, now: now)
         XCTAssertEqual(session.reminderIndex(now: now).reminders.first?.raw, line, "a token with no day comes back too")
+    }
+
+    func testIdentifiersCarryTheDueAndStaleDeliveriesAreTakenBack() throws {
+        let identifier = "rem:7d3e55a1c0f2:2026-10-21 14:30"
+        XCTAssertEqual(ReminderSchedule.due(in: identifier), ReminderDue("2026-10-21 14:30"))
+        XCTAssertEqual(ReminderSchedule.due(in: "rem:7d3e55a1c0f2:2026-10-22"), ReminderDue("2026-10-22"))
+        XCTAssertNil(ReminderSchedule.due(in: "rem:7d3e55a1c0f2"))
+        XCTAssertNil(ReminderSchedule.due(in: "other"))
+
+        let session = try session([
+            "reminders.md": "## Open\n- [ ] Call (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->\n- [x] Paid (@2026-10-20) <!--rem:6e1f42b07a93-->\n",
+        ])
+        let open = session.openReminderIdentifiers(now: now)
+        XCTAssertEqual(open, [identifier])
+        let delivered = [identifier, "rem:7d3e55a1c0f2:2026-10-21 14:00", "rem:6e1f42b07a93:2026-10-20", "calendar:x"]
+        XCTAssertEqual(ReminderSchedule.staleDelivered(delivered, open: open), ["rem:7d3e55a1c0f2:2026-10-21 14:00", "rem:6e1f42b07a93:2026-10-20"])
+    }
+
+    func testAnEditFromAnOldListFindsTheLineAgainOrSaysItChanged() throws {
+        let session = try session(["reminders.md": "## Open\n- [ ] Call (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->\n"])
+        let drawn = try XCTUnwrap(session.reminderIndex(now: now).reminders.first)
+        // The desk moved it before this phone's list was drawn again.
+        try session.store.applySnapshot(path: "reminders.md", version: 2, content: "## Open\n- [ ] Call (@2026-10-23 09:00) <!--rem:7d3e55a1c0f2-->\n", contentHash: "hash2", blobID: "blob2")
+        try session.rescheduleReminder(drawn, to: try XCTUnwrap(ReminderDue("2026-10-24 10:00")), now: now)
+        XCTAssertEqual(session.store.pending().last?.document.newLine, "- [ ] Call (@2026-10-24 10:00) <!--rem:7d3e55a1c0f2-->")
+
+        let gone = try self.session(["reminders.md": "## Open\n- [ ] Call (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->\n"])
+        try gone.store.applySnapshot(path: "reminders.md", version: 2, content: "## Open\n- [ ] Call, no reminder now\n", contentHash: "hash2", blobID: "blob2")
+        XCTAssertNil(gone.reminderIndex(now: now).reminder(id: drawn.id))
+        XCTAssertThrowsError(try gone.closeReminder(drawn, now: now)) { error in
+            XCTAssertEqual(error as? VaultSessionError, .reminderChanged)
+        }
     }
 
     func testANotificationTitleIsPlainText() {

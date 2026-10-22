@@ -331,8 +331,15 @@ final class AppModel {
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled, phase == .ready, let session else { return }
             AppDelegate.notifier.registerCategories(session.config.reminders)
-            await AppDelegate.notifier.refresh(alerts: session.reminderAlerts())
+            await refreshAlerts()
         }
+    }
+
+    /// Hands iOS the alerts the phone's copy holds now, and takes back
+    /// delivered ones for reminders since closed or moved.
+    private func refreshAlerts() async {
+        guard let session else { return }
+        await AppDelegate.notifier.refresh(alerts: session.reminderAlerts(), open: session.openReminderIdentifiers())
     }
 
     /// Asked the first time the Reminder chip or Remind me… is used, never
@@ -351,11 +358,21 @@ final class AppModel {
     }
 
     /// A notification's answer, which may have launched the app in the
-    /// background: one write on the home line, then a round to send it.
-    func answer(_ answer: ReminderAnswer, reminderID: String) async {
+    /// background: one write on the home line, then a round to send it. An
+    /// answer to a ring the reminder has moved on from (rescheduled, closed,
+    /// answered at the desk) writes nothing and opens Reminders instead.
+    func answer(_ answer: ReminderAnswer, reminderID: String, due: ReminderDue?) async {
         await boot()
         guard phase == .ready else { return }
-        guard perform({ try $0.answer(answer, reminderID: reminderID) }) else { return }
+        var wrote = false
+        guard perform({ wrote = try $0.answer(answer, reminderID: reminderID, due: due) }) else { return }
+        guard wrote else {
+            openRemindersFromNotification()
+            return
+        }
+        // The answered ring and the reminder's other alerts change now, not
+        // after the round below, which may never finish in the background.
+        await refreshAlerts()
         var grace = UIBackgroundTaskIdentifier.invalid
         grace = UIApplication.shared.beginBackgroundTask {
             UIApplication.shared.endBackgroundTask(grace)
@@ -365,7 +382,7 @@ final class AppModel {
         if UIApplication.shared.applicationState == .background {
             await engine?.stop()
         }
-        await AppDelegate.notifier.refresh(alerts: session?.reminderAlerts() ?? [])
+        await refreshAlerts()
         if grace != .invalid {
             UIApplication.shared.endBackgroundTask(grace)
         }
@@ -542,6 +559,9 @@ final class AppModel {
         sheet = nil
         showingBacklog = false
         withAnimation(.snappy) { showingReminders = true }
+        // Reminders made at the desk ring here too (V45 decision 5), so the
+        // screen asks as the Reminder chip does; iOS asks only once.
+        Task { await askToRing() }
     }
 
     func closeReminders() {
@@ -601,7 +621,6 @@ final class AppModel {
         }
     }
 
-    /// Undo for a reschedule or a drop: the token as it was.
     /// Undo for a reschedule or a drop: the home line exactly as it was.
     private func restoreDue(of reminder: IndexedReminder) {
         perform { try $0.restoreReminderLine(reminder) }
@@ -632,7 +651,7 @@ final class AppModel {
         guard perform({ try $0.remindMe(item, note: note, due: due) }) else { return }
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         scheduleReminderRefresh()
-        show(due.ringsSentence(today: .today(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt), action: "Show") { [weak self] in
+        show(due.ringsSentence(today: .today(), now: .now(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt), action: "Show") { [weak self] in
             self?.openReminders()
         }
     }
@@ -642,7 +661,7 @@ final class AppModel {
         guard perform({ try $0.remindMe(task, due: due) }) else { return }
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         scheduleReminderRefresh()
-        show(due.ringsSentence(today: .today(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt), action: "Show") { [weak self] in
+        show(due.ringsSentence(today: .today(), now: .now(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt), action: "Show") { [weak self] in
             self?.openReminders()
         }
     }
@@ -847,6 +866,8 @@ final class AppModel {
             return true
         } catch VaultSessionError.readOnly {
             show("This phone is read-only until Thock Plus is renewed.")
+        } catch VaultSessionError.reminderChanged {
+            show("That reminder changed since this list was drawn. Look again.")
         } catch {
             show("That didn't save. Try again.")
         }
@@ -978,7 +999,7 @@ final class AppModel {
             // Scheduled from the phone's own copy at once, so it rings even
             // if the phone never reaches the server.
             scheduleReminderRefresh()
-            show(due.map { $0.ringsSentence(today: .today(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt) } ?? "Reminder saved", action: "Show") { [weak self] in
+            show(due.map { $0.ringsSentence(today: .today(), now: .now(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt) } ?? "Reminder saved", action: "Show") { [weak self] in
                 self?.openReminders()
             }
         }
