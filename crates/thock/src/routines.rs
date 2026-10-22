@@ -4002,19 +4002,41 @@ open = "weekly/site/index.html"
     #[test]
     fn rituals_ask_about_reminders_and_quote_tasks_without_them() {
         for expected in [
-            "**Move all to Mon 09:00**, **Let me pick** and **Leave them**",
-            "**Tomorrow 09:00**, **Next week** (Monday 09:00), **Pick a date**",
+            "**Let me pick** and **Leave them**",
+            "**Pick a date**",
             "**Close** and **Drop the reminder**",
+            "`tomorrow_at` (09:00 by default)",
         ] {
             assert!(
                 TIMELINE_WEEK_REVIEW_SKILL.contains(expected),
                 "Week Review must say {expected}"
             );
+            assert!(
+                TIMELINE_WRAP_TODAY_SKILL.contains(expected),
+                "Wrap Today must say {expected}"
+            );
         }
+        assert!(TIMELINE_WRAP_TODAY_SKILL.contains(
+            "**only** edit this skill makes to your own text besides the reminder answers in step 6"
+        ));
+        let quote_rule = "without its `(@…)` reminder token and its `<!--rem:…-->` id";
+        assert!(TIMELINE_WRAP_TODAY_SKILL.contains(quote_rule));
+        assert!(TIMELINE_WEEK_REVIEW_SKILL.contains(quote_rule));
         assert!(
-            TIMELINE_WRAP_TODAY_SKILL
-                .contains("**Move to tomorrow 09:00**, **Let me pick** and **Leave them**")
+            TIMELINE_WEEK_REVIEW_SKILL.contains("is quoted as `- Call the plumber`"),
+            "Week Review shows a quoted task"
         );
+        assert_eq!(
+            thock_sync_core::parse_line("- Call the plumber", None),
+            None
+        );
+        for line in fenced_lines(TIMELINE_WEEK_REVIEW_SKILL)
+            .into_iter()
+            .skip_while(|line| !line.starts_with("## Week Review:"))
+            .take_while(|line| !line.starts_with("### Pull & Merge Requests"))
+        {
+            assert_eq!(thock_sync_core::parse_line(line, None), None, "{line}");
+        }
         for quoted in [
             "- [ ] Call the plumber → backlog (Soon)",
             "- [ ] Renew the passport → backlog (Soon)",

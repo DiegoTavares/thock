@@ -56,17 +56,17 @@ Some tasks probably got done today but were never checked off. Cross-reference t
 
 1. For each unchecked task, judge whether what step 3 pulled in, or the notes captured in step 2, show it was finished.
 2. If any look done, confirm them one at a time with the `ask` tool: the question names the task and the evidence (the commit or note that suggests completion), and the options are **Tick it** and **Not yet**. Default to **none**; only mark what the user explicitly confirms. If nothing looks finished, skip this step silently.
-3. For each confirmed task, flip its box in place (`- [ ]` → `- [x]`) in today's note. This checkbox flip is the **only** edit this skill makes to your own text — leave the task wording and everything else untouched.
+3. For each confirmed task, flip its box in place (`- [ ]` → `- [x]`) in today's note. This checkbox flip is the **only** edit this skill makes to your own text besides the reminder answers in step 6 — leave the task wording and everything else untouched.
 
 A task marked done here is no longer "unfinished," so it drops out of the step 7 backlog offer.
 
 ## 6. Ask about the day's reminders
 
-A reminder is a token at the end of a line, `(@YYYY-MM-DD HH:MM)`, `(@YYYY-MM-DD)`, or `(@HH:MM)` in a daily note (that note's day), followed by a `<!--rem:…-->` id Thock adds. Find them as the Week Review skill's step 6 does: read the index (`reminders.md`, unless `.thock/reminders.toml` names another), and through each link the line carrying the same id in the linked note, its **home**. Most of today's also show under `### Reminders` in today's note, but those lines are copies; the index is the full list.
+A reminder is a token on a line (Thock writes it at the end), `(@YYYY-MM-DD HH:MM)`, `(@YYYY-MM-DD)`, or `(@HH:MM)` in a daily note (that note's day), followed by a `<!--rem:…-->` id Thock adds. Find them as the Week Review skill's step 6 does: read the index (`reminders.md`, unless `.thock/reminders.toml` names another), and through each link the line carrying the same id in the linked note, its **home**. Most of today's also show under `### Reminders` in today's note, but those lines are copies; the index is the full list.
 
 1. Collect the open reminders due **today**: an unticked task or a sentence whose token is not struck. If there are none, skip this step silently.
-2. Ask **one** question with the `ask` tool, naming them: *N reminders are still open from today. Move them to tomorrow at 09:00?*, with **Move to tomorrow 09:00**, **Let me pick** and **Leave them**.
-3. On **Let me pick**, ask once per reminder, as the Week Review does: **Tomorrow 09:00**, **Next week** (Monday 09:00), **Pick a date**, **Close** and **Drop the reminder**.
+2. Ask **one** question with the `ask` tool, naming them: *N reminders are still open from today. Move them to tomorrow at 09:00?*, with **Move to tomorrow 09:00**, **Let me pick** and **Leave them**. The hour in the question and the options is `tomorrow_at` (09:00 by default): `[ring] tomorrow_at` in `.thock/reminders.toml` names another.
+3. On **Let me pick**, ask once per reminder, as the Week Review does: **Tomorrow 09:00**, **Next week** (Monday 09:00), **Pick a date**, **Close** and **Drop the reminder**, with `tomorrow_at` in place of 09:00 here too.
 4. Write each answer on the home line only, found by its id, exactly as the Week Review's step 6 shows: rewrite the token in its full form to move it, tick the task (or strike the token in a sentence) to close it, delete the token and keep the words and the id to drop it. Never write or change an id, and never edit the index or the copies under `### Reminders`.
 
 A reminder moved here, or closed in step 5, is no longer unfinished, so it drops out of step 7. A reminder you leave stays open and Thock keeps listing it, each morning, until it is closed, moved or dropped.

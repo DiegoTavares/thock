@@ -89,9 +89,10 @@ in that language, within the limits the section names.
 
 ## Reminders
 
-A date at the end of a line makes it a reminder, which Thock rings on the
+A date token anywhere on a line makes it a reminder, which Thock rings on the
 desk and the phone: `(@YYYY-MM-DD HH:MM)`, `(@YYYY-MM-DD)` for a day with no
-time, or `(@HH:MM)` inside a daily note, where it means that note's day.
+time, or `(@HH:MM)` inside a daily note, where it means that note's day. When
+a line has two, the last one counts.
 
 - To set one, add the token at the end of the line it is about. A reminder
   with nowhere else to live is a task under `## Open` in `reminders.md`,

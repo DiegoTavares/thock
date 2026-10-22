@@ -101,11 +101,11 @@ Note: `action_name: "accepted"` means the user merged an MR (counts toward `merg
 
 ## 6. Sweep the reminders still open
 
-A reminder is a token at the end of a line: `(@YYYY-MM-DD HH:MM)`, `(@YYYY-MM-DD)` for a day with no time, or `(@HH:MM)` in a daily note, which means that note's day. Thock puts a `<!--rem:…-->` id after it. `.thock/reminders.toml` may name another index file (`index`), other headings (`[headings] open`) and another time for the choices below (`[ring] tomorrow_at`); a missing file means `reminders.md`, `Open` and 09:00.
+A reminder is a token on a line (Thock writes it at the end): `(@YYYY-MM-DD HH:MM)`, `(@YYYY-MM-DD)` for a day with no time, or `(@HH:MM)` in a daily note, which means that note's day. Thock puts a `<!--rem:…-->` id after it. `.thock/reminders.toml` may name another index file (`index`), other headings (`[headings] open`) and another time for the choices below (`[ring] tomorrow_at`); a missing file means `reminders.md`, `Open` and 09:00.
 
 1. **Find them.** Read the index. Each line under `## Open` is either a task that is the reminder itself, or a link to the note it lives in (`- [[projects/house]] <!--rem:7d3e55a1c0f2-->`). For a link, open that note and find the line carrying the same id: that line is the reminder's **home**. Skip a home that is already closed (a ticked `- [x]` task, or a struck `~~(@…)~~` token) or has no token left, and skip a link whose line you can't find.
 2. **Collect** every open reminder due on or before the Sunday that ends the reviewed week, **earlier weeks included**, so a skipped review loses nothing. If there are none, skip this step silently.
-3. **Ask once** with the `ask` tool: *N reminders are still open. Move them all to Monday at 09:00?*, with **Move all to Mon 09:00**, **Let me pick** and **Leave them**. Monday is the next Monday after today, never today itself.
+3. **Ask once** with the `ask` tool: *N reminders are still open. Move them all to Monday at 09:00?*, with **Move all to Mon 09:00**, **Let me pick** and **Leave them**. Monday is the next Monday after today, never today itself. The hour, here and in the next step, is `tomorrow_at` (09:00 by default): write the vault's own in the question and the options.
 4. **On Let me pick,** ask once per reminder, naming its text and its due: **Tomorrow 09:00**, **Next week** (Monday 09:00), **Pick a date** (a follow-up question for the day and, if they want one, the time), **Close** and **Drop the reminder**.
 5. **Write only the home line,** found by its id, one edit per answer. Every other byte of the line stays as it is.
    - **Move:** rewrite the token's date and time, always in the full `(@YYYY-MM-DD HH:MM)` form, or `(@YYYY-MM-DD)` for a day with no time. The short `(@HH:MM)` is only for a line in the daily note of the new day itself.
@@ -158,6 +158,8 @@ Append a `# AI Week Review` section at the end of the weekly file with the `appe
 - Task or activity completed
 - Another task
 ```
+
+A task the review names is quoted without its `(@…)` reminder token and its `<!--rem:…-->` id, as Wrap Today's closure quotes them: the review is a record of the week, not a second reminder. `- [ ] Call the plumber (@2026-10-26 09:00) <!--rem:7d3e55a1c0f2-->` is quoted as `- Call the plumber`.
 
 When step 4 ran and found something, add one more section under it:
 

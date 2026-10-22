@@ -654,8 +654,8 @@ A new step before the backlog offer, in `routines/timeline/skills/week-review.md
 
 ### 13.3 What the agent is told
 
-- **`AGENTS.md`** gains a short section. A reminder is `(@YYYY-MM-DD HH:MM)` or `(@YYYY-MM-DD)` at
-  the end of a line, or `(@HH:MM)` in a daily note. Never write or change a `<!--rem:…-->` id. A
+- **`AGENTS.md`** gains a short section. A reminder is `(@YYYY-MM-DD HH:MM)` or `(@YYYY-MM-DD)`
+  anywhere on a line (the last one counts; set one at the end), or `(@HH:MM)` in a daily note. Never write or change a `<!--rem:…-->` id. A
   reminder with no home is a task under `## Open` in `reminders.md`. Close it by ticking it.
 - **The hosted agent's context block** (V27) names the index path beside the backlog file, so "remind
   me Friday to call the bank" works in chat and in phone Ask with the agent writing the token.
