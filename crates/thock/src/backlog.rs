@@ -667,10 +667,47 @@ pub fn completion_date(text: &str) -> Option<NaiveDate> {
 }
 
 /// Normalizes task text for duplicate detection (spec §7.2):
-/// whitespace-insensitive, ignoring any completion-date suffix.
+/// whitespace-insensitive, ignoring any completion-date suffix, the
+/// reminder token and every reminder id (V45 §13.2), so a task carried with
+/// its reminder still matches the one already in the backlog.
 pub fn normalize_task_text(text: &str) -> String {
-    let (label, _) = split_completion(text);
+    let without_ids = remove_reminder_ids(text);
+    let without_token =
+        match thock_sync_core::parse_line(&without_ids, None).and_then(|reminder| reminder.token) {
+            Some(token) => format!(
+                "{} {}",
+                &without_ids[..token.range.start],
+                &without_ids[token.range.end..]
+            ),
+            None => without_ids,
+        };
+    let (label, _) = split_completion(without_token.trim_end());
     label.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn remove_reminder_ids(text: &str) -> String {
+    const OPEN: &str = "<!--rem:";
+    let mut kept = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        let after = &rest[start + OPEN.len()..];
+        match after
+            .find("-->")
+            .filter(|&end| thock_sync_core::is_id(&after[..end]))
+        {
+            Some(end) => {
+                kept.push_str(&rest[..start]);
+                kept.push(' ');
+                rest = &after[end + "-->".len()..];
+            }
+            None => {
+                kept.push_str(&rest[..start + OPEN.len()]);
+                rest = after;
+            }
+        }
+    }
+    kept.push_str(rest);
+    kept
 }
 
 #[cfg(test)]
@@ -1057,6 +1094,38 @@ Some orienting prose the model must never touch.
         assert_ne!(
             normalize_task_text("Fix the bug"),
             normalize_task_text("fix the bug")
+        );
+    }
+
+    #[test]
+    fn normalize_ignores_reminder_tokens_and_ids() {
+        let plain = normalize_task_text("Renew the passport");
+        for text in [
+            "Renew the passport (@2026-12-02 09:00) <!--rem:2f6b08e19a5c-->",
+            "Renew the passport (@2026-12-02)",
+            "Renew the passport <!--rem:2f6b08e19a5c-->",
+            "Renew the passport ~~(@2026-12-02)~~ <!--rem:2f6b08e19a5c-->",
+            "Renew the passport (@2026-12-02 09:00) <!--rem:2f6b08e19a5c--> ✅ 2026-12-02",
+            "Renew the passport (@2026-12-02 09:00) ✅ 2026-12-02 <!--rem:2f6b08e19a5c-->",
+        ] {
+            assert_eq!(normalize_task_text(text), plain, "{text}");
+        }
+        assert_eq!(
+            normalize_task_text("Ask about `(@2026-12-02)` <!--gmail:abc-->"),
+            "Ask about `(@2026-12-02)` <!--gmail:abc-->",
+            "a token in code and other comments are part of the text"
+        );
+        assert_eq!(
+            normalize_task_text("Keep <!--rem:not-an-id--> it"),
+            "Keep <!--rem:not-an-id--> it"
+        );
+    }
+
+    #[test]
+    fn a_task_carried_with_its_reminder_is_already_in_the_backlog() {
+        let backlog = parse("## Soon\n- [ ] Renew the passport\n");
+        assert!(
+            backlog.contains_task("Renew the passport (@2026-12-02 09:00) <!--rem:2f6b08e19a5c-->")
         );
     }
 

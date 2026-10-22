@@ -26,8 +26,9 @@ These are binding for any agent working in this vault:
 3. **Never write under `.thock/`, `.claude/`, or `.gemini/`.** Thock owns
    that machinery. Two exceptions, both for skills, never incidental:
    state markers a skill explicitly documents (ready and done markers under
-   `.thock/state/`), and `.thock/config.toml` when a skill is changing a
-   setting the user explicitly asked for (the Set Language ritual does).
+   `.thock/state/`), and `.thock/config.toml` or `.thock/reminders.toml`
+   when a skill is changing a setting the user explicitly asked for (the Set
+   Language ritual does).
 4. **Create-if-missing.** Daily and weekly notes may not exist yet —
    creating them from `templates/` is normal. Never treat a missing file or
    folder as an error.
@@ -60,6 +61,7 @@ in that language, within the limits the section names.
 - `daily/YYYY-MM-DD.md` — daily notes; `weekly/YYYY-Www.md` — weekly notes
   (new ones come from `templates/daily.md` and `templates/weekly.md`).
 - `backlog.md` — the Soon / Someday / Completed task lists.
+- `reminders.md` — the index of every reminder (see Reminders below).
 - `profile.md`: who the user is, what they track, and what you may pull in
   on their behalf (when the Set Profile ritual has run).
 - `memory/`: what past sessions learned about the user. `index.md` is the
@@ -84,6 +86,24 @@ in that language, within the limits the section names.
   `skills/thock/set-profile.md` (the interview behind `profile.md`),
   `skills/thock/reflect.md` (which maintains `memory/`), and
   `skills/thock/customize-app.md` (the app's settings and shortcuts).
+
+## Reminders
+
+A date at the end of a line makes it a reminder, which Thock rings on the
+desk and the phone: `(@YYYY-MM-DD HH:MM)`, `(@YYYY-MM-DD)` for a day with no
+time, or `(@HH:MM)` inside a daily note, where it means that note's day.
+
+- To set one, add the token at the end of the line it is about. A reminder
+  with nowhere else to live is a task under `## Open` in `reminders.md`,
+  like `- [ ] Call the bank (@2026-10-22 10:00)`.
+- Close it by ticking its task, or in a sentence by striking the token,
+  `~~(@2026-10-22)~~`. Move it by rewriting the token. Drop it by deleting
+  the token and keeping the rest of the line.
+- Never write or change a `<!--rem:…-->` id; Thock adds them and keeps
+  `reminders.md`. Edit a reminder on its own line, found by that id, not on
+  the links in `reminders.md` or the copies under a daily note's
+  `### Reminders`.
+- When you only mean to show a token, write it in code, as this file does.
 
 ## Rituals
 
