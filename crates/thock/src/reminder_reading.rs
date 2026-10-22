@@ -76,13 +76,16 @@ pub fn presets(now: NaiveDateTime, tomorrow_at: NaiveTime) -> Vec<Preset> {
             reading: at(today, NaiveTime::from_hms_opt(17, 0, 0)),
         });
     }
-    let tomorrow = today + Days::new(1);
+    let Some(tomorrow) = today.checked_add_days(Days::new(1)) else {
+        return presets;
+    };
     presets.push(Preset {
         label: "Tomorrow",
         reading: at(tomorrow, Some(tomorrow_at)),
     });
-    let monday = next_weekday(today, Weekday::Mon);
-    if monday != tomorrow {
+    if let Some(monday) = next_weekday(today, Weekday::Mon)
+        && monday != tomorrow
+    {
         presets.push(Preset {
             label: "Monday",
             reading: at(monday, Some(tomorrow_at)),
@@ -158,12 +161,11 @@ fn parse_at(
     let can_time = parsed.times.is_empty() && !parsed.exact;
 
     if can_date {
-        let date = match word {
-            "today" | "tod" => Some(today),
-            "tomorrow" | "tom" | "tmr" | "tmrw" => Some(today + Days::new(1)),
-            _ => parse_weekday(word)
-                .map(|weekday| next_weekday(today, weekday))
-                .or_else(|| NaiveDate::parse_from_str(word, "%Y-%m-%d").ok()),
+        let date = match (word, parse_weekday(word)) {
+            ("today" | "tod", _) => Some(today),
+            ("tomorrow" | "tom" | "tmr" | "tmrw", _) => Some(today.checked_add_days(Days::new(1))?),
+            (_, Some(weekday)) => Some(next_weekday(today, weekday)?),
+            _ => NaiveDate::parse_from_str(word, "%Y-%m-%d").ok(),
         };
         if let Some(date) = date {
             parsed.date = Some(date);
@@ -171,13 +173,14 @@ fn parse_at(
         }
 
         if word == "next" {
-            let monday_next_week = next_weekday(today, Weekday::Mon);
-            let date = match next {
-                Some("week") => Some(monday_next_week),
-                Some(next) => parse_weekday(next).map(|weekday| {
-                    monday_next_week + Days::new(u64::from(weekday.num_days_from_monday()))
-                }),
-                None => None,
+            let monday_next_week = next_weekday(today, Weekday::Mon)?;
+            let date = match next.map(|next| (next, parse_weekday(next))) {
+                Some(("week", _)) => Some(monday_next_week),
+                Some((_, Some(weekday))) => Some(
+                    monday_next_week
+                        .checked_add_days(Days::new(u64::from(weekday.num_days_from_monday())))?,
+                ),
+                _ => None,
             };
             if let Some(date) = date {
                 parsed.date = Some(date);
@@ -202,8 +205,8 @@ fn parse_at(
         {
             let amount = i64::from(amount);
             let offset = match unit {
-                "m" | "min" | "mins" | "minute" | "minutes" => Some(Duration::minutes(amount)),
-                "h" | "hr" | "hrs" | "hour" | "hours" => Some(Duration::hours(amount)),
+                "m" | "min" | "mins" | "minute" | "minutes" => Some(Duration::try_minutes(amount)?),
+                "h" | "hr" | "hrs" | "hour" | "hours" => Some(Duration::try_hours(amount)?),
                 _ => None,
             };
             if let Some(offset) = offset
@@ -217,11 +220,11 @@ fn parse_at(
             }
             let days = match unit {
                 "d" | "day" | "days" => Some(amount),
-                "w" | "wk" | "wks" | "week" | "weeks" => Some(amount * 7),
+                "w" | "wk" | "wks" | "week" | "weeks" => Some(amount.checked_mul(7)?),
                 _ => None,
             };
             if let Some(days) = days {
-                parsed.date = Some(today + Days::new(u64::try_from(days).ok()?));
+                parsed.date = Some(today.checked_add_days(Days::new(u64::try_from(days).ok()?))?);
                 return Some(3);
             }
         }
@@ -280,19 +283,19 @@ fn resolve(parsed: &Parsed, now: NaiveDateTime) -> Vec<Reading> {
         }],
         (date, times) => times
             .iter()
-            .map(|&time| {
+            .filter_map(|&time| {
                 let date_named = date.is_some();
                 let date = date.unwrap_or(today);
                 let past_today = date == today && time <= now.time();
-                Reading {
+                Some(Reading {
                     date: if past_today {
-                        date + Days::new(1)
+                        date.checked_add_days(Days::new(1))?
                     } else {
                         date
                     },
                     time: Some(time),
                     already_past: date_named && (past_today || date < today),
-                }
+                })
             })
             .collect(),
     };
@@ -301,10 +304,11 @@ fn resolve(parsed: &Parsed, now: NaiveDateTime) -> Vec<Reading> {
     readings
 }
 
-/// The first `weekday` after `today`; a weekday never means today.
-fn next_weekday(today: NaiveDate, weekday: Weekday) -> NaiveDate {
+/// The first `weekday` after `today`; a weekday never means today. `None`
+/// past the last date chrono can hold.
+fn next_weekday(today: NaiveDate, weekday: Weekday) -> Option<NaiveDate> {
     let ahead = (weekday.num_days_from_monday() + 7 - today.weekday().num_days_from_monday()) % 7;
-    today + Days::new(u64::from(if ahead == 0 { 7 } else { ahead }))
+    today.checked_add_days(Days::new(u64::from(if ahead == 0 { 7 } else { ahead })))
 }
 
 /// This year's `month`/`day`, or next year's once this year's has gone by.
@@ -584,5 +588,29 @@ mod tests {
                 preset("Monday", at(date(10, 26), 8, 30)),
             ]
         );
+    }
+
+    #[test]
+    fn readings_past_the_last_date_are_dropped_not_panicked_on() {
+        for query in [
+            "in 99999999 days",
+            "in 4294967295 weeks",
+            "in 4294967295 hours",
+        ] {
+            assert_eq!(read(query, now()).readings, [], "{query:?}");
+        }
+        // The most minutes a query can name is about 8,000 years: still a date.
+        assert_eq!(read("in 4294967295 min", now()).readings.len(), 1);
+        let last = NaiveDate::MAX.and_time(time(23, 0));
+        for query in ["tomorrow", "fri", "next mon", "next week", "22:00", "10"] {
+            assert!(
+                read(query, last)
+                    .readings
+                    .iter()
+                    .all(|reading| reading.date == NaiveDate::MAX),
+                "{query:?}"
+            );
+        }
+        assert_eq!(presets(last, time(9, 0)), []);
     }
 }
