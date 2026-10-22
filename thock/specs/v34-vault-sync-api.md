@@ -508,6 +508,11 @@ feed to go to, the server sends one silent push per thirty-second burst:
 
 The phone treats it exactly like a reconnect: pull, then read `GET /v1/vault`.
 
+The push goes out with `apns-push-type: background` and `apns-priority: 5` to the app's bundle id. When
+APNs answers 410 or `BadDeviceToken` the server forgets the token, so the phone sends its token with
+`PATCH /v1/vault/devices/me` every time iOS hands it one, including on every launch. The secrets the
+service needs are in `thock/services/plus/README.md`, *Silent push*.
+
 ### 6.6 Entitlement
 
 `GET /v1/entitlement` (V25) gains one optional object, present when the user has a vault:

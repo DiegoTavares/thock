@@ -17,6 +17,7 @@ queues the phone's writes until the desk applies them.
 - `vault_store.go`: vaults, devices, files, writes and pairings; versions and seqs under a row lock.
 - `blobs.go`: the blob store interface and the local store that serves signed URLs itself.
 - `feed.go`: the server-sent-events hub, the push interface with its logging fake, push coalescing.
+- `apns.go`: the APNs client (HTTP/2, ES256 provider token) that sends the silent push.
 
 No Dockerfile: Cloud Run buildpacks build it from source.
 
@@ -169,8 +170,8 @@ curl -N -H "Authorization: Bearer $PHONE" localhost:8080/v1/vault/feed
 ```
 
 Uploads are begin (`POST /v1/vault/files/{path}`), `PUT` the envelope to the returned URL, then
-`POST /v1/vault/files/{path}/commit`. Without APNs credentials pushes are logged, not sent; the
-`pusher` interface in `feed.go` is where a real client goes. A sweeper runs hourly and prunes lapsed
+`POST /v1/vault/files/{path}/commit`. Without APNs credentials pushes are logged, not sent (see
+*Silent push* below). A sweeper runs hourly and prunes lapsed
 vaults after 30 days, uploads begun but never committed after an hour, tombstones after 30 days,
 acked writes after a week, and spent pairing codes.
 
@@ -204,3 +205,27 @@ FEEDBACK_GITHUB_TOKEN='github_pat_...' ./deploy.sh      # add or rotate the feed
 ```
 
 Without it the route answers `503 feedback_unavailable` and the phone says reporting isn't set up.
+
+## Silent push
+
+When the desk changes the vault and no phone holds the feed, the service sends the phone one silent
+push per thirty seconds (`content-available: 1`, `apns-push-type: background`, priority 5; payload
+in the contract §6.5), and the phone syncs. The phone hands its token over at pairing
+(`apns_token` in `POST /v1/vault/pair`) and whenever iOS gives it a new one
+(`PATCH /v1/vault/devices/me` with `{"apns_token": "<hex>"}`, or `null` to stop). APNs answering
+410 or `BadDeviceToken` makes the service forget the token until the phone sends another.
+
+| Variable | Meaning |
+|---|---|
+| `APNS_KEY` | The contents of the `.p8` APNs auth key (Certificates, Identifiers & Profiles → Keys, with Apple Push Notifications service enabled). Unset, pushes are logged, not sent. Secret `apns-auth-key`. |
+| `APNS_KEY_ID` | The key's 10-character id. Required with `APNS_KEY`. Secret `apns-key-id`. |
+| `APNS_TEAM_ID` | The developer team; defaults to `KY338LSPPB`. |
+| `APNS_TOPIC` | The app's bundle id; defaults to `com.thethock.ios`. |
+| `APNS_ENVIRONMENT` | `production` (default: TestFlight and App Store builds) or `sandbox` (a build run from Xcode). A token from the other environment is refused as `BadDeviceToken` and forgotten; the phone sends it again on its next launch. |
+
+```sh
+APNS_KEY="$(cat AuthKey_ABC123DEFG.p8)" APNS_KEY_ID=ABC123DEFG ./deploy.sh   # add or rotate the APNs key
+```
+
+The App ID needs the Push Notifications capability and the app the `aps-environment` entitlement,
+or iOS never hands it a token.

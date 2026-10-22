@@ -1144,7 +1144,14 @@ func (s *server) sendPush(vaultID string) {
 	if err != nil {
 		return
 	}
-	if err := s.pusher.push(ctx, phone.APNSToken, payload); err != nil {
+	err = s.pusher.push(ctx, phone.APNSToken, payload)
+	switch {
+	case errors.Is(err, errPushTokenGone):
+		logf("forgetting the push token of vault %s's phone: %v", vaultID, err)
+		if err := s.store.forgetAPNSToken(ctx, phone.ID, phone.APNSToken); err != nil {
+			logf("error: forgetting a push token: %v", err)
+		}
+	case err != nil:
 		logf("warning: pushing to the phone of vault %s: %v", vaultID, err)
 	}
 }

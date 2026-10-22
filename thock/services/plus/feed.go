@@ -166,9 +166,9 @@ func (h *feedHub) serve(w http.ResponseWriter, r *http.Request, vaultID string, 
 
 // --- push ---
 
-// pusher delivers a silent push to the phone. The real client (APNs over
-// HTTP/2 with a token-based key) is configuration away; the logging fake is
-// what runs without one and what the tests inspect.
+// pusher delivers a silent push to the phone: apnsPusher (apns.go) when an
+// APNs key is configured, the logging fake otherwise. An error wrapping
+// errPushTokenGone tells the caller to forget the token.
 type pusher interface {
 	push(ctx context.Context, apnsToken string, payload []byte) error
 }
