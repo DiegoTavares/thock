@@ -8,7 +8,7 @@ use crate::backlog_panel::{
     RevealBacklogTask,
 };
 use crate::backlog_panel::{BacklogFolds, BacklogPanel, BacklogView, ToggleBacklogFocus};
-use crate::day_plan::{DayPlan, ItemTiming, ItemWeight, PlanItem, parse_day_plan};
+use crate::day_plan::{DayPlan, ItemTiming, ItemWeight, PlanItem};
 use crate::day_planner_panel::{DayPlannerPanel, ToggleDayPlannerFocus};
 use crate::notes::NoteKind;
 use crate::reminders_panel::{
@@ -487,7 +487,15 @@ impl DeskPanel {
         let Some(vault) = &self.vault else {
             return;
         };
-        let plan = parse_day_plan(&buffer.read(cx).text(), &vault.config.day_planner);
+        let Some(date) = self.today.as_ref().map(|today| today.date) else {
+            return;
+        };
+        let reminders = crate::day_planner_panel::plan_reminders(&self.project, date, cx);
+        let plan = crate::day_plan::parse_day_plan_for(
+            &buffer.read(cx).text(),
+            &vault.config.day_planner,
+            &reminders,
+        );
         if let Some(today) = &mut self.today
             && today.plan != plan
         {
@@ -806,6 +814,7 @@ impl Panel for DeskPanel {
 mod tests {
     use super::*;
     use crate::day_plan::DayPlannerConfig;
+    use crate::day_plan::parse_day_plan;
     use editor::Editor;
     use fs::{FakeFs, Fs as _};
     use gpui::{KeyBinding, TestAppContext, VisualTestContext, px, size};

@@ -25,7 +25,7 @@ use util::ResultExt as _;
 use workspace::Workspace;
 
 use crate::calendar_service::{self, CalendarService};
-use crate::day_plan::{self, DayPlan, PlacedBlock, PlanItem, parse_day_plan};
+use crate::day_plan::{self, DayPlan, PlacedBlock, PlanItem};
 use crate::markdown_text::render_markdown_row;
 use crate::notes::{NoteKind, format_date};
 use crate::reminder_service;
@@ -314,7 +314,7 @@ impl DayPlannerPanel {
                 this.schedule_reparse(cx);
             }
         });
-        let plan = self.parse_editor_plan(&editor, cx);
+        let plan = self.parse_editor_plan(&editor, date, cx);
         self.set_active(
             Some(ActiveNote {
                 source: NoteSource::Editor(editor.downgrade()),
@@ -380,7 +380,7 @@ impl DayPlannerPanel {
                         this.schedule_reparse(cx);
                     }
                 });
-                let plan = this.parse_text_plan(&buffer.read(cx).text());
+                let plan = this.parse_text_plan(&buffer.read(cx).text(), today, cx);
                 this.set_active(
                     Some(ActiveNote {
                         source: NoteSource::Buffer(buffer),
@@ -423,16 +423,17 @@ impl DayPlannerPanel {
         Some((editor, date))
     }
 
-    fn parse_editor_plan(&self, editor: &Entity<Editor>, cx: &App) -> DayPlan {
+    fn parse_editor_plan(&self, editor: &Entity<Editor>, date: NaiveDate, cx: &App) -> DayPlan {
         let text = editor.read(cx).buffer().read(cx).snapshot(cx).text();
-        self.parse_text_plan(&text)
+        self.parse_text_plan(&text, date, cx)
     }
 
-    fn parse_text_plan(&self, text: &str) -> DayPlan {
+    fn parse_text_plan(&self, text: &str, date: NaiveDate, cx: &App) -> DayPlan {
         let VaultStatus::Valid(vault) = &self.vault_status else {
             return DayPlan::default();
         };
-        parse_day_plan(text, &vault.config.day_planner)
+        let reminders = plan_reminders(&self.project, date, cx);
+        day_plan::parse_day_plan_for(text, &vault.config.day_planner, &reminders)
     }
 
     fn schedule_reparse(&mut self, cx: &mut Context<Self>) {
@@ -446,14 +447,15 @@ impl DayPlannerPanel {
         let Some(active) = &self.active else {
             return;
         };
+        let date = active.date;
         let plan = match &active.source {
             NoteSource::Editor(editor) => {
                 let Some(editor) = editor.upgrade() else {
                     return;
                 };
-                self.parse_editor_plan(&editor, cx)
+                self.parse_editor_plan(&editor, date, cx)
             }
-            NoteSource::Buffer(buffer) => self.parse_text_plan(&buffer.read(cx).text()),
+            NoteSource::Buffer(buffer) => self.parse_text_plan(&buffer.read(cx).text(), date, cx),
         };
         if let Some(active) = &mut self.active
             && active.plan != plan
@@ -1191,6 +1193,23 @@ impl DayPlannerPanel {
     }
 }
 
+/// What a plan of `date`'s note reads reminders by: the day, and the day
+/// section's headings from the vault's reminder settings (the defaults
+/// before the service has loaded them).
+pub(crate) fn plan_reminders(
+    project: &Entity<Project>,
+    date: NaiveDate,
+    cx: &App,
+) -> day_plan::PlanReminders {
+    let day_headings = crate::reminder_service::service_for_project(project, cx)
+        .map(|service| service.read(cx).settings().day_headings.clone())
+        .unwrap_or_else(|| day_plan::PlanReminders::default().day_headings);
+    day_plan::PlanReminders {
+        day: Some(date),
+        day_headings,
+    }
+}
+
 fn min_visual_minutes() -> u32 {
     (MIN_BLOCK_PX / HOUR_HEIGHT * 60.0).ceil() as u32
 }
@@ -1295,6 +1314,7 @@ impl Focusable for DayPlannerPanel {
 mod tests {
     use super::*;
     use crate::backlog_panel::BacklogFolds;
+    use crate::day_plan::parse_day_plan;
     use crate::desk_panel::{DeskPanel, DeskTab};
     use fs::FakeFs;
     use gpui::{KeyBinding, TestAppContext, VisualTestContext};
