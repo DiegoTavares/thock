@@ -21,6 +21,12 @@ public struct ClockTime: Hashable, Comparable, Sendable, CustomStringConvertible
         self.minute = minute
     }
 
+    /// `hour:minute` held to 00:00–23:59.
+    public init(clampingHour hour: Int, minute: Int) {
+        self.hour = min(max(hour, 0), 23)
+        self.minute = min(max(minute, 0), 59)
+    }
+
     /// `H:MM` or `HH:MM`, 00:00 to 23:59.
     public init?(_ text: String) {
         guard let time = Reminders.parseClock(Array(text.utf8)[...]) else { return nil }
@@ -749,6 +755,13 @@ public enum Reminders {
     }
 
     // MARK: Display text
+
+    /// `text` without its counting token, the words around it kept one
+    /// space apart, as `reminderText` removes it.
+    public static func removingToken(_ text: String) -> String {
+        guard let token = parseLine(text, day: nil)?.token else { return text }
+        return removeRange(Array(text.utf8)[...], token.range)
+    }
 
     /// The words a label shows for a reminder line: no list marker, checkbox,
     /// planner time, token or trailing comments (§4.3, §7.1).

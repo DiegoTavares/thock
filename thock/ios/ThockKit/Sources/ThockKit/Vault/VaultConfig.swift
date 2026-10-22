@@ -150,8 +150,62 @@ public struct NotesConfig: Equatable, Sendable {
     public var template: String
 }
 
-/// What the phone reads from `.thock/config.toml` and `.thock/inbox.toml`.
-/// It never writes either (V33 §14).
+/// `.thock/reminders.toml` (V45 §12), as the desk's `parse_reminder_settings`
+/// reads it. A missing file, a missing key or a value the phone cannot use
+/// is the default: the desk reports a bad value, the phone just carries on.
+public struct ReminderSettings: Equatable, Sendable {
+    public static let path = ".thock/reminders.toml"
+
+    /// The index, from the vault root.
+    public var index = "reminders.md"
+    /// Heading names, matched loosely (V26). The first of each is written.
+    public var openHeadings = ["Open"]
+    public var doneHeadings = ["Done"]
+    public var dayHeadings = [Reminders.defaultDayHeading]
+    /// When a reminder with no time rings.
+    public var dateOnlyAt = ClockTime(clampingHour: 9, minute: 0)
+    /// How far *In 1 hour* pushes a reminder.
+    public var snoozeMinutes = 60
+    /// The time of *Tomorrow 09:00* and the reschedule choices.
+    public var tomorrowAt = ClockTime(clampingHour: 9, minute: 0)
+
+    public init() {}
+
+    public init(_ text: String?) {
+        self.init()
+        let values = MiniTOML.parse(text ?? "")
+        if let index = values["index"]?.string?.trimmingCharacters(in: .whitespaces), Self.isVaultMarkdownPath(index) {
+            self.index = index
+        }
+        func names(_ key: String, _ fallback: [String]) -> [String] {
+            guard case .array(let items)? = values["headings.\(key)"] else { return fallback }
+            let cleaned = items.compactMap { $0.string?.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            return cleaned.isEmpty ? fallback : cleaned
+        }
+        openHeadings = names("open", openHeadings)
+        doneHeadings = names("done", doneHeadings)
+        dayHeadings = names("day", dayHeadings)
+        func time(_ key: String, _ fallback: ClockTime) -> ClockTime {
+            guard let text = values["ring.\(key)"]?.string?.trimmingCharacters(in: .whitespaces),
+                  text.utf8.count == 5, let time = ClockTime(text)
+            else { return fallback }
+            return time
+        }
+        dateOnlyAt = time("date_only_at", dateOnlyAt)
+        tomorrowAt = time("tomorrow_at", tomorrowAt)
+        if case .number(let minutes)? = values["ring.snooze_minutes"], minutes >= 0, minutes == minutes.rounded() {
+            snoozeMinutes = min(max(Int(minutes), 1), 24 * 60)
+        }
+    }
+
+    static func isVaultMarkdownPath(_ path: String) -> Bool {
+        !path.hasPrefix("/") && !path.contains("\\") && path.lowercased().hasSuffix(".md")
+            && path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+    }
+}
+
+/// What the phone reads from `.thock/config.toml`, `.thock/inbox.toml` and
+/// `.thock/reminders.toml`. It never writes any of them (V33 §14).
 public struct VaultConfig: Equatable, Sendable {
     public static let configPath = ".thock/config.toml"
     public static let inboxConfigPath = ".thock/inbox.toml"
@@ -182,11 +236,13 @@ public struct VaultConfig: Equatable, Sendable {
     public var languageTag: String?
     /// The cap on `memory/index.md` in the agent's context (V28 decision 3).
     public var memoryIndexLines = 120
+    public var reminders = ReminderSettings()
 
     public init() {}
 
-    public init(config: String?, inboxConfig: String? = nil) {
+    public init(config: String?, inboxConfig: String? = nil, remindersConfig: String? = nil) {
         self.init()
+        reminders = ReminderSettings(remindersConfig)
         let values = MiniTOML.parse(config ?? "")
         func text(_ key: String) -> String? {
             guard let value = values[key]?.string?.trimmingCharacters(in: .whitespaces), !value.isEmpty else { return nil }
@@ -278,15 +334,24 @@ public struct VaultConfig: Equatable, Sendable {
         }
     }
 
-    /// The day named by a path under the daily folder, when the vault uses
-    /// the shipped `YYYY-MM-DD` names; any other pattern cannot be read back.
+    /// The day named by a path under the daily folder, read back through
+    /// the vault's filename format as the desk reads it (V45 §4.2).
     public func day(ofDailyPath path: String) -> VaultDay? {
-        guard daily.filename == "YYYY-MM-DD" else { return nil }
-        let prefix = daily.dir.isEmpty ? "" : daily.dir + "/"
-        guard path.hasPrefix(prefix), path.hasSuffix(".md") else { return nil }
-        let stem = path.dropFirst(prefix.count).dropLast(3)
-        guard !stem.contains("/") else { return nil }
-        return VaultDay(iso: String(stem))
+        dailyNotes.day(of: path)
+    }
+
+    public var dailyNotes: DailyNotes {
+        DailyNotes(dir: daily.dir, filename: daily.filename)
+    }
+
+    /// What the reminder grammar needs to read this vault's notes.
+    public var reminderConfig: ReminderConfig {
+        ReminderConfig(daily: dailyNotes, dayHeadings: reminders.dayHeadings)
+    }
+
+    /// The notes a token can never be a reminder in: the templates' folders.
+    public var templatePaths: [String] {
+        [daily.template, weekly.template]
     }
 
     /// `.` as a folder is the vault's root.

@@ -43,6 +43,11 @@ public struct PlannerItem: Identifiable, Equatable, Sendable {
     public var ordinal: Int
     public var indent: String
     public var marker: Character
+    /// The reminder the line carries (V45 §4), drawn as its chip.
+    public var reminder: LineReminder? = nil
+    /// A line the desk keeps in the day's Reminders section (§7.1): a copy
+    /// of a reminder that lives in another note.
+    public var mirror: MirrorLine? = nil
 }
 
 public struct PlannerGroup: Identifiable, Equatable, Sendable {
@@ -103,8 +108,10 @@ public struct NoteView: Equatable, Sendable {
     public var planner: Planner
     public var journal: Journal
 
-    public init(text: String, config: VaultConfig, kind: NoteKind = .daily) {
+    /// `day` is the note's day, for a token that names only a time.
+    public init(text: String, config: VaultConfig, kind: NoteKind = .daily, day: VaultDay? = nil) {
         self.kind = kind
+        let reading = Reading(day: kind == .daily ? day : nil, dayHeadings: config.reminders.dayHeadings)
         let file = TextFile(text)
         let lines = file.lines.map(\.text)
         let headings = file.headings()
@@ -159,11 +166,11 @@ public struct NoteView: Equatable, Sendable {
                 kind = .prose
             }
             let blocks = Blocks.parse(lines: Array(lines[(heading.index + 1)..<end]), firstLine: heading.index + 1, alreadyInsideNote: true)
-            let items = kind == .prose ? Self.checklist(file: file, heading: heading, headings: headings).items : []
+            let items = kind == .prose ? Self.checklist(file: file, heading: heading, headings: headings, reading: reading).items : []
             cards.append(NoteCard(id: heading.index, kind: kind, title: Inline.plainText(heading.text), heading: Self.reference(heading, in: headings), blocks: blocks, items: items))
         }
         self.cards = cards
-        self.planner = Self.planner(file: file, heading: plannerHeading, headings: headings, names: checklistNames)
+        self.planner = Self.planner(file: file, heading: plannerHeading, headings: headings, names: checklistNames, reading: reading)
         self.journal = Self.journal(file: file, heading: journalHeading, headings: headings, config: config)
     }
 
@@ -197,18 +204,24 @@ public struct NoteView: Equatable, Sendable {
         return HeadingRef(text: heading.text, level: heading.level, ordinal: ordinal)
     }
 
-    static func planner(file: TextFile, heading: HeadingLine?, headings: [HeadingLine], names: [String]) -> Planner {
+    /// What reading a checklist's reminders needs from the note.
+    struct Reading {
+        var day: VaultDay?
+        var dayHeadings: [String]
+    }
+
+    static func planner(file: TextFile, heading: HeadingLine?, headings: [HeadingLine], names: [String], reading: Reading) -> Planner {
         guard let heading else {
             let reference = HeadingRef(text: names.first ?? "Day planner", level: 2)
             return Planner(heading: reference, exists: false, groups: [PlannerGroup(id: -1, name: nil, heading: reference, items: [])])
         }
-        return checklist(file: file, heading: heading, headings: headings)
+        return checklist(file: file, heading: heading, headings: headings, reading: reading)
     }
 
     /// The checklist lines of one section, grouped by its subsections. Every
     /// line names the section's own heading, so a write finds it whichever
     /// group it sits in.
-    static func checklist(file: TextFile, heading: HeadingLine, headings: [HeadingLine]) -> Planner {
+    static func checklist(file: TextFile, heading: HeadingLine, headings: [HeadingLine], reading: Reading) -> Planner {
         let reference = reference(heading, in: headings)
         let section = file.section(of: heading)
         let mask = file.contentMask()
@@ -235,7 +248,21 @@ public struct NoteView: Equatable, Sendable {
                 continue
             }
             guard let item = Blocks.listItem(text), case .task(let done) = item.kind else { continue }
-            let withoutComment = Self.strippingTrailingComments(item.text)
+            let reminder = Reminders.parseLine(text, day: reading.day)
+            // A copy the desk keeps in the day's Reminders section (V45 §7.1)
+            // reads as its text, struck when it moved, dropped or went.
+            let inDaySection = groups[groups.count - 1].name.map { name in reading.dayHeadings.contains { Reminders.headingMatches(name, $0) } } ?? false
+            if inDaySection, reminder?.token == nil, let mirror = MirrorLine(parsing: text) {
+                let time = TimePrefix.parse(withoutLeadingCheckbox(text) ?? "")
+                guard !SyncCore.lineIdentity(text).isEmpty, !mirror.text.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+                groups[groups.count - 1].items.append(PlannerItem(
+                    line: index, raw: text, done: done, time: mirror.time == nil ? nil : time,
+                    label: Inline.plainText(mirror.text), struck: mirror.mark != nil, isCalendar: false,
+                    heading: reference, hash: hash, ordinal: ordinal, indent: item.indent, marker: text.trimmingLeadingWhitespace().first ?? "-",
+                    reminder: reminder, mirror: mirror))
+                continue
+            }
+            let withoutComment = Reminders.removingToken(Self.strippingTrailingComments(item.text))
             var time = TimePrefix.parse(withoutComment)
             var label = time.map { String($0.rest) } ?? withoutComment
             var struck = false
@@ -259,7 +286,7 @@ public struct NoteView: Equatable, Sendable {
             groups[groups.count - 1].items.append(PlannerItem(
                 line: index, raw: text, done: done, time: time,
                 label: label.trimmingCharacters(in: .whitespaces), struck: struck, isCalendar: isCalendar,
-                heading: reference, hash: hash, ordinal: ordinal, indent: item.indent, marker: marker))
+                heading: reference, hash: hash, ordinal: ordinal, indent: item.indent, marker: marker, reminder: reminder))
         }
         for position in groups.indices {
             let start = position == 0 ? section.start : groups[position].id + 1
@@ -269,6 +296,12 @@ public struct NoteView: Equatable, Sendable {
             groups[position].notes = Blocks.parse(lines: lines, firstLine: start, alreadyInsideNote: true).filter(Self.isPlannerNote)
         }
         return Planner(heading: reference, exists: true, groups: groups)
+    }
+
+    /// The text after a task line's checkbox.
+    static func withoutLeadingCheckbox(_ line: String) -> String? {
+        guard let item = Blocks.listItem(line), case .task = item.kind else { return nil }
+        return item.text
     }
 
     /// Paragraphs, quotes and top-level bullets. The template's italic hint
@@ -335,6 +368,7 @@ public enum ReceiptState: Equatable, Sendable {
     case discarded(day: VaultDay?)
     case addedToToday
     case addedToBacklog
+    case addedToReminders
     /// Swiped away on the phone: the note is in `archives/inbox/` (V40 §8).
     case archived(day: VaultDay?)
     case gone

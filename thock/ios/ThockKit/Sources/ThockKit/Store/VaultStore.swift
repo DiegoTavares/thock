@@ -165,7 +165,7 @@ public final class VaultStore: @unchecked Sendable {
     }
 
     public var config: VaultConfig {
-        VaultConfig(config: content(VaultConfig.configPath), inboxConfig: content(VaultConfig.inboxConfigPath))
+        VaultConfig(config: content(VaultConfig.configPath), inboxConfig: content(VaultConfig.inboxConfigPath), remindersConfig: content(ReminderSettings.path))
     }
 
     /// The expanded template a note would be created from, when the vault has

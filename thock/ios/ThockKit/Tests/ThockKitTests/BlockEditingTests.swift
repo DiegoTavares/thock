@@ -239,6 +239,14 @@ final class BlockEditingTests: XCTestCase {
         }
     }
 
+    func testEditingAReminderLineKeepsItsTokenAndId() throws {
+        let markdown = "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->\n"
+        let result = try reopened(markdown) { text in
+            text.replaceCharacters(in: try range(of: "plumber", in: text), with: "electrician")
+        }
+        XCTAssertEqual(result.markdown, "- [ ] Call the electrician (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->\n")
+    }
+
     func testEditingNextToAnInlineCommentKeepsIt() throws {
         let result = try reopened("Standup <!--gcal:9f2c-->\n") { text in
             try self.replace("Standup", with: "Daily standup", in: text)

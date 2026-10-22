@@ -48,11 +48,11 @@ public struct VaultSession: Sendable {
     public func view(_ note: NoteID, now: Date = Date()) -> NoteView? {
         let config = config
         if let text = store.content(config.path(note)) {
-            return NoteView(text: text, config: config, kind: note.kind)
+            return NoteView(text: text, config: config, kind: note.kind, day: note.day)
         }
         if case .day(let day) = note, day != today(now: now) { return nil }
         guard let seed = store.seedText(writes(now: now).seed(for: note)) else { return nil }
-        return NoteView(text: seed, config: config, kind: note.kind)
+        return NoteView(text: seed, config: config, kind: note.kind, day: note.day)
     }
 
     // MARK: The calendar
@@ -94,6 +94,10 @@ public struct VaultSession: Sendable {
     /// from its template and is not in the vault yet, it is created from the
     /// template first: without that both ends would make a bare note holding
     /// only the heading the write names.
+    func recordOnNote(_ writes: [PlannedWrite], note: NoteID, now: Date = Date()) throws {
+        try record(writes, on: note, now: now)
+    }
+
     private func record(_ writes: [PlannedWrite], on note: NoteID, now: Date = Date()) throws {
         guard !writes.isEmpty else { return }
         let builder = self.writes(now: now)
@@ -105,10 +109,12 @@ public struct VaultSession: Sendable {
     }
 
     @discardableResult
-    public func capture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], now: Date = Date()) throws -> CaptureRecord? {
+    /// `due` is when a `.reminder` capture rings; other destinations ignore it.
+    public func capture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], due: ReminderDue? = nil, now: Date = Date()) throws -> CaptureRecord? {
         let builder = writes(now: now)
         let template = store.content(config.daily.template)
-        guard let captured = builder.capture(blocks: blocks, destination: destination, images: images, todayNote: noteText(builder.today), template: template, taken: taken) else {
+        let reminder = destination == .reminder ? due.map { ReminderCapture(due: $0, id: newReminderID()) } : nil
+        guard let captured = builder.capture(blocks: blocks, destination: destination, images: images, reminder: reminder, todayNote: noteText(builder.today), template: template, taken: taken) else {
             return nil
         }
         try record(captured.writes)
