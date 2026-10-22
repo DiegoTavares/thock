@@ -162,7 +162,13 @@ The boiler ticks when it starts. Ask about it before the cold comes (@2026-11-02
 - [x] Pay the deposit (@2026-10-19 09:00) <!--rem:51aa02c9d811-->            closed task
 Got the quote back, it's fine. ~~(@2026-10-18 10:00)~~ <!--rem:0d93be7a1c44-->  closed in prose
 - [ ] Send the leak photos to the landlord <!--rem:9e4a21f0b388-->           dropped: id, no token
+> - [ ] Ring the insurer (@2026-10-23) <!--rem:4a7c2e19b0d5-->                 a task in a quote
 ```
+
+A task inside a blockquote, at any depth and with or without the space after each `>`
+(`> > - [ ]`, `>>- [ ]`), is a task: closing ticks its box and leaves the quote markers byte for byte,
+and its label drops them. Quoted prose closes by striking the token, like any prose. This is the
+reminder grammar only; the planner and the backlog still read a quoted line as text.
 
 ## 5. Where reminders live
 

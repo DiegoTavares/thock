@@ -1130,6 +1130,65 @@
           "text": "Then"
         }
       ]
+    },
+    {
+      "name": "tasks in blockquotes",
+      "path": "projects/house.md",
+      "daily": {
+        "dir": "daily",
+        "filename": "YYYY-MM-DD"
+      },
+      "note": "> - [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->\n> > - [x] Paid (@2026-10-19)\n>>- [ ] Tight (@2026-10-22)\n> Ask about it (@2026-11-02)",
+      "reminders": [
+        {
+          "line": 0,
+          "id": "7d3e55a1c0f2",
+          "token": "(@2026-10-21 14:30)",
+          "when": "2026-10-21 14:30",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-21 14:30",
+          "state": "open",
+          "mirror": false,
+          "text": "Call the plumber"
+        },
+        {
+          "line": 1,
+          "id": null,
+          "token": "(@2026-10-19)",
+          "when": "2026-10-19",
+          "struck": false,
+          "task": "done",
+          "due": "2026-10-19",
+          "state": "closed",
+          "mirror": false,
+          "text": "Paid"
+        },
+        {
+          "line": 2,
+          "id": null,
+          "token": "(@2026-10-22)",
+          "when": "2026-10-22",
+          "struck": false,
+          "task": "open",
+          "due": "2026-10-22",
+          "state": "open",
+          "mirror": false,
+          "text": "Tight"
+        },
+        {
+          "line": 3,
+          "id": null,
+          "token": "(@2026-11-02)",
+          "when": "2026-11-02",
+          "struck": false,
+          "task": null,
+          "due": "2026-11-02",
+          "state": "open",
+          "mirror": false,
+          "text": "Ask about it"
+        }
+      ]
     }
   ],
   "mirrors": [
@@ -1404,6 +1463,12 @@
       "comments": "<!-->",
       "edited": "<!-->",
       "strip": "<!-->"
+    },
+    {
+      "line": "> - [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+      "comments": "> - [ ] Call the plumber (@2026-10-21 14:30)",
+      "edited": "> - [ ] Call the plumber",
+      "strip": "> - [ ] Call the plumber"
     }
   ],
   "snoozes": [

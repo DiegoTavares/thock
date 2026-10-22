@@ -959,5 +959,110 @@
       "due": "2026-12-02"
     },
     "after": "Buy stamps (@2026-12-02) <!-- for the cards"
+  },
+  {
+    "name": "close a task in a blockquote",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "> - [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": "> - [x] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->"
+  },
+  {
+    "name": "close a task in a nested blockquote",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "> > - [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": "> > - [x] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->"
+  },
+  {
+    "name": "close a task in a blockquote without spaces",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": ">>- [ ] Call (@2026-10-21)",
+    "edit": {
+      "kind": "close"
+    },
+    "after": ">>- [x] Call (@2026-10-21)"
+  },
+  {
+    "name": "close an indented task in a blockquote",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "  >   - [ ] Call (@2026-10-21)",
+    "edit": {
+      "kind": "close"
+    },
+    "after": "  >   - [x] Call (@2026-10-21)"
+  },
+  {
+    "name": "reopen a task in a blockquote",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "> - [x] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "reopen"
+    },
+    "after": "> - [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->"
+  },
+  {
+    "name": "reopen a struck token in a nested blockquote task",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "> > - [x] Call ~~(@2026-10-21)~~",
+    "edit": {
+      "kind": "reopen"
+    },
+    "after": "> > - [ ] Call (@2026-10-21)"
+  },
+  {
+    "name": "close quoted prose strikes the token",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "> Ask about the boiler (@2026-11-02) <!--rem:7c11e0b4d2a9-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": "> Ask about the boiler ~~(@2026-11-02)~~ <!--rem:7c11e0b4d2a9-->"
+  },
+  {
+    "name": "rewrite a task in a blockquote",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "> - [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-22 09:00"
+    },
+    "after": "> - [ ] Call the plumber (@2026-10-22 09:00) <!--rem:7d3e55a1c0f2-->"
   }
 ]

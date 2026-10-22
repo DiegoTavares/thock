@@ -627,9 +627,20 @@ public enum Reminders {
         return ClockTime(hour: Bytes.number(hours), minute: Bytes.number(minutes))
     }
 
-    /// A list item's checkbox and the UTF-8 offset of the character inside it.
+    /// `text` after its blockquote markers: any depth of `>`, with or
+    /// without the space after each, and the indentation around them.
+    private static func stripQuoteMarkers(_ text: ArraySlice<UInt8>) -> ArraySlice<UInt8> {
+        var rest = Bytes.trimStart(text)
+        while rest.first == UInt8(ascii: ">") {
+            rest = Bytes.trimStart(rest.dropFirst())
+        }
+        return rest
+    }
+
+    /// A list item's checkbox and the UTF-8 offset of the character inside
+    /// it. A task inside a blockquote (`> - [ ] …`) is a task.
     private static func taskOf(_ line: ArraySlice<UInt8>) -> (task: ReminderTask, mark: Int)? {
-        let trimmed = Bytes.trimStart(line)
+        let trimmed = stripQuoteMarkers(line)
         let afterMarker = Bytes.stripListMarker(trimmed)
         guard afterMarker.count != trimmed.count else { return nil }
         let mark = line.count - afterMarker.count + 1
@@ -864,11 +875,12 @@ public enum Reminders {
         return comments
     }
 
-    /// The words a label shows for a reminder line: no list marker, checkbox,
-    /// planner time, token or trailing comments (§4.3, §7.1).
+    /// The words a label shows for a reminder line: no blockquote markers,
+    /// list marker, checkbox, planner time, token or trailing comments
+    /// (§4.3, §7.1).
     public static func reminderText(_ line: String) -> String {
         let text = Array(stripReminder(line).utf8)[...]
-        let trimmed = Bytes.trimStart(text)
+        let trimmed = stripQuoteMarkers(text)
         let item = Bytes.stripListMarker(trimmed)
         let words = item.count < trimmed.count ? Bytes.stripCheckbox(item) : trimmed
         let label = Bytes.string(words)

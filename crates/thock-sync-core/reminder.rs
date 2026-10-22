@@ -604,9 +604,20 @@ fn parse_clock(text: &str) -> Option<NaiveTime> {
     NaiveTime::from_hms_opt(hours.parse().ok()?, minutes.parse().ok()?, 0)
 }
 
+/// `text` after its blockquote markers: any depth of `>`, with or without
+/// the space after each, and the indentation around them.
+fn strip_quote_markers(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    while let Some(inner) = rest.strip_prefix('>') {
+        rest = inner.trim_start();
+    }
+    rest
+}
+
 /// A list item's checkbox and the byte offset of the character inside it.
+/// A task inside a blockquote (`> - [ ] …`) is a task.
 fn task_of(line: &str) -> Option<(Task, usize)> {
-    let trimmed = line.trim_start();
+    let trimmed = strip_quote_markers(line);
     let after_marker = strip_list_marker(trimmed);
     if after_marker.len() == trimmed.len() {
         return None;
@@ -862,11 +873,11 @@ pub fn trailing_metadata_start(text: &str) -> usize {
     }
 }
 
-/// The words a label shows for a reminder line: no list marker, checkbox,
-/// planner time, token or trailing comments (§4.3, §7.1).
+/// The words a label shows for a reminder line: no blockquote markers, list
+/// marker, checkbox, planner time, token or trailing comments (§4.3, §7.1).
 pub fn reminder_text(line: &str) -> String {
     let text = strip_reminder(line);
-    let trimmed = text.trim_start();
+    let trimmed = strip_quote_markers(&text);
     let text = match strip_list_marker(trimmed) {
         item if item.len() < trimmed.len() => strip_checkbox(item),
         prose => prose,
