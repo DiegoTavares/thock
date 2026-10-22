@@ -59,32 +59,33 @@ pub fn read(query: &str, now: NaiveDateTime) -> Readings {
     }
 }
 
-/// The suggestions for an empty query: *Later today 17:00* (only before 16:00), *Tomorrow 09:00*
-/// and *Monday 09:00* (left out when tomorrow is already Monday).
-pub fn presets(now: NaiveDateTime) -> Vec<Preset> {
+/// The suggestions for an empty query: *Later today 17:00* (only before 16:00), then *Tomorrow*
+/// and *Monday* (left out when tomorrow is already Monday) at `tomorrow_at`, the vault's
+/// `[ring] tomorrow_at`.
+pub fn presets(now: NaiveDateTime, tomorrow_at: NaiveTime) -> Vec<Preset> {
     let today = now.date();
-    let at = |date: NaiveDate, hour: u32| Reading {
+    let at = |date: NaiveDate, time: Option<NaiveTime>| Reading {
         date,
-        time: NaiveTime::from_hms_opt(hour, 0, 0),
+        time,
         already_past: false,
     };
     let mut presets = Vec::new();
     if now.hour() < 16 {
         presets.push(Preset {
             label: "Later today",
-            reading: at(today, 17),
+            reading: at(today, NaiveTime::from_hms_opt(17, 0, 0)),
         });
     }
     let tomorrow = today + Days::new(1);
     presets.push(Preset {
         label: "Tomorrow",
-        reading: at(tomorrow, 9),
+        reading: at(tomorrow, Some(tomorrow_at)),
     });
     let monday = next_weekday(today, Weekday::Mon);
     if monday != tomorrow {
         presets.push(Preset {
             label: "Monday",
-            reading: at(monday, 9),
+            reading: at(monday, Some(tomorrow_at)),
         });
     }
     presets
@@ -556,7 +557,7 @@ mod tests {
     fn presets_for_an_empty_query() {
         let preset = |label, reading| Preset { label, reading };
         assert_eq!(
-            presets(now()),
+            presets(now(), time(9, 0)),
             [
                 preset("Later today", at(date(10, 21), 17, 0)),
                 preset("Tomorrow", at(date(10, 22), 9, 0)),
@@ -565,7 +566,7 @@ mod tests {
         );
         let late = date(10, 21).and_time(time(16, 0));
         assert_eq!(
-            presets(late),
+            presets(late, time(9, 0)),
             [
                 preset("Tomorrow", at(date(10, 22), 9, 0)),
                 preset("Monday", at(date(10, 26), 9, 0)),
@@ -573,8 +574,15 @@ mod tests {
         );
         let sunday = date(10, 25).and_time(time(18, 0));
         assert_eq!(
-            presets(sunday),
+            presets(sunday, time(9, 0)),
             [preset("Tomorrow", at(date(10, 26), 9, 0))]
+        );
+        assert_eq!(
+            presets(late, time(8, 30)),
+            [
+                preset("Tomorrow", at(date(10, 22), 8, 30)),
+                preset("Monday", at(date(10, 26), 8, 30)),
+            ]
         );
     }
 }
