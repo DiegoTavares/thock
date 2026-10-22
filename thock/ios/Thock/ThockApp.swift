@@ -52,7 +52,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         // Set before launch ends, so an answer that launched the app arrives.
         UNUserNotificationCenter.current().delegate = AppDelegate.notifier
-        AppDelegate.notifier.registerCategories(tomorrowAt: ReminderSettings().tomorrowAt)
+        AppDelegate.notifier.registerCategories(ReminderSettings())
         return true
     }
 

@@ -114,7 +114,7 @@ public struct VaultSession: Sendable {
         let builder = writes(now: now)
         let template = store.content(config.daily.template)
         let reminder = destination == .reminder ? due.map { ReminderCapture(due: $0, id: newReminderID()) } : nil
-        guard let captured = builder.capture(blocks: blocks, destination: destination, images: images, reminder: reminder, todayNote: noteText(builder.today), template: template, taken: taken) else {
+        guard let captured = builder.capture(blocks: blocks, destination: destination, images: images, reminder: reminder, indexText: store.content(config.reminders.index), todayNote: noteText(builder.today), template: template, taken: taken) else {
             return nil
         }
         try record(captured.writes)

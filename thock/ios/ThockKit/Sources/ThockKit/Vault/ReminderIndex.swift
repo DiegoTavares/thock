@@ -42,6 +42,9 @@ public struct IndexedReminder: Identifiable, Hashable, Sendable {
     public var raw: String?
     public var reminder: LineReminder?
     public var status: ReminderStatus
+    /// Open at home, but its copy in today's Reminders section was ticked on
+    /// this phone: closed until the desk carries the tick home (§5.3).
+    public var closedByCopy = false
 
     /// `reminderText` of the home line.
     public var text: String? {
@@ -60,11 +63,9 @@ public struct IndexedReminder: Identifiable, Hashable, Sendable {
     /// for a removed one, none while it is missing or has no day.
     public func group(today: VaultDay) -> ReminderGroup? {
         switch status {
-        case .removed: return .done
+        case .closed, .dropped, .removed: return .done
         case .missing: return nil
-        case .open, .closed, .dropped:
-            guard let reminder else { return nil }
-            return Reminders.group(state: reminder.state, due: reminder.due, today: today)
+        case .open: return Reminders.group(state: .open, due: due, today: today)
         }
     }
 
@@ -82,21 +83,29 @@ public struct ReminderIndex: Equatable, Sendable {
     public var reminders: [IndexedReminder]
 
     /// `content` reads a note from the vault, `nil` when it is missing.
-    public init(config: VaultConfig, content: (String) -> String?) {
+    /// `todayNote` is today's daily note, whose ticked copies close their
+    /// reminders here before the desk ticks the home line.
+    public init(config: VaultConfig, todayNote: String? = nil, content: (String) -> String?) {
         let settings = config.reminders
         let readerConfig = config.reminderConfig
         path = settings.index
         let indexText = content(settings.index) ?? ""
         let file = TextFile(indexText)
         let headings = file.headings()
-        func ranges(_ names: [String]) -> [Range<Int>] {
-            headings.filter { heading in names.contains { Reminders.headingMatches(heading.text, $0) } }.map { heading in
-                let section = file.section(of: heading)
-                return section.start..<section.end
+        // As the desk's `section_ranges`: each Open or Done heading's rows,
+        // a heading that names both being Open.
+        let sections: [(IndexedReminder.Section, Range<Int>)] = headings.compactMap { heading in
+            let section: IndexedReminder.Section
+            if settings.openHeadings.contains(where: { Reminders.headingMatches(heading.text, $0) }) {
+                section = .open
+            } else if settings.doneHeadings.contains(where: { Reminders.headingMatches(heading.text, $0) }) {
+                section = .done
+            } else {
+                return nil
             }
+            let end = headings.first { $0.index > heading.index && $0.level <= heading.level }?.index ?? file.lines.count
+            return (section, heading.index + 1..<end)
         }
-        let openRanges = ranges(settings.openHeadings)
-        let doneRanges = ranges(settings.doneHeadings)
 
         var notes: [String: [ReminderAppearance]] = [:]
         var texts: [String: [String]] = [:]
@@ -113,19 +122,12 @@ public struct ReminderIndex: Equatable, Sendable {
         for entry in Reminders.parseNote(indexText, path: settings.index, config: readerConfig) {
             guard let id = entry.reminder.id else { continue }
             let entryText = file.lines[entry.line].text
-            let section: IndexedReminder.Section
-            if openRanges.contains(where: { $0.contains(entry.line) }) {
-                section = .open
-            } else if doneRanges.contains(where: { $0.contains(entry.line) }) {
-                section = .done
-            } else {
-                continue
-            }
-            let item = Bytes.trimStart(Array(entryText.utf8)[...])
-            let afterMarker = Bytes.stripListMarker(item)
-            guard afterMarker.count < item.count else { continue }
-            let link = Self.linkTarget(Bytes.string(afterMarker))
-            let home = link.map { $0 + ".md" } ?? settings.index
+            // The innermost range wins, as the desk takes the last match.
+            guard let section = sections.last(where: { $0.1.contains(entry.line) })?.0,
+                  let body = Self.listItemBody(entryText)
+            else { continue }
+            let link = Self.linkTarget(body)
+            let home = link.map(Self.linkPath) ?? settings.index
             var reminder = IndexedReminder(
                 id: id, section: section, link: link, stamp: Self.stamp(entryText), entryLine: entry.line,
                 home: home, line: nil, raw: nil, reminder: nil, status: .missing
@@ -144,6 +146,15 @@ public struct ReminderIndex: Equatable, Sendable {
                 reminder.status = .removed
             }
             reminders.append(reminder)
+        }
+        if let todayNote, let text = content(todayNote) {
+            let ticked = Set(Reminders.parseNote(text, path: todayNote, config: readerConfig)
+                .filter { $0.mirror && $0.reminder.task == .done }
+                .compactMap(\.reminder.id))
+            for position in reminders.indices where reminders[position].status == .open && ticked.contains(reminders[position].id) {
+                reminders[position].status = .closed
+                reminders[position].closedByCopy = true
+            }
         }
         self.reminders = reminders
     }
@@ -171,26 +182,48 @@ public struct ReminderIndex: Equatable, Sendable {
         }.map(\.element)
     }
 
-    /// `[[target]]` or `[[target|alias]]` opening an entry.
-    static func linkTarget(_ item: String) -> String? {
-        guard item.hasPrefix("[["), let close = item.range(of: "]]") else { return nil }
-        let inside = item[item.index(item.startIndex, offsetBy: 2)..<close.lowerBound]
-        let target = inside.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
-        return target.isEmpty ? nil : target
+    /// `[[target]]` or `[[target|alias]]` opening an entry's body.
+    static func linkTarget(_ body: String) -> String? {
+        let bytes = Array(body.utf8)[...]
+        guard Bytes.hasPrefix(bytes, "[["), let close = Bytes.firstRange(of: "]]", in: bytes.dropFirst(2)) else { return nil }
+        let inside = bytes[(bytes.startIndex + 2)..<close.lowerBound]
+        let target = inside.firstIndex(of: UInt8(ascii: "|")).map { inside[..<$0] } ?? inside
+        return Bytes.string(target)
     }
 
-    /// `✅ <date>`, `dropped <date>` or `removed <date>` just before the
-    /// entry's trailing comments.
-    static func stamp(_ line: String) -> IndexedReminder.Stamp? {
-        let body = NoteView.strippingTrailingComments(line)
-        guard let range = body.range(of: #"(✅|dropped|removed) (\d{4}-\d{2}-\d{2})$"#, options: .regularExpression) else { return nil }
-        let words = body[range].split(separator: " ")
-        guard words.count == 2, let day = VaultDay(iso: String(words[1])), DateFormat.validDay(year: day.year, month: day.month, day: day.day) != nil else { return nil }
-        switch words[0] {
-        case "✅": return .done(day)
-        case "dropped": return .dropped(day)
-        default: return .removed(day)
+    /// The vault-relative path a wikilink target names, as the desk's
+    /// `link_path`: trimmed, without a leading slash, `.md` added unless the
+    /// target already ends with it.
+    static func linkPath(_ target: String) -> String {
+        var trimmed = Bytes.trimmed(Array(target.utf8)[...])
+        while trimmed.first == UInt8(ascii: "/") {
+            trimmed = trimmed.dropFirst()
         }
+        let path = Bytes.string(trimmed)
+        return path.lowercased().hasSuffix(".md") ? path : path + ".md"
+    }
+
+    /// A `-`, `*` or `+` item's words, as the desk's `list_item_body`; a
+    /// numbered item is not an entry.
+    static func listItemBody(_ line: String) -> String? {
+        let trimmed = Bytes.trimStart(Array(line.utf8)[...])
+        for marker in ["- ", "* ", "+ "] where Bytes.hasPrefix(trimmed, marker) {
+            return Bytes.string(trimmed.dropFirst(2))
+        }
+        return nil
+    }
+
+    /// `✅ <date>`, ` dropped <date>` or ` removed <date>` closing the words
+    /// before the trailing comments, as the desk's `parse_stamp`.
+    static func stamp(_ line: String) -> IndexedReminder.Stamp? {
+        let head = Bytes.trimEnd(Array(Reminders.withoutTrailingComments(line).utf8)[...])
+        guard head.count >= 10 else { return nil }
+        guard let date = Reminders.parseISODate(head.suffix(10)) else { return nil }
+        let before = Bytes.string(Bytes.trimEnd(head.dropLast(10)))
+        if before.hasSuffix("✅") { return .done(date) }
+        if before.hasSuffix(" dropped") { return .dropped(date) }
+        if before.hasSuffix(" removed") { return .removed(date) }
+        return nil
     }
 
     /// A note split on `\n`, a trailing `\r` belonging to the ending, the
@@ -285,6 +318,19 @@ extension ReminderSettings {
         )
     }
 
+    /// The snooze answer's title: *In 1 hour*, *In 2 hours*, *In 30 min*,
+    /// *In 1 h 30 min*.
+    public var snoozeTitle: String {
+        let hours = snoozeMinutes / 60
+        let rest = snoozeMinutes % 60
+        switch (hours, rest) {
+        case (0, _): return "In \(rest) min"
+        case (1, 0): return "In 1 hour"
+        case (_, 0): return "In \(hours) hours"
+        default: return "In \(hours) h \(rest) min"
+        }
+    }
+
     /// *Tomorrow 09:00*.
     public func tomorrowDue(today: VaultDay) -> ReminderDue {
         ReminderDue(date: today.adding(days: 1), time: tomorrowAt)
@@ -306,11 +352,16 @@ extension PhoneWrites {
         return Reminders.attach(line, due: due, id: id, homeDay: config.day(ofDailyPath: config.reminders.index)) ?? line
     }
 
-    /// An append under the index's Open heading, which a missing index
-    /// gets with the line (V45 §5.1).
-    func indexAppend(_ lines: [String]) -> PlannedWrite {
+    /// An append under the index's Open heading: the first configured name
+    /// the index has, as it spells it, or the first name, which a missing
+    /// heading or index gets with the line (V45 §5.1).
+    func indexAppend(_ lines: [String], indexText: String?) -> PlannedWrite {
         var write = document(.append, path: config.reminders.index)
-        write.heading = HeadingRef(text: config.reminders.openHeadings.first ?? "Open", level: 2)
+        let file = TextFile(indexText ?? "")
+        let headings = file.headings()
+        let names = config.reminders.openHeadings
+        let found = names.lazy.compactMap { name in headings.first { Reminders.headingMatches($0.text, name) } }.first
+        write.heading = found.map { NoteView.reference($0, in: headings) } ?? HeadingRef(text: names.first ?? "Open", level: 2)
         write.lines = lines
         return PlannedWrite(document: write)
     }
@@ -319,7 +370,7 @@ extension PhoneWrites {
     /// and a new id on the line, and a link to it in the index. A line that
     /// is already a reminder keeps its id, is rescheduled, and needs no new
     /// link. `nil` when the line cannot carry a reminder (a calendar line).
-    public func remindMe(raw: String, path: String, heading: HeadingRef?, hash: String, ordinal: Int, due: ReminderDue, id: String) -> [PlannedWrite]? {
+    public func remindMe(raw: String, path: String, heading: HeadingRef?, hash: String, ordinal: Int, due: ReminderDue, id: String, indexText: String?) -> [PlannedWrite]? {
         guard let newLine = Reminders.attach(raw, due: due, id: id, homeDay: config.day(ofDailyPath: path)) else { return nil }
         var write = document(.replaceLine, path: path)
         write.heading = heading
@@ -328,7 +379,7 @@ extension PhoneWrites {
         write.newLine = newLine
         let alreadyIndexed = Reminders.parseLine(raw, day: nil)?.id != nil
         guard !alreadyIndexed, path != config.reminders.index else { return [PlannedWrite(document: write)] }
-        return [PlannedWrite(document: write), indexAppend([Reminders.indexLinkLine(path: path, id: id)])]
+        return [PlannedWrite(document: write), indexAppend([Reminders.indexLinkLine(path: path, id: id)], indexText: indexText)]
     }
 
     /// One edit of a reminder's home line, addressed in the whole file
@@ -373,8 +424,9 @@ extension PhoneWrites {
 extension VaultSession {
     /// The index and its home lines, from the phone's copy. A vault without
     /// `reminders.md` has no reminders, never an error.
-    public func reminderIndex() -> ReminderIndex {
-        ReminderIndex(config: config, content: store.content)
+    public func reminderIndex(now: Date = Date()) -> ReminderIndex {
+        let config = config
+        return ReminderIndex(config: config, todayNote: config.dailyPath(today(now: now)), content: store.content)
     }
 
     /// A new id the index does not hold.
@@ -383,12 +435,12 @@ extension VaultSession {
     }
 
     public func remindMe(_ item: PlannerItem, note: NoteID, due: ReminderDue, now: Date = Date()) throws {
-        guard let writes = writes(now: now).remindMe(raw: item.raw, path: config.path(note), heading: item.heading, hash: item.hash, ordinal: item.ordinal, due: due, id: newReminderID()) else { return }
+        guard let writes = writes(now: now).remindMe(raw: item.raw, path: config.path(note), heading: item.heading, hash: item.hash, ordinal: item.ordinal, due: due, id: newReminderID(), indexText: store.content(config.reminders.index)) else { return }
         try recordOnNote(writes, note: note, now: now)
     }
 
     public func remindMe(_ task: BacklogTask, due: ReminderDue, now: Date = Date()) throws {
-        guard let writes = writes(now: now).remindMe(raw: task.raw, path: config.backlogFile, heading: task.heading, hash: task.hash, ordinal: task.ordinal, due: due, id: newReminderID()) else { return }
+        guard let writes = writes(now: now).remindMe(raw: task.raw, path: config.backlogFile, heading: task.heading, hash: task.hash, ordinal: task.ordinal, due: due, id: newReminderID(), indexText: store.content(config.reminders.index)) else { return }
         try record(writes)
     }
 
@@ -406,6 +458,13 @@ extension VaultSession {
 
     public func dropReminder(_ reminder: IndexedReminder, now: Date = Date()) throws {
         try editReminder(reminder, now: now) { builder, note in builder.dropReminder(reminder, note: note) }
+    }
+
+    /// Undo for a reschedule or a drop: the home line as it was before, found
+    /// again by its id. Nothing is written when it moved to another note.
+    public func restoreReminderLine(_ before: IndexedReminder, now: Date = Date()) throws {
+        guard let current = reminderIndex(now: now).reminder(id: before.id), current.home == before.home else { return }
+        try editReminder(current, now: now) { builder, note in builder.homeLineEdit(current, note: note, newLine: before.raw) }
     }
 
     private func editReminder(_ reminder: IndexedReminder, now: Date = Date(), _ build: (PhoneWrites, String) -> PlannedWrite?) throws {

@@ -53,14 +53,16 @@ struct RemindersScreen: View {
                 ForEach(open, id: \.0) { group, reminders in
                     if !reminders.isEmpty {
                         sectionLabel(Self.title(group), count: reminders.count)
-                        ForEach(reminders) { reminder in
+                        // Keyed by the entry's line: a pasted loose line can
+                        // repeat an id, and the desk reads both entries.
+                        ForEach(reminders, id: \.entryLine) { reminder in
                             row(reminder, today: today)
                         }
                     }
                 }
                 if !noDay.isEmpty {
                     sectionLabel("Which day?", count: noDay.count)
-                    ForEach(noDay) { reminder in
+                    ForEach(noDay, id: \.entryLine) { reminder in
                         row(reminder, today: today)
                     }
                 }
@@ -83,7 +85,7 @@ struct RemindersScreen: View {
                 .accessibilityLabel("Done, \(done.count)")
                 .accessibilityHint(showingDone ? "Hides the finished reminders" : "Shows the finished reminders")
                 if showingDone {
-                    ForEach(done) { reminder in
+                    ForEach(done, id: \.entryLine) { reminder in
                         row(reminder, today: today)
                     }
                 }
@@ -156,7 +158,7 @@ struct RemindersScreen: View {
             .swipeActions(edge: .leading, allowsFullSwipe: true) {
                 if editable {
                     if closed {
-                        if reminder.status == .closed {
+                        if reminder.status == .closed, !reminder.closedByCopy {
                             Button("Reopen") { model.reopenReminder(reminder) }
                                 .tint(Theme.amber)
                         }
@@ -167,7 +169,7 @@ struct RemindersScreen: View {
                 }
             }
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                if editable, reminder.status != .removed {
+                if editable, !closed {
                     Button("Reschedule") { rescheduling = reminder }
                         .tint(Theme.amber)
                 }
@@ -176,10 +178,12 @@ struct RemindersScreen: View {
                 if editable {
                     if reminder.status == .open {
                         Button("Done") { model.closeReminder(reminder) }
-                    } else if reminder.status == .closed {
+                    } else if reminder.status == .closed, !reminder.closedByCopy {
                         Button("Reopen") { model.reopenReminder(reminder) }
                     }
-                    Button("Reschedule…") { rescheduling = reminder }
+                    if !closed {
+                        Button("Reschedule…") { rescheduling = reminder }
+                    }
                 }
                 Button("Open note") { model.openNote(of: reminder) }
                 if editable, reminder.reminder?.token != nil {

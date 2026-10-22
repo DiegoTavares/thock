@@ -209,7 +209,8 @@ extension PhoneWrites {
         let view = NoteView(text: todayNote ?? template.map { Template.expand($0, day: today, time: clock, title: today.formatted(config.daily.filename)) } ?? "", config: config)
         var record = document(.append, path: config.dailyPath(today))
         record.heading = view.planner.heading
-        record.lines = ["- [x] " + parts.text.trimmingCharacters(in: .whitespaces)]
+        // The record is not a second reminder: no token, wherever it sat, and no id.
+        record.lines = ["- [x] " + Reminders.removingToken(parts.text).trimmingCharacters(in: .whitespaces)]
         record.placement = .beforeChildren
         record.createFromTemplate = true
 

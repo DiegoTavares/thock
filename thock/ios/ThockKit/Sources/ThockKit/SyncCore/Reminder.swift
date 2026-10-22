@@ -756,6 +756,12 @@ public enum Reminders {
 
     // MARK: Display text
 
+    /// `line` up to its trailing run of HTML comments.
+    public static func withoutTrailingComments(_ line: String) -> String {
+        let bytes = Array(line.utf8)[...]
+        return Bytes.string(bytes.prefix(trailingCommentsStart(bytes)))
+    }
+
     /// `text` without its counting token, the words around it kept one
     /// space apart, as `reminderText` removes it.
     public static func removingToken(_ text: String) -> String {

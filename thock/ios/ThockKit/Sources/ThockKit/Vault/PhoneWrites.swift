@@ -334,7 +334,7 @@ public struct PhoneWrites: Sendable {
     /// Pictures (V39 §7.1) are written first, then linked at the end of the
     /// capture: as the task's continuation when the capture is one task,
     /// otherwise as lines of their own.
-    public func capture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], reminder: ReminderCapture? = nil, todayNote: String?, template: String?, taken: (String) -> Bool) -> (writes: [PlannedWrite], record: CaptureRecord)? {
+    public func capture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], reminder: ReminderCapture? = nil, indexText: String? = nil, todayNote: String?, template: String?, taken: (String) -> Bool) -> (writes: [PlannedWrite], record: CaptureRecord)? {
         var content = blocks.filter { $0.kind != .blank }
         if content.allSatisfy({ $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.kind != .rule }) {
             guard !images.isEmpty else { return nil }
@@ -407,7 +407,7 @@ public struct PhoneWrites: Sendable {
             lines += placed.lines.map { "  " + $0 }
             var record = CaptureRecord(digest: captureDigest(), title: title, kind: .idea, destination: .reminder, madeAt: now, inboxPath: nil)
             record.imageCount = images.count
-            return (placed.writes + [indexAppend(lines)], record)
+            return (placed.writes + [indexAppend(lines, indexText: indexText)], record)
 
         case .backlog:
             var write = document(.append, path: config.backlogFile)
@@ -798,8 +798,13 @@ public struct PhoneWrites: Sendable {
         var append = document(.append, path: config.backlogFile)
         append.heading = HeadingRef(text: config.soonHeading, level: 2)
         // A reminder travels with its token and id and stays one reminder
-        // (V45 §13.2): the backlog line becomes its home.
-        append.lines = ["- [ ] " + parts.text + (parts.token ?? "") + (parts.reminderID.map { " " + Reminders.idMarker($0) } ?? "")]
+        // (V45 §13.2): the backlog line becomes its home. A time-only token
+        // names no day outside the daily note, so it leaves with its date.
+        var token = parts.token ?? ""
+        if case .time? = item.reminder?.token?.when, let due = item.reminder?.due {
+            token = " " + Reminders.tokenText(due, homeDay: nil)
+        }
+        append.lines = ["- [ ] " + parts.text + token + (parts.reminderID.map { " " + Reminders.idMarker($0) } ?? "")]
         append.placement = .beforeChildren
         return [remove(item, note: note), PlannedWrite(document: append)]
     }
