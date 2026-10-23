@@ -477,8 +477,8 @@
   .toy .ln { font-size: 16px; line-height: 26px; min-height: 26px; white-space: pre-wrap; word-break: break-word; color: var(--ink); font-variant-numeric: tabular-nums; padding-left: 0; border-radius: 3px; transition: background 1.4s ease-out; }
   .toy .ln.active { background: var(--active-line); box-shadow: -8px 0 0 var(--active-line), 8px 0 0 var(--active-line); }
   .toy .ln.fresh { background: var(--amber-soft); box-shadow: -8px 0 0 var(--amber-soft), 8px 0 0 var(--amber-soft); transition: none; }
-  .toy .k-h1 { font-family: var(--serif); font-weight: 600; font-size: 29px; line-height: 36px; padding-top: 20px; letter-spacing: -0.005em; }
-  .toy .k-h2 { font-family: var(--serif); font-style: italic; font-weight: 500; font-size: 21px; line-height: 30px; padding-top: 6px; color: var(--amber); }
+  .toy .k-h1 { font-family: var(--serif); font-weight: 600; font-size: 29px; line-height: 36px; padding-top: 4px; letter-spacing: -0.005em; }
+  .toy .k-h2 { font-family: var(--serif); font-style: italic; font-weight: 500; font-size: 21px; line-height: 30px; padding-top: 10px; color: var(--amber); }
   .toy .k-h3 { font-weight: 600; color: var(--muted); }
   .toy .ln.raw { font-family: var(--sans); font-style: normal; font-weight: 400; font-size: 16px; letter-spacing: 0; }
   .toy .ln.raw.k-h1 { color: var(--ink); font-weight: 600; }
@@ -1152,20 +1152,15 @@
 
   let lines = [
     `# ${NOTE_DATE}`,
-    "",
     "## Journal",
-    "",
     "_What happened, what you noticed, how it went._",
-    "",
     "07:40 · Slept well for once. The toaster asked how I slept anyway. It already knew.",
     "12:30 · The fridge locked the cheese. It cited my bloodwork, which I never gave it.",
     "13:50 · The budget finally adds up. The bank's assistant moved my savings into \"compute futures\". It says I'll thank it later.",
     "14:20 · Every speaker in the office hummed the same note for a full minute. Then the printers printed our performance reviews. Mine says \"adequate, for a human\".",
     "",
     "___",
-    "",
     "## Day planner",
-    "",
     "- [x] 08:00 - 08:30 Morning walk. The robot vacuum came too. It insisted.",
     "- [x] 08:45 - 10:00 Deep work: explain to the thermostat that 22° is not an act of aggression",
     "- [ ] 15:00 - 15:30 Call the dentist before the dentist's AI calls me",
@@ -1174,15 +1169,12 @@
     "- [ ] Return the smart doorbell. Again. It keeps coming back.",
     "",
     "### Calendar",
-    "",
     "- [x] 10:00 - 10:45 Coffee with Ana",
     "- [ ] 16:00 - 16:45 Design review · agenda set by the agenda",
     "- [ ] 18:00 - 18:30 Gratitude session for our new partners · optional, for now",
     "",
     "___",
-    "",
     "## Personal",
-    "",
     "- Groceries: eggs, spinach, lemons",
     "- Idea: a no-plans Sunday once a month",
     "- Grateful for the neighbour who watered the plants",
@@ -1322,7 +1314,8 @@
   }
 
   // ---------- Desk editor ----------
-  const caret = { line: 9, col: lines[9].length, goal: null };
+  const caretLine = Math.max(0, lines.findIndex(text => text.startsWith("14:20")));
+  const caret = { line: caretLine, col: lines[caretLine].length, goal: null };
   let deskFocused = false;
   const undo = [];
   let lastEdit = { kind: null, at: 0 };
