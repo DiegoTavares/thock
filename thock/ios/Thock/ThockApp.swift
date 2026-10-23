@@ -30,9 +30,16 @@ struct ThockApp: App {
                 .onOpenURL { model.handle(url: $0) }
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
-                    case .active: model.becameActive()
-                    case .background: model.wentToBackground()
-                    default: break
+                    case .active:
+                        model.isInactive = false
+                        model.becameActive()
+                    case .inactive:
+                        model.isInactive = true
+                    case .background:
+                        model.isInactive = true
+                        model.wentToBackground()
+                    @unknown default:
+                        break
                     }
                 }
         }

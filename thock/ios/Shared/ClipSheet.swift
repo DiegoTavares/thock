@@ -10,6 +10,8 @@ struct ClipDraft: Equatable {
     var html: String?
     /// Pictures shared with the item, already downsized (V39 §7.3).
     var images: [ImageAttachment] = []
+    /// The line about why, kept when the app leaves mid-clip (V46 §5.3).
+    var why = ""
 }
 
 /// Pictures shared with no link (V39 §7.3): the thumbnails, a line for a
@@ -83,6 +85,9 @@ struct ClipSheet: View {
     var asksForLink = false
     var onCancel: () -> Void
     var onSave: (PhoneWrites.Clip) -> Void
+    /// Hears every change to the link and the why, so a clip in progress
+    /// can be kept when the app leaves.
+    var onDraftChange: ((ClipDraft) -> Void)?
 
     @State private var why = ""
     @State private var keepText = true
@@ -156,9 +161,20 @@ struct ClipSheet: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 20)
+        .onChange(of: draft) { reportDraft() }
+        .onChange(of: why) { reportDraft() }
         .onAppear {
+            if why.isEmpty {
+                why = draft.why
+            }
             focus = asksForLink && draft.url.isEmpty ? .link : .why
         }
+    }
+
+    private func reportDraft() {
+        var current = draft
+        current.why = why
+        onDraftChange?(current)
     }
 
     private func save() {

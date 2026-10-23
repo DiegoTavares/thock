@@ -2811,6 +2811,7 @@ async fn file_one(
             placement: Default::default(),
             blank_line_before: false,
             create_from_template: false,
+            after: None,
         },
     );
     // The log is a note the Routine links, so it goes through the buffer

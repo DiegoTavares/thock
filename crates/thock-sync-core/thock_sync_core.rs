@@ -28,7 +28,7 @@ pub use reminder::{
     note_link, parse_line, parse_note, place_token, reminder_text, reopen, rewrite, snoozed_due,
     strip_reminder, token_text, trailing_comments_start, trailing_metadata_start,
 };
-pub use write::{Heading, Operation, Place, Placement, Write, WriteError, parse_write};
+pub use write::{Anchor, Heading, Operation, Place, Placement, Write, WriteError, parse_write};
 
 use unicode_normalization::is_nfc;
 

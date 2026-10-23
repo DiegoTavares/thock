@@ -932,4 +932,168 @@ final class ReadableTests: XCTestCase {
         XCTAssertEqual(Readable.extract(html: "<html><body><p>Too short.</p></body></html>").markdown, "")
         XCTAssertEqual(Readable.extract(html: "<title>Only a title</title>").title, "Only a title")
     }
+
+    // MARK: V46, edit in place
+
+    let ownSections = """
+    # Friday
+
+    A line above the sections.
+
+    ## Journal
+
+    **11:31** · What's my purpose?
+
+    - Get to know yourself
+    - A safe place to write
+
+    **12:05** · Lunch.
+
+    - [ ] Not part of it
+
+    ## Day planner
+
+    - [ ] Walk
+      - around the park
+
+    An idea from the phone.
+
+    ### Calendar
+
+    - [ ] 12:30 - 13:30 Lunch with Ana <!--gcal:aaaaaaaaaaaa-->
+
+    # Interview prep
+
+    Questions:
+
+    - Why not an external index
+
+    # Daily Closure
+
+    Done.
+
+    """
+
+    func testOnlyTheAgentsOwnHeadingsAreItsVoice() throws {
+        let view = NoteView(text: ownSections, config: config)
+        XCTAssertEqual(view.cards.map(\.kind), [.preamble, .journal, .planner, .prose, .agent])
+        let prep = try XCTUnwrap(view.cards.first { $0.title == "Interview prep" })
+        let questions = try XCTUnwrap(prep.blocks.first { $0.kind == .paragraph })
+        XCTAssertTrue(view.isEditable(questions, in: prep))
+        XCTAssertTrue(config.isAgentHeading("AI Week Review"))
+        XCTAssertTrue(config.isAgentHeading(PhoneWrites.keptHeading))
+        XCTAssertFalse(config.isAgentHeading("Interview prep"))
+
+        let heading = try XCTUnwrap(prep.heading)
+        let section = try XCTUnwrap(view.section(.card(heading)))
+        XCTAssertTrue(section.isEditable(questions))
+        let edited = try XCTUnwrap(writes().replaceParagraph(questions, with: "Questions to ask:", heading: section.heading, note: .day(day), text: ownSections))
+        let change = changedLines(ownSections, SyncCore.apply(existing: ownSections, write: edited.document).text)
+        XCTAssertEqual(change.removed, ["Questions:"])
+        XCTAssertEqual(change.added, ["Questions to ask:"])
+    }
+
+    func testAJournalEntryKeepsTheListUnderIt() throws {
+        let view = NoteView(text: ownSections, config: config)
+        let entries = view.journal.written
+        XCTAssertEqual(entries.map(\.time), ["11:31", "12:05"])
+        XCTAssertEqual(entries[0].attached.map(\.text), ["Get to know yourself", "A safe place to write"])
+        XCTAssertEqual(entries[0].source, ["**11:31** · What's my purpose?", "", "- Get to know yourself", "- A safe place to write"])
+        XCTAssertTrue(entries[0].contains(line: try XCTUnwrap(entries[0].attached.last).line))
+        XCTAssertTrue(entries[1].attached.isEmpty, "a checklist line keeps its own moves")
+
+        let blocks = [
+            Block(id: 0, kind: .paragraph, text: "What's my purpose for Thock?", touched: true),
+            Block(id: 1, kind: .bullet, text: "Get to know yourself", touched: true),
+            Block(id: 2, kind: .bullet, text: "A safe place to write your thoughts", touched: true),
+        ]
+        let newText = EditorDocument(blocks: blocks).lines().joined(separator: "\n")
+        let write = try XCTUnwrap(writes().journalReplace(entry: entries[0], newText: newText, day: day, note: ownSections, journal: view.journal))
+        XCTAssertEqual(write.document.kind, .replaceSection)
+        let applied = SyncCore.apply(existing: ownSections, write: write.document)
+        XCTAssertEqual(applied.outcome, .applied)
+        XCTAssertTrue(applied.text.contains("**11:31** · What's my purpose for Thock?\n\n- Get to know yourself\n- A safe place to write your thoughts\n\n**12:05** · Lunch."))
+        XCTAssertTrue(applied.text.contains("- [ ] Not part of it"))
+
+        // The phone's own entry, a line and a list, reads back as one.
+        let today = try XCTUnwrap(SampleVault.make(today: day).files["daily/2026-10-02.md"])
+        let appended = try XCTUnwrap(writes().journalAppend(blocks: [blocks[0]] + blocks[1...], journal: NoteView(text: today, config: config).journal))
+        let after = NoteView(text: SyncCore.apply(existing: today, write: appended.document).text, config: config)
+        XCTAssertEqual(after.journal.written.last?.attached.count, 2)
+    }
+
+    func testAMovedEntryIsFoundAgainOrLeftAlone() throws {
+        let view = NoteView(text: ownSections, config: config)
+        let entry = view.journal.written[0]
+        // A line landed above the entry after the editor opened it.
+        let moved = ownSections.replacingOccurrences(of: "## Journal\n\n", with: "## Journal\n\nFrom the desk.\n\n")
+        let write = try XCTUnwrap(writes().journalReplace(entry: entry, newText: "Changed.", day: day, note: moved, journal: view.journal))
+        let text = SyncCore.apply(existing: moved, write: write.document).text
+        XCTAssertTrue(text.contains("From the desk.\n\n**11:31** · Changed.\n\n**12:05**"))
+        // The entry itself changed at the desk: nothing is written over it.
+        let rewritten = ownSections.replacingOccurrences(of: "- A safe place to write", with: "- Somewhere else")
+        XCTAssertNil(writes().journalReplace(entry: entry, newText: "Changed.", day: day, note: rewritten, journal: view.journal))
+    }
+
+    func testTheTextAboveTheSectionsEditsUnderTheTitle() throws {
+        let view = NoteView(text: ownSections, config: config)
+        let preamble = try XCTUnwrap(view.cards.first)
+        XCTAssertEqual(preamble.heading, HeadingRef(text: "Friday", level: 1))
+        let line = try XCTUnwrap(preamble.blocks.first { $0.kind == .paragraph })
+        XCTAssertTrue(view.isEditable(line, in: preamble))
+        let section = try XCTUnwrap(view.section(.preamble))
+        XCTAssertEqual(section.placement, .beforeChildren)
+
+        let replaced = try XCTUnwrap(writes().replaceParagraph(line, with: "A line above, edited.", heading: section.heading, note: .day(day), text: ownSections))
+        XCTAssertEqual(changedLines(ownSections, SyncCore.apply(existing: ownSections, write: replaced.document).text).added, ["A line above, edited."])
+
+        let added = try XCTUnwrap(writes().appendParagraph(blocks: Blocks.parse("Another line."), heading: section.heading, placement: section.placement, note: .day(day)))
+        XCTAssertTrue(SyncCore.apply(existing: ownSections, write: added.document).text.hasPrefix("# Friday\n\nA line above the sections.\n\nAnother line.\n\n## Journal"))
+
+        // Without a title there is no heading to write under.
+        let untitled = NoteView(text: "Loose text\n\n## Journal\n\nfoo\n", config: config)
+        let loose = try XCTUnwrap(untitled.cards.first)
+        XCTAssertEqual(loose.kind, .preamble)
+        XCTAssertFalse(untitled.isEditable(try XCTUnwrap(loose.blocks.first), in: loose))
+        XCTAssertNil(untitled.section(.preamble))
+    }
+
+    func testANewTaskLandsUnderTheLastTaskNotTheText() throws {
+        let view = NoteView(text: ownSections, config: config)
+        let top = try XCTUnwrap(view.planner.groups.first)
+        XCTAssertEqual(top.notes.map(\.text), ["An idea from the phone."])
+        let note = try XCTUnwrap(top.notes.first)
+
+        let added = try XCTUnwrap(writes().addLine("Buy a card", group: nil, planner: view.planner, note: .day(day), noteText: ownSections))
+        XCTAssertEqual(added.document.after, LineAnchor(lineHash: SyncCore.lineHash("- [ ] Walk"), ordinal: 0))
+        let text = SyncCore.apply(existing: ownSections, write: added.document).text
+        XCTAssertTrue(text.contains("- [ ] Walk\n  - around the park\n- [ ] Buy a card\n\nAn idea from the phone."))
+
+        // The text among the tasks opens in the section editor, and a new
+        // note lands with it, above the calendar.
+        let section = try XCTUnwrap(view.section(.plannerGroup(view.planner.heading)))
+        XCTAssertEqual(section.editable, [note.line])
+        let appended = try XCTUnwrap(writes().appendParagraph(blocks: Blocks.parse("Another idea."), heading: section.heading, placement: section.placement, note: .day(day)))
+        XCTAssertTrue(SyncCore.apply(existing: ownSections, write: appended.document).text.contains("An idea from the phone.\n\nAnother idea.\n\n### Calendar"))
+        let calendar = try XCTUnwrap(view.planner.groups.first { $0.isCalendar }?.heading)
+        XCTAssertNil(view.section(.plannerGroup(calendar)), "the calendar is the desk's to write")
+    }
+
+    func testAResumePointKnowsHome() throws {
+        let today = VaultDay(year: 2026, month: 10, day: 23)
+        XCTAssertTrue(ResumePoint(canvas: .day(today), leftOn: today).isHome)
+        XCTAssertFalse(ResumePoint(canvas: .day(today.adding(days: -1)), leftOn: today).isHome)
+        XCTAssertFalse(ResumePoint(canvas: .day(today), sheet: .ask, leftOn: today).isHome)
+        XCTAssertFalse(ResumePoint(canvas: .backlog, leftOn: today).isHome)
+
+        var draft = ResumePoint.Draft()
+        draft.markdown = "A thought"
+        draft.destination = .backlog
+        draft.images = [ImageAttachment(name: "photo", bytes: Data([1, 2, 3]), fileExtension: "jpg")]
+        let point = ResumePoint(canvas: .week(VaultWeek(today)), sheet: .section(note: .day(today), section: .plannerGroup(HeadingRef(text: "Day planner")), editing: LineKey(hash: "abc", ordinal: 1)), draft: draft, cursor: 4, leftOn: today)
+        let decoded = try JSONDecoder().decode(ResumePoint.self, from: JSONEncoder().encode(point))
+        XCTAssertEqual(decoded, point)
+        XCTAssertTrue(decoded.needsUnlock)
+        XCTAssertFalse(ResumePoint(canvas: .day(today), sheet: .capture(entry: "dock", preset: nil), leftOn: today).needsUnlock)
+    }
 }

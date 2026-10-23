@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 
 /// A picture ready to be written to the vault's images folder (V39 §7.1):
 /// already downsized, with the name it will be filed under.
-public struct ImageAttachment: Equatable, Sendable {
+public struct ImageAttachment: Equatable, Sendable, Codable {
     /// The source's stem, which becomes the slug in the file name and the
     /// link's alt text; `photo` when the source had none.
     public var name: String

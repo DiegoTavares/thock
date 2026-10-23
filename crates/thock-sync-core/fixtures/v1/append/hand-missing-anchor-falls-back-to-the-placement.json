@@ -1,0 +1,32 @@
+{
+  "name": "missing anchor falls back to the placement",
+  "before": "## Day planner\n- [ ] Walk\n  - around the park\n\nAn idea from the phone.\n\n### Calendar\n- [ ] 12:30 Lunch <!--gcal:a-->\n",
+  "seed": null,
+  "write": {
+    "v": 1,
+    "client_id": "hand-anchor-gone",
+    "path": "daily/2026-10-02.md",
+    "made_at": "2026-10-02T13:58:02Z",
+    "device_id": "c41a2f8e9b7d1c35",
+    "kind": "append",
+    "heading": {
+      "text": "Day planner",
+      "level": 2,
+      "ordinal": 0
+    },
+    "lines": [
+      "- [ ] Buy a card"
+    ],
+    "placement": "before_children",
+    "blank_line_before": false,
+    "create_from_template": false,
+    "after": {
+      "line_hash": "dd4fa375c70c4e42",
+      "ordinal": 0
+    }
+  },
+  "after": "## Day planner\n- [ ] Walk\n  - around the park\n\nAn idea from the phone.\n- [ ] Buy a card\n\n### Calendar\n- [ ] 12:30 Lunch <!--gcal:a-->\n",
+  "outcome": "applied",
+  "effect_present_before": false,
+  "effect_present_after": true
+}

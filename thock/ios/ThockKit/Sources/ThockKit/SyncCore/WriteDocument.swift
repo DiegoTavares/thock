@@ -86,6 +86,29 @@ extension Place: Codable {
     }
 }
 
+/// The line an `append` lands after, with its indented continuation
+/// (V46 §4.6). A missing anchor falls back to the write's `placement`.
+public struct LineAnchor: Equatable, Sendable, Codable {
+    public var lineHash: String
+    public var ordinal: Int
+
+    public init(lineHash: String, ordinal: Int) {
+        self.lineHash = lineHash
+        self.ordinal = ordinal
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case lineHash = "line_hash"
+        case ordinal
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        lineHash = try container.decode(String.self, forKey: .lineHash)
+        ordinal = try container.decodeIfPresent(Int.self, forKey: .ordinal) ?? 0
+    }
+}
+
 public enum Placement: String, Codable, Sendable {
     case end
     case beforeChildren = "before_children"
@@ -109,6 +132,8 @@ public struct WriteDocument: Equatable, Sendable {
     public var heading: HeadingRef?
     public var lines: [String] = []
     public var placement: Placement = .end
+    /// `append`: the line to land after, when it is still there.
+    public var after: LineAnchor?
     public var blankLineBefore = false
     public var createFromTemplate = false
     public var lineHash: String?
@@ -171,6 +196,9 @@ public struct WriteDocument: Equatable, Sendable {
         if case .after(_, let anchorOrdinal) = place, anchorOrdinal < 0 {
             throw WriteError.malformed("negative ordinal")
         }
+        if let after, after.ordinal < 0 {
+            throw WriteError.malformed("negative ordinal")
+        }
         let single = [newLine].compactMap { $0 } + lines
         if single.contains(where: { $0.contains("\n") || $0.contains("\r") }) {
             throw WriteError.malformed("line with a terminator")
@@ -214,6 +242,7 @@ extension WriteDocument: Codable {
         case heading
         case lines
         case placement
+        case after
         case blankLineBefore = "blank_line_before"
         case createFromTemplate = "create_from_template"
         case lineHash = "line_hash"
@@ -244,6 +273,9 @@ extension WriteDocument: Codable {
             lines = try container.decodeIfPresent([String].self, forKey: .lines) ?? []
         }
         placement = try container.decodeIfPresent(Placement.self, forKey: .placement) ?? .end
+        if kind == .append {
+            after = try container.decodeIfPresent(LineAnchor.self, forKey: .after)
+        }
         blankLineBefore = try container.decodeIfPresent(Bool.self, forKey: .blankLineBefore) ?? false
         createFromTemplate = try container.decodeIfPresent(Bool.self, forKey: .createFromTemplate) ?? false
         lineHash = try container.decodeIfPresent(String.self, forKey: .lineHash)
@@ -279,6 +311,7 @@ extension WriteDocument: Codable {
             try container.encode(placement, forKey: .placement)
             try container.encode(blankLineBefore, forKey: .blankLineBefore)
             try container.encode(createFromTemplate, forKey: .createFromTemplate)
+            try container.encodeIfPresent(after, forKey: .after)
         case .replaceLine:
             try container.encode(heading, forKey: .heading)
             try container.encode(lineHash, forKey: .lineHash)

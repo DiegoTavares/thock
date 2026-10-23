@@ -250,28 +250,35 @@ public struct VaultSession: Sendable {
     }
 
     public func addLine(_ text: String, group: PlannerGroup?, note: NoteID) throws {
-        guard let planner = planner(note), let write = writes().addLine(text, group: group, planner: planner, note: note) else { return }
+        guard let planner = planner(note), let write = writes().addLine(text, group: group, planner: planner, note: note, noteText: noteText(note)) else { return }
         try record([write])
     }
 
-    /// Replaces one paragraph of a prose section (V37 §6, §8). Returns false
-    /// when there was nothing to change.
+    /// Replaces one block of a run of prose (V37 §6, §8; V46 §4.5) with the
+    /// editor's lines. Returns false when there was nothing to change.
     @discardableResult
-    public func replaceParagraph(_ block: Block, in card: NoteCard, with newText: String, note: NoteID, now: Date = Date()) throws -> Bool {
-        guard let text = noteText(note), let heading = card.heading else { return false }
-        guard let write = writes(now: now).replaceParagraph(block, with: newText, heading: heading, note: note, text: text) else { return false }
+    public func replaceParagraph(_ block: Block, in section: EditableSection, with newText: String, note: NoteID, now: Date = Date()) throws -> Bool {
+        guard let text = noteText(note) else { return false }
+        guard let write = writes(now: now).replaceParagraph(block, with: newText, heading: section.heading, note: note, text: text) else { return false }
         try record([write])
         return true
     }
 
-    /// Adds a paragraph at the end of a prose section, creating the note from
-    /// its template when the section was only drawn from it. Returns false
-    /// when there was nothing to write.
+    /// Adds a paragraph where the section takes new text, creating the note
+    /// from its template when the section was only drawn from it. Returns
+    /// false when there was nothing to write.
     @discardableResult
-    public func appendParagraph(blocks: [Block], to card: NoteCard, note: NoteID, now: Date = Date()) throws -> Bool {
-        guard let heading = card.heading, let write = writes(now: now).appendParagraph(blocks: blocks, heading: heading, note: note) else { return false }
+    public func appendParagraph(blocks: [Block], to section: EditableSection, note: NoteID, now: Date = Date()) throws -> Bool {
+        guard let write = writes(now: now).appendParagraph(blocks: blocks, heading: section.heading, placement: section.placement, note: note) else { return false }
         try record([write])
         return true
+    }
+
+    /// The last block a tap could replace in a section: where a paragraph
+    /// just appended to it is found again, so the editor can keep it open.
+    public func lastEditableLine(in key: SectionKey, note: NoteID) -> Int? {
+        guard let section = view(note)?.section(key) else { return nil }
+        return section.blocks.last { section.isEditable($0) }?.line
     }
 
     /// The next lines of today's plan that are still open, for the widgets.

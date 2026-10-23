@@ -407,6 +407,11 @@ final class EditorHandle {
         textView?.textStorage.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
     }
 
+    /// The cursor's offset, kept when the app leaves (V46 §5).
+    var cursor: Int? {
+        textView?.selectedRange.location
+    }
+
     func focus() {
         textView?.becomeFirstResponder()
     }
@@ -423,6 +428,8 @@ struct RichTextEditor: UIViewRepresentable {
     var fontSize: CGFloat = 18
     var scrolls = true
     var autofocus = true
+    /// Where the cursor starts instead of the end, as a restore left it.
+    var cursor: Int?
     var suggestions: (String) -> [String] = { _ in [] }
     var onChange: ([Block]) -> Void = { _ in }
 
@@ -439,7 +446,7 @@ struct RichTextEditor: UIViewRepresentable {
         view.opened = BlockEditing(initial)
         if !initial.isEmpty {
             view.attributedText = EditorStyle.attributed(view.opened.paragraphs, size: fontSize)
-            view.selectedRange = NSRange(location: view.textStorage.length, length: 0)
+            view.selectedRange = NSRange(location: min(cursor ?? view.textStorage.length, view.textStorage.length), length: 0)
         }
         let bar = FormatBar(textView: view, coordinator: context.coordinator)
         view.inputAccessoryView = bar

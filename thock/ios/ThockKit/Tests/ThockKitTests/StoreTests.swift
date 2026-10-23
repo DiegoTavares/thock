@@ -296,4 +296,20 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(reopened.pending().map(\.seq), [2])
         XCTAssertEqual(reopened.cursor, 7)
     }
+
+    func testAResumePointFindsItsLineAfterTheDeskMovedIt() throws {
+        let store = try VaultStore(url: nil)
+        try snapshot(store, "# Friday\n\n## Notes\n\nFirst.\n\nSecond.\n", version: 1)
+        let session = VaultSession(store: store)
+        let note = NoteID.day(VaultDay(year: 2026, month: 10, day: 2))
+        let heading = HeadingRef(text: "Notes")
+        let key = try XCTUnwrap(session.lineKey(line: 6, heading: heading, note: note))
+
+        try snapshot(store, "# Friday\n\n## Notes\n\nFrom the desk.\n\nFirst.\n\nSecond.\n", version: 2)
+        XCTAssertEqual(session.line(for: key, heading: heading, note: note), 8)
+
+        try snapshot(store, "# Friday\n\n## Notes\n\nFirst.\n\nSecond, rewritten.\n", version: 3)
+        XCTAssertNil(session.line(for: key, heading: heading, note: note), "a line the desk changed is not found by its old words")
+    }
 }
+

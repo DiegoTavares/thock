@@ -12,9 +12,9 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use thock_sync_core::{
-    Applied, Context, DailyNotes, Due, Group, Heading, MirrorLine, MirrorMark, Operation, Outcome,
-    Place, Placement, ReminderConfig, ReminderState, Task, When, Write, add_id, apply, attach,
-    close, content_hash, cut_text, drop_token, effect_present, group, heading_key,
+    Anchor, Applied, Context, DailyNotes, Due, Group, Heading, MirrorLine, MirrorMark, Operation,
+    Outcome, Place, Placement, ReminderConfig, ReminderState, Task, When, Write, add_id, apply,
+    attach, close, content_hash, cut_text, drop_token, effect_present, group, heading_key,
     is_reminder_path, is_syncable_image_path, is_syncable_path, key_check, line_hash, mirror_text,
     open, parse_line, parse_note, parse_write, place_token, reminder_text, reopen, rewrite,
     seal_with_nonce, section_hash, snoozed_due, strip_reminder, trailing_comments_start,
@@ -68,6 +68,7 @@ fn roundtrip_probe() -> Write {
             placement: Placement::End,
             blank_line_before: false,
             create_from_template: false,
+            after: None,
         },
     )
 }
@@ -1091,6 +1092,7 @@ fn append_op(
         placement,
         blank_line_before: blank,
         create_from_template: template,
+        after: None,
     }
 }
 
@@ -1914,11 +1916,89 @@ fn hand_cases() -> Vec<Spec> {
                     placement: Placement::End,
                     blank_line_before: false,
                     create_from_template: false,
+                    after: None,
                 },
             ),
             Outcome::Applied,
             false,
             "# Title\n\n## Journal\nfoo\n\n___\ntail\n",
+        ),
+        spec(
+            "append",
+            "anchored-task-lands-after-the-last-task-not-the-notes",
+            Some(
+                "## Day planner\n- [ ] Walk\n  - around the park\n\nAn idea from the phone.\n\n### Calendar\n- [ ] 12:30 Lunch <!--gcal:a-->\n",
+            ),
+            None,
+            w(
+                "anchor",
+                "daily/2026-10-02.md",
+                Operation::Append {
+                    heading: planner(),
+                    lines: vec!["- [ ] Buy a card".into()],
+                    placement: Placement::BeforeChildren,
+                    blank_line_before: false,
+                    create_from_template: false,
+                    after: Some(Anchor {
+                        line_hash: line_hash("Walk"),
+                        ordinal: 0,
+                    }),
+                },
+            ),
+            Outcome::Applied,
+            false,
+            "## Day planner\n- [ ] Walk\n  - around the park\n- [ ] Buy a card\n\nAn idea from the phone.\n\n### Calendar\n- [ ] 12:30 Lunch <!--gcal:a-->\n",
+        ),
+        spec(
+            "append",
+            "missing-anchor-falls-back-to-the-placement",
+            Some(
+                "## Day planner\n- [ ] Walk\n  - around the park\n\nAn idea from the phone.\n\n### Calendar\n- [ ] 12:30 Lunch <!--gcal:a-->\n",
+            ),
+            None,
+            w(
+                "anchor-gone",
+                "daily/2026-10-02.md",
+                Operation::Append {
+                    heading: planner(),
+                    lines: vec!["- [ ] Buy a card".into()],
+                    placement: Placement::BeforeChildren,
+                    blank_line_before: false,
+                    create_from_template: false,
+                    after: Some(Anchor {
+                        line_hash: line_hash("Swim"),
+                        ordinal: 0,
+                    }),
+                },
+            ),
+            Outcome::Applied,
+            false,
+            "## Day planner\n- [ ] Walk\n  - around the park\n\nAn idea from the phone.\n- [ ] Buy a card\n\n### Calendar\n- [ ] 12:30 Lunch <!--gcal:a-->\n",
+        ),
+        spec(
+            "append",
+            "before-children-of-the-title-stays-above-the-sections",
+            Some("# Friday\n\nA line above the sections.\n\n## Journal\nfoo\n"),
+            None,
+            w(
+                "preamble",
+                "daily/2026-10-02.md",
+                Operation::Append {
+                    heading: Some(Heading {
+                        text: "Friday".into(),
+                        level: 1,
+                        ordinal: 0,
+                    }),
+                    lines: vec!["Another line.".into()],
+                    placement: Placement::BeforeChildren,
+                    blank_line_before: true,
+                    create_from_template: false,
+                    after: None,
+                },
+            ),
+            Outcome::Applied,
+            false,
+            "# Friday\n\nA line above the sections.\n\nAnother line.\n\n## Journal\nfoo\n",
         ),
         spec(
             "replace_line",
