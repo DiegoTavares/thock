@@ -18,6 +18,8 @@ struct JournalScreen: View {
     @State private var finished = false
     @State private var openedAt = Date()
     @State private var cursor: Int?
+    /// Bumped to open the live editor afresh on the same entry.
+    @State private var generation = 0
     @State private var owner = UUID()
 
     /// Only today takes a new entry: a stamp on another day would claim a
@@ -114,7 +116,7 @@ struct JournalScreen: View {
             RichTextEditor(initial: initial, handle: handle, placeholder: "A few lines about now…", fontSize: 17, scrolls: false, cursor: cursor) { query in
                 model.session?.noteTitles(matching: query) ?? []
             } onChange: { blocks = $0 }
-            .id(editing?.line ?? -1)
+            .id([editing?.line ?? -1, generation])
         }
     }
 
@@ -150,12 +152,29 @@ struct JournalScreen: View {
         if !live.isEmpty {
             blocks = live
         }
-        if commit() == .appended, let written = model.session?.journalEntryToContinue() {
+        let committed = commit()
+        if committed == .appended, let written = model.session?.journalEntryToContinue() {
             editing = written
         } else if let line = editing?.line {
             editing = model.session?.view(day)?.journal.written.first { $0.line == line }
         }
+        if committed != .nothing {
+            settle(live: live, opens: editing.map(Self.opened) ?? [], cursor: position)
+        }
         return LiveEditor(line: editing?.line, cursor: position)
+    }
+
+    /// The editor stays open on `editing` after a commit on the way out, so
+    /// it must hold exactly that entry: a second paragraph is an entry of
+    /// its own and would otherwise be written again on the next commit.
+    /// When it holds more, it opens afresh on the entry alone.
+    private func settle(live: [Block], opens target: [Block], cursor position: Int?) {
+        if EditorDocument(blocks: live.filter { $0.kind != .blank }).lines() == EditorDocument(blocks: target).lines() {
+            cursor = position
+        } else {
+            cursor = nil
+            generation += 1
+        }
     }
 
     private enum Committed {

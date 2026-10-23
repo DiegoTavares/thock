@@ -20,6 +20,8 @@ struct SectionScreen: View {
     @State private var handle = EditorHandle()
     @State private var finished = false
     @State private var cursor: Int?
+    /// Bumped to open the live editor afresh on the same line.
+    @State private var generation = 0
     @State private var owner = UUID()
 
     private var leading: String {
@@ -103,7 +105,7 @@ struct SectionScreen: View {
         RichTextEditor(initial: initial, handle: handle, placeholder: "A few lines…", fontSize: 17, scrolls: false, cursor: cursor) { query in
             model.session?.noteTitles(matching: query) ?? []
         } onChange: { blocks = $0 }
-        .id(editing ?? -1)
+        .id([editing ?? -1, generation])
     }
 
     private func switchTo(_ line: Int?) {
@@ -127,10 +129,28 @@ struct SectionScreen: View {
         if !live.isEmpty {
             blocks = live
         }
-        if commit() == .appended {
+        let committed = commit()
+        if committed == .appended {
             editing = model.session?.lastEditableLine(in: key, note: note)
         }
+        if committed != .nothing {
+            let target = editing.flatMap { line in model.session?.view(note)?.section(key)?.blocks.first { $0.line == line } }
+            settle(live: live, opens: target.map { [Self.opened($0)] } ?? [], cursor: position)
+        }
         return LiveEditor(line: editing, cursor: position)
+    }
+
+    /// The editor stays open on `editing` after a commit on the way out, so
+    /// it must hold exactly that block: an edit that became two blocks would
+    /// otherwise write the second again on the next commit. When it holds
+    /// more, it opens afresh on the block alone.
+    private func settle(live: [Block], opens target: [Block], cursor position: Int?) {
+        if EditorDocument(blocks: live.filter { $0.kind != .blank }).lines() == EditorDocument(blocks: target).lines() {
+            cursor = position
+        } else {
+            cursor = nil
+            generation += 1
+        }
     }
 
     private enum Committed {

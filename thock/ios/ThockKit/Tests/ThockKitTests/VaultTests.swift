@@ -994,6 +994,14 @@ final class VaultTests: XCTestCase {
         // The entry itself changed at the desk: nothing is written over it.
         let rewritten = ownSections.replacingOccurrences(of: "- A safe place to write", with: "- Somewhere else")
         XCTAssertNil(writes().journalReplace(entry: entry, newText: "Changed.", day: day, note: rewritten, journal: view.journal))
+
+        // Of two copies of the same words, the one nearer where the editor
+        // opened it is replaced.
+        let twins = "## Notes\n\nSame\nwrapped\n\nmiddle\n\nSame\nwrapped\n"
+        let shifted = twins.replacingOccurrences(of: "## Notes\n\n", with: "## Notes\n\nFrom the desk.\n\n")
+        let second = try XCTUnwrap(writes().replaceParagraph(at: 7, source: ["Same", "wrapped"], with: "Changed.", heading: HeadingRef(text: "Notes"), path: "a.md", note: shifted))
+        XCTAssertEqual(SyncCore.apply(existing: shifted, write: second.document).text,
+                       "## Notes\n\nFrom the desk.\n\nSame\nwrapped\n\nmiddle\n\nChanged.\n")
     }
 
     func testTheTextAboveTheSectionsEditsUnderTheTitle() throws {

@@ -710,11 +710,12 @@ public struct PhoneWrites: Sendable {
         var body = file.lines[section.body].map(\.text)
         // The lines the editor opened may have moved since (a sync landed
         // while it was open): find them again by what they say, or write
-        // nothing rather than replace whatever sits there now.
+        // nothing rather than replace whatever sits there now. Of two copies
+        // of the same words, the one nearer where it was opened is it.
         let current = body
         let opened = line - section.start
         let fits = { (start: Int) in start >= 0 && start + source.count <= current.count && Array(current[start..<(start + source.count)]) == source }
-        guard let start = fits(opened) ? opened : current.indices.first(where: fits) else { return nil }
+        guard let start = current.indices.filter(fits).min(by: { abs($0 - opened) < abs($1 - opened) }) else { return nil }
         var write = document(.replaceSection, path: path)
         write.heading = heading
         write.baseHash = SyncCore.sectionHash(lines: body)
