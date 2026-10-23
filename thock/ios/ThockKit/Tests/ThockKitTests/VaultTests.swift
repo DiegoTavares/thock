@@ -893,45 +893,6 @@ final class VaultTests: XCTestCase {
         XCTAssertEqual(Receipts.state(of: record("eeeeeeeeeeee", .today), exists: exists, log: log), .addedToToday)
         XCTAssertEqual(Receipts.state(of: record("ffffffffffff", .backlog), exists: exists, log: log), .addedToBacklog)
     }
-}
-
-final class ReadableTests: XCTestCase {
-    func testAnArticleBecomesReadableText() {
-        let html = """
-        <!doctype html><html><head><title>Ship It &amp; Go | Example</title><style>p { color: red }</style>
-        <meta property="og:title" content="Ship It: a practical guide"></head>
-        <body><nav><a href="/">Home</a> <a href="/essays">Essays</a></nav>
-        <article><h1>Ship It</h1>
-        <p>Most teams don&#39;t have a <strong>shipping</strong> problem. They have a <em>deciding</em> problem.
-        Every feature that lingers is a decision nobody made.</p>
-        <img src="hero.png" alt="hero">
-        <ul><li>Decide early</li><li>Ship small</li></ul>
-        <blockquote><p>Done is a decision.</p></blockquote>
-        <p>The second paragraph says more about why the small release is the one that teaches you something,
-        and why the large one mostly teaches you patience. It goes on for a while to make the point.</p>
-        <script>var tracking = "<p>not text</p>";</script>
-        </article><footer>Copyright 2026</footer></body></html>
-        """
-        let page = Readable.extract(html: html)
-        XCTAssertEqual(page.title, "Ship It: a practical guide")
-        XCTAssertEqual(page.markdown, """
-            ## Ship It
-
-            Most teams don't have a **shipping** problem. They have a _deciding_ problem. Every feature that lingers is a decision nobody made.
-
-            - Decide early
-            - Ship small
-
-            > Done is a decision.
-
-            The second paragraph says more about why the small release is the one that teaches you something, and why the large one mostly teaches you patience. It goes on for a while to make the point.
-            """)
-        // What it wrote is the subset the editor reads back unchanged.
-        let lines = page.markdown.components(separatedBy: "\n")
-        XCTAssertEqual(EditorDocument(lines: lines).lines(), lines)
-        XCTAssertEqual(Readable.extract(html: "<html><body><p>Too short.</p></body></html>").markdown, "")
-        XCTAssertEqual(Readable.extract(html: "<title>Only a title</title>").title, "Only a title")
-    }
 
     // MARK: V46, edit in place
 
@@ -1095,5 +1056,44 @@ final class ReadableTests: XCTestCase {
         XCTAssertEqual(decoded, point)
         XCTAssertTrue(decoded.needsUnlock)
         XCTAssertFalse(ResumePoint(canvas: .day(today), sheet: .capture(entry: "dock", preset: nil), leftOn: today).needsUnlock)
+    }
+}
+
+final class ReadableTests: XCTestCase {
+    func testAnArticleBecomesReadableText() {
+        let html = """
+        <!doctype html><html><head><title>Ship It &amp; Go | Example</title><style>p { color: red }</style>
+        <meta property="og:title" content="Ship It: a practical guide"></head>
+        <body><nav><a href="/">Home</a> <a href="/essays">Essays</a></nav>
+        <article><h1>Ship It</h1>
+        <p>Most teams don&#39;t have a <strong>shipping</strong> problem. They have a <em>deciding</em> problem.
+        Every feature that lingers is a decision nobody made.</p>
+        <img src="hero.png" alt="hero">
+        <ul><li>Decide early</li><li>Ship small</li></ul>
+        <blockquote><p>Done is a decision.</p></blockquote>
+        <p>The second paragraph says more about why the small release is the one that teaches you something,
+        and why the large one mostly teaches you patience. It goes on for a while to make the point.</p>
+        <script>var tracking = "<p>not text</p>";</script>
+        </article><footer>Copyright 2026</footer></body></html>
+        """
+        let page = Readable.extract(html: html)
+        XCTAssertEqual(page.title, "Ship It: a practical guide")
+        XCTAssertEqual(page.markdown, """
+            ## Ship It
+
+            Most teams don't have a **shipping** problem. They have a _deciding_ problem. Every feature that lingers is a decision nobody made.
+
+            - Decide early
+            - Ship small
+
+            > Done is a decision.
+
+            The second paragraph says more about why the small release is the one that teaches you something, and why the large one mostly teaches you patience. It goes on for a while to make the point.
+            """)
+        // What it wrote is the subset the editor reads back unchanged.
+        let lines = page.markdown.components(separatedBy: "\n")
+        XCTAssertEqual(EditorDocument(lines: lines).lines(), lines)
+        XCTAssertEqual(Readable.extract(html: "<html><body><p>Too short.</p></body></html>").markdown, "")
+        XCTAssertEqual(Readable.extract(html: "<title>Only a title</title>").title, "Only a title")
     }
 }
