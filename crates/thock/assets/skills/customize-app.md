@@ -257,7 +257,7 @@ rather than guessing from the visible name.
 | `thock::OpenPreviousDay` / `OpenNextDay` | The daily note before or after the one you're viewing, skipping empty days | `ctrl-cmd-[` / `ctrl-cmd-]` |
 | `thock::FocusDayStrip` | The masthead's day strip (arrows or `h` `j` `k` `l`, `enter` opens, `escape` returns) | `ctrl-cmd-w` |
 | `thock::ToggleAgentFocus` | The terminal agent panel | `cmd-alt-t` |
-| `thock::ToggleChatFocus` | The Thock Agent chat | `cmd-alt-n` |
+| `thock::ToggleChatFocus` | The Thock Agent chat | `cmd-?` |
 | `thock::OpenToday` | Today's note | `ctrl-cmd-t` |
 | `thock::OpenYesterday` / `OpenTomorrow` | A daily note | unbound |
 | `thock::OpenThisWeek` / `OpenLastWeek` | A weekly note | unbound |
