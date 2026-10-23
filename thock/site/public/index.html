@@ -193,6 +193,14 @@
   #hero .sub { font-size: 1.1rem; max-width: 33rem; margin: 0 0 1.3rem; }
   #hero .sub em { color: var(--ink); }
 
+  .tenets {
+    max-width: 100rem; margin: 3.4rem auto 0; padding: 0 var(--pad);
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1.8rem 2.4rem;
+  }
+  .tenet { border-top: 1px solid var(--rule); padding-top: 1.1rem; }
+  .tenet h3 { font-size: 1.2rem; font-weight: 400; color: var(--ink); margin: 0 0 0.5rem; }
+  .tenet p { font-size: 0.95rem; line-height: 1.6; }
+
   /* the toy keeps the apps' own type (Plex Sans, Petrona, SF) and its own
      tokens, scoped under .toy, so it reads as a screenshot that happens to work */
   .toy { max-width: 100rem; margin: 3.4rem auto 0; padding: 0 var(--pad); background: none; }
@@ -620,8 +628,10 @@
       margin: 1.3rem 0 0;
     }
     .lead { grid-template-columns: minmax(0, 1fr); }
+    .tenets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     #hero h1 { font-size: clamp(2.1rem, 8vw, 2.8rem); }
   }
+  @media (max-width: 40rem) { .tenets { grid-template-columns: minmax(0, 1fr); } }
   @media (min-width: 120rem) { body { font-size: 19px; } }
 </style>
 </head>
@@ -645,14 +655,36 @@
     <h1>Your personal notebook, on your desk and in your pocket.</h1>
     <div>
       <p class="sub">Journal, tasks and half-formed ideas in one folder of plain text. Give the model
-      you already trust a window into how you think. <em>It reads the notebook and adds its part below
-      yours. It never touches a word you wrote.</em></p>
+      you already trust a window into how you think, <em>and keep what you write to yourself.</em></p>
       <form class="waitform" data-waitlist>
         <input type="email" name="email" placeholder="your@email.com" required aria-label="Email address">
         <button type="submit">Join the waitlist &rarr;</button>
       </form>
       <p class="form-status" aria-live="polite"></p>
       <p class="form-note">Free while in early access &nbsp;·&nbsp; macOS and Linux, iPhone in testing &nbsp;·&nbsp; plain Markdown, always</p>
+    </div>
+  </div>
+
+  <div class="tenets">
+    <div class="tenet">
+      <h3>Get to know yourself</h3>
+      <p>Write a little every day and the patterns show up: what drains you, what keeps slipping, what
+      you said you'd watch. Your agent reads along and tells you what it notices.</p>
+    </div>
+    <div class="tenet">
+      <h3>A safe place for your thoughts</h3>
+      <p>Nobody rewrites you. The agent adds its part below yours, never over it, and any earlier
+      version of any note can be brought back.</p>
+    </div>
+    <div class="tenet">
+      <h3>AI and memory, on your terms</h3>
+      <p>Bring the model you trust, local or with your own key. What it remembers about you is a folder
+      of notes you can read and edit. Your phone's copy travels encrypted with a key only your devices hold.</p>
+    </div>
+    <div class="tenet">
+      <h3>Nothing between you and the page</h3>
+      <p>No feed, no streaks, no notifications fishing for attention. Nothing you write is mined to sell
+      you things. It's a notebook, and it stays one.</p>
     </div>
   </div>
 
