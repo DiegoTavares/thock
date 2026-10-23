@@ -158,6 +158,11 @@ pub fn render_markdown_row(
     workspace: &WeakEntity<Workspace>,
     cx: &App,
 ) -> AnyElement {
+    // The reminder token and trailing comments (capture and sync markers) are
+    // identity, not content: the file keeps them and the row hides them
+    // (v8 §11.4, V45 §8.5).
+    let text = thock_sync_core::strip_reminder(text);
+    let text = text.as_str();
     let spans = parse_inline_spans(text);
     if spans
         .iter()

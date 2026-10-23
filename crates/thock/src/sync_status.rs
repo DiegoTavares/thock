@@ -32,6 +32,8 @@ use crate::inbox_service::{self, InboxService, SyncInboxNow};
 use crate::inbox_suggest::format_cost;
 use crate::inbox_view::OpenInbox;
 use crate::readwise_service::{self, ConnectReadwise, ReadwiseService, SyncReadwiseNow};
+use crate::reminder_day::DayHold;
+use crate::reminder_service::{self, ReminderService, ReminderStatus, RetryReminders};
 use crate::vault_sync::{
     self, ConnectPhone, PhoneSyncState, SkippedFile, SyncVaultNow, VaultSyncService,
 };
@@ -76,6 +78,7 @@ pub enum Connector {
     Inbox,
     Readwise,
     Phone,
+    Reminders,
 }
 
 impl Connector {
@@ -86,6 +89,7 @@ impl Connector {
             Self::Inbox => "Inbox",
             Self::Readwise => "Readwise",
             Self::Phone => "Phone",
+            Self::Reminders => "Reminders",
         }
     }
 }
@@ -119,6 +123,7 @@ pub enum ActionKind {
     AddPlannerHeading,
     ChoosePlannerHeading,
     OpenInbox,
+    RetryReminders,
 }
 
 impl ActionKind {
@@ -135,6 +140,7 @@ impl ActionKind {
             Self::AddPlannerHeading => AddPlannerHeading.boxed_clone(),
             Self::ChoosePlannerHeading => ChoosePlannerHeading.boxed_clone(),
             Self::OpenInbox => OpenInbox.boxed_clone(),
+            Self::RetryReminders => RetryReminders.boxed_clone(),
         }
     }
 
@@ -149,6 +155,7 @@ impl ActionKind {
                 | Self::SyncInboxNow
                 | Self::SyncReadwiseNow
                 | Self::SyncVaultNow
+                | Self::RetryReminders
         )
     }
 }
@@ -479,6 +486,59 @@ pub fn status_for_phone(state: &PhoneSyncState, extras: PhoneExtras) -> Option<C
     })
 }
 
+/// The Reminders row (V45 §6.1): only while a write has failed.
+pub fn status_for_reminders(status: &ReminderStatus) -> Option<ConnectorStatus> {
+    match status {
+        ReminderStatus::Idle => None,
+        ReminderStatus::Failing { error } => Some(
+            ConnectorStatus::new(Connector::Reminders, "couldn't save a change")
+                .detail(error.clone())
+                .attention(Attention::Error)
+                .action(ActionKind::RetryReminders, "Retry"),
+        ),
+    }
+}
+
+/// The Reminders row while today's day section is on hold (V45 §7.2): the
+/// same answers calendar sync's hold offers.
+pub fn status_for_reminder_day(hold: &DayHold) -> ConnectorStatus {
+    match hold {
+        DayHold::NoPlannerHeading { heading } => {
+            ConnectorStatus::new(Connector::Reminders, format!("waiting for “{heading}”"))
+                .detail(format!(
+                    "Today's note has no “{heading}” heading, so today's reminders can't be \
+                     listed under it."
+                ))
+                .attention(Attention::Warning)
+                .action(ActionKind::AddPlannerHeading, "Add heading")
+                .action(ActionKind::ChoosePlannerHeading, "Use another…")
+        }
+        DayHold::PlannerHeadingTooDeep { heading } => {
+            ConnectorStatus::new(Connector::Reminders, format!("“{heading}” is too deep"))
+                .detail(format!(
+                    "“{heading}” is a level-6 heading, so today's reminders have no room for \
+                     a section under it."
+                ))
+                .attention(Attention::Warning)
+                .action(ActionKind::ChoosePlannerHeading, "Use another…")
+        }
+    }
+}
+
+/// The Reminders row: a failed write of the index or of a day section
+/// first, then today's hold.
+pub fn reminder_day_status(service: &ReminderService, cx: &App) -> Option<ConnectorStatus> {
+    status_for_reminders(service.status()).or_else(|| {
+        let day_sync = service.day_sync()?.read(cx);
+        match day_sync.failure() {
+            Some(error) => status_for_reminders(&ReminderStatus::Failing {
+                error: error.clone(),
+            }),
+            None => day_sync.hold().map(status_for_reminder_day),
+        }
+    })
+}
+
 pub fn calendar_status(service: &CalendarService) -> Option<ConnectorStatus> {
     status_for_calendar(service.state())
 }
@@ -716,6 +776,7 @@ pub struct SyncStatusIndicator {
     inbox: Option<Entity<InboxService>>,
     readwise: Option<Entity<ReadwiseService>>,
     phone: Option<Entity<VaultSyncService>>,
+    reminders: Option<Entity<ReminderService>>,
     popover_handle: PopoverMenuHandle<SyncStatusPopover>,
     _subscriptions: Vec<Subscription>,
 }
@@ -744,6 +805,7 @@ impl SyncStatusIndicator {
             inbox: None,
             readwise: None,
             phone: None,
+            reminders: None,
             popover_handle: PopoverMenuHandle::default(),
             _subscriptions: vec![project_subscription],
         };
@@ -783,6 +845,12 @@ impl SyncStatusIndicator {
         Self::resolve(
             &mut self.phone,
             vault_sync::service_for_project(&project, cx),
+            &mut self._subscriptions,
+            cx,
+        );
+        Self::resolve(
+            &mut self.reminders,
+            reminder_service::service_for_project(&project, cx),
             &mut self._subscriptions,
             cx,
         );
@@ -827,6 +895,11 @@ impl SyncStatusIndicator {
             self.phone
                 .as_ref()
                 .and_then(|service| phone_status(service.read(cx))),
+        );
+        statuses.extend(
+            self.reminders
+                .as_ref()
+                .and_then(|service| reminder_day_status(service.read(cx), cx)),
         );
         statuses
     }

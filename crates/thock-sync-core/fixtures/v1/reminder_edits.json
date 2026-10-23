@@ -1,0 +1,1068 @@
+[
+  {
+    "name": "close a task",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": "- [x] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->"
+  },
+  {
+    "name": "close prose strikes the token",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "The boiler ticks when it starts. Ask about it before the cold comes (@2026-11-02) <!--rem:7c11e0b4d2a9-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": "The boiler ticks when it starts. Ask about it before the cold comes ~~(@2026-11-02)~~ <!--rem:7c11e0b4d2a9-->"
+  },
+  {
+    "name": "close a planner line",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] 16:00 - 17:00 Dentist (@15:30) <!--rem:5b71c08e3f6d-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": "- [x] 16:00 - 17:00 Dentist (@15:30) <!--rem:5b71c08e3f6d-->"
+  },
+  {
+    "name": "close an indented task",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "  - [ ] Child (@2026-10-22)",
+    "edit": {
+      "kind": "close"
+    },
+    "after": "  - [x] Child (@2026-10-22)"
+  },
+  {
+    "name": "close a closed task",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [x] Pay the deposit (@2026-10-19 09:00) <!--rem:51aa02c9d811-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": null
+  },
+  {
+    "name": "close a struck token",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Got the quote back, it's fine. ~~(@2026-10-18 10:00)~~ <!--rem:0d93be7a1c44-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": null
+  },
+  {
+    "name": "close a dropped line",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Send the leak photos to the landlord <!--rem:9e4a21f0b388-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": null
+  },
+  {
+    "name": "close a line with no reminder",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Buy stamps",
+    "edit": {
+      "kind": "close"
+    },
+    "after": null
+  },
+  {
+    "name": "close a calendar line",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] 12:00 - 12:30 Team sync (@11:55) <!--gcal:5d0c2a91b7e4-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": null
+  },
+  {
+    "name": "reopen a ticked task",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [x] Pay the deposit (@2026-10-19 09:00) <!--rem:51aa02c9d811-->",
+    "edit": {
+      "kind": "reopen"
+    },
+    "after": "- [ ] Pay the deposit (@2026-10-19 09:00) <!--rem:51aa02c9d811-->"
+  },
+  {
+    "name": "reopen a struck token",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Got the quote back, it's fine. ~~(@2026-10-18 10:00)~~ <!--rem:0d93be7a1c44-->",
+    "edit": {
+      "kind": "reopen"
+    },
+    "after": "Got the quote back, it's fine. (@2026-10-18 10:00) <!--rem:0d93be7a1c44-->"
+  },
+  {
+    "name": "reopen a ticked task with a struck token",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [x] Call Ana ~~(@2026-10-18)~~",
+    "edit": {
+      "kind": "reopen"
+    },
+    "after": "- [ ] Call Ana (@2026-10-18)"
+  },
+  {
+    "name": "reopen an open task",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "reopen"
+    },
+    "after": null
+  },
+  {
+    "name": "reopen a dropped line",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Send the leak photos to the landlord <!--rem:9e4a21f0b388-->",
+    "edit": {
+      "kind": "reopen"
+    },
+    "after": null
+  },
+  {
+    "name": "rewrite a task",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-22 09:00"
+    },
+    "after": "- [ ] Call the plumber (@2026-10-22 09:00) <!--rem:7d3e55a1c0f2-->"
+  },
+  {
+    "name": "rewrite to date-only",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-23"
+    },
+    "after": "- [ ] Call the plumber (@2026-10-23) <!--rem:7d3e55a1c0f2-->"
+  },
+  {
+    "name": "rewrite prose",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "The boiler ticks when it starts. Ask about it before the cold comes (@2026-11-02) <!--rem:7c11e0b4d2a9-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-22 09:00"
+    },
+    "after": "The boiler ticks when it starts. Ask about it before the cold comes (@2026-10-22 09:00) <!--rem:7c11e0b4d2a9-->"
+  },
+  {
+    "name": "rewrite in the daily note of the new day writes the short form",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] 16:00 - 17:00 Dentist (@15:30) <!--rem:5b71c08e3f6d-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-21 16:45"
+    },
+    "after": "- [ ] 16:00 - 17:00 Dentist (@16:45) <!--rem:5b71c08e3f6d-->"
+  },
+  {
+    "name": "rewrite in a daily note to another day writes the full date",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] 16:00 - 17:00 Dentist (@15:30) <!--rem:5b71c08e3f6d-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-22 09:00"
+    },
+    "after": "- [ ] 16:00 - 17:00 Dentist (@2026-10-22 09:00) <!--rem:5b71c08e3f6d-->"
+  },
+  {
+    "name": "rewrite a full token into its own daily note's day",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Standup (@2026-10-22 09:00) <!--rem:3f9a1c0d4e21-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-21 10:00"
+    },
+    "after": "- [ ] Standup (@10:00) <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "rewrite to date-only in the daily note of that day keeps the full date",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] 16:00 - 17:00 Dentist (@15:30) <!--rem:5b71c08e3f6d-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-21"
+    },
+    "after": "- [ ] 16:00 - 17:00 Dentist (@2026-10-21) <!--rem:5b71c08e3f6d-->"
+  },
+  {
+    "name": "rewrite outside a daily note always writes the full date",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-21 16:45"
+    },
+    "after": "- [ ] Call the plumber (@2026-10-21 16:45) <!--rem:7d3e55a1c0f2-->"
+  },
+  {
+    "name": "rewrite keeps a ticked checkbox",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [x] Pay the deposit (@2026-10-19 09:00) <!--rem:51aa02c9d811-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-22 09:00"
+    },
+    "after": "- [x] Pay the deposit (@2026-10-22 09:00) <!--rem:51aa02c9d811-->"
+  },
+  {
+    "name": "rewrite keeps a strike",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Got the quote back, it's fine. ~~(@2026-10-18 10:00)~~ <!--rem:0d93be7a1c44-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-22 09:00"
+    },
+    "after": "Got the quote back, it's fine. ~~(@2026-10-22 09:00)~~ <!--rem:0d93be7a1c44-->"
+  },
+  {
+    "name": "rewrite a dropped line puts the token back before the id",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Send the leak photos to the landlord <!--rem:9e4a21f0b388-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-22 09:00"
+    },
+    "after": "- [ ] Send the leak photos to the landlord (@2026-10-22 09:00) <!--rem:9e4a21f0b388-->"
+  },
+  {
+    "name": "rewrite the last of two tokens",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Move (@2026-10-21) to (@2026-10-23 09:00)",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-24"
+    },
+    "after": "Move (@2026-10-21) to (@2026-10-24)"
+  },
+  {
+    "name": "rewrite a line with no reminder",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Buy stamps",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-22 09:00"
+    },
+    "after": null
+  },
+  {
+    "name": "rewrite a calendar line",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] 12:00 - 12:30 Team sync (@11:55) <!--gcal:5d0c2a91b7e4-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-22 09:00"
+    },
+    "after": null
+  },
+  {
+    "name": "drop a task's token",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "drop"
+    },
+    "after": "- [ ] Call the plumber <!--rem:7d3e55a1c0f2-->"
+  },
+  {
+    "name": "drop prose",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "The boiler ticks when it starts. Ask about it before the cold comes (@2026-11-02) <!--rem:7c11e0b4d2a9-->",
+    "edit": {
+      "kind": "drop"
+    },
+    "after": "The boiler ticks when it starts. Ask about it before the cold comes <!--rem:7c11e0b4d2a9-->"
+  },
+  {
+    "name": "drop a planner line's token",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] 16:00 - 17:00 Dentist (@15:30) <!--rem:5b71c08e3f6d-->",
+    "edit": {
+      "kind": "drop"
+    },
+    "after": "- [ ] 16:00 - 17:00 Dentist <!--rem:5b71c08e3f6d-->"
+  },
+  {
+    "name": "drop a closed task's token",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [x] Pay the deposit (@2026-10-19 09:00) <!--rem:51aa02c9d811-->",
+    "edit": {
+      "kind": "drop"
+    },
+    "after": "- [x] Pay the deposit <!--rem:51aa02c9d811-->"
+  },
+  {
+    "name": "drop a struck token",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Got the quote back, it's fine. ~~(@2026-10-18 10:00)~~ <!--rem:0d93be7a1c44-->",
+    "edit": {
+      "kind": "drop"
+    },
+    "after": "Got the quote back, it's fine. <!--rem:0d93be7a1c44-->"
+  },
+  {
+    "name": "drop a token mid-line",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Dentist (@2026-10-22 15:30) at the clinic",
+    "edit": {
+      "kind": "drop"
+    },
+    "after": "Dentist at the clinic"
+  },
+  {
+    "name": "drop a token after the checkbox",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] (@2026-10-22) Call the bank",
+    "edit": {
+      "kind": "drop"
+    },
+    "after": "- [ ] Call the bank"
+  },
+  {
+    "name": "drop a token before punctuation",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Call the bank (@2026-10-22).",
+    "edit": {
+      "kind": "drop"
+    },
+    "after": "Call the bank."
+  },
+  {
+    "name": "drop a dropped line",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Send the leak photos to the landlord <!--rem:9e4a21f0b388-->",
+    "edit": {
+      "kind": "drop"
+    },
+    "after": null
+  },
+  {
+    "name": "drop on a line with no reminder",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Buy stamps",
+    "edit": {
+      "kind": "drop"
+    },
+    "after": null
+  },
+  {
+    "name": "attach to a plain task",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Buy stamps",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Buy stamps (@2026-12-02 09:00) <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "attach keeps a gmail marker before the id",
+    "path": "backlog.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Renew passport <!--gmail:18c2f0a9b3d4e5f6-->",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Renew passport (@2026-12-02 09:00) <!--gmail:18c2f0a9b3d4e5f6--> <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "attach date-only to prose",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Water the plants",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-10-22",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "Water the plants (@2026-10-22) <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "attach in the daily note of that day writes the short form",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Pick up the parcel",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-10-21 17:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Pick up the parcel (@17:00) <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "attach in a daily note for another day",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Pick up the parcel",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-10-22 17:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Pick up the parcel (@2026-10-22 17:00) <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "attach to a planner line keeps the planner time first",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] 16:00 - 17:00 Dentist",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-10-21 15:30",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] 16:00 - 17:00 Dentist (@15:30) <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "attach drops trailing spaces",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Buy stamps   ",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Buy stamps (@2026-12-02) <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "attach before a comment that is not trailing",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Note <!-- aside --> more",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "Note <!-- aside --> more (@2026-12-02) <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "attach to a line with a token and no id",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Call the bank (@2026-10-22 10:00)",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-10-23 10:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Call the bank (@2026-10-23 10:00) <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "attach to a dropped line keeps its id",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Send the leak photos to the landlord <!--rem:9e4a21f0b388-->",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Send the leak photos to the landlord (@2026-12-02 09:00) <!--rem:9e4a21f0b388-->"
+  },
+  {
+    "name": "attach to a reminder rewrites it and keeps its id",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Call the plumber (@2026-12-02 09:00) <!--rem:7d3e55a1c0f2-->"
+  },
+  {
+    "name": "attach to a calendar line",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] 12:00 - 12:30 Team sync (@11:55) <!--gcal:5d0c2a91b7e4-->",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": null
+  },
+  {
+    "name": "attach with a malformed id",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Buy stamps",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3F9A1C0D4E21"
+    },
+    "after": null
+  },
+  {
+    "name": "add an id to a token",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Call the bank (@2026-10-22 10:00)",
+    "edit": {
+      "kind": "add_id",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Call the bank (@2026-10-22 10:00) <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "add an id after a gmail marker",
+    "path": "backlog.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Renew passport (@2026-12-02) <!--gmail:18c2f0a9b3d4e5f6-->",
+    "edit": {
+      "kind": "add_id",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Renew passport (@2026-12-02) <!--gmail:18c2f0a9b3d4e5f6--> <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "add an id to a loose index line",
+    "path": "reminders.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Send the October invoice (@2026-10-21)",
+    "edit": {
+      "kind": "add_id",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Send the October invoice (@2026-10-21) <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "add an id to a line that has one",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "add_id",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": null
+  },
+  {
+    "name": "add an id to a calendar line",
+    "path": "daily/2026-10-21.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] 12:00 - 12:30 Team sync (@11:55) <!--gcal:5d0c2a91b7e4-->",
+    "edit": {
+      "kind": "add_id",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": null
+  },
+  {
+    "name": "attach to a closed task rewrites it and keeps it closed",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [x] Pay the deposit (@2026-10-19 09:00) <!--rem:51aa02c9d811-->",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [x] Pay the deposit (@2026-12-02 09:00) <!--rem:51aa02c9d811-->"
+  },
+  {
+    "name": "attach to struck prose keeps the strike",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Got the quote back, it's fine. ~~(@2026-10-18 10:00)~~ <!--rem:0d93be7a1c44-->",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "Got the quote back, it's fine. ~~(@2026-12-02 09:00)~~ <!--rem:0d93be7a1c44-->"
+  },
+  {
+    "name": "attach before a comment the line leaves open",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Buy stamps <!-- for the cards",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Buy stamps (@2026-12-02 09:00) <!--rem:3f9a1c0d4e21--> <!-- for the cards"
+  },
+  {
+    "name": "attach to a token before a comment the line leaves open",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Buy stamps (@2026-11-01) <!--gmail:ab--> <!-- for the cards",
+    "edit": {
+      "kind": "attach",
+      "due": "2026-12-02 09:00",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Buy stamps (@2026-12-02 09:00) <!--gmail:ab--> <!--rem:3f9a1c0d4e21--> <!-- for the cards"
+  },
+  {
+    "name": "add an id before a comment the line leaves open",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Call the plumber (@2026-10-21 14:30) <!-- ask about the boiler",
+    "edit": {
+      "kind": "add_id",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Call the plumber (@2026-10-21 14:30) <!--rem:3f9a1c0d4e21--> <!-- ask about the boiler",
+    "identity_changes": true
+  },
+  {
+    "name": "add an id after a closed comment and before an open one",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Renew passport (@2026-12-02) <!--gmail:ab--> <!-- draft  ",
+    "edit": {
+      "kind": "add_id",
+      "id": "3f9a1c0d4e21"
+    },
+    "after": "- [ ] Renew passport (@2026-12-02) <!--gmail:ab--> <!--rem:3f9a1c0d4e21--> <!-- draft",
+    "identity_changes": true
+  },
+  {
+    "name": "rewrite a dropped line before a comment it leaves open",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Send the leak photos <!--rem:9e4a21f0b388--> <!-- later",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-22 09:00"
+    },
+    "after": "- [ ] Send the leak photos (@2026-10-22 09:00) <!--rem:9e4a21f0b388--> <!-- later"
+  },
+  {
+    "name": "place a token before trailing comments",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Renew passport <!-- note -->",
+    "edit": {
+      "kind": "place",
+      "due": "2026-12-02 10:20"
+    },
+    "after": "- [ ] Renew passport (@2026-12-02 10:20) <!-- note -->"
+  },
+  {
+    "name": "place rewrites the token and keeps the id",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Renew (@2026-11-01) soon <!--rem:3f9a1c0d4e21-->",
+    "edit": {
+      "kind": "place",
+      "due": "2026-12-02 10:20"
+    },
+    "after": "Renew (@2026-12-02 10:20) soon <!--rem:3f9a1c0d4e21-->"
+  },
+  {
+    "name": "place in the daily note of that day writes the short form",
+    "path": "daily/2026-12-02.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Water",
+    "edit": {
+      "kind": "place",
+      "due": "2026-12-02 10:20"
+    },
+    "after": "Water (@10:20)"
+  },
+  {
+    "name": "place on a calendar line",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Standup <!--gcal:abc-->",
+    "edit": {
+      "kind": "place",
+      "due": "2026-12-02 10:20"
+    },
+    "after": null
+  },
+  {
+    "name": "place writes no id",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "- [ ] Buy stamps",
+    "edit": {
+      "kind": "place",
+      "due": "2026-12-02"
+    },
+    "after": "- [ ] Buy stamps (@2026-12-02)"
+  },
+  {
+    "name": "place before a comment the line leaves open",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "Buy stamps <!-- for the cards",
+    "edit": {
+      "kind": "place",
+      "due": "2026-12-02"
+    },
+    "after": "Buy stamps (@2026-12-02) <!-- for the cards"
+  },
+  {
+    "name": "close a task in a blockquote",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "> - [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": "> - [x] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->"
+  },
+  {
+    "name": "close a task in a nested blockquote",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "> > - [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": "> > - [x] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->"
+  },
+  {
+    "name": "close a task in a blockquote without spaces",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": ">>- [ ] Call (@2026-10-21)",
+    "edit": {
+      "kind": "close"
+    },
+    "after": ">>- [x] Call (@2026-10-21)"
+  },
+  {
+    "name": "close an indented task in a blockquote",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "  >   - [ ] Call (@2026-10-21)",
+    "edit": {
+      "kind": "close"
+    },
+    "after": "  >   - [x] Call (@2026-10-21)"
+  },
+  {
+    "name": "reopen a task in a blockquote",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "> - [x] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "reopen"
+    },
+    "after": "> - [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->"
+  },
+  {
+    "name": "reopen a struck token in a nested blockquote task",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "> > - [x] Call ~~(@2026-10-21)~~",
+    "edit": {
+      "kind": "reopen"
+    },
+    "after": "> > - [ ] Call (@2026-10-21)"
+  },
+  {
+    "name": "close quoted prose strikes the token",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "> Ask about the boiler (@2026-11-02) <!--rem:7c11e0b4d2a9-->",
+    "edit": {
+      "kind": "close"
+    },
+    "after": "> Ask about the boiler ~~(@2026-11-02)~~ <!--rem:7c11e0b4d2a9-->"
+  },
+  {
+    "name": "rewrite a task in a blockquote",
+    "path": "projects/house.md",
+    "daily": {
+      "dir": "daily",
+      "filename": "YYYY-MM-DD"
+    },
+    "line": "> - [ ] Call the plumber (@2026-10-21 14:30) <!--rem:7d3e55a1c0f2-->",
+    "edit": {
+      "kind": "rewrite",
+      "due": "2026-10-22 09:00"
+    },
+    "after": "> - [ ] Call the plumber (@2026-10-22 09:00) <!--rem:7d3e55a1c0f2-->"
+  }
+]

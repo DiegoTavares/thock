@@ -3941,4 +3941,131 @@ open = "weekly/site/index.html"
         assert!(vault_file_path(root, "/etc/passwd").is_err());
         assert!(vault_file_path(root, "").is_err());
     }
+
+    fn fenced_lines(skill: &str) -> Vec<&str> {
+        let mut lines = Vec::new();
+        let mut fenced = false;
+        for line in skill.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("```") {
+                fenced = !fenced;
+            } else if fenced {
+                lines.push(trimmed);
+            }
+        }
+        lines
+    }
+
+    /// Each reminder line a ritual shows the agent writing is the first line
+    /// with its id, unchanged, or one of the sync core's home-line edits of
+    /// it (V45 §13, §14 Rituals).
+    #[test]
+    fn ritual_reminder_lines_are_the_sync_core_edits() {
+        use thock_sync_core::{close, drop_token, is_id, parse_line, rewrite};
+        for (name, skill) in [
+            ("week-review", TIMELINE_WEEK_REVIEW_SKILL),
+            ("wrap-today", TIMELINE_WRAP_TODAY_SKILL),
+        ] {
+            let mut originals: std::collections::HashMap<String, &str> = Default::default();
+            let mut edited = 0;
+            for line in fenced_lines(skill) {
+                let Some(reminder) = parse_line(line, None) else {
+                    continue;
+                };
+                let id = reminder
+                    .id
+                    .unwrap_or_else(|| panic!("{name}: a reminder line without its id: {line}"));
+                assert!(is_id(&id), "{name}: {line}");
+                let Some(&original) = originals.get(&id) else {
+                    originals.insert(id, line);
+                    continue;
+                };
+                let mut edits = vec![
+                    Some(original.to_string()),
+                    close(original),
+                    drop_token(original),
+                ];
+                if let Some(due) = reminder.due {
+                    edits.push(rewrite(original, due, None));
+                    edits.push(rewrite(original, due, Some(due.date)));
+                }
+                assert!(
+                    edits.iter().flatten().any(|edit| edit == line),
+                    "{name}: {line:?} is no sync-core edit of {original:?}"
+                );
+                edited += 1;
+            }
+            assert!(edited > 0, "{name} shows no reminder edit");
+        }
+    }
+
+    #[test]
+    fn rituals_ask_about_reminders_and_quote_tasks_without_them() {
+        for expected in [
+            "**Let me pick** and **Leave them**",
+            "**Pick a date**",
+            "**Close** and **Drop the reminder**",
+            "`tomorrow_at` (09:00 by default)",
+        ] {
+            assert!(
+                TIMELINE_WEEK_REVIEW_SKILL.contains(expected),
+                "Week Review must say {expected}"
+            );
+            assert!(
+                TIMELINE_WRAP_TODAY_SKILL.contains(expected),
+                "Wrap Today must say {expected}"
+            );
+        }
+        assert!(TIMELINE_WRAP_TODAY_SKILL.contains(
+            "**only** edit this skill makes to your own text besides the reminder answers in step 6"
+        ));
+        let quote_rule = "without its `(@…)` reminder token and its `<!--rem:…-->` id";
+        assert!(TIMELINE_WRAP_TODAY_SKILL.contains(quote_rule));
+        assert!(TIMELINE_WEEK_REVIEW_SKILL.contains(quote_rule));
+        assert!(
+            TIMELINE_WEEK_REVIEW_SKILL.contains("is quoted as `- Call the plumber`"),
+            "Week Review shows a quoted task"
+        );
+        assert_eq!(
+            thock_sync_core::parse_line("- Call the plumber", None),
+            None
+        );
+        for line in fenced_lines(TIMELINE_WEEK_REVIEW_SKILL)
+            .into_iter()
+            .skip_while(|line| !line.starts_with("## Week Review:"))
+            .take_while(|line| !line.starts_with("### Pull & Merge Requests"))
+        {
+            assert_eq!(thock_sync_core::parse_line(line, None), None, "{line}");
+        }
+        for quoted in [
+            "- [ ] Call the plumber → backlog (Soon)",
+            "- [ ] Renew the passport → backlog (Soon)",
+        ] {
+            assert!(TIMELINE_WRAP_TODAY_SKILL.contains(quoted));
+            assert_eq!(thock_sync_core::parse_line(quoted, None), None);
+        }
+        for line in fenced_lines(TIMELINE_WRAP_TODAY_SKILL)
+            .into_iter()
+            .skip_while(|line| *line != "# Daily Closure")
+            .take_while(|line| !line.starts_with("## Suggestions"))
+        {
+            assert_eq!(thock_sync_core::parse_line(line, None), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn shipped_instructions_show_reminder_tokens_only_in_code() {
+        let config = thock_sync_core::ReminderConfig::default();
+        for (path, text) in [
+            ("AGENTS.md", AGENT_INSTRUCTIONS),
+            ("skills/thock/set-language.md", SET_LANGUAGE_SKILL),
+        ] {
+            assert!(
+                thock_sync_core::parse_note(text, path, &config).is_empty(),
+                "{path} would ring"
+            );
+        }
+        assert!(AGENT_INSTRUCTIONS.contains("Never write or change a `<!--rem:…-->` id"));
+        assert!(SET_LANGUAGE_SKILL.contains("day = [\"…\", \"Reminders\"]"));
+    }
 }

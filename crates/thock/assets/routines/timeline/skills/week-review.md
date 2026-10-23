@@ -2,8 +2,8 @@
 
 Review the previous week's daily notes, plus whatever outside activity the vault's profile allows you to pull in, then produce a summary organized by the areas the user tracks, write it to the weekly markdown file, and append a structured entry to the dashboard data (`weekly/site/data.js`).
 
-**Reads:** the daily and weekly notes, the backlog file, `profile.md`, and any sources recorded in `routines/timeline/sources.md`.
-**Writes (append-only):** the weekly `.md` file, `weekly/site/data.js`, the backlog file.
+**Reads:** the daily and weekly notes, the backlog file, the reminders index (`reminders.md`) and the notes it links to, `profile.md`, and any sources recorded in `routines/timeline/sources.md`.
+**Writes (append-only):** the weekly `.md` file, `weekly/site/data.js`, the backlog file. The one exception is a reminder the user answers about in step 6: its own line is edited in place, exactly as step 6 shows.
 
 > **Note paths and filenames are vault-configured.** Read `.thock/config.toml` first: `[daily]` / `[weekly]` set each note kind's `dir` and moment-style `filename` format, and `[backlog]` sets `file`. This skill's examples use the defaults (`daily/YYYY-MM-DD.md`, `weekly/GGGG-[W]WW.md`, `backlog.md`); when the config — or the vault's existing notes — use different names, follow those silently. That's configuration, not a doc mismatch worth reporting.
 
@@ -99,18 +99,55 @@ Note: `action_name: "accepted"` means the user merged an MR (counts toward `merg
 2. **Set the `goal: true` flag** on any project that served a `# Week Goals` item that week. This is the one judgment call the dashboard cannot make itself — it drives the "time sink" warning (share of work outside your goals). Leave it off for projects that were not goals. Never flag `Personal` or `Team` as lingering-exempt yourself; the page handles that.
 3. **Pick 2–3 highlights** — the week's most notable accomplishments, in your own words. For an unfinished in-progress week, leave highlights empty.
 
-## 6. Offer unfinished tasks to the backlog
+## 6. Sweep the reminders still open
 
-The vault keeps a holding pen — the configured backlog file, `backlog.md` by default — with the sections `## Soon`, `## Someday`, and `## Completed` (the Desk panel's Backlog tab in the right dock renders it). After organizing the week you know what stayed unfinished — the unchecked (`- [ ]`) items from the weekly note's goal sections plus tasks the daily notes show lingering across the week:
+A reminder is a token on a line (Thock writes it at the end): `(@YYYY-MM-DD HH:MM)`, `(@YYYY-MM-DD)` for a day with no time, or `(@HH:MM)` in a daily note, which means that note's day. Thock puts a `<!--rem:…-->` id after it. `.thock/reminders.toml` may name another index file (`index`), other headings (`[headings] open`) and another time for the choices below (`[ring] tomorrow_at`); a missing file means `reminders.md`, `Open` and 09:00.
+
+1. **Find them.** Read the index. Each line under `## Open` is either a task that is the reminder itself, or a link to the note it lives in (`- [[projects/house]] <!--rem:7d3e55a1c0f2-->`). For a link, open that note and find the line carrying the same id: that line is the reminder's **home**. Skip a home that is already closed (a ticked `- [x]` task, or a struck `~~(@…)~~` token) or has no token left, and skip a link whose line you can't find.
+2. **Collect** every open reminder due on or before the Sunday that ends the reviewed week, **earlier weeks included**, so a skipped review loses nothing. If there are none, skip this step silently.
+3. **Ask once** with the `ask` tool: *N reminders are still open. Move them all to Monday at 09:00?*, with **Move all to Mon 09:00**, **Let me pick** and **Leave them**. Monday is the next Monday after today, never today itself. The hour, here and in the next step, is `tomorrow_at` (09:00 by default): write the vault's own in the question and the options.
+4. **On Let me pick,** ask once per reminder, naming its text and its due: **Tomorrow 09:00**, **Next week** (Monday 09:00), **Pick a date** (a follow-up question for the day and, if they want one, the time), **Close** and **Drop the reminder**.
+5. **Write only the home line,** found by its id, one edit per answer. Every other byte of the line stays as it is.
+   - **Move:** rewrite the token's date and time, always in the full `(@YYYY-MM-DD HH:MM)` form, or `(@YYYY-MM-DD)` for a day with no time. The short `(@HH:MM)` is only for a line in the daily note of the new day itself.
+   - **Close:** tick a task (`- [ ]` becomes `- [x]`); in a sentence, strike the token instead (`~~(@…)~~`).
+   - **Drop:** delete the token and the space before it. The words and the id stay.
+
+   A task due last Wednesday, and the line it becomes when moved, closed or dropped:
+
+   ```markdown
+   - [ ] Call the plumber (@2026-10-14 14:30) <!--rem:7d3e55a1c0f2-->
+   ```
+
+   ```markdown
+   - [ ] Call the plumber (@2026-10-26 09:00) <!--rem:7d3e55a1c0f2-->
+   - [x] Call the plumber (@2026-10-14 14:30) <!--rem:7d3e55a1c0f2-->
+   - [ ] Call the plumber <!--rem:7d3e55a1c0f2-->
+   ```
+
+   A reminder in a sentence, and the line closed:
+
+   ```markdown
+   The boiler ticks when it starts. Ask about it before the cold comes (@2026-10-16) <!--rem:7c11e0b4d2a9-->
+   ```
+
+   ```markdown
+   The boiler ticks when it starts. Ask about it before the cold comes ~~(@2026-10-16)~~ <!--rem:7c11e0b4d2a9-->
+   ```
+
+Never write or change an id, never edit the copies under a daily note's `### Reminders`, and never touch the index's link lines or move anything between its sections: Thock keeps the index in step with the home lines. When a reminder's home is a task in the index itself, that task is the line to edit. **Leave them** writes nothing.
+
+## 7. Offer unfinished tasks to the backlog
+
+The vault keeps a holding pen — the configured backlog file, `backlog.md` by default — with the sections `## Soon`, `## Someday`, and `## Completed` (the Desk panel's Backlog tab in the right dock renders it). After organizing the week you know what stayed unfinished — the unchecked (`- [ ]`) items from the weekly note's goal sections plus tasks the daily notes show lingering across the week. Leave out the lines under a daily note's `### Reminders`: each is a copy of a reminder that lives in another note, and step 6 already asked about it.
 
 1. List those unfinished tasks.
 2. Ask the user **one** question: move **all** of them to the backlog, **none**, or **some** (the user picks which)? The default destination is **Soon**; the user can say "someday" for any task. If nothing is unfinished, skip this step silently.
-3. **Deduplicate before appending:** skip any chosen task whose text already appears in `backlog.md` — compare whitespace-insensitively and ignore any ` ✅ YYYY-MM-DD` completion suffix — in **any** section, `## Completed` included. Report skips as "already in backlog: …".
-4. Append the remaining tasks as `- [ ] <task text>` at the end of the matching section. Create `backlog.md` or a missing section heading if needed — never rewrite, reorder, or delete anything already in the file.
+3. **Deduplicate before appending:** skip any chosen task whose text already appears in `backlog.md` — compare whitespace-insensitively and ignore any ` ✅ YYYY-MM-DD` completion suffix, any `(@…)` reminder token and any `<!--rem:…-->` id — in **any** section, `## Completed` included. Report skips as "already in backlog: …".
+4. Append the remaining tasks as `- [ ] <task text>` at the end of the matching section. A task with a reminder keeps its token and its id, so it stays the same reminder; a `(@HH:MM)` token becomes the full `(@YYYY-MM-DD HH:MM)` of its note's day, since the backlog has no day of its own. Create `backlog.md` or a missing section heading if needed — never rewrite, reorder, or delete anything already in the file.
 
 Record the moves in the review you write next (e.g. suffix a goal with `→ backlog (Soon)`). Never move a task without the user's answer, and never edit the weekly or daily notes' existing content.
 
-## 7. Write the markdown review
+## 8. Write the markdown review
 
 Append a `# AI Week Review` section at the end of the weekly file with the `append` tool, in one call, after everything already there (never re-create the file), in this format:
 
@@ -121,6 +158,8 @@ Append a `# AI Week Review` section at the end of the weekly file with the `appe
 - Task or activity completed
 - Another task
 ```
+
+A task the review names is quoted without its `(@…)` reminder token and its `<!--rem:…-->` id, as Wrap Today's closure quotes them: the review is a record of the week, not a second reminder. `- [ ] Call the plumber (@2026-10-26 09:00) <!--rem:7d3e55a1c0f2-->` is quoted as `- Call the plumber`.
 
 When step 4 ran and found something, add one more section under it:
 
@@ -135,7 +174,7 @@ When step 4 ran and found something, add one more section under it:
 
 When `routines/reading/skills/reading-week.md` exists, read it and run it now, from Week Review, for the review's week. Put the `### Reading` block it hands back after the area sections (and after Pull & Merge Requests, when present). Skip this in silence when the file is missing or the block comes back empty.
 
-## 8. Append to the dashboard (`weekly/site/data.js`)
+## 9. Append to the dashboard (`weekly/site/data.js`)
 
 The dashboard reads `window.WEEKS` (an array, newest last). Append **one new week object** immediately before the closing `];` of the `window.WEEKS` array. Never rewrite existing entries — new weeks carry their MRs inline with `src` tags.
 
@@ -188,10 +227,10 @@ Rules:
 - The dashboard computes stats, sparklines, and warnings from this data. It infers **lingering areas** and **carried-over goals** across weeks automatically; you only need accurate `projects` (with `goal` flags), `tasks`, `goals`, and `prs`. Keep the area names stable across weeks so lingering detection works (the page canonicalizes common variants, but consistency helps).
 - After editing, verify the file still parses: `node -e "global.window={};require('./weekly/site/data.js');console.log(window.WEEKS.length,'weeks')"`.
 
-## 9. Reflect
+## 10. Reflect
 
 Read `skills/thock/reflect.md` at the vault root and run it in **weekly** mode over the week's daily notes, which you have already read. It folds the week into `memory/` (patterns, people, threads), resolves what changed, and appends a `## Things Thock could forget` checklist to the weekly note when anything has gone quiet for long enough. Skip this step in silence if that file is missing.
 
 ## Output
 
-After the appends have happened, tell the user in a few sentences what the review (§7) found, that it is at the end of the weekly note, which tasks (if any) moved to the backlog, that the dashboard entry was appended, and that they can open `weekly/site/index.html` to view it, plus Reflect's one line on what it learned and whether there is a forgetting list to look at. The review lives in the note; don't repeat it whole in the chat.
+After the appends have happened, tell the user in a few sentences what the review (§8) found, which reminders step 6 moved, closed or dropped, that it is at the end of the weekly note, which tasks (if any) moved to the backlog, that the dashboard entry was appended, and that they can open `weekly/site/index.html` to view it, plus Reflect's one line on what it learned and whether there is a forgetting list to look at. The review lives in the note; don't repeat it whole in the chat.

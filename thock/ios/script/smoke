@@ -7,7 +7,10 @@
 #      server, the practice desk;
 #   2. the backlog's moves (to Someday, a tick, to today) land in `backlog.md`
 #      and today's note on the phone and at the practice desk;
-#   3. text typed into the capture editor is saved as the expected Markdown.
+#   3. a Reminder capture and Remind me… on a backlog task land in
+#      `reminders.md` and the backlog with a token and an id, and Done ticks
+#      the reminder;
+#   4. text typed into the capture editor is saved as the expected Markdown.
 #
 # Exits non-zero on the first failure.
 #
@@ -183,6 +186,18 @@ wait_for "the archive line in the triage log" file_has "$triage_log" "Ship It: a
 wait_for "the task at the practice desk" desk_has "- [ ] Ask Ana for the article on burnout [["
 # The practice desk writes JSON with escaped slashes, so a path reads `a\/b`.
 wait_for "the archived note at the practice desk" desk_has "archives\\/inbox\\/$today-0912-ask-ana-for-the-article-on-burnout.md"
+
+step "reminders: a Reminder capture, Remind me… on a task, Done"
+tomorrow="$(date -v+1d +%F)"
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+xcrun simctl launch "$udid" "$bundle" \
+    -thock-script "remind:$tomorrow 10.00:$token reminder;remind-task:$tomorrow 09.00:Renew the passport;reminder-done:$token reminder" >/dev/null
+wait_for "the reminder under Open on the phone" section_has reminders.md "## Open" "$token reminder (@$tomorrow 10:00) <!--rem:"
+wait_for "the reminder ticked on the phone" file_has reminders.md "- [x] $token reminder (@$tomorrow 10:00) <!--rem:"
+wait_for "the token and id on the backlog task" file_has backlog.md "- [ ] Renew the passport (@$tomorrow 09:00) <!--rem:"
+wait_for "the backlog task's link in the index" file_has reminders.md "- [[backlog]] <!--rem:"
+wait_for "the ticked reminder at the practice desk" desk_has "- [x] $token reminder (@$tomorrow 10:00) <!--rem:"
+wait_for "the backlog reminder at the practice desk" desk_has "- [ ] Renew the passport (@$tomorrow 09:00) <!--rem:"
 
 step "pictures: a capture with a photo"
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true

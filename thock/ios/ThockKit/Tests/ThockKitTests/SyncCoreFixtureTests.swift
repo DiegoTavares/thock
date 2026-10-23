@@ -42,7 +42,9 @@ final class SyncCoreFixtureTests: XCTestCase {
         let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
         var files: [URL] = []
         while let url = enumerator?.nextObject() as? URL {
-            if url.pathExtension == "json", url.deletingLastPathComponent().path != root.path {
+            // `reminder_index/` holds data-only reminder cases, not writes.
+            if url.pathExtension == "json", url.deletingLastPathComponent().path != root.path,
+               url.deletingLastPathComponent().lastPathComponent != "reminder_index" {
                 files.append(url)
             }
         }
@@ -189,5 +191,353 @@ final class SyncCoreFixtureTests: XCTestCase {
         XCTAssertThrowsError(try WriteDocument.parse(#"{"v":1,"client_id":"a","kind":"replace_line","path":"x.md"}"#))
         XCTAssertThrowsError(try WriteDocument.parse(#"{"v":1,"client_id":"a","kind":"append","path":"x.md","heading":null,"lines":["a\nb"]}"#))
         XCTAssertNoThrow(try WriteDocument.parse(#"{"v":1,"client_id":"a","kind":"append","path":"x.md","heading":null,"lines":["a"],"unknown":true}"#))
+    }
+
+    // MARK: Reminder vectors (V45 §11)
+
+    struct DailyVector: Decodable {
+        var dir: String
+        var filename: String
+
+        var notes: DailyNotes { DailyNotes(dir: dir, filename: filename) }
+    }
+
+    func reminderFiles(_ name: String) -> [URL] {
+        Self.fixtureRoots().map { $0.appendingPathComponent(name) }.filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// The note split on `\n`, a trailing `\r` belonging to the ending. By
+    /// bytes: `\r\n` is one `Character`, so a `Character` split misses it.
+    static func lines(_ text: String) -> [String] {
+        Array(text.utf8).split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false).map { line in
+            Bytes.string(line.last == UInt8(ascii: "\r") ? line.dropLast() : line)
+        }
+    }
+
+    func testReminderVectors() throws {
+        struct Scope: Decodable {
+            var templates: [String]
+            var counted: [String]
+            var ignored: [String]
+        }
+        struct Expected: Decodable {
+            var line: Int
+            var id: String?
+            var token: String?
+            var when: String?
+            var struck: Bool
+            var task: String?
+            var due: String?
+            var state: String
+            var mirror: Bool
+            var text: String
+        }
+        struct Case: Decodable {
+            var name: String
+            var path: String
+            var daily: DailyVector
+            var day_headings: [String]?
+            var note: String
+            var reminders: [Expected]
+        }
+        enum Mark: Decodable, Equatable {
+            case named(String)
+            case moved(String)
+
+            init(from decoder: Decoder) throws {
+                if let name = try? decoder.singleValueContainer().decode(String.self) {
+                    self = .named(name)
+                } else {
+                    self = .moved(try decoder.singleValueContainer().decode([String: String].self)["moved"] ?? "")
+                }
+            }
+        }
+        struct ExpectedMirror: Decodable {
+            var checked: Bool
+            var time: String?
+            var text: String
+            var mark: Mark?
+            var carried: String?
+            var note: String
+            var id: String
+        }
+        struct Mirror: Decodable {
+            var line: String
+            var mirror: ExpectedMirror?
+        }
+        struct Cut: Decodable {
+            var text: String
+            var max: Int
+            var cut: String
+        }
+        struct MirrorText: Decodable {
+            var text: String
+            var mirror: String
+        }
+        struct Row: Decodable {
+            var line: String
+            var comments: String
+            var edited: String
+            var strip: String
+        }
+        struct Snooze: Decodable {
+            var now: String
+            var minutes: Int
+            var zone: String
+            var due: String
+        }
+        struct Vectors: Decodable {
+            var scope: [Scope]
+            var cases: [Case]
+            var mirrors: [Mirror]
+            var texts: [Cut]
+            var mirror_texts: [MirrorText]
+            var rows: [Row]
+            var snoozes: [Snooze]
+        }
+        func whenText(_ when: ReminderWhen) -> String {
+            switch when {
+            case .date(let date): return date.iso
+            case .dateTime(let date, let time): return "\(date.iso) \(time)"
+            case .time(let time): return time.description
+            }
+        }
+
+        let urls = reminderFiles("reminders.json")
+        XCTAssertFalse(urls.isEmpty)
+        for url in urls {
+            let vectors = try JSONDecoder().decode(Vectors.self, from: Data(contentsOf: url))
+            for scope in vectors.scope {
+                for path in scope.counted {
+                    XCTAssertTrue(Reminders.isReminderPath(path, templatePaths: scope.templates), "\(path) counts")
+                }
+                for path in scope.ignored {
+                    XCTAssertFalse(Reminders.isReminderPath(path, templatePaths: scope.templates), "\(path) is ignored")
+                }
+            }
+
+            XCTAssertGreaterThanOrEqual(vectors.cases.count, 30)
+            for vector in vectors.cases {
+                let label = vector.name
+                let config = ReminderConfig(daily: vector.daily.notes, dayHeadings: vector.day_headings ?? [Reminders.defaultDayHeading])
+                let lines = Self.lines(vector.note)
+                let found = Reminders.parseNote(vector.note, path: vector.path, config: config)
+                XCTAssertEqual(found.map(\.line), vector.reminders.map(\.line), "\(label): lines")
+                for (appearance, expected) in zip(found, vector.reminders) {
+                    let line = lines[appearance.line]
+                    let reminder = appearance.reminder
+                    XCTAssertEqual(reminder.id, expected.id, "\(label): id")
+                    XCTAssertEqual(reminder.token?.text(in: line), expected.token, "\(label): token")
+                    XCTAssertEqual(reminder.token.map { whenText($0.when) }, expected.when, "\(label): when")
+                    XCTAssertEqual(reminder.token?.struck ?? false, expected.struck, "\(label): struck")
+                    XCTAssertEqual(reminder.task.map { $0 == .open ? "open" : "done" }, expected.task, "\(label): task")
+                    XCTAssertEqual(reminder.due?.description, expected.due, "\(label): due")
+                    XCTAssertEqual(reminder.state.rawValue, expected.state, "\(label): state")
+                    XCTAssertEqual(appearance.mirror, expected.mirror, "\(label): mirror")
+                    XCTAssertEqual(Reminders.reminderText(line), expected.text, "\(label): text")
+                    if !vector.note.contains("\n") {
+                        XCTAssertEqual(Reminders.parseLine(line, day: config.daily.day(of: vector.path)), reminder, "\(label): parseLine agrees")
+                    }
+                }
+            }
+
+            for vector in vectors.mirrors {
+                let parsed = MirrorLine(parsing: vector.line)
+                guard let expected = vector.mirror else {
+                    XCTAssertNil(parsed, "\(vector.line) is not a mirror line")
+                    continue
+                }
+                guard let parsed else {
+                    XCTFail("\(vector.line) is a mirror line")
+                    continue
+                }
+                let mark: MirrorMark?
+                switch expected.mark {
+                case nil: mark = nil
+                case .named("dropped")?: mark = .dropped
+                case .named("removed")?: mark = .removed
+                case .named(let other)?: XCTFail("unknown mark \(other)"); mark = nil
+                case .moved(let date)?: mark = VaultDay(iso: date).map(MirrorMark.moved)
+                }
+                let wanted = MirrorLine(
+                    checked: expected.checked, time: expected.time.flatMap(ClockTime.init), text: expected.text, mark: mark,
+                    carried: expected.carried.flatMap(ReminderDue.init), note: expected.note, id: expected.id
+                )
+                XCTAssertEqual(parsed, wanted, vector.line)
+                XCTAssertEqual(parsed.description, vector.line, "mirror lines round-trip")
+            }
+
+            for vector in vectors.texts {
+                XCTAssertEqual(Reminders.cutText(vector.text, maxCharacters: vector.max), vector.cut, vector.text)
+            }
+
+            for vector in vectors.mirror_texts {
+                let mirror = Reminders.mirrorText(vector.text)
+                XCTAssertEqual(mirror, vector.mirror, vector.text)
+                let line = "- [ ] \(mirror) · [[backlog]] <!--rem:2f6b08e19a5c-->"
+                XCTAssertNil(Reminders.parseLine(line, day: nil)?.token, "\(vector.text): no token on a mirror line")
+            }
+
+            func prefix(_ line: String, _ offset: Int) -> String {
+                Bytes.string(Array(line.utf8).prefix(offset)[...])
+            }
+            for vector in vectors.rows {
+                XCTAssertEqual(prefix(vector.line, Reminders.trailingCommentsStart(vector.line)), vector.comments, "\(vector.line): comments")
+                XCTAssertEqual(prefix(vector.line, Reminders.trailingMetadataStart(vector.line)), vector.edited, "\(vector.line): edited")
+                XCTAssertEqual(Reminders.stripReminder(vector.line), vector.strip, "\(vector.line): strip")
+            }
+
+            for vector in vectors.snoozes {
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = try XCTUnwrap(TimeZone(identifier: vector.zone))
+                let numbers = vector.now.split(whereSeparator: { "-T:".contains($0) }).compactMap { Int($0) }
+                XCTAssertEqual(numbers.count, 6, vector.now)
+                guard numbers.count == 6 else { continue }
+                let parts = DateComponents(year: numbers[0], month: numbers[1], day: numbers[2], hour: numbers[3], minute: numbers[4], second: numbers[5])
+                let now = try XCTUnwrap(calendar.date(from: parts))
+                var settings = ReminderSettings()
+                settings.snoozeMinutes = vector.minutes
+                XCTAssertEqual(settings.snoozedDue(now: now, calendar: calendar).description, vector.due, "\(vector.now) + \(vector.minutes) min")
+            }
+        }
+    }
+
+    func testDailyPathVectors() throws {
+        struct Vector: Decodable {
+            var daily: DailyVector
+            var path: String
+            var day: String?
+        }
+        let urls = reminderFiles("daily_paths.json")
+        XCTAssertFalse(urls.isEmpty)
+        for url in urls {
+            let vectors = try JSONDecoder().decode([Vector].self, from: Data(contentsOf: url))
+            XCTAssertGreaterThanOrEqual(vectors.count, 20)
+            for vector in vectors {
+                XCTAssertEqual(vector.daily.notes.day(of: vector.path), vector.day.flatMap(VaultDay.init(iso:)), "\(vector.daily.filename) \(vector.path)")
+            }
+        }
+    }
+
+    func testReminderEditVectors() throws {
+        struct Edit: Decodable {
+            var kind: String
+            var due: String?
+            var id: String?
+        }
+        struct Vector: Decodable {
+            var name: String
+            var path: String
+            var daily: DailyVector
+            var line: String
+            var edit: Edit
+            var after: String?
+            var identity_changes: Bool?
+        }
+        let urls = reminderFiles("reminder_edits.json")
+        XCTAssertFalse(urls.isEmpty)
+        for url in urls {
+            let vectors = try JSONDecoder().decode([Vector].self, from: Data(contentsOf: url))
+            XCTAssertGreaterThanOrEqual(vectors.count, 50)
+            for vector in vectors {
+                let day = vector.daily.notes.day(of: vector.path)
+                let edit = vector.edit
+                func due() throws -> ReminderDue {
+                    try XCTUnwrap(edit.due.flatMap(ReminderDue.init), "\(vector.name): due")
+                }
+                let id = edit.id ?? ""
+                let after: String?
+                switch edit.kind {
+                case "close": after = Reminders.close(vector.line)
+                case "reopen": after = Reminders.reopen(vector.line)
+                case "rewrite": after = Reminders.rewrite(vector.line, due: try due(), homeDay: day)
+                case "drop": after = Reminders.dropToken(vector.line)
+                case "attach": after = Reminders.attach(vector.line, due: try due(), id: id, homeDay: day)
+                case "add_id": after = Reminders.addID(vector.line, id: id)
+                case "place": after = Reminders.placeToken(vector.line, due: try due(), homeDay: day)
+                default:
+                    XCTFail("\(vector.name): unknown edit \(edit.kind)")
+                    continue
+                }
+                XCTAssertEqual(after, vector.after, vector.name)
+                if edit.kind == "add_id", vector.identity_changes != true, let after {
+                    XCTAssertEqual(SyncCore.lineHash(after), SyncCore.lineHash(vector.line), "\(vector.name): an id never changes a line's identity")
+                }
+            }
+        }
+    }
+
+    /// The index cases read as the desk's runner reads them: each entry's
+    /// home line found by id, with its state, due and group. `ReminderIndex`
+    /// (V45 P1) reads the same cases its own way.
+    func testReminderIndexDerivations() throws {
+        struct Headings: Decodable {
+            var open: [String]
+            var done: [String]
+            var day: [String]
+        }
+        struct Expected: Decodable {
+            var id: String
+            var home: String
+            var line: Int?
+            var text: String?
+            var due: String?
+            var rings_at: String?
+            var state: String
+            var group: String?
+            var stamp: [String: String]?
+        }
+        struct Case: Decodable {
+            var name: String
+            var now: String
+            var index: String
+            var headings: Headings
+            var daily: DailyVector
+            var date_only_at: String
+            var files: [String: String]
+            var reminders: [Expected]
+        }
+        var checked = 0
+        for root in Self.fixtureRoots() {
+            let folder = root.appendingPathComponent("reminder_index")
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { continue }
+            for name in names.sorted() where name.hasSuffix(".json") {
+                let vector = try JSONDecoder().decode(Case.self, from: Data(contentsOf: folder.appendingPathComponent(name)))
+                let config = ReminderConfig(daily: vector.daily.notes, dayHeadings: vector.headings.day)
+                let today = try XCTUnwrap(VaultDay(iso: String(vector.now.prefix(10))))
+                let dateOnlyAt = try XCTUnwrap(ClockTime(vector.date_only_at))
+                let indexText = vector.files[vector.index] ?? ""
+                let indexLines = Self.lines(indexText)
+                // Top-level list items only: indented lines are a loose entry's children.
+                let entries = Reminders.parseNote(indexText, path: vector.index, config: config).filter { entry in
+                    entry.reminder.id != nil && ["- ", "* ", "+ "].contains { indexLines[entry.line].hasPrefix($0) }
+                }
+                XCTAssertEqual(entries.compactMap(\.reminder.id), vector.reminders.map(\.id), "\(vector.name): entries")
+                for expected in vector.reminders {
+                    let label = "\(vector.name) \(expected.id)"
+                    let homeText = vector.files[expected.home]
+                    let homes = homeText.map { Reminders.parseNote($0, path: expected.home, config: config) }?
+                        .filter { !$0.mirror && $0.reminder.id == expected.id } ?? []
+                    guard let home = homes.first(where: { $0.reminder.token != nil }) ?? homes.first, let homeText else {
+                        XCTAssertEqual(expected.state, expected.stamp?["kind"] == "removed" ? "removed" : "missing", label)
+                        XCTAssertNil(expected.line, label)
+                        continue
+                    }
+                    let reminder = home.reminder
+                    XCTAssertEqual(home.line, expected.line, "\(label): home line")
+                    XCTAssertEqual(Reminders.reminderText(Self.lines(homeText)[home.line]), expected.text, "\(label): text")
+                    XCTAssertEqual(reminder.due?.description, expected.due, "\(label): due")
+                    let rings = reminder.due.map { due -> String in
+                        let moment = due.ringsAt(dateOnlyAt: dateOnlyAt)
+                        return "\(moment.date.iso)T\(moment.time)"
+                    }
+                    XCTAssertEqual(rings, expected.rings_at, "\(label): rings at")
+                    XCTAssertEqual(reminder.state.rawValue, expected.state, "\(label): state")
+                    XCTAssertEqual(Reminders.group(state: reminder.state, due: reminder.due, today: today)?.rawValue, expected.group, "\(label): group")
+                    checked += 1
+                }
+            }
+        }
+        XCTAssertGreaterThan(checked, 0)
     }
 }

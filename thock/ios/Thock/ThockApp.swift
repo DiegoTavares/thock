@@ -1,16 +1,18 @@
 import AppIntents
 import SwiftUI
 import ThockKit
+import UserNotifications
 
 @main
 struct ThockApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
         Theme.registerFonts()
     }
+
+    private var model: AppModel { AppDelegate.model }
 
     var body: some Scene {
         WindowGroup {
@@ -19,7 +21,6 @@ struct ThockApp: App {
                 .preferredColorScheme(model.appearance.scheme)
                 .tint(Theme.amber)
                 .task {
-                    AppDelegate.model = model
                     await model.boot()
                     if let shortcut = AppDelegate.launchShortcut {
                         AppDelegate.launchShortcut = nil
@@ -38,11 +39,22 @@ struct ThockApp: App {
     }
 }
 
-/// The app icon's quick actions arrive through the scene delegate; SwiftUI
-/// has no hook of its own for them.
+/// The app icon's quick actions arrive through the scene delegate and a
+/// reminder's answers through the notification center's; SwiftUI has no
+/// hook of its own for either.
 final class AppDelegate: NSObject, UIApplicationDelegate {
-    @MainActor static weak var model: AppModel?
+    /// Owned here rather than by the scene: a notification's answer can
+    /// launch the app in the background with no scene at all.
+    @MainActor static let model = AppModel()
     @MainActor static var launchShortcut: String?
+    @MainActor static let notifier = ReminderNotifier()
+
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // Set before launch ends, so an answer that launched the app arrives.
+        UNUserNotificationCenter.current().delegate = AppDelegate.notifier
+        AppDelegate.notifier.registerCategories(ReminderSettings())
+        return true
+    }
 
     func application(_ application: UIApplication, configurationForConnecting session: UISceneSession, options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         if let shortcut = options.shortcutItem {
@@ -56,7 +68,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
         // The server's silent push is a nudge to pull (V34 API §6.5).
         Task { @MainActor in
-            AppDelegate.model?.becameActive()
+            AppDelegate.model.becameActive()
             completionHandler(.newData)
         }
     }
@@ -66,7 +78,7 @@ final class SceneDelegate: NSObject, UIWindowSceneDelegate {
     func windowScene(_ windowScene: UIWindowScene, performActionFor shortcutItem: UIApplicationShortcutItem, completionHandler: @escaping (Bool) -> Void) {
         let type = shortcutItem.type
         Task { @MainActor in
-            AppDelegate.model?.handle(shortcut: type)
+            AppDelegate.model.handle(shortcut: type)
             completionHandler(true)
         }
     }

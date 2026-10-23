@@ -20,6 +20,8 @@ public struct BacklogTask: Identifiable, Equatable, Sendable {
     public var ordinal: Int
     /// The task line and its indented continuation, which travel together.
     public var block: [String]
+    /// The reminder the line carries, drawn as its chip (V45 §10.4).
+    public var reminder: LineReminder?
 
     public var childLines: Int { block.count - 1 }
 }
@@ -141,7 +143,8 @@ public struct BacklogView: Equatable, Sendable {
         guard !identity.isEmpty else { return nil }
         let hash = SyncCore.lineHash(text)
         let ordinal = own.filter { $0 < index && mask[$0] && SyncCore.lineHash(file.lines[$0].text) == hash && !SyncCore.lineIdentity(file.lines[$0].text).isEmpty }.count
-        var label = NoteView.strippingTrailingComments(item.text).trimmingCharacters(in: .whitespaces)
+        let reminder = Reminders.parseLine(text, day: nil)
+        var label = Reminders.removingToken(NoteView.strippingTrailingComments(item.text)).trimmingCharacters(in: .whitespaces)
         var completedOn: String?
         if let range = label.range(of: #"\s*✅\s*(\d{4}-\d{2}-\d{2})\s*$"#, options: .regularExpression) {
             completedOn = String(label[range]).components(separatedBy: "✅").last?.trimmingCharacters(in: .whitespaces)
@@ -151,7 +154,7 @@ public struct BacklogView: Equatable, Sendable {
         section.bodyEnd = own.upperBound
         let end = SyncCore.blockEnd(from: index, in: section, file: file)
         return BacklogTask(line: index, raw: text, label: label, done: done, completedOn: completedOn, heading: heading,
-                           hash: hash, ordinal: ordinal, block: file.lines[index..<end].map(\.text))
+                           hash: hash, ordinal: ordinal, block: file.lines[index..<end].map(\.text), reminder: reminder)
     }
 }
 
@@ -206,11 +209,19 @@ extension PhoneWrites {
         let view = NoteView(text: todayNote ?? template.map { Template.expand($0, day: today, time: clock, title: today.formatted(config.daily.filename)) } ?? "", config: config)
         var record = document(.append, path: config.dailyPath(today))
         record.heading = view.planner.heading
-        record.lines = ["- [x] " + parts.text.trimmingCharacters(in: .whitespaces)]
+        // The record is not a second reminder: no token, wherever it sat, and no id.
+        record.lines = ["- [x] " + Reminders.removingToken(parts.text).trimmingCharacters(in: .whitespaces)]
         record.placement = .beforeChildren
         record.createFromTemplate = true
 
-        parts.text = parts.text.trimmingCharacters(in: .whitespaces) + " ✅ " + today.iso
+        // The stamp closes the words and the token, before the trailing
+        // comments, so a reminder id stays last on the line (V45 §4.3).
+        let stamp = " ✅ " + today.iso
+        if let token = parts.token {
+            parts.token = token + stamp
+        } else {
+            parts.text = parts.text.trimmingCharacters(in: .whitespaces) + stamp
+        }
         var move = document(.moveBlock, path: config.backlogFile)
         move.heading = task.heading
         move.lineHash = task.hash

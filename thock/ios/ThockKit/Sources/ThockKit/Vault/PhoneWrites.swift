@@ -30,6 +30,30 @@ public enum CaptureDestination: String, Codable, CaseIterable, Sendable {
     case today
     case inbox
     case backlog
+    /// A task in `reminders.md` that rings (V45 §10.2). Chosen per capture
+    /// and never remembered as the entry's chip.
+    case reminder
+
+    /// Whether saving with this chip makes it the entry's next one.
+    public var isRemembered: Bool { self != .reminder }
+
+    /// The chip an entry opens with, from what was last remembered for it:
+    /// Today when nothing was, and never Reminder.
+    public static func remembered(_ stored: String?) -> CaptureDestination {
+        guard let chip = stored.flatMap(CaptureDestination.init(rawValue:)), chip.isRemembered else { return .today }
+        return chip
+    }
+}
+
+/// When a reminder capture rings, and the id its line gets.
+public struct ReminderCapture: Equatable, Sendable {
+    public var due: ReminderDue
+    public var id: String
+
+    public init(due: ReminderDue, id: String) {
+        self.due = due
+        self.id = id
+    }
 }
 
 public enum CaptureKind: String, Codable, Sendable {
@@ -56,6 +80,9 @@ public struct TaskLineParts: Equatable, Sendable {
     public var head: String
     public var time: String?
     public var text: String
+    /// A reminder token closing the words, with the space before it (V45
+    /// §4.2), kept apart so an edit of the words never loses it.
+    public var token: String?
     /// Trailing comments with the space before them.
     public var tail: String
 
@@ -81,6 +108,19 @@ public struct TaskLineParts: Equatable, Sendable {
         } else {
             text = body
         }
+        // Only a token that ends the words is set apart: one in their middle
+        // stays where the person put it.
+        let bytes = Array(text.utf8)
+        if let range = Reminders.parseLine(text, day: nil)?.token?.range, Bytes.trimmed(bytes[range.upperBound...]).isEmpty {
+            let words = Bytes.trimEnd(bytes[..<range.lowerBound])
+            token = Bytes.string(bytes[words.endIndex...])
+            text = Bytes.string(words)
+        }
+    }
+
+    /// The `<!--rem:…-->` id among the trailing comments, if any.
+    public var reminderID: String? {
+        Reminders.parseLine(tail, day: nil)?.id
     }
 
     public var done: Bool {
@@ -97,7 +137,7 @@ public struct TaskLineParts: Equatable, Sendable {
                 }
             }
         }
-        return head + (time.map { text.isEmpty ? $0 : $0 + " " } ?? "") + text + tail
+        return head + (time.map { text.isEmpty ? $0 : $0 + " " } ?? "") + text + (token ?? "") + tail
     }
 }
 
@@ -294,7 +334,7 @@ public struct PhoneWrites: Sendable {
     /// Pictures (V39 §7.1) are written first, then linked at the end of the
     /// capture: as the task's continuation when the capture is one task,
     /// otherwise as lines of their own.
-    public func capture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], todayNote: String?, template: String?, taken: (String) -> Bool) -> (writes: [PlannedWrite], record: CaptureRecord)? {
+    public func capture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], reminder: ReminderCapture? = nil, indexText: String? = nil, todayNote: String?, template: String?, taken: (String) -> Bool) -> (writes: [PlannedWrite], record: CaptureRecord)? {
         var content = blocks.filter { $0.kind != .blank }
         if content.allSatisfy({ $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.kind != .rule }) {
             guard !images.isEmpty else { return nil }
@@ -351,6 +391,23 @@ public struct PhoneWrites: Sendable {
             write.blankLineBefore = true
             write.createFromTemplate = true
             return (placed.writes + [PlannedWrite(document: write, seed: dailySeed(today))], record)
+
+        case .reminder:
+            // A reminder needs its time; the sheet sets it before Save shows.
+            guard let reminder else { return nil }
+            var lines = [reminderLine(firstLines[0], due: reminder.due, id: reminder.id)]
+            for line in firstLines.dropFirst() {
+                lines.append("  " + line)
+            }
+            for block in content.dropFirst() {
+                var block = block
+                block.touched = true
+                lines += block.markdownLines().map { "  " + $0 }
+            }
+            lines += placed.lines.map { "  " + $0 }
+            var record = CaptureRecord(digest: captureDigest(), title: title, kind: .idea, destination: .reminder, madeAt: now, inboxPath: nil)
+            record.imageCount = images.count
+            return (placed.writes + [indexAppend(lines, indexText: indexText)], record)
 
         case .backlog:
             var write = document(.append, path: config.backlogFile)
@@ -740,7 +797,14 @@ public struct PhoneWrites: Sendable {
         guard let parts = TaskLineParts(item.raw) else { return [] }
         var append = document(.append, path: config.backlogFile)
         append.heading = HeadingRef(text: config.soonHeading, level: 2)
-        append.lines = ["- [ ] " + parts.text]
+        // A reminder travels with its token and id and stays one reminder
+        // (V45 §13.2): the backlog line becomes its home. A time-only token
+        // names no day outside the daily note, so it leaves with its date.
+        var token = parts.token ?? ""
+        if case .time? = item.reminder?.token?.when, let due = item.reminder?.due {
+            token = " " + Reminders.tokenText(due, homeDay: nil)
+        }
+        append.lines = ["- [ ] " + parts.text + token + (parts.reminderID.map { " " + Reminders.idMarker($0) } ?? "")]
         append.placement = .beforeChildren
         return [remove(item, note: note), PlannedWrite(document: append)]
     }
@@ -826,6 +890,7 @@ public enum Receipts {
         switch record.destination {
         case .today: return .addedToToday
         case .backlog: return .addedToBacklog
+        case .reminder: return .addedToReminders
         case .inbox: break
         }
         if let line = log.last(where: { $0.digest == record.digest }) {

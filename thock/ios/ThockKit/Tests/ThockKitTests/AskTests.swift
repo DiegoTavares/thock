@@ -241,10 +241,15 @@ final class AskTests: XCTestCase {
         XCTAssertTrue(context.contains("Today is Saturday, 3 October 2026 (2026-10-03), week 2026-W40. The time is 14:02."))
         XCTAssertTrue(context.contains("- Today's note: `daily/2026-10-03.md` (not written yet)."))
         XCTAssertTrue(context.contains("- Tasks: `backlog.md`, under the headings `Soon`, `Someday` and `Completed`."))
+        XCTAssertTrue(context.contains("- Reminders: `reminders.md` indexes them. A reminder is `(@YYYY-MM-DD HH:MM)` or `(@YYYY-MM-DD)` at the end of a line, or `(@HH:MM)` in a daily note. To set one, write the token on the line it is about; one with no other home is a `- [ ] ` task under `Open` in `reminders.md`. Never write or change a `<!--rem:…-->` id: Thock adds them and keeps the index."))
         XCTAssertTrue(context.contains("This vault is set to **Portuguese (Brazil)** (`pt-BR`)."))
         // The index is three lines and the vault caps it at two.
         XCTAssertTrue(context.contains("# What Thock has learned\n\n\nThe rest of this page is over its cap"))
         XCTAssertFalse(context.contains("your manager"))
+
+        let renamed = AskPrompt.context(session: try vault([".thock/reminders.toml": "index = \"lembretes.md\"\n[headings]\nopen = [\"Abertos\", \"Open\"]\n"]), now: now)
+        XCTAssertTrue(renamed.contains("- Reminders: `lembretes.md` indexes them."))
+        XCTAssertTrue(renamed.contains("under `Abertos` in `lembretes.md`."))
 
         let bare = AskPrompt.context(session: try vault(["daily/2026-10-03.md": "# Today\n"]), now: now)
         XCTAssertTrue(bare.contains("- Today's note: `daily/2026-10-03.md`."))

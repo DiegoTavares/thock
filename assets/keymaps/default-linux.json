@@ -411,6 +411,7 @@
     "bindings": {
       "ctrl-k v": "markdown::OpenPreviewToTheSide",
       "ctrl-shift-v": "markdown::OpenPreview",
+      "ctrl-alt-shift-d": "thock::PickReminderDate",
     },
   },
   {
@@ -489,6 +490,7 @@
       "ctrl-alt-w": "thock::FocusDayStrip",
       "ctrl-alt-t": "thock::ToggleAgentFocus",
       "ctrl-alt-p": "thock::ToggleDayPlannerFocus",
+      "ctrl-alt-k": "thock::ToggleRemindersFocus",
       "ctrl-?": "thock::ToggleChatFocus",
       "ctrl-alt-o": "thock::ToggleSyncStatus",
       "ctrl-alt-i": "thock::OpenInbox",
@@ -991,7 +993,8 @@
     "bindings": {
       "1": ["thock::ActivateDeskTab", { "tab": "backlog" }],
       "2": ["thock::ActivateDeskTab", { "tab": "today" }],
-      "3": ["thock::ActivateDeskTab", { "tab": "done" }],
+      "3": ["thock::ActivateDeskTab", { "tab": "reminders" }],
+      "4": ["thock::ActivateDeskTab", { "tab": "done" }],
     },
   },
   {
@@ -1041,6 +1044,47 @@
       "ctrl-d": "thock::ScrollInboxReaderPageDown",
       "ctrl-u": "thock::ScrollInboxReaderPageUp",
       "tab": "thock::FocusInboxReader",
+    },
+  },
+  {
+    "context": "ThockRemindersPanel",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "menu::Confirm",
+      "escape": "menu::Cancel",
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "home": "menu::SelectFirst",
+      "end": "menu::SelectLast",
+      "x": "thock::CloseReminder",
+      "space": "thock::CloseReminder",
+      "s": "thock::RescheduleReminder",
+      "d": "thock::DropReminder",
+      "o": "thock::NewReminder",
+    },
+  },
+  {
+    "context": "ThockRemindersPanel && rescheduling",
+    "use_key_equivalents": true,
+    "bindings": {
+      "1": ["thock::ChooseRescheduleOption", { "index": 0 }],
+      "2": ["thock::ChooseRescheduleOption", { "index": 1 }],
+      "3": ["thock::ChooseRescheduleOption", { "index": 2 }],
+    },
+  },
+  {
+    "context": "ThockReminderCalendar",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "menu::Confirm",
+      "escape": "menu::Cancel",
+      "left": "thock::SelectPreviousCalendarDay",
+      "right": "thock::SelectNextCalendarDay",
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "[": "thock::SelectPreviousCalendarMonth",
+      "]": "thock::SelectNextCalendarMonth",
+      "backspace": "thock::ClearReminderTime",
     },
   },
   {

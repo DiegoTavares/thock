@@ -34,13 +34,16 @@ use workspace::{OpenOptions, OpenVisible, Workspace};
 use crate::backlog::{
     self, Backlog, BacklogHeadings, BacklogTask, SectionKind, parse_backlog, split_completion,
 };
-use crate::day_plan::strip_trailing_comment;
+use crate::day_plan::strip_trailing_metadata;
 use crate::gmail_service::{self, GmailService};
 use crate::inbox_service::{self, InboxService};
 use crate::markdown_conceal::resolve_wikilink_target;
 use crate::markdown_text::{LinkTarget, parse_inline_spans, render_markdown_row};
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
 use crate::readwise_service::{self, ReadwiseService};
+use crate::reminder_index::{IndexSection, IndexedReminder, IndexedState, StampKind};
+use crate::reminder_service::{self, ReminderEvent, ReminderService};
+use crate::reminders::{ChipState, ReminderClock, ReminderDay, reminder_chip};
 use crate::sync_status;
 use crate::vault::{Vault, VaultStatus};
 use crate::vault_sync::{self, VaultSyncService};
@@ -180,6 +183,10 @@ enum BacklogRow<'a> {
     Task {
         task: &'a BacklogTask,
     },
+    /// A closed or dropped reminder among the finished tasks (V45 §9.1).
+    Reminder {
+        reminder: &'a IndexedReminder,
+    },
 }
 
 /// The keyboard cursor: a column plus a row index into the tasks that column
@@ -243,6 +250,13 @@ pub struct BacklogPanel {
     /// only, like the other two.
     readwise_service: Option<Entity<ReadwiseService>>,
     vault_sync_service: Option<Entity<VaultSyncService>>,
+    /// The vault's reminders, whose closed and dropped ones Done lists
+    /// beside the finished tasks (V45 §9.1).
+    reminder_service: Option<Entity<ReminderService>>,
+    _reminder_subscription: Option<Subscription>,
+    /// The closed and dropped reminders of the index's `## Done`, newest
+    /// first, kept so the Done rows and the cursor share one list.
+    done_reminders: Vec<IndexedReminder>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -292,6 +306,25 @@ impl BacklogPanel {
             .map(|selection| (selection.section.id(), selection.index))
     }
 
+    /// The row text and meta line of the first Soon task containing
+    /// `needle`, for label tests.
+    #[cfg(test)]
+    pub(crate) fn row_for_tests(
+        &self,
+        needle: &str,
+        cx: &App,
+    ) -> Option<(String, Option<(String, bool)>)> {
+        let task = self
+            .backlog
+            .section(SectionKind::Soon)
+            .iter()
+            .find(|task| task.text.contains(needle))?;
+        Some((
+            thock_sync_core::strip_reminder(&task.text),
+            self.task_meta(task, cx),
+        ))
+    }
+
     /// Whether the new-task editor's row lies inside the list's viewport
     /// as last drawn, and how far the list is scrolled, for keystroke tests.
     #[cfg(test)]
@@ -325,6 +358,7 @@ impl BacklogPanel {
                         | project::Event::WorktreeUpdatedEntries(..)
                 ) {
                     this.refresh_vault_status(cx);
+                    this.ensure_reminder_service(cx);
                 }
             });
             let gmail_service = gmail_service::service_for_project(&project, cx);
@@ -344,6 +378,9 @@ impl BacklogPanel {
             if let Some(service) = &vault_sync_service {
                 subscriptions.push(cx.observe(service, |_, _, cx| cx.notify()));
             }
+            // Reminder chips relabel when the day turns.
+            let reminder_day = ReminderDay::global(cx);
+            subscriptions.push(cx.observe(&reminder_day, |_, _, cx| cx.notify()));
             let mut this = Self {
                 workspace: weak_workspace,
                 project,
@@ -374,8 +411,12 @@ impl BacklogPanel {
                 inbox_service,
                 readwise_service,
                 vault_sync_service,
+                reminder_service: None,
+                _reminder_subscription: None,
+                done_reminders: Vec::new(),
                 _subscriptions: subscriptions,
             };
+            this.ensure_reminder_service(cx);
             this.vault_status = this.detect_vault_status(cx);
             this.ensure_buffer(cx);
             this
@@ -543,8 +584,30 @@ impl BacklogPanel {
         if backlog != self.backlog {
             self.backlog = backlog;
             self.refresh_link_folders(cx);
+            // Done lists a finished reminder once: beside its task when the
+            // task is in Completed, on its own otherwise.
+            self.refresh_done_reminders(cx);
             cx.notify();
         }
+    }
+
+    /// Finds the vault's reminders service, which appears with the vault's
+    /// worktree, and follows its index.
+    fn ensure_reminder_service(&mut self, cx: &mut Context<Self>) {
+        if self.reminder_service.is_some() {
+            return;
+        }
+        let Some(service) = reminder_service::service_for_project(&self.project, cx) else {
+            return;
+        };
+        self._reminder_subscription =
+            Some(cx.subscribe(&service, |this, _, _: &ReminderEvent, cx| {
+                this.refresh_done_reminders(cx);
+                cx.notify();
+            }));
+        self.reminder_service = Some(service);
+        self.refresh_done_reminders(cx);
+        cx.notify();
     }
 
     fn show_error(&self, message: String, cx: &mut Context<Self>) {
@@ -595,12 +658,14 @@ impl BacklogPanel {
 
     // --- Keyboard navigation (spec §6.6) ---
 
-    fn completed_tasks(&self) -> Vec<&BacklogTask> {
-        completed_tasks(&self.backlog)
-    }
-
     fn visible_rows(&self, section: SectionKind) -> Vec<BacklogRow<'_>> {
-        column_rows(&self.backlog, section, &self.collapsed, &self.folded_lanes)
+        column_rows(
+            &self.backlog,
+            section,
+            &self.collapsed,
+            &self.folded_lanes,
+            &self.done_reminders,
+        )
     }
 
     /// The lanes the current view lays out, in order.
@@ -680,7 +745,18 @@ impl BacklogPanel {
         let selection = self.selection()?;
         match self.visible_rows(selection.section).get(selection.index)? {
             BacklogRow::Task { task } => Some((selection.section, (*task).clone())),
-            BacklogRow::Category { .. } | BacklogRow::Lane { .. } => None,
+            BacklogRow::Category { .. } | BacklogRow::Lane { .. } | BacklogRow::Reminder { .. } => {
+                None
+            }
+        }
+    }
+
+    /// The selected row's reminder, when it is a finished reminder.
+    fn selected_reminder(&self) -> Option<IndexedReminder> {
+        let selection = self.selection()?;
+        match self.visible_rows(selection.section).get(selection.index)? {
+            BacklogRow::Reminder { reminder } => Some((*reminder).clone()),
+            _ => None,
         }
     }
 
@@ -693,7 +769,7 @@ impl BacklogPanel {
             BacklogRow::Task { task } => {
                 task.category.clone().map(|name| (selection.section, name))
             }
-            BacklogRow::Lane { .. } => None,
+            BacklogRow::Lane { .. } | BacklogRow::Reminder { .. } => None,
         }
     }
 
@@ -703,7 +779,7 @@ impl BacklogPanel {
         let selection = self.selection()?;
         match self.visible_rows(selection.section).get(selection.index)? {
             BacklogRow::Category { collapsed, .. } => Some(*collapsed),
-            BacklogRow::Task { .. } | BacklogRow::Lane { .. } => None,
+            BacklogRow::Task { .. } | BacklogRow::Lane { .. } | BacklogRow::Reminder { .. } => None,
         }
     }
 
@@ -1139,7 +1215,7 @@ impl BacklogPanel {
             let mut editor = Editor::single_line(window, cx);
             // The hidden trailing comment stays out of the editor too;
             // `commit_edit` re-attaches it so a rename can't destroy it.
-            editor.set_text(strip_trailing_comment(initial_text), window, cx);
+            editor.set_text(strip_trailing_metadata(initial_text), window, cx);
             if let EditTarget::New { .. } = target {
                 editor.set_placeholder_text("New task", window, cx);
             }
@@ -1207,6 +1283,10 @@ impl BacklogPanel {
             self.set_category_collapsed(!collapsed, cx);
             return;
         }
+        if let Some(reminder) = self.selected_reminder() {
+            self.reveal_reminder(&reminder, window, cx);
+            return;
+        }
         self.edit_selected_task(&EditBacklogTask, window, cx);
     }
 
@@ -1238,7 +1318,7 @@ impl BacklogPanel {
                 // Committing an empty string is a revert, not a delete (§6.2).
                 // The editor showed the text without its hidden trailing
                 // comment, so "unchanged" is judged against that view.
-                if new_text.is_empty() || new_text == strip_trailing_comment(&original_text) {
+                if new_text.is_empty() || new_text == strip_trailing_metadata(&original_text) {
                     return;
                 }
                 let new_text = restore_hidden_suffix(&original_text, &new_text);
@@ -1413,6 +1493,11 @@ impl BacklogPanel {
         cx.spawn_in(window, async move |this, cx| {
             let note_result = async {
                 let (note_path, outcome) = ensure.await?;
+                if outcome != EnsureNoteOutcome::AlreadyExisted {
+                    this.update(cx, |_, cx| {
+                        crate::notes::announce_note(&project, &note_path, cx)
+                    })?;
+                }
                 if outcome == EnsureNoteOutcome::CreatedWithoutTemplate {
                     this.update(cx, |this, cx| {
                         this.show_error(
@@ -1552,6 +1637,17 @@ impl BacklogPanel {
         let Some(path) = self.vault().map(Vault::backlog_path) else {
             return;
         };
+        self.reveal_path(path, line, window, cx);
+    }
+
+    /// Opens `path` with the cursor at the start of `line`.
+    fn reveal_path(
+        &mut self,
+        path: PathBuf,
+        line: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let workspace = self.workspace.clone();
         cx.spawn_in(window, async move |_, cx| {
             let item = workspace
@@ -1639,10 +1735,6 @@ impl BacklogPanel {
     /// Returns the text element only — the caller wraps it in the `LabelLike`
     /// that carries the row's size, color and truncation.
     fn render_task_text(&self, id: ElementId, text: &str, cx: &Context<Self>) -> AnyElement {
-        // A trailing `<!-- … -->` (e.g. a capture marker) is identity, not
-        // content — hidden here exactly as the Day Planner hides it (v8
-        // §11.4); the file keeps it.
-        let text = strip_trailing_comment(text);
         render_markdown_row(id, text, &self.project, &self.workspace, cx)
     }
 
@@ -1655,22 +1747,32 @@ impl BacklogPanel {
         (self.selection() == Some(row)).then(|| cx.theme().colors().element_selected)
     }
 
-    /// What a task row says under its text (V43 §8.3): the date of the
-    /// linked note it came from and the folder that note lives in. Only what
-    /// the line already carries; a task without a link has no meta line.
-    fn task_meta(&self, task: &BacklogTask) -> Option<String> {
-        let link = task_link(&task.text)?;
+    /// What a task row says under its text (V43 §8.3, V45 §8.5): its
+    /// reminder's chip, then the date of the linked note it came from and the
+    /// folder that note lives in. Only what the line already carries; a task
+    /// with neither has no meta line. The flag is set when the reminder is
+    /// overdue, for the warning colour.
+    fn task_meta(&self, task: &BacklogTask, cx: &App) -> Option<(String, bool)> {
         let mut parts: Vec<String> = Vec::new();
-        if let Some(date) = link.date {
-            parts.push(format!("from {}", crate::notes::format_date(date, "MMM D")));
+        let today = ReminderClock::global(cx).today();
+        let chip = thock_sync_core::parse_line(&task.text, None)
+            .and_then(|reminder| reminder_chip(&reminder, today));
+        if let Some(chip) = &chip {
+            parts.push(format!("⏰ {}", chip.label));
         }
-        if let Some(Some(folder)) = self.link_folders.get(&link.target) {
-            parts.push(folder.clone());
+        if let Some(link) = task_link(&task.text) {
+            if let Some(date) = link.date {
+                parts.push(format!("from {}", crate::notes::format_date(date, "MMM D")));
+            }
+            if let Some(Some(folder)) = self.link_folders.get(&link.target) {
+                parts.push(folder.clone());
+            }
         }
         if parts.is_empty() {
             return None;
         }
-        Some(parts.join(" · "))
+        let overdue = chip.is_some_and(|chip| chip.state == ChipState::Overdue);
+        Some((parts.join(" · "), overdue))
     }
 
     /// Resolves every linked note's folder in one pass over the vault's
@@ -1742,7 +1844,7 @@ impl BacklogPanel {
         let task_text = task.text.clone();
         let today_task_text = task.text.clone();
         let task_line = task.line;
-        let meta = self.task_meta(task);
+        let meta = self.task_meta(task, cx);
         // Chevrons, matching the `>` / `<` keys that do the same thing.
         let (move_icon, move_tooltip, move_action) = match section {
             SectionKind::Someday => (
@@ -1885,9 +1987,7 @@ impl BacklogPanel {
                     .flex_1()
                     .min_w_0()
                     .cursor_text()
-                    .tooltip(Tooltip::text(
-                        strip_trailing_comment(&task.text).to_string(),
-                    ))
+                    .tooltip(Tooltip::text(thock_sync_core::strip_reminder(&task.text)))
                     .child(
                         div()
                             .text_size(rems(0.875))
@@ -1901,11 +2001,15 @@ impl BacklogPanel {
                                 cx,
                             )),
                     )
-                    .when_some(meta, |this, meta| {
+                    .when_some(meta, |this, (meta, overdue)| {
                         this.child(
                             div()
                                 .text_size(rems(0.71875))
-                                .text_color(colors.text_placeholder)
+                                .text_color(if overdue {
+                                    cx.theme().status().warning
+                                } else {
+                                    colors.text_placeholder
+                                })
                                 .child(SharedString::from(meta)),
                         )
                     })
@@ -2108,6 +2212,8 @@ impl BacklogPanel {
                     BacklogRow::Task { task } => {
                         list = list.child(self.render_open_task_row(section, index, task, cx));
                     }
+                    // Only the Done view lists reminders.
+                    BacklogRow::Reminder { .. } => {}
                 }
             }
             if self.is_adding_to(section, group)
@@ -2127,19 +2233,27 @@ impl BacklogPanel {
     /// The Done tab: completed tasks newest first, each with its date.
     fn render_done_view(&self, cx: &Context<Self>) -> AnyElement {
         let colors = cx.theme().colors();
-        let completed = self.completed_tasks();
+        let rows = self.visible_rows(SectionKind::Completed);
         let mut list = v_flex().py_1();
-        if completed.is_empty() {
+        if rows.is_empty() {
             list = list.child(self.render_hint("Nothing finished yet."));
         }
-        for (index, task) in completed.into_iter().enumerate() {
-            let (label, date) = split_completion(&task.text);
-            let row = TaskSelection {
+        for (index, row) in rows.into_iter().enumerate() {
+            let selection = TaskSelection {
                 section: SectionKind::Completed,
                 index,
             };
+            let task = match row {
+                BacklogRow::Task { task } => task,
+                BacklogRow::Reminder { reminder } => {
+                    list = list.child(self.render_done_reminder(selection, reminder, cx));
+                    continue;
+                }
+                BacklogRow::Lane { .. } | BacklogRow::Category { .. } => continue,
+            };
+            let (label, date) = split_completion(&task.text);
             list = list.child(
-                self.row_frame(row, cx)
+                self.row_frame(selection, cx)
                     .items_start()
                     .child(
                         div().pt_0p5().child(
@@ -2183,6 +2297,122 @@ impl BacklogPanel {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handles[BacklogView::Done.index()])
+            .into_any_element()
+    }
+
+    /// Reads the closed and dropped reminders from the index's `## Done`,
+    /// newest first.
+    fn refresh_done_reminders(&mut self, cx: &App) {
+        let Some(service) = &self.reminder_service else {
+            self.done_reminders.clear();
+            return;
+        };
+        let finished_task_ids: HashSet<String> = self
+            .backlog
+            .completed
+            .iter()
+            .filter_map(|task| thock_sync_core::parse_line(&task.text, None)?.id)
+            .collect();
+        let mut reminders: Vec<IndexedReminder> = service
+            .read(cx)
+            .reminders()
+            .iter()
+            .filter(|reminder| {
+                reminder.section == IndexSection::Done
+                    && matches!(reminder.state, IndexedState::Closed | IndexedState::Dropped)
+            })
+            // A finished backlog task already has its own Done row.
+            .filter(|reminder| !finished_task_ids.contains(&reminder.id))
+            .cloned()
+            .collect();
+        reminders.sort_by_key(|reminder| Reverse(done_date(reminder)));
+        self.done_reminders = reminders;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn done_reminders(&self) -> &[IndexedReminder] {
+        &self.done_reminders
+    }
+
+    #[cfg(test)]
+    pub(crate) fn buffer_for_tests(&self) -> Option<Entity<Buffer>> {
+        self.buffer.clone()
+    }
+
+    /// The selected Done row's reminder id, for keystroke tests.
+    #[cfg(test)]
+    pub(crate) fn selected_reminder_for_tests(&self) -> Option<String> {
+        self.selected_reminder().map(|reminder| reminder.id)
+    }
+
+    /// Opens a finished reminder's home note at its line.
+    fn reveal_reminder(
+        &mut self,
+        reminder: &IndexedReminder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(service) = &self.reminder_service else {
+            return;
+        };
+        let path = service.read(cx).abs_path(&reminder.home);
+        let line = reminder.line.and_then(|line| u32::try_from(line).ok());
+        self.reveal_path(path, line.unwrap_or(0), window, cx);
+    }
+
+    /// A finished reminder among the finished tasks: its words struck, over
+    /// the day it was closed or dropped. `enter` opens its home line.
+    fn render_done_reminder(
+        &self,
+        selection: TaskSelection,
+        reminder: &IndexedReminder,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors();
+        let text = reminder.text.clone().unwrap_or_default();
+        let dropped = reminder.state == IndexedState::Dropped
+            || reminder
+                .stamp
+                .is_some_and(|stamp| stamp.kind == StampKind::Dropped);
+        let meta = match (done_date(reminder), dropped) {
+            (Some(date), true) => format!("{date} · dropped"),
+            (Some(date), false) => date.to_string(),
+            (None, true) => "dropped".to_string(),
+            (None, false) => String::new(),
+        };
+        self.row_frame(selection, cx)
+            .items_start()
+            .child(
+                div().pt_0p5().child(
+                    Icon::new(IconName::Bell)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(rems(0.875))
+                            .text_color(colors.text_muted)
+                            .line_clamp(2)
+                            .child(
+                                LabelLike::new()
+                                    .strikethrough()
+                                    .child(SharedString::from(text)),
+                            ),
+                    )
+                    .when(!meta.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .text_size(rems(0.71875))
+                                .text_color(colors.text_placeholder)
+                                .child(SharedString::from(meta)),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 
@@ -2267,6 +2497,33 @@ fn task_link(text: &str) -> Option<TaskLink> {
     Some(TaskLink { target, date })
 }
 
+/// Finished tasks and finished reminders as one list. Both run newest
+/// first; a reminder closed on a later day than a task goes above it, and
+/// undated ones of either kind sink to the end.
+fn done_rows<'a>(
+    tasks: Vec<&'a BacklogTask>,
+    reminders: &'a [IndexedReminder],
+) -> Vec<BacklogRow<'a>> {
+    let mut reminders = reminders.iter().peekable();
+    let mut rows = Vec::new();
+    for task in tasks {
+        let task_date = backlog::completion_date(&task.text);
+        while let Some(reminder) = reminders
+            .next_if(|reminder| task_date.is_none_or(|date| done_date(reminder) > Some(date)))
+        {
+            rows.push(BacklogRow::Reminder { reminder });
+        }
+        rows.push(BacklogRow::Task { task });
+    }
+    rows.extend(reminders.map(|reminder| BacklogRow::Reminder { reminder }));
+    rows
+}
+
+/// The day a finished reminder was closed or dropped, from its stamp.
+fn done_date(reminder: &IndexedReminder) -> Option<NaiveDate> {
+    reminder.stamp.map(|stamp| stamp.date)
+}
+
 /// The completed audit trail in render order. The file stays append-ordered
 /// (oldest first); reversing before the sort puts same-day completions
 /// newest-first too, and the sort is stable so that survives.
@@ -2285,12 +2542,10 @@ fn column_rows<'a>(
     section: SectionKind,
     collapsed: &HashSet<(SectionKind, String)>,
     folded_lanes: &HashSet<SectionKind>,
+    done_reminders: &'a [IndexedReminder],
 ) -> Vec<BacklogRow<'a>> {
     if section == SectionKind::Completed {
-        return completed_tasks(backlog)
-            .into_iter()
-            .map(|task| BacklogRow::Task { task })
-            .collect();
+        return done_rows(completed_tasks(backlog), done_reminders);
     }
     let open: Vec<&BacklogTask> = backlog
         .section(section)
@@ -2331,10 +2586,10 @@ fn column_rows<'a>(
     rows
 }
 
-/// Re-attaches the trailing HTML comment `strip_trailing_comment` hid from
+/// Re-attaches the trailing HTML comment `strip_trailing_metadata` hid from
 /// the inline editor, so renaming a captured task keeps its identity marker.
 fn restore_hidden_suffix(original: &str, edited: &str) -> String {
-    let visible = strip_trailing_comment(original);
+    let visible = strip_trailing_metadata(original);
     let hidden = original[visible.len()..].trim();
     if hidden.is_empty() {
         edited.to_string()
@@ -2418,16 +2673,23 @@ mod tests {
             .iter()
             .map(|(section, name)| (*section, (*name).to_string()))
             .collect();
-        column_rows(&backlog, SectionKind::Soon, &collapsed, &HashSet::default())
-            .into_iter()
-            .map(|row| match row {
-                BacklogRow::Lane { count, folded, .. } => {
-                    format!("## Soon ({count}{})", if folded { ", folded" } else { "" })
-                }
-                BacklogRow::Category { name, count, .. } => format!("# {name} ({count})"),
-                BacklogRow::Task { task } => task.text.clone(),
-            })
-            .collect()
+        column_rows(
+            &backlog,
+            SectionKind::Soon,
+            &collapsed,
+            &HashSet::default(),
+            &[],
+        )
+        .into_iter()
+        .map(|row| match row {
+            BacklogRow::Lane { count, folded, .. } => {
+                format!("## Soon ({count}{})", if folded { ", folded" } else { "" })
+            }
+            BacklogRow::Category { name, count, .. } => format!("# {name} ({count})"),
+            BacklogRow::Task { task } => task.text.clone(),
+            BacklogRow::Reminder { reminder } => reminder.id.clone(),
+        })
+        .collect()
     }
 
     #[test]
@@ -2479,6 +2741,7 @@ mod tests {
             SectionKind::Soon,
             &HashSet::default(),
             &HashSet::from_iter([SectionKind::Soon]),
+            &[],
         );
         assert_eq!(rows.len(), 1);
         assert!(matches!(

@@ -25,9 +25,10 @@ use util::ResultExt as _;
 use workspace::Workspace;
 
 use crate::calendar_service::{self, CalendarService};
-use crate::day_plan::{self, DayPlan, PlacedBlock, PlanItem, parse_day_plan};
+use crate::day_plan::{self, DayPlan, PlacedBlock, PlanItem};
 use crate::markdown_text::render_markdown_row;
 use crate::notes::{NoteKind, format_date};
+use crate::reminder_service::{self, ReminderEvent};
 use crate::sync_status;
 use crate::vault::VaultStatus;
 
@@ -119,6 +120,9 @@ pub struct DayPlannerPanel {
     grid_scroll_handle: ScrollHandle,
     reparse_task: Option<Task<()>>,
     fallback_open_task: Option<Task<()>>,
+    /// Whether the vault's reminders service has been found and followed.
+    reminders_attached: bool,
+    _reminder_subscriptions: Vec<Subscription>,
     /// Coarse repaint driver for the "now" line.
     _now_tick: Task<()>,
     _subscriptions: Vec<Subscription>,
@@ -151,6 +155,7 @@ impl DayPlannerPanel {
                         | project::Event::WorktreeUpdatedEntries(..)
                 ) {
                     this.refresh_vault_status(cx);
+                    this.ensure_reminder_service(cx);
                 }
             });
             let workspace_subscription = cx.subscribe(
@@ -192,9 +197,12 @@ impl DayPlannerPanel {
                 grid_scroll_handle: ScrollHandle::new(),
                 reparse_task: None,
                 fallback_open_task: None,
+                reminders_attached: false,
+                _reminder_subscriptions: Vec::new(),
                 _now_tick: now_tick,
                 _subscriptions: subscriptions,
             };
+            this.ensure_reminder_service(cx);
             this.vault_status = this.detect_vault_status(cx);
             // Resolving the active item reads the workspace entity, which is
             // still leased by the `workspace.update_in` that is constructing
@@ -307,7 +315,7 @@ impl DayPlannerPanel {
                 this.schedule_reparse(cx);
             }
         });
-        let plan = self.parse_editor_plan(&editor, cx);
+        let plan = self.parse_editor_plan(&editor, date, cx);
         self.set_active(
             Some(ActiveNote {
                 source: NoteSource::Editor(editor.downgrade()),
@@ -373,7 +381,7 @@ impl DayPlannerPanel {
                         this.schedule_reparse(cx);
                     }
                 });
-                let plan = this.parse_text_plan(&buffer.read(cx).text());
+                let plan = this.parse_text_plan(&buffer.read(cx).text(), today, cx);
                 this.set_active(
                     Some(ActiveNote {
                         source: NoteSource::Buffer(buffer),
@@ -416,16 +424,49 @@ impl DayPlannerPanel {
         Some((editor, date))
     }
 
-    fn parse_editor_plan(&self, editor: &Entity<Editor>, cx: &App) -> DayPlan {
+    fn parse_editor_plan(&self, editor: &Entity<Editor>, date: NaiveDate, cx: &App) -> DayPlan {
         let text = editor.read(cx).buffer().read(cx).snapshot(cx).text();
-        self.parse_text_plan(&text)
+        self.parse_text_plan(&text, date, cx)
     }
 
-    fn parse_text_plan(&self, text: &str) -> DayPlan {
+    fn parse_text_plan(&self, text: &str, date: NaiveDate, cx: &App) -> DayPlan {
         let VaultStatus::Valid(vault) = &self.vault_status else {
             return DayPlan::default();
         };
-        parse_day_plan(text, &vault.config.day_planner)
+        let reminders = plan_reminders(&self.project, date, cx);
+        day_plan::parse_day_plan_for(text, &vault.config.day_planner, &reminders)
+    }
+
+    /// Follows the vault's reminders service once it appears with the
+    /// vault's worktree: its status rows repaint, and a new reading of the
+    /// index or of `.thock/reminders.toml` (the day headings) reparses the
+    /// plan.
+    fn ensure_reminder_service(&mut self, cx: &mut Context<Self>) {
+        if self.reminders_attached {
+            return;
+        }
+        let Some(service) = reminder_service::service_for_project(&self.project, cx) else {
+            return;
+        };
+        self.reminders_attached = true;
+        let mut subscriptions = vec![
+            cx.observe(&service, |_, _, cx| cx.notify()),
+            cx.subscribe(&service, |this, _, event: &ReminderEvent, cx| {
+                if matches!(
+                    event,
+                    ReminderEvent::IndexChanged
+                        | ReminderEvent::SettingsChanged
+                        | ReminderEvent::DayChanged { .. }
+                ) {
+                    this.schedule_reparse(cx);
+                }
+            }),
+        ];
+        if let Some(day_sync) = service.read(cx).day_sync().cloned() {
+            subscriptions.push(cx.observe(&day_sync, |_, _, cx| cx.notify()));
+        }
+        self._reminder_subscriptions = subscriptions;
+        self.schedule_reparse(cx);
     }
 
     fn schedule_reparse(&mut self, cx: &mut Context<Self>) {
@@ -439,14 +480,15 @@ impl DayPlannerPanel {
         let Some(active) = &self.active else {
             return;
         };
+        let date = active.date;
         let plan = match &active.source {
             NoteSource::Editor(editor) => {
                 let Some(editor) = editor.upgrade() else {
                     return;
                 };
-                self.parse_editor_plan(&editor, cx)
+                self.parse_editor_plan(&editor, date, cx)
             }
-            NoteSource::Buffer(buffer) => self.parse_text_plan(&buffer.read(cx).text()),
+            NoteSource::Buffer(buffer) => self.parse_text_plan(&buffer.read(cx).text(), date, cx),
         };
         if let Some(active) = &mut self.active
             && active.plan != plan
@@ -686,10 +728,7 @@ impl DayPlannerPanel {
         else {
             return;
         };
-        let Some(block) = day_plan::layout_blocks(&active.plan, min_visual_minutes())
-            .into_iter()
-            .find(|block| block.item_index == selected)
-        else {
+        let Some((start_min, end_min)) = grid_extent(&active.plan, selected) else {
             return;
         };
         let viewport_height = self.grid_scroll_handle.bounds().size.height;
@@ -697,9 +736,8 @@ impl DayPlannerPanel {
             return;
         }
         let (grid_start, _) = day_plan::grid_bounds(&active.plan, &vault.config.day_planner);
-        let top = px(block.start_min.saturating_sub(grid_start) as f32 / 60.0 * HOUR_HEIGHT);
-        let height =
-            px(((block.end_min - block.start_min) as f32 / 60.0 * HOUR_HEIGHT).max(MIN_BLOCK_PX));
+        let top = px(start_min.saturating_sub(grid_start) as f32 / 60.0 * HOUR_HEIGHT);
+        let height = px(((end_min - start_min) as f32 / 60.0 * HOUR_HEIGHT).max(MIN_BLOCK_PX));
         let offset = self.grid_scroll_handle.offset();
         let scroll_top = -offset.y;
         let new_scroll_top = if top < scroll_top {
@@ -716,10 +754,20 @@ impl DayPlannerPanel {
     /// The Calendar row at the top of the panel (V32 §4.2), kept only while
     /// it needs the user; healthy status lives in the sync icon's popover.
     fn render_status_row(&self, cx: &App) -> Option<AnyElement> {
-        let status = sync_status::calendar_status(self.calendar_service.as_ref()?.read(cx))?;
-        status
-            .needs_user()
-            .then(|| sync_status::render_inline_row(&status, cx))
+        let calendar = self
+            .calendar_service
+            .as_ref()
+            .and_then(|service| sync_status::calendar_status(service.read(cx)))
+            .filter(|status| status.needs_user());
+        let reminders = reminder_service::service_for_project(&self.project, cx)
+            .and_then(|service| sync_status::reminder_day_status(service.read(cx), cx))
+            .filter(|status| status.needs_user());
+        let rows: Vec<AnyElement> = calendar
+            .into_iter()
+            .chain(reminders)
+            .map(|status| sync_status::render_inline_row(&status, cx))
+            .collect();
+        (!rows.is_empty()).then(|| v_flex().children(rows).into_any_element())
     }
 
     /// The theme colour for an item's subsection, from the `players()`
@@ -850,9 +898,84 @@ impl DayPlannerPanel {
                 .color(state.finished_color().unwrap_or(Color::Muted)),
             )
             .child(label)
+            .when_some(item.carried_from, |this, date| {
+                this.child(
+                    Label::new(format!("from {}", format_date(date, "ddd D MMM")))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Warning),
+                )
+            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.reveal_item(item_index, window, cx);
             }))
+            .into_any_element()
+    }
+
+    /// A reminder point (V45 §7.3): a bell at its minute, never a block. A
+    /// mirror line's point runs across the grid with its text; a planner
+    /// line's own reminder is a small bell at the block's right edge.
+    fn render_point(
+        &self,
+        item_index: usize,
+        at_min: u32,
+        item: &PlanItem,
+        grid_start: u32,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors();
+        let selected = self.selected_item == Some(item_index);
+        let state = ItemState::of(item);
+        let color = state.finished_color().unwrap_or(Color::Accent);
+        let mirror = matches!(item.timing, day_plan::ItemTiming::Point { .. });
+        let top = px(at_min.saturating_sub(grid_start) as f32 / 60.0 * HOUR_HEIGHT) - px(8.0);
+        let marker = h_flex()
+            .id(("thock-day-planner-point", item_index))
+            .absolute()
+            .top(top)
+            .h(px(16.0))
+            .gap_1()
+            .px_1()
+            .rounded_sm()
+            .cursor_pointer()
+            .bg(colors.editor_background)
+            .when(selected, |this| {
+                this.border_1().border_color(colors.text_accent)
+            })
+            .child(
+                Icon::new(IconName::Bell)
+                    .size(IconSize::XSmall)
+                    .color(color),
+            )
+            .child(
+                Label::new(format_minutes(at_min))
+                    .size(LabelSize::XSmall)
+                    .color(color),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.reveal_item(item_index, window, cx);
+            }));
+        if !mirror {
+            return marker.right(px(2.0)).into_any_element();
+        }
+        let label = LabelLike::new().size(LabelSize::XSmall).truncate();
+        let label = match state.finished_color() {
+            Some(color) => label.strikethrough().color(color),
+            None => label,
+        };
+        marker
+            .left_0()
+            .right_0()
+            .child(label.child(self.render_item_label(
+                ElementId::Name(format!("thock-day-planner-point-text-{item_index}").into()),
+                item,
+                cx,
+            )))
+            .child(
+                div()
+                    .flex_1()
+                    .h(px(1.0))
+                    .bg(colors.text_accent.opacity(0.35)),
+            )
             .into_any_element()
     }
 
@@ -939,7 +1062,14 @@ impl DayPlannerPanel {
                 lane_blocks(day_plan::ItemWeight::Normal)
                     .map(|(block, item)| self.render_block(block, item, grid_start, cx)),
             );
-        body = body.child(block_area);
+        let points = plan
+            .points()
+            .into_iter()
+            .filter_map(|(item_index, at_min)| {
+                let item = plan.items.get(item_index)?;
+                Some(self.render_point(item_index, at_min, item, grid_start, cx))
+            });
+        body = body.child(block_area.children(points));
 
         if let Some(now_minutes) = self.now_line_minutes(config, date)
             && (grid_start..=grid_end).contains(&now_minutes)
@@ -1096,6 +1226,23 @@ impl DayPlannerPanel {
     }
 }
 
+/// What a plan of `date`'s note reads reminders by: the day, and the day
+/// section's headings from the vault's reminder settings (the defaults
+/// before the service has loaded them).
+pub(crate) fn plan_reminders(
+    project: &Entity<Project>,
+    date: NaiveDate,
+    cx: &App,
+) -> day_plan::PlanReminders {
+    let day_headings = crate::reminder_service::service_for_project(project, cx)
+        .map(|service| service.read(cx).settings().day_headings.clone())
+        .unwrap_or_else(|| day_plan::PlanReminders::default().day_headings);
+    day_plan::PlanReminders {
+        day: Some(date),
+        day_headings,
+    }
+}
+
 fn min_visual_minutes() -> u32 {
     (MIN_BLOCK_PX / HOUR_HEIGHT * 60.0).ceil() as u32
 }
@@ -1104,17 +1251,43 @@ fn min_visual_minutes() -> u32 {
 /// first, then the grid's blocks top to bottom, left to right within a row
 /// (the status lane sits left of the day's blocks).
 fn navigation_order(plan: &DayPlan) -> Vec<usize> {
-    let mut blocks = day_plan::layout_blocks(plan, min_visual_minutes());
-    blocks.sort_by_key(|block| {
-        let lane = match plan.items.get(block.item_index).map(|item| item.weight) {
-            Some(day_plan::ItemWeight::Status) => 0,
-            _ => 1,
-        };
-        (block.start_min, lane, block.column, block.item_index)
-    });
+    let mut grid: Vec<(u32, usize, usize, usize)> =
+        day_plan::layout_blocks(plan, min_visual_minutes())
+            .into_iter()
+            .map(|block| {
+                let lane = match plan.items.get(block.item_index).map(|item| item.weight) {
+                    Some(day_plan::ItemWeight::Status) => 0,
+                    _ => 1,
+                };
+                (block.start_min, lane, block.column, block.item_index)
+            })
+            .collect();
+    // A mirror line's point is a row of its own; a planner line's reminder
+    // is reached through its block.
+    grid.extend(
+        plan.items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| match item.timing {
+                day_plan::ItemTiming::Point { at_min } => Some((at_min, 1, 0, index)),
+                _ => None,
+            }),
+    );
+    grid.sort();
     plan.unscheduled_indices()
-        .chain(blocks.into_iter().map(|block| block.item_index))
+        .chain(grid.into_iter().map(|(_, _, _, index)| index))
         .collect()
+}
+
+/// The minutes an item spans on the grid: its block, or a point's marker.
+fn grid_extent(plan: &DayPlan, item_index: usize) -> Option<(u32, u32)> {
+    if let day_plan::ItemTiming::Point { at_min } = plan.items.get(item_index)?.timing {
+        return Some((at_min, at_min + min_visual_minutes()));
+    }
+    day_plan::layout_blocks(plan, min_visual_minutes())
+        .into_iter()
+        .find(|block| block.item_index == item_index)
+        .map(|block| (block.start_min, block.end_min))
 }
 
 /// The selection carried across a re-parse of the same day: the item with
@@ -1174,6 +1347,7 @@ impl Focusable for DayPlannerPanel {
 mod tests {
     use super::*;
     use crate::backlog_panel::BacklogFolds;
+    use crate::day_plan::parse_day_plan;
     use crate::desk_panel::{DeskPanel, DeskTab};
     use fs::FakeFs;
     use gpui::{KeyBinding, TestAppContext, VisualTestContext};
@@ -1250,6 +1424,30 @@ mod tests {
     /// planner docked and focused. `Vault::detect` reads the marker from
     /// disk, so it lives in a real temp dir mirrored into the FakeFs.
     async fn setup(cx: &mut TestAppContext, vim: bool) -> Setup {
+        let setup = setup_note(cx, vim, NOTE).await;
+        assert_eq!(
+            setup.panel.read_with(&setup.cx, |panel, _| panel
+                .active
+                .as_ref()
+                .map(|active| active.plan.items.len())),
+            Some(3),
+            "the planner mirrors the open daily note"
+        );
+        setup
+    }
+
+    /// The Desk on its Today tab, planning `daily/2026-01-05.md` holding `note`.
+    async fn setup_note(cx: &mut TestAppContext, vim: bool, note: &str) -> Setup {
+        setup_vault(cx, vim, note, json!({ "config.toml": "schema = 1\n" })).await
+    }
+
+    /// `setup_note` with `thock` as the vault's `.thock/` folder.
+    async fn setup_vault(
+        cx: &mut TestAppContext,
+        vim: bool,
+        note: &str,
+        thock: serde_json::Value,
+    ) -> Setup {
         init_test(cx, vim);
         let vault_dir = tempfile::tempdir().unwrap();
         let root = vault_dir.path();
@@ -1259,8 +1457,8 @@ mod tests {
         fs.insert_tree(
             root,
             json!({
-                ".thock": { "config.toml": "schema = 1\n" },
-                "daily": { "2026-01-05.md": NOTE },
+                ".thock": thock,
+                "daily": { "2026-01-05.md": note },
             }),
         )
         .await;
@@ -1294,14 +1492,6 @@ mod tests {
             workspace.toggle_panel_focus::<DeskPanel>(window, cx);
         });
         cx.run_until_parked();
-        assert_eq!(
-            panel.read_with(&cx, |panel, _| panel
-                .active
-                .as_ref()
-                .map(|active| active.plan.items.len())),
-            Some(3),
-            "the planner mirrors the open daily note"
-        );
         Setup {
             desk,
             panel,
@@ -1404,7 +1594,114 @@ mod tests {
         assert_eq!(tab(&setup), DeskTab::Today, "from the Backlog");
         assert!(panel_focused(&mut setup));
         setup.cx.simulate_keystrokes("3");
+        assert_eq!(tab(&setup), DeskTab::Reminders);
+        setup.cx.simulate_keystrokes("4");
         assert_eq!(tab(&setup), DeskTab::Done);
+    }
+
+    #[gpui::test]
+    async fn the_keyboard_reaches_a_reminder_point_in_time_order(cx: &mut TestAppContext) {
+        let note = "# Day planner\n\
+            - [ ] 09:00 – 10:00 First block\n\
+            - [ ] 16:00 – 17:00 Dentist (@15:30)\n\
+            \n\
+            ## Reminders\n\
+            - [ ] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->\n\
+            - [ ] Renew the car insurance · 2026-01-02 09:00 · [[backlog]] <!--rem:2f6b08e19a5c-->\n";
+        let mut setup = setup_note(cx, false, note).await;
+        let plan = setup.panel.read_with(&setup.cx, |panel, _| {
+            panel.active.as_ref().map(|active| active.plan.clone())
+        });
+        let plan = plan.expect("the note is planned");
+        assert_eq!(plan.points(), vec![(2, 14 * 60 + 30), (1, 15 * 60 + 30)]);
+        setup.cx.simulate_keystrokes("down");
+        assert_eq!(
+            selected_row(&setup),
+            Some(6),
+            "the carried reminder is a chip"
+        );
+        setup.cx.simulate_keystrokes("down down");
+        assert_eq!(
+            selected_row(&setup),
+            Some(5),
+            "the 14:30 point comes before 16:00"
+        );
+        setup.cx.simulate_keystrokes("down");
+        assert_eq!(selected_row(&setup), Some(2));
+    }
+
+    #[gpui::test]
+    async fn the_plan_reads_the_vaults_day_headings_once_they_load(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::reminders::TestClock::install(
+                NaiveDate::from_ymd_opt(2026, 1, 5)
+                    .unwrap()
+                    .and_hms_opt(8, 0, 0)
+                    .unwrap(),
+                cx,
+            );
+            crate::reminders::init(cx);
+            reminder_service::init(cx);
+        });
+        let note = "# Day planner\n\
+            - [ ] 09:00 – 10:00 First block\n\
+            \n\
+            ## Lembretes\n\
+            - [ ] 14:30 Call the plumber · [[projects/house]] <!--rem:7d3e55a1c0f2-->\n";
+        let mut setup = setup_vault(
+            cx,
+            false,
+            note,
+            json!({
+                "config.toml": "schema = 1\n",
+                "reminders.toml": "[headings]\nday = [\"Lembretes\"]\n",
+            }),
+        )
+        .await;
+        setup.desk.update(&mut setup.cx, |desk, cx| {
+            desk.set_now(
+                NaiveDate::from_ymd_opt(2026, 1, 5)
+                    .unwrap()
+                    .and_hms_opt(8, 0, 0)
+                    .unwrap(),
+                cx,
+            )
+        });
+        for _ in 0..12 {
+            setup
+                .cx
+                .executor()
+                .advance_clock(Duration::from_millis(500));
+            setup.cx.run_until_parked();
+        }
+        let points = setup.panel.read_with(&setup.cx, |panel, _| {
+            panel.active.as_ref().map(|active| {
+                active
+                    .plan
+                    .points()
+                    .into_iter()
+                    .map(|(_, at)| at)
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert_eq!(
+            points,
+            Some(vec![14 * 60 + 30]),
+            "the mirror under the vault's own heading is a point"
+        );
+        let card_points = setup.desk.read_with(&setup.cx, |desk, _| {
+            desk.today_plan_for_tests().map(|plan| {
+                plan.points()
+                    .into_iter()
+                    .map(|(_, at)| at)
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert_eq!(
+            card_points,
+            Some(vec![14 * 60 + 30]),
+            "and so does the Next card's"
+        );
     }
 
     #[gpui::test]

@@ -5,10 +5,13 @@
 //! machine; `markdown_text.rs` is the precedent for this shape of parser.
 
 use std::ops::Range;
+use std::sync::Arc;
+
+use crate::reminders::ChipState;
 
 /// What a scanned span means for display. `Marker` and `Rule` become folds;
 /// the label/heading kinds become text colours.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpanKind {
     /// Syntax characters hidden while the cursor is off the line.
     Marker,
@@ -74,6 +77,9 @@ pub enum SpanKind {
     TaskTime,
     /// The ` - ` between a task's two times, drawn as an en dash.
     TimeDash,
+    /// A reminder token, `(@2026-12-02 14:30)`, folded into a chip that
+    /// reads `label` and is drawn for `state` (V45 §8.4).
+    Reminder { label: Arc<str>, state: ChipState },
 }
 
 /// A byte range of the scanned text and how it should display.
@@ -166,6 +172,21 @@ pub fn wikilink_at(text: &str, offset: usize) -> Option<WikilinkReference> {
         });
     });
     found
+}
+
+/// Whether byte `offset` of `text` is prose: outside fences, front matter,
+/// inline code and HTML comments, the places where markup is text.
+pub fn is_prose_at(text: &str, offset: usize) -> bool {
+    let mut prose = false;
+    each_content_line(text, |line_start, line| {
+        if (line_start..=line_start + line.len()).contains(&offset) {
+            let column = offset - line_start;
+            prose = !inline_exclusions(line)
+                .iter()
+                .any(|range| range.start <= column && column < range.end);
+        }
+    });
+    prose
 }
 
 /// Calls `f` with `(line_start, line)` for every line outside fenced code
@@ -2370,5 +2391,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["# ", "a", "[[", "b", "]]"]
         );
+    }
+
+    #[test]
+    fn prose_excludes_code_comments_fences_and_front_matter() {
+        let text = "---\nkey: (@\n---\nplain (@ `code (@` <!-- (@ -->\n```\n(@\n```\n";
+        let offset = |needle: &str, from: usize| text[from..].find(needle).unwrap() + from;
+        assert!(!is_prose_at(text, offset("(@", 0)));
+        let plain = offset("plain", 0);
+        assert!(is_prose_at(text, offset("(@", plain)));
+        assert!(!is_prose_at(text, offset("(@", offset("`code", plain))));
+        assert!(!is_prose_at(text, offset("(@", offset("<!--", plain))));
+        assert!(!is_prose_at(text, offset("(@", offset("```", plain))));
     }
 }

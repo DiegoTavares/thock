@@ -18,10 +18,15 @@
 //! the cursor is on it.
 
 use crate::ThockSettings;
-use crate::markdown_syntax::{self, SpanKind};
+use crate::markdown_syntax::{self, ConcealSpan, SpanKind};
 use crate::markdown_text;
+use crate::reminders::{
+    ChipState, DayChanged, ReminderClock, ReminderDay, ReminderSettings, is_reminder_note,
+    load_reminder_settings, reminder_chip,
+};
 use crate::thock_theme::on_accent_color;
 use crate::vault::{Vault, VaultStatus};
+use chrono::NaiveDate;
 use collections::{HashMap, HashSet};
 use editor::actions::GoToDefinition;
 use editor::display_map::{
@@ -45,11 +50,13 @@ use settings::{Settings as _, SettingsStore};
 use std::any::TypeId;
 use std::borrow::Cow;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use thock_sync_core::{ReminderConfig, parse_note};
 use ui::prelude::FluentBuilder as _;
 use ui::{ActiveTheme as _, Color, Icon, IconName, IconSize};
+use util::ResultExt as _;
 use util::paths::PathStyle;
 use util::rel_path::{RelPath, RelPathBuf};
 use workspace::Workspace;
@@ -119,6 +126,20 @@ pub struct ConcealSettings {
     /// The vault's images folder, which a bare `images/x.png` resolves
     /// against the root rather than the note (V39 §4.3).
     pub images_dir: String,
+    /// Where the note sits for reminders, or `None` where a token is text
+    /// (V45 §4.2).
+    pub reminder_note: Option<ReminderNote>,
+}
+
+/// A note that can hold reminders: its vault-relative path and how the vault
+/// reads them.
+#[derive(Clone)]
+pub struct ReminderNote {
+    pub path: String,
+    pub config: ReminderConfig,
+    /// Where `.thock/reminders.toml` is read from, for the vault's heading
+    /// names.
+    pub vault_root: PathBuf,
 }
 
 /// One `#` or `##` line drawn as a block (V43 §7.2): the line it stands on,
@@ -126,11 +147,10 @@ pub struct ConcealSettings {
 /// while the cursor is elsewhere, or the one-row spacer that keeps an H1's
 /// height while its source shows.
 struct HeadingEntry {
-    /// The start of the heading line.
-    line: Anchor,
-    /// The end of the heading line; a replace block needs a range that
-    /// spans more than one point or the display map drops it.
-    line_end: Anchor,
+    /// The start of the heading's text. Line boundaries are taken fresh
+    /// from its row each pass, since anchors on them drift onto a
+    /// neighbouring line when a newline is typed at either end.
+    start: Anchor,
     level: u8,
     text: String,
     /// False once the heading is gone from the plan; the entry stays only
@@ -138,6 +158,9 @@ struct HeadingEntry {
     live: bool,
     block: Option<CustomBlockId>,
     spacer: Option<CustomBlockId>,
+    /// The row the blocks were drawn on; they are redrawn once the heading
+    /// moves off it.
+    drawn_on: Option<u32>,
 }
 
 /// One image line's picture: the line it sits under, what it points at, and
@@ -158,6 +181,7 @@ pub struct MarkdownConcealAddon {
     email_enabled: bool,
     account: Option<String>,
     images_dir: String,
+    reminder_note: Option<ReminderNote>,
     spans: Vec<AnchorSpan>,
     email: Option<EmailAnchors>,
     images: Vec<ImageEntry>,
@@ -174,6 +198,10 @@ pub struct MarkdownConcealAddon {
     self_applied: bool,
     /// The last repair `apply_folds` tried and the fold map did not take.
     last_attempt: Option<ApplyAttempt>,
+    /// The state each reminder chip fold was drawn with, by range. A closed
+    /// chip can carry the same label as an open one (*Today*), so the fold
+    /// diff compares the state too.
+    chip_states: HashMap<Range<MultiBufferOffset>, ChipState>,
     /// Whether the wrap overrides were last set for the body face; `None`
     /// until first set. Settings changes only touch the wrap when the face
     /// switches on or off, so a soft-wrap toggle survives a theme change.
@@ -267,11 +295,18 @@ fn vault_markdown_settings(editor: &Editor, cx: &App) -> Option<ConcealSettings>
                     .account
                 })
                 .flatten();
+            let path = file.path.as_unix_str().to_string();
+            let reminder_note = is_reminder_note(&vault, &path).then(|| ReminderNote {
+                path,
+                config: ReminderSettings::default().reminder_config(&vault),
+                vault_root: vault_root.to_path_buf(),
+            });
             Some(ConcealSettings {
                 conceal: vault.config.markdown.conceal,
                 email_view,
                 account,
                 images_dir: vault.config.images.dir,
+                reminder_note,
             })
         }
         _ => None,
@@ -314,6 +349,13 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         apply_folds(editor, cx);
         apply_heading_blocks(editor, cx);
     }));
+    // Chips say *Today* and *Tomorrow*, so they relabel when the day turns.
+    let reminder_day = ReminderDay::global(cx);
+    subscriptions.push(
+        cx.subscribe(&reminder_day, |editor, _, _: &DayChanged, cx| {
+            schedule_reparse(editor, cx)
+        }),
+    );
     // Highlight styles capture theme colours, so a theme change needs a
     // re-apply to pick up the new palette; the body face is a setting too.
     // Heading blocks read their face at render time, so they follow on
@@ -372,6 +414,7 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         email_enabled: settings.email_view,
         account: settings.account,
         images_dir: settings.images_dir,
+        reminder_note: settings.reminder_note,
         spans: Vec::new(),
         email: None,
         images: Vec::new(),
@@ -381,11 +424,62 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         default_folds_applied: false,
         self_applied: false,
         last_attempt: None,
+        chip_states: HashMap::default(),
         wrap_set_for_body_face: None,
         reparse: Task::ready(()),
         _subscriptions: subscriptions,
     });
     apply_body_font(editor, cx);
+    schedule_reparse(editor, cx);
+    load_reminder_headings(editor, cx);
+}
+
+/// Reads the vault's day-section names from `.thock/reminders.toml`, which
+/// tell a mirror line from a home line (V45 §7.1), and reparses with them.
+/// The defaults stand until then, and when the file can't be read.
+fn load_reminder_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let Some(vault_root) = editor
+        .addon::<MarkdownConcealAddon>()
+        .and_then(|addon| Some(addon.reminder_note.as_ref()?.vault_root.clone()))
+    else {
+        return;
+    };
+    let Some(project) = editor.project().cloned() else {
+        return;
+    };
+    let observed =
+        crate::reminder_service::observe_settings(&project, cx, |editor, settings, cx| {
+            set_reminder_headings(editor, settings, cx)
+        });
+    if let Some(settings) = observed {
+        set_reminder_headings(editor, &settings, cx);
+        return;
+    }
+    let fs = project.read(cx).fs().clone();
+    cx.spawn(async move |editor, cx| {
+        let Some(settings) = load_reminder_settings(&fs, &vault_root).await.log_err() else {
+            return;
+        };
+        editor
+            .update(cx, |editor, cx| {
+                set_reminder_headings(editor, &settings, cx)
+            })
+            .log_err();
+    })
+    .detach();
+}
+
+fn set_reminder_headings(
+    editor: &mut Editor,
+    settings: &ReminderSettings,
+    cx: &mut Context<Editor>,
+) {
+    if let Some(note) = editor
+        .addon_mut::<MarkdownConcealAddon>()
+        .and_then(|addon| addon.reminder_note.as_mut())
+    {
+        note.config.day_headings = settings.day_headings.clone();
+    }
     schedule_reparse(editor, cx);
 }
 
@@ -818,19 +912,13 @@ fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
         return;
     };
     let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
-    let found: Vec<(Anchor, Anchor, u8, String)> = addon
+    let found: Vec<(Anchor, u8, String)> = addon
         .spans
         .iter()
         .filter_map(|span| match span.kind {
             SpanKind::Heading(level @ (1 | 2)) => {
-                let row = span.range.start.to_point(&buffer_snapshot).row;
-                let line = buffer_snapshot.anchor_before(MultiBufferPoint::new(row, 0));
-                let line_end = buffer_snapshot.anchor_after(MultiBufferPoint::new(
-                    row,
-                    buffer_snapshot.line_len(MultiBufferRow(row)),
-                ));
                 let text: String = buffer_snapshot.text_for_range(span.range.clone()).collect();
-                Some((line, line_end, level, text))
+                Some((span.range.start, level, text))
             }
             _ => None,
         })
@@ -844,7 +932,7 @@ fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
         .iter()
         .map(|entry| {
             (
-                entry.line.to_offset(&buffer_snapshot),
+                entry.start.to_offset(&buffer_snapshot),
                 entry.level,
                 entry.text.clone(),
             )
@@ -853,20 +941,20 @@ fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
     let mut carried: Vec<Option<HeadingEntry>> = previous.into_iter().map(Some).collect();
     let headings: Vec<HeadingEntry> = found
         .into_iter()
-        .map(|(line, line_end, level, text)| {
-            let key = (line.to_offset(&buffer_snapshot), level, text.clone());
+        .map(|(start, level, text)| {
+            let key = (start.to_offset(&buffer_snapshot), level, text.clone());
             let kept = previous_keys
                 .iter()
                 .position(|previous| *previous == key)
                 .and_then(|index| carried.get_mut(index).and_then(Option::take));
             kept.unwrap_or(HeadingEntry {
-                line,
-                line_end,
+                start,
                 level,
                 text,
                 live: true,
                 block: None,
                 spacer: None,
+                drawn_on: None,
             })
         })
         .collect();
@@ -898,6 +986,7 @@ enum HeadingBlock {
 /// operation (`unfold_all`, `zR`, a restored fold) sweeps intersecting
 /// replace blocks away with the folds, so a block the map no longer holds
 /// counts as missing and is drawn again, the way the folds heal (§10.2).
+/// Blocks of a heading that moved to another row are drawn again there.
 fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
     let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
         return;
@@ -916,23 +1005,28 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
     let project = editor.project().cloned();
     let workspace = editor.workspace().map(|workspace| workspace.downgrade());
     let mut to_remove: HashSet<CustomBlockId> = HashSet::default();
-    let mut to_insert: Vec<(usize, HeadingBlock, BlockProperties<Anchor>)> = Vec::new();
+    let mut to_insert: Vec<(usize, HeadingBlock, u32, BlockProperties<Anchor>)> = Vec::new();
     let mut swept: Vec<(usize, HeadingBlock)> = Vec::new();
     for (index, entry) in addon.headings.iter().enumerate() {
-        let row = entry.line.to_point(&buffer_snapshot).row;
+        let row = entry.start.to_point(&buffer_snapshot).row;
         let is_revealed = revealed
             .iter()
             .any(|&(first, last)| row >= first && row <= last);
         let want_block = enabled && entry.live && !is_revealed;
         let want_spacer = enabled && entry.live && is_revealed && entry.level == 1;
-        let block = still_held(entry.block);
+        let mut block = still_held(entry.block);
         if entry.block.is_some() && block.is_none() {
             swept.push((index, HeadingBlock::Replace));
         }
-        let spacer = still_held(entry.spacer);
+        let mut spacer = still_held(entry.spacer);
         if entry.spacer.is_some() && spacer.is_none() {
             swept.push((index, HeadingBlock::Spacer));
         }
+        if entry.drawn_on != Some(row) {
+            to_remove.extend(block.take());
+            to_remove.extend(spacer.take());
+        }
+        let line = line_range(row, &buffer_snapshot);
         match (block, want_block) {
             (Some(id), false) => {
                 to_remove.insert(id);
@@ -940,7 +1034,8 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
             (None, true) => to_insert.push((
                 index,
                 HeadingBlock::Replace,
-                heading_block(entry, project.clone(), workspace.clone()),
+                row,
+                heading_block(entry, line.clone(), project.clone(), workspace.clone()),
             )),
             _ => {}
         }
@@ -948,7 +1043,9 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
             (Some(id), false) => {
                 to_remove.insert(id);
             }
-            (None, true) => to_insert.push((index, HeadingBlock::Spacer, spacer_block(entry.line))),
+            (None, true) => {
+                to_insert.push((index, HeadingBlock::Spacer, row, spacer_block(line.start)))
+            }
             _ => {}
         }
     }
@@ -973,7 +1070,7 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
     let inserted = editor.insert_blocks(
         to_insert
             .iter()
-            .map(|(_, _, properties)| properties.clone()),
+            .map(|(_, _, _, properties)| properties.clone()),
         None,
         cx,
     );
@@ -981,8 +1078,9 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
         editor.remove_blocks(to_remove.clone(), None, cx);
     }
     if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
-        for ((index, which, _), id) in to_insert.into_iter().zip(inserted) {
+        for ((index, which, row, _), id) in to_insert.into_iter().zip(inserted) {
             if let Some(entry) = addon.headings.get_mut(index) {
+                entry.drawn_on = Some(row);
                 match which {
                     HeadingBlock::Replace => entry.block = Some(id),
                     HeadingBlock::Spacer => entry.spacer = Some(id),
@@ -1010,15 +1108,26 @@ fn heading_rows(level: u8) -> u32 {
     if level == 1 { 2 } else { 1 }
 }
 
+/// The text of buffer row `row`, anchored inward so an edit at either end
+/// never stretches it over a neighbouring line. A replace block needs a
+/// range that spans more than one point or the display map drops it, which
+/// a heading line always does.
+fn line_range(row: u32, buffer_snapshot: &MultiBufferSnapshot) -> Range<Anchor> {
+    let line_end = MultiBufferPoint::new(row, buffer_snapshot.line_len(MultiBufferRow(row)));
+    buffer_snapshot.anchor_after(MultiBufferPoint::new(row, 0))
+        ..buffer_snapshot.anchor_before(line_end)
+}
+
 fn heading_block(
     entry: &HeadingEntry,
+    line: Range<Anchor>,
     project: Option<Entity<Project>>,
     workspace: Option<WeakEntity<Workspace>>,
 ) -> BlockProperties<Anchor> {
     let text = entry.text.clone();
     let level = entry.level;
     BlockProperties {
-        placement: BlockPlacement::Replace(entry.line..=entry.line_end),
+        placement: BlockPlacement::Replace(line.start..=line.end),
         height: Some(heading_rows(level)),
         style: BlockStyle::Flex,
         priority: 0,
@@ -1322,6 +1431,8 @@ fn schedule_reparse(editor: &mut Editor, cx: &mut Context<Editor>) {
     };
     let email_enabled = addon.email_enabled;
     let account = addon.account.clone();
+    let reminder_note = addon.reminder_note.clone();
+    let today = ReminderClock::global(cx).today();
     let task = cx.spawn(async move |editor, cx| {
         cx.background_executor().timer(REPARSE_DEBOUNCE).await;
         let Ok(snapshot) = editor.read_with(cx, |editor, cx| editor.buffer().read(cx).snapshot(cx))
@@ -1354,7 +1465,13 @@ fn schedule_reparse(editor: &mut Editor, cx: &mut Context<Editor>) {
                         };
                         (plan.spans, Some(email))
                     }
-                    None => (markdown_syntax::conceal_spans(&text), None),
+                    None => {
+                        let mut spans = markdown_syntax::conceal_spans(&text);
+                        if let Some(note) = &reminder_note {
+                            spans.extend(reminder_spans(&text, note, today));
+                        }
+                        (spans, None)
+                    }
                 };
                 let spans = plain_spans
                     .into_iter()
@@ -1478,7 +1595,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
     let mut desired: Vec<(Range<MultiBufferOffset>, SpanKind)> = Vec::new();
     if enabled {
         for span in &addon.spans {
-            if !is_folded(span.kind) {
+            if !is_folded(&span.kind) {
                 continue;
             }
             let start = span.range.start.to_offset(&buffer_snapshot);
@@ -1500,7 +1617,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
                 .iter()
                 .any(|&(first, last)| start_row <= last && end_row >= first);
             if !is_revealed {
-                desired.push((start..end, span.kind));
+                desired.push((start..end, span.kind.clone()));
             }
         }
     }
@@ -1516,7 +1633,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
         } else if fold.placeholder.type_tag == Some(email_fold_type_tag()) {
             continue;
         } else if addon.spans.iter().any(|span| {
-            is_folded(span.kind)
+            is_folded(&span.kind)
                 && span.range.start.to_offset(&buffer_snapshot) == range.start
                 && span.range.end.to_offset(&buffer_snapshot) == range.end
         }) || addon.email.as_ref().is_some_and(|email| {
@@ -1539,9 +1656,13 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
     // The diff compares placeholder text as well as range: toggling the
     // email view gives the same `## ` range a different placeholder (marker
     // space vs sender dot), and a range-only diff would keep the stale one.
-    let matches = |(range, text): &(Range<MultiBufferOffset>, Option<SharedString>),
-                   (desired, kind): &(Range<MultiBufferOffset>, SpanKind)| {
-        range == desired && text.as_deref() == Some(collapsed_text_for(*kind))
+    let chip_states = editor
+        .addon::<MarkdownConcealAddon>()
+        .map(|addon| addon.chip_states.clone())
+        .unwrap_or_default();
+    let matches = |fold: &(Range<MultiBufferOffset>, Option<SharedString>),
+                   want: &(Range<MultiBufferOffset>, SpanKind)| {
+        fold_matches(fold, want, &chip_states)
     };
     let stale: Vec<Range<MultiBufferOffset>> = existing
         .iter()
@@ -1605,6 +1726,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
                 SpanKind::EmailLink => email_link_placeholder(),
                 SpanKind::ImageTail(false) => image_not_found_placeholder(),
                 SpanKind::TimeDash => time_dash_placeholder(),
+                SpanKind::Reminder { label, state } => reminder_placeholder(label, state),
                 _ => marker_placeholder(),
             };
             Crease::simple(range, placeholder)
@@ -1639,12 +1761,23 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
             )
         })
         .collect();
+    let drawn_states: HashMap<Range<MultiBufferOffset>, ChipState> = desired
+        .iter()
+        .filter(|want| !(deferred && !existing.iter().any(|fold| matches(fold, want))))
+        .filter_map(|(range, kind)| match kind {
+            SpanKind::Reminder { state, .. } => Some((range.clone(), *state)),
+            _ => None,
+        })
+        .collect();
     let converged = applied.len() == desired.len()
-        && desired
-            .iter()
-            .all(|want| applied.iter().any(|fold| matches(fold, want)));
+        && desired.iter().all(|want| {
+            applied
+                .iter()
+                .any(|fold| fold_matches(fold, want, &drawn_states))
+        });
 
     if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        addon.chip_states = drawn_states;
         // The notify below lands back on this editor's own observer; that
         // pass is our echo, not a user fold operation, so mark it.
         addon.self_applied = true;
@@ -1655,11 +1788,28 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
     cx.notify();
 }
 
+/// Whether a fold in the display map is the one `want` asks for: the same
+/// range and placeholder text, and for a reminder chip the state it was
+/// drawn with.
+fn fold_matches(
+    (range, text): &(Range<MultiBufferOffset>, Option<SharedString>),
+    (desired, kind): &(Range<MultiBufferOffset>, SpanKind),
+    chip_states: &HashMap<Range<MultiBufferOffset>, ChipState>,
+) -> bool {
+    range == desired
+        && text.as_deref() == Some(collapsed_text_for(kind))
+        && match kind {
+            SpanKind::Reminder { state, .. } => chip_states.get(range) == Some(state),
+            _ => true,
+        }
+}
+
 /// The collapsed text each folded kind's placeholder carries — the fold
 /// diff's placeholder key. Must agree with what the placeholder constructors
 /// set.
-fn collapsed_text_for(kind: SpanKind) -> &'static str {
+fn collapsed_text_for(kind: &SpanKind) -> &str {
     match kind {
+        SpanKind::Reminder { label, .. } => label,
         SpanKind::Checkbox(false) => "☐",
         SpanKind::Checkbox(true) => "☑",
         SpanKind::Bullet => "•",
@@ -1677,7 +1827,7 @@ const IMAGE_NOT_FOUND: &str = " · not found";
 
 /// Whether a span is concealed behind a fold placeholder rather than merely
 /// coloured.
-fn is_folded(kind: SpanKind) -> bool {
+fn is_folded(kind: &SpanKind) -> bool {
     matches!(
         kind,
         SpanKind::Marker
@@ -1689,7 +1839,100 @@ fn is_folded(kind: SpanKind) -> bool {
             | SpanKind::EmailMarker(_)
             | SpanKind::ImageTail(_)
             | SpanKind::TimeDash
+            | SpanKind::Reminder { .. }
     )
+}
+
+/// The reminder chips of `text`, as fold spans (V45 §8.4).
+fn reminder_spans(text: &str, note: &ReminderNote, today: NaiveDate) -> Vec<ConcealSpan> {
+    let mut line_starts = vec![0];
+    line_starts.extend(text.match_indices('\n').map(|(index, _)| index + 1));
+    parse_note(text, &note.path, &note.config)
+        .into_iter()
+        .filter_map(|appearance| {
+            let token = appearance.reminder.token.as_ref()?;
+            let line_start = *line_starts.get(appearance.line)?;
+            let line = text[line_start..].split('\n').next()?;
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            // A struck token's `~~` fold on their own, as every struck run's do.
+            let mut range = token.range.clone();
+            if token.struck {
+                range = range.start + 2..range.end - 2;
+            }
+            // A token inside a link or an image line would fold across the
+            // link's own folds; it stays text.
+            if markdown_syntax::image_line(line).is_some()
+                || markdown_syntax::inline_links(line)
+                    .iter()
+                    .any(|link| link.range.start < range.end && range.start < link.range.end)
+            {
+                return None;
+            }
+            let chip = reminder_chip(&appearance.reminder, today)?;
+            Some(ConcealSpan {
+                range: line_start + range.start..line_start + range.end,
+                kind: SpanKind::Reminder {
+                    label: chip.label.into(),
+                    state: chip.state,
+                },
+            })
+        })
+        .collect()
+}
+
+/// Placeholder for a reminder token: a chip with its label, outlined in the
+/// accent while upcoming, filled today, in the warning colour once overdue,
+/// muted and struck once closed, and dashed with no day (V45 §8.4).
+fn reminder_placeholder(label: Arc<str>, state: ChipState) -> FoldPlaceholder {
+    let collapsed_text = SharedString::from(label);
+    FoldPlaceholder {
+        render: Arc::new({
+            let label = collapsed_text.clone();
+            move |_, _, cx| {
+                let colors = cx.theme().colors();
+                let (border, text) = match state {
+                    ChipState::Upcoming => (colors.text_accent, colors.text_accent),
+                    ChipState::Today => (colors.text_accent, on_accent_color(cx)),
+                    ChipState::Overdue => {
+                        (cx.theme().status().warning, cx.theme().status().warning)
+                    }
+                    ChipState::Closed | ChipState::NoDay => (colors.border, colors.text_muted),
+                };
+                let chip = div()
+                    .flex()
+                    .items_center()
+                    .gap_0p5()
+                    .px_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(border)
+                    .text_color(text)
+                    .when(state == ChipState::Today, |chip| {
+                        chip.bg(colors.text_accent)
+                    })
+                    .when(state == ChipState::NoDay, |chip| chip.border_dashed())
+                    .when(state == ChipState::Closed, |chip| {
+                        chip.line_through().child(
+                            Icon::new(IconName::Check)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                    })
+                    .child(label.clone());
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(chip)
+                    .into_any_element()
+            }
+        }),
+        constrain_width: false,
+        merge_adjacent: false,
+        type_tag: Some(fold_type_tag()),
+        gutter_toggle: false,
+        collapsed_text: Some(collapsed_text),
+    }
 }
 
 /// Placeholder for the `-` between a task's two times: an en dash, set
@@ -2006,12 +2249,12 @@ const TASK_TIME_SLOT: usize = 15;
 
 /// The highlight slot for a styled span, or `None` for one that folds away
 /// rather than taking a colour.
-fn highlight_slot(kind: SpanKind) -> Option<usize> {
+fn highlight_slot(kind: &SpanKind) -> Option<usize> {
     match kind {
         SpanKind::Quote => Some(QUOTE_SLOT),
         // Levels 4–6 reuse level 3 — three signals are enough to read
         // structure at a glance (§7.1).
-        SpanKind::Heading(level) => Some(HEADING_SLOT + level.clamp(1, 3) as usize - 1),
+        SpanKind::Heading(level) => Some(HEADING_SLOT + (*level).clamp(1, 3) as usize - 1),
         SpanKind::Bold => Some(BOLD_SLOT),
         SpanKind::Italic => Some(ITALIC_SLOT),
         SpanKind::Code => Some(CODE_SLOT),
@@ -2034,7 +2277,8 @@ fn highlight_slot(kind: SpanKind) -> Option<usize> {
         | SpanKind::EmailMarker(_)
         | SpanKind::ImageTail(_)
         | SpanKind::ImageSource
-        | SpanKind::TimeDash => None,
+        | SpanKind::TimeDash
+        | SpanKind::Reminder { .. } => None,
     }
 }
 
@@ -2143,7 +2387,7 @@ fn apply_highlights(editor: &mut Editor, cx: &mut Context<Editor>) {
     let mut by_slot: [Vec<Range<Anchor>>; HIGHLIGHT_SLOTS] = Default::default();
     if addon.enabled {
         for span in &addon.spans {
-            if let Some(slot) = highlight_slot(span.kind) {
+            if let Some(slot) = highlight_slot(&span.kind) {
                 by_slot[slot].push(span.range.clone());
             }
         }
@@ -2177,6 +2421,14 @@ mod tests {
 
     const NOTE: &str = "# Title\nsee [[wiki]] and [docs](https://a.example)\n___\nplain tail\n";
 
+    /// Wednesday 21 October 2026 at 14:05, the V45 spec's clock.
+    fn pinned_now() -> chrono::NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 10, 21)
+            .unwrap()
+            .and_hms_opt(14, 5, 0)
+            .unwrap()
+    }
+
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
@@ -2184,10 +2436,19 @@ mod tests {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             release_channel::init(semver::Version::new(0, 0, 0), cx);
             editor::init(cx);
+            crate::reminders::TestClock::install(pinned_now(), cx);
         });
     }
 
     async fn setup(cx: &mut TestAppContext, text: &str) -> (Entity<Editor>, VisualTestContext) {
+        setup_with(cx, text, test_settings()).await
+    }
+
+    async fn setup_with(
+        cx: &mut TestAppContext,
+        text: &str,
+        settings: ConcealSettings,
+    ) -> (Entity<Editor>, VisualTestContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree("/vault", json!({ "note.md": text })).await;
@@ -2202,9 +2463,7 @@ mod tests {
             .add_window(|window, cx| Editor::for_buffer(buffer, Some(project.clone()), window, cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let editor = window.root(&mut cx).unwrap();
-        editor.update_in(&mut cx, |editor, _, cx| {
-            install(editor, test_settings(), cx)
-        });
+        editor.update_in(&mut cx, |editor, _, cx| install(editor, settings, cx));
         settle(&mut cx);
         (editor, cx)
     }
@@ -2215,6 +2474,11 @@ mod tests {
             email_view: true,
             account: Some("diego.exodo@gmail.com".to_string()),
             images_dir: "images".to_string(),
+            reminder_note: Some(ReminderNote {
+                path: "note.md".to_string(),
+                config: ReminderConfig::default(),
+                vault_root: PathBuf::from("/vault"),
+            }),
         }
     }
 
@@ -3610,6 +3874,88 @@ mod tests {
         assert_eq!(custom_blocks(&editor, &mut cx), vec![(true, 2), (true, 1)]);
     }
 
+    fn cursor_row(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> u32 {
+        editor.update(cx, |editor, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            editor
+                .selections
+                .newest_anchor()
+                .head()
+                .to_point(&snapshot)
+                .row
+        })
+    }
+
+    #[gpui::test]
+    async fn enter_after_a_new_heading_keeps_the_next_line(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "\nplain tail\n").await;
+        move_cursor_to(&editor, 0, &mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.insert("# Title", window, cx)
+        });
+        settle(&mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.newline(&editor::actions::Newline, window, cx);
+            editor.insert("next", window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            display_text(&editor, &mut cx).contains("\nnext\n"),
+            "the line under the heading shows: {:?}",
+            display_text(&editor, &mut cx)
+        );
+        settle(&mut cx);
+        assert_eq!(custom_blocks(&editor, &mut cx), vec![(true, 2)]);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "\n\nnext\nplain tail\n",
+            "the heading is a block and the line under it shows"
+        );
+    }
+
+    #[gpui::test]
+    async fn enter_before_a_heading_keeps_its_source_on_the_cursors_line(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, HEADED).await;
+        move_cursor_to(&editor, 0, &mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.newline(&editor::actions::Newline, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(cursor_row(&editor, &mut cx), 1);
+        assert!(
+            display_text(&editor, &mut cx).starts_with("\n\n# Day planner\n"),
+            "the blank line, the spacer and the source: {:?}",
+            display_text(&editor, &mut cx)
+        );
+        settle(&mut cx);
+        move_cursor_to(&editor, 6, &mut cx);
+        assert_eq!(
+            custom_blocks(&editor, &mut cx),
+            vec![(true, 2), (true, 1)],
+            "both headings are blocks again once the cursor leaves"
+        );
+    }
+
+    #[gpui::test]
+    async fn moving_down_off_a_heading_keeps_the_cursor_visible(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, HEADED).await;
+        move_cursor_to(&editor, 0, &mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.move_down(&zed_actions::editor::MoveDown, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(cursor_row(&editor, &mut cx), 1);
+        assert_eq!(custom_blocks(&editor, &mut cx), vec![(true, 2), (true, 1)]);
+        assert!(display_text(&editor, &mut cx).starts_with("\n\n- [ ] Workout\n"));
+
+        move_cursor_to(&editor, 2, &mut cx);
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.move_down(&zed_actions::editor::MoveDown, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(cursor_row(&editor, &mut cx), 3);
+    }
+
     #[gpui::test]
     async fn heading_colours_come_from_the_theme_when_it_defines_them(cx: &mut TestAppContext) {
         let (_editor, mut cx) = setup(cx, NOTE).await;
@@ -3634,5 +3980,185 @@ mod tests {
             assert_eq!(h2.font_style, Some(gpui::FontStyle::Italic));
             assert_eq!(heading_style(3, cx).color, Some(colors.text_muted));
         });
+    }
+
+    const REMINDERS: &str = "- [ ] Renew passport (@2026-11-02)\n\
+                             - [ ] Call (@2026-10-22 10:00)\n\
+                             - [ ] Standup (@2026-10-21 14:30)\n\
+                             - [ ] Bins (@2026-10-19 18:00)\n\
+                             - [x] Paid (@2026-10-19)\n\
+                             Sent ~~(@2026-10-19)~~ already\n\
+                             - [ ] Dentist (@17:00)\n\
+                             - [ ] Taxes (@2027-12-02 9:30)\n\
+                             plain tail\n";
+
+    fn chip_states(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> Vec<ChipState> {
+        editor.update(cx, |editor, _| {
+            editor
+                .addon::<MarkdownConcealAddon>()
+                .unwrap()
+                .spans
+                .iter()
+                .filter_map(|span| match span.kind {
+                    SpanKind::Reminder { state, .. } => Some(state),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn each_reminder_state_folds_to_its_label(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, REMINDERS).await;
+        move_cursor_to(&editor, 8, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            " ☐ Renew passport Mon 2 Nov\n\
+             \x20☐ Call Tomorrow 10:00\n\
+             \x20☐ Standup Today 14:30\n\
+             \x20☐ Bins Mon 19 Oct 18:00 · overdue\n\
+             \x20☑ Paid Mon 19 Oct\n\
+             Sent  Mon 19 Oct  already\n\
+             \x20☐ Dentist 17:00 · which day?\n\
+             \x20☐ Taxes Thu 2 Dec 2027 09:30\n\
+             plain tail\n"
+        );
+        assert_eq!(
+            chip_states(&editor, &mut cx),
+            [
+                ChipState::Upcoming,
+                ChipState::Upcoming,
+                ChipState::Today,
+                ChipState::Overdue,
+                ChipState::Closed,
+                ChipState::Closed,
+                ChipState::NoDay,
+                ChipState::Upcoming,
+            ]
+        );
+    }
+
+    #[gpui::test]
+    async fn a_reminders_line_shows_its_source_under_the_cursor(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "- [ ] Call (@2026-10-22 10:00)\nplain tail\n").await;
+        move_cursor_to(&editor, 1, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            " ☐ Call Tomorrow 10:00\nplain tail\n"
+        );
+        move_cursor_to(&editor, 0, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "- [ ] Call (@2026-10-22 10:00)\nplain tail\n"
+        );
+        editor.update(&mut cx, |editor, cx| {
+            assert_eq!(
+                editor.buffer().read(cx).snapshot(cx).text(),
+                "- [ ] Call (@2026-10-22 10:00)\nplain tail\n"
+            );
+            assert!(!editor.buffer().read(cx).read(cx).is_dirty());
+        });
+    }
+
+    #[gpui::test]
+    async fn a_time_only_token_in_a_daily_note_rings_on_its_day(cx: &mut TestAppContext) {
+        let settings = ConcealSettings {
+            reminder_note: Some(ReminderNote {
+                path: "daily/2026-10-21.md".to_string(),
+                config: ReminderConfig::default(),
+                vault_root: PathBuf::from("/vault"),
+            }),
+            ..test_settings()
+        };
+        let (editor, mut cx) =
+            setup_with(cx, "- [ ] Dentist (@17:00)\nplain tail\n", settings).await;
+        move_cursor_to(&editor, 1, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            " ☐ Dentist Today 17:00\nplain tail\n"
+        );
+        assert_eq!(chip_states(&editor, &mut cx), [ChipState::Today]);
+    }
+
+    #[gpui::test]
+    async fn chips_relabel_when_the_day_turns(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "- [ ] Call (@2026-10-22 10:00)\nplain tail\n").await;
+        move_cursor_to(&editor, 1, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            " ☐ Call Tomorrow 10:00\nplain tail\n"
+        );
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(10 * 60 * 60));
+        settle(&mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            " ☐ Call Today 10:00\nplain tail\n"
+        );
+        assert_eq!(chip_states(&editor, &mut cx), [ChipState::Today]);
+    }
+
+    #[gpui::test]
+    async fn a_chip_redraws_when_its_state_changes_under_the_same_label(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "- [ ] Water (@2026-10-21)\nplain tail\n").await;
+        move_cursor_to(&editor, 1, &mut cx);
+        let chip_folds = |editor: &Entity<Editor>, cx: &mut VisualTestContext| {
+            editor.update(cx, |editor, cx| {
+                let snapshot = editor.buffer().read(cx).snapshot(cx);
+                editor
+                    .display_map
+                    .update(cx, |map, cx| map.snapshot(cx))
+                    .folds_in_range(MultiBufferOffset(0)..snapshot.len())
+                    .filter(|fold| fold.placeholder.collapsed_text.as_deref() == Some("Today"))
+                    .map(|fold| fold.id)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = chip_folds(&editor, &mut cx);
+        assert_eq!(before.len(), 1);
+        assert_eq!(chip_states(&editor, &mut cx), [ChipState::Today]);
+
+        editor.update(&mut cx, |editor, cx| {
+            editor.buffer().update(cx, |buffer, cx| {
+                buffer.edit(
+                    [(MultiBufferOffset(3)..MultiBufferOffset(4), "x")],
+                    None,
+                    cx,
+                )
+            });
+        });
+        settle(&mut cx);
+        assert_eq!(chip_states(&editor, &mut cx), [ChipState::Closed]);
+        let after = chip_folds(&editor, &mut cx);
+        assert_eq!(after.len(), 1);
+        assert_ne!(after, before, "the chip is drawn again as closed");
+        editor.update(&mut cx, |editor, _| {
+            let addon = editor.addon::<MarkdownConcealAddon>().unwrap();
+            assert_eq!(
+                addon.chip_states.values().copied().collect::<Vec<_>>(),
+                [ChipState::Closed]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_note_outside_reminder_scope_draws_no_chip(cx: &mut TestAppContext) {
+        let settings = ConcealSettings {
+            reminder_note: None,
+            ..test_settings()
+        };
+        let (editor, mut cx) =
+            setup_with(cx, "- [ ] Call (@2026-10-22 10:00)\nplain tail\n", settings).await;
+        move_cursor_to(&editor, 1, &mut cx);
+        assert_eq!(chip_states(&editor, &mut cx), []);
+    }
+
+    #[gpui::test]
+    async fn a_token_in_code_or_on_a_calendar_line_stays_text(cx: &mut TestAppContext) {
+        let note =
+            "`(@2026-10-22)`\n- [ ] 10:00 - 10:30 Sync (@09:50) <!--gcal:abc-->\nplain tail\n";
+        let (editor, mut cx) = setup(cx, note).await;
+        move_cursor_to(&editor, 2, &mut cx);
+        assert_eq!(chip_states(&editor, &mut cx), []);
     }
 }

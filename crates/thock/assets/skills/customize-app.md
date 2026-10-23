@@ -251,12 +251,13 @@ rather than guessing from the visible name.
 | `thock::ToggleFocus` | The Routines rail | `cmd-2` |
 | `thock::ToggleBacklogFocus` | The Desk, on its Backlog tab | `cmd-alt-u` |
 | `thock::ToggleDayPlannerFocus` | The Desk, on its Today tab | `cmd-alt-p` |
+| `thock::ToggleRemindersFocus` | The Desk, on its Reminders tab | `cmd-alt-k` |
 | `thock::ToggleDeskFocus` | The Desk, on whatever tab it shows | unbound |
-| `["thock::ActivateDeskTab", { "tab": "done" }]` | A Desk tab (`backlog`, `today`, `done`) | `1` `2` `3` inside the Desk; `g t` / `g T` cycle in vim mode |
+| `["thock::ActivateDeskTab", { "tab": "done" }]` | A Desk tab (`backlog`, `today`, `reminders`, `done`) | `1` `2` `3` `4` inside the Desk; `g t` / `g T` cycle in vim mode |
 | `thock::OpenPreviousDay` / `OpenNextDay` | The daily note before or after the one you're viewing, skipping empty days | `ctrl-cmd-[` / `ctrl-cmd-]` |
 | `thock::FocusDayStrip` | The masthead's day strip (arrows or `h` `j` `k` `l`, `enter` opens, `escape` returns) | `ctrl-cmd-w` |
 | `thock::ToggleAgentFocus` | The terminal agent panel | `cmd-alt-t` |
-| `thock::ToggleChatFocus` | The Thock Agent chat | `cmd-alt-n` |
+| `thock::ToggleChatFocus` | The Thock Agent chat | `cmd-?` |
 | `thock::OpenToday` | Today's note | `ctrl-cmd-t` |
 | `thock::OpenYesterday` / `OpenTomorrow` | A daily note | unbound |
 | `thock::OpenThisWeek` / `OpenLastWeek` | A weekly note | unbound |

@@ -4,6 +4,9 @@ public enum VaultSessionError: Error, Equatable {
     /// Plus lapsed: the phone shows what it has and writes nothing.
     case readOnly
     case notConnected
+    /// A reminder's line no longer reads as the list drawn it, so the edit
+    /// had nothing to change.
+    case reminderChanged
 }
 
 /// Everything the app, the share sheet and the widgets do to the vault, in
@@ -48,11 +51,11 @@ public struct VaultSession: Sendable {
     public func view(_ note: NoteID, now: Date = Date()) -> NoteView? {
         let config = config
         if let text = store.content(config.path(note)) {
-            return NoteView(text: text, config: config, kind: note.kind)
+            return NoteView(text: text, config: config, kind: note.kind, day: note.day)
         }
         if case .day(let day) = note, day != today(now: now) { return nil }
         guard let seed = store.seedText(writes(now: now).seed(for: note)) else { return nil }
-        return NoteView(text: seed, config: config, kind: note.kind)
+        return NoteView(text: seed, config: config, kind: note.kind, day: note.day)
     }
 
     // MARK: The calendar
@@ -94,7 +97,7 @@ public struct VaultSession: Sendable {
     /// from its template and is not in the vault yet, it is created from the
     /// template first: without that both ends would make a bare note holding
     /// only the heading the write names.
-    private func record(_ writes: [PlannedWrite], on note: NoteID, now: Date = Date()) throws {
+    func record(_ writes: [PlannedWrite], on note: NoteID, now: Date = Date()) throws {
         guard !writes.isEmpty else { return }
         let builder = self.writes(now: now)
         if noteText(note) == nil, store.seedText(builder.seed(for: note)) != nil {
@@ -104,11 +107,13 @@ public struct VaultSession: Sendable {
         }
     }
 
+    /// `due` is when a `.reminder` capture rings; other destinations ignore it.
     @discardableResult
-    public func capture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], now: Date = Date()) throws -> CaptureRecord? {
+    public func capture(blocks: [Block], destination: CaptureDestination, images: [ImageAttachment] = [], due: ReminderDue? = nil, now: Date = Date()) throws -> CaptureRecord? {
         let builder = writes(now: now)
         let template = store.content(config.daily.template)
-        guard let captured = builder.capture(blocks: blocks, destination: destination, images: images, todayNote: noteText(builder.today), template: template, taken: taken) else {
+        let reminder = destination == .reminder ? due.map { ReminderCapture(due: $0, id: newReminderID()) } : nil
+        guard let captured = builder.capture(blocks: blocks, destination: destination, images: images, reminder: reminder, indexText: store.content(config.reminders.index), todayNote: noteText(builder.today), template: template, taken: taken) else {
             return nil
         }
         try record(captured.writes)

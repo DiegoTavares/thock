@@ -8,12 +8,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use thock_sync_core::{
-    Applied, Context, Heading, Operation, Outcome, Place, Placement, Write, apply, content_hash,
-    effect_present, heading_key, is_syncable_image_path, is_syncable_path, key_check, line_hash,
-    open, parse_write, seal_with_nonce, section_hash,
+    Applied, Context, DailyNotes, Due, Group, Heading, MirrorLine, MirrorMark, Operation, Outcome,
+    Place, Placement, ReminderConfig, ReminderState, Task, When, Write, add_id, apply, attach,
+    close, content_hash, cut_text, drop_token, effect_present, group, heading_key,
+    is_reminder_path, is_syncable_image_path, is_syncable_path, key_check, line_hash, mirror_text,
+    open, parse_line, parse_note, parse_write, place_token, reminder_text, reopen, rewrite,
+    seal_with_nonce, section_hash, snoozed_due, strip_reminder, trailing_comments_start,
+    trailing_metadata_start,
 };
 
 fn fixtures_root() -> PathBuf {
@@ -331,6 +336,599 @@ fn path_vectors_match() {
             "{path:?} should be refused as a picture"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reminder vectors (V45 §11): `reminders.json`, `daily_paths.json`,
+// `reminder_edits.json` and the `reminder_index/` cases. All hand-written.
+
+fn read_json<T: serde::de::DeserializeOwned>(relative: &str) -> T {
+    let path = fixtures_root().join(relative);
+    let text = fs::read_to_string(&path).unwrap_or_else(|error| panic!("{relative}: {error}"));
+    serde_json::from_str(&text).unwrap_or_else(|error| panic!("{relative}: {error}"))
+}
+
+fn vector_date(text: &str) -> NaiveDate {
+    NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap_or_else(|_| panic!("date {text:?}"))
+}
+
+fn vector_due(text: &str) -> Due {
+    Due::parse(text).unwrap_or_else(|| panic!("due {text:?}"))
+}
+
+fn vector_time(text: &str) -> NaiveTime {
+    NaiveTime::parse_from_str(text, "%H:%M").unwrap_or_else(|_| panic!("time {text:?}"))
+}
+
+fn when_text(when: When) -> String {
+    match when {
+        When::Date(date) => Due::new(date, None).to_string(),
+        When::DateTime(date, time) => Due::new(date, Some(time)).to_string(),
+        When::Time(time) => time.format("%H:%M").to_string(),
+    }
+}
+
+fn state_text(state: ReminderState) -> &'static str {
+    match state {
+        ReminderState::Open => "open",
+        ReminderState::Closed => "closed",
+        ReminderState::Dropped => "dropped",
+    }
+}
+
+fn group_text(group: Group) -> &'static str {
+    match group {
+        Group::Overdue => "overdue",
+        Group::Today => "today",
+        Group::Upcoming => "upcoming",
+        Group::Done => "done",
+    }
+}
+
+fn note_lines(text: &str) -> Vec<&str> {
+    text.split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct DailyVector {
+    dir: String,
+    filename: String,
+}
+
+impl DailyVector {
+    fn notes(&self) -> DailyNotes {
+        DailyNotes {
+            dir: self.dir.clone(),
+            filename: self.filename.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ReminderVectors {
+    scope: Vec<ScopeVector>,
+    cases: Vec<ReminderCase>,
+    mirrors: Vec<MirrorVector>,
+    texts: Vec<CutVector>,
+    mirror_texts: Vec<MirrorTextVector>,
+    rows: Vec<RowVector>,
+    snoozes: Vec<SnoozeVector>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MirrorTextVector {
+    text: String,
+    mirror: String,
+}
+
+/// A line as rows outside the editor see it: up to its trailing comments, up
+/// to its trailing metadata (what a person edits), and stripped for a label.
+#[derive(Debug, Deserialize)]
+struct RowVector {
+    line: String,
+    comments: String,
+    edited: String,
+    strip: String,
+}
+
+/// *In 1 hour* at a local wall-clock `now`. `zone` is for runners whose
+/// clock is an instant; the answer is the same wall-clock time in any zone.
+#[derive(Debug, Deserialize)]
+struct SnoozeVector {
+    now: String,
+    minutes: u32,
+    #[allow(dead_code)]
+    zone: String,
+    due: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScopeVector {
+    templates: Vec<String>,
+    counted: Vec<String>,
+    ignored: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReminderCase {
+    name: String,
+    path: String,
+    daily: DailyVector,
+    day_headings: Option<Vec<String>>,
+    note: String,
+    reminders: Vec<ExpectedLine>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedLine {
+    line: usize,
+    id: Option<String>,
+    token: Option<String>,
+    when: Option<String>,
+    struck: bool,
+    task: Option<String>,
+    due: Option<String>,
+    state: String,
+    mirror: bool,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MirrorVector {
+    line: String,
+    mirror: Option<ExpectedMirror>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedMirror {
+    checked: bool,
+    time: Option<String>,
+    text: String,
+    mark: Option<serde_json::Value>,
+    carried: Option<String>,
+    note: String,
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CutVector {
+    text: String,
+    max: usize,
+    cut: String,
+}
+
+#[test]
+fn reminder_vectors_match() {
+    let vectors: ReminderVectors = read_json("reminders.json");
+    for scope in &vectors.scope {
+        let templates: Vec<&str> = scope.templates.iter().map(String::as_str).collect();
+        for path in &scope.counted {
+            assert!(is_reminder_path(path, &templates), "{path:?} counts");
+        }
+        for path in &scope.ignored {
+            assert!(!is_reminder_path(path, &templates), "{path:?} is ignored");
+        }
+    }
+
+    assert!(vectors.cases.len() >= 30);
+    for case in &vectors.cases {
+        let label = &case.name;
+        let config = ReminderConfig {
+            daily: case.daily.notes(),
+            day_headings: case
+                .day_headings
+                .clone()
+                .unwrap_or_else(|| ReminderConfig::default().day_headings),
+        };
+        let lines = note_lines(&case.note);
+        let found = parse_note(&case.note, &case.path, &config);
+        assert_eq!(
+            found.iter().map(|found| found.line).collect::<Vec<_>>(),
+            case.reminders
+                .iter()
+                .map(|expected| expected.line)
+                .collect::<Vec<_>>(),
+            "{label}: lines"
+        );
+        for (appearance, expected) in found.iter().zip(&case.reminders) {
+            let line = lines[appearance.line];
+            let reminder = &appearance.reminder;
+            assert_eq!(reminder.id, expected.id, "{label}: id");
+            assert_eq!(
+                reminder
+                    .token
+                    .as_ref()
+                    .map(|token| line[token.range.clone()].to_string()),
+                expected.token,
+                "{label}: token"
+            );
+            assert_eq!(
+                reminder.token.as_ref().map(|token| when_text(token.when)),
+                expected.when,
+                "{label}: when"
+            );
+            assert_eq!(
+                reminder.token.as_ref().is_some_and(|token| token.struck),
+                expected.struck,
+                "{label}: struck"
+            );
+            let task = reminder.task.map(|task| match task {
+                Task::Open => "open".to_string(),
+                Task::Done => "done".to_string(),
+            });
+            assert_eq!(task, expected.task, "{label}: task");
+            assert_eq!(
+                reminder.due.map(|due| due.to_string()),
+                expected.due,
+                "{label}: due"
+            );
+            assert_eq!(
+                state_text(reminder.state()),
+                expected.state,
+                "{label}: state"
+            );
+            assert_eq!(appearance.mirror, expected.mirror, "{label}: mirror");
+            assert_eq!(reminder_text(line), expected.text, "{label}: text");
+            if !case.note.contains('\n') {
+                let day = config.daily.day_of(&case.path);
+                assert_eq!(
+                    parse_line(line, day).as_ref(),
+                    Some(reminder),
+                    "{label}: parse_line agrees"
+                );
+            }
+        }
+    }
+
+    for vector in &vectors.mirrors {
+        let parsed = MirrorLine::parse(&vector.line);
+        let Some(expected) = &vector.mirror else {
+            assert_eq!(parsed, None, "{:?} is not a mirror line", vector.line);
+            continue;
+        };
+        let parsed = parsed.unwrap_or_else(|| panic!("{:?} is a mirror line", vector.line));
+        let mark = match &expected.mark {
+            None => None,
+            Some(serde_json::Value::String(kind)) if kind == "dropped" => Some(MirrorMark::Dropped),
+            Some(serde_json::Value::String(kind)) if kind == "removed" => Some(MirrorMark::Removed),
+            Some(value) => Some(MirrorMark::Moved(vector_date(
+                value["moved"].as_str().expect("moved date"),
+            ))),
+        };
+        assert_eq!(
+            parsed,
+            MirrorLine {
+                checked: expected.checked,
+                time: expected.time.as_deref().map(vector_time),
+                text: expected.text.clone(),
+                mark,
+                carried: expected.carried.as_deref().map(vector_due),
+                note: expected.note.clone(),
+                id: expected.id.clone(),
+            },
+            "{:?}",
+            vector.line
+        );
+        assert_eq!(parsed.to_string(), vector.line, "mirror lines round-trip");
+    }
+
+    for vector in &vectors.texts {
+        assert_eq!(cut_text(&vector.text, vector.max), vector.cut, "{vector:?}");
+    }
+
+    for vector in &vectors.mirror_texts {
+        let mirror = mirror_text(&vector.text);
+        assert_eq!(mirror, vector.mirror, "{vector:?}");
+        let line = format!("- [ ] {mirror} · [[backlog]] <!--rem:2f6b08e19a5c-->");
+        assert!(
+            parse_line(&line, None).is_some_and(|reminder| reminder.token.is_none()),
+            "{vector:?}: no token on a mirror line (§7.1)"
+        );
+    }
+
+    for vector in &vectors.rows {
+        let line = &vector.line;
+        assert_eq!(
+            &line[..trailing_comments_start(line)],
+            vector.comments,
+            "{vector:?}: comments"
+        );
+        assert_eq!(
+            &line[..trailing_metadata_start(line)],
+            vector.edited,
+            "{vector:?}: edited"
+        );
+        assert_eq!(strip_reminder(line), vector.strip, "{vector:?}: strip");
+    }
+
+    for vector in &vectors.snoozes {
+        let now = NaiveDateTime::parse_from_str(&vector.now, "%Y-%m-%dT%H:%M:%S")
+            .unwrap_or_else(|_| panic!("now {:?}", vector.now));
+        assert_eq!(
+            snoozed_due(now, vector.minutes).to_string(),
+            vector.due,
+            "{vector:?}"
+        );
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DailyPathVector {
+    daily: DailyVector,
+    path: String,
+    day: Option<String>,
+}
+
+#[test]
+fn daily_path_vectors_match() {
+    let vectors: Vec<DailyPathVector> = read_json("daily_paths.json");
+    assert!(vectors.len() >= 20);
+    for vector in vectors {
+        assert_eq!(
+            vector.daily.notes().day_of(&vector.path),
+            vector.day.as_deref().map(vector_date),
+            "{vector:?}"
+        );
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EditVector {
+    name: String,
+    path: String,
+    daily: DailyVector,
+    line: String,
+    edit: serde_json::Value,
+    after: Option<String>,
+    /// An id written before a comment the line leaves open is part of the
+    /// line's identity, the one place §4.3's rule gives way.
+    #[serde(default)]
+    identity_changes: bool,
+}
+
+#[test]
+fn reminder_edit_vectors_match() {
+    let vectors: Vec<EditVector> = read_json("reminder_edits.json");
+    assert!(vectors.len() >= 50);
+    for vector in vectors {
+        let day = vector.daily.notes().day_of(&vector.path);
+        let edit = &vector.edit;
+        let due = || vector_due(edit["due"].as_str().expect("due"));
+        let id = || edit["id"].as_str().expect("id");
+        let after = match edit["kind"].as_str() {
+            Some("close") => close(&vector.line),
+            Some("reopen") => reopen(&vector.line),
+            Some("rewrite") => rewrite(&vector.line, due(), day),
+            Some("drop") => drop_token(&vector.line),
+            Some("attach") => attach(&vector.line, due(), id(), day),
+            Some("add_id") => add_id(&vector.line, id()),
+            Some("place") => place_token(&vector.line, due(), day),
+            other => panic!("{}: unknown edit {other:?}", vector.name),
+        };
+        assert_eq!(after, vector.after, "{}", vector.name);
+        if let Some(after) = after
+            .as_ref()
+            .filter(|_| edit["kind"] == "add_id" && !vector.identity_changes)
+        {
+            assert_eq!(
+                line_hash(after),
+                line_hash(&vector.line),
+                "{}: an id never changes a line's identity (§4.3)",
+                vector.name
+            );
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct IndexCase {
+    name: String,
+    now: String,
+    index: String,
+    headings: IndexHeadings,
+    daily: DailyVector,
+    date_only_at: String,
+    files: BTreeMap<String, String>,
+    reminders: Vec<IndexedReminder>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IndexHeadings {
+    open: Vec<String>,
+    done: Vec<String>,
+    day: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IndexedReminder {
+    id: String,
+    section: String,
+    entry: String,
+    stamp: Option<IndexStamp>,
+    home: String,
+    line: Option<usize>,
+    text: Option<String>,
+    due: Option<String>,
+    rings_at: Option<String>,
+    state: String,
+    group: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IndexStamp {
+    kind: String,
+    date: String,
+}
+
+/// The index fixture is data for the desk's and the phone's own readers. This
+/// checks the facts it states against the grammar, so a wrong case can't ship.
+#[test]
+fn reminder_index_cases_agree_with_the_grammar() {
+    let dir = fixtures_root().join("reminder_index");
+    let mut paths: Vec<PathBuf> = fs::read_dir(&dir)
+        .expect("reminder_index readable")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect();
+    paths.sort();
+    assert!(paths.len() >= 2);
+    for path in paths {
+        let case: IndexCase = serde_json::from_str(&fs::read_to_string(&path).expect("readable"))
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let label = &case.name;
+        let config = ReminderConfig {
+            daily: case.daily.notes(),
+            day_headings: case.headings.day.clone(),
+        };
+        let now = NaiveDateTime::parse_from_str(&case.now, "%Y-%m-%dT%H:%M").expect("now");
+        let date_only_at = vector_time(&case.date_only_at);
+        let index_text = &case.files[&case.index];
+        let index_lines = note_lines(index_text);
+        let entries: Vec<_> = parse_note(index_text, &case.index, &config)
+            .into_iter()
+            .filter(|appearance| {
+                appearance.reminder.id.is_some()
+                    && ["- ", "* ", "+ "]
+                        .iter()
+                        .any(|marker| index_lines[appearance.line].starts_with(marker))
+            })
+            .collect();
+        assert_eq!(
+            entries
+                .iter()
+                .filter_map(|entry| entry.reminder.id.clone())
+                .collect::<Vec<_>>(),
+            case.reminders
+                .iter()
+                .map(|expected| expected.id.clone())
+                .collect::<Vec<_>>(),
+            "{label}: one reminder per index entry, in file order"
+        );
+        for (entry, expected) in entries.iter().zip(&case.reminders) {
+            let label = format!("{label} {}", expected.id);
+            let entry_line = index_lines[entry.line];
+            let section = index_lines[..entry.line]
+                .iter()
+                .rev()
+                .find(|line| line.starts_with("## "))
+                .map(|line| heading_key(line.trim_start_matches('#')))
+                .expect("entry under a heading");
+            let names = if expected.section == "open" {
+                &case.headings.open
+            } else {
+                &case.headings.done
+            };
+            assert!(
+                names.iter().any(|name| heading_key(name) == section),
+                "{label}: section"
+            );
+            let link = strip_list(entry_line)
+                .strip_prefix("[[")
+                .and_then(|rest| rest.split_once("]]"))
+                .map(|(target, _)| target.split('|').next().unwrap_or(target));
+            match link {
+                Some(target) => {
+                    assert_eq!(expected.entry, "link", "{label}: entry");
+                    assert_eq!(format!("{target}.md"), expected.home, "{label}: home");
+                }
+                None => {
+                    assert_eq!(expected.entry, "loose", "{label}: entry");
+                    assert_eq!(expected.home, case.index, "{label}: home");
+                    assert_eq!(Some(entry.line), expected.line, "{label}: loose line");
+                }
+            }
+            let stamps = [
+                ("done", "✅ "),
+                ("dropped", "dropped "),
+                ("removed", "removed "),
+            ];
+            for (kind, prefix) in stamps {
+                let stated = expected
+                    .stamp
+                    .as_ref()
+                    .filter(|stamp| stamp.kind == kind)
+                    .map(|stamp| format!("{prefix}{} <!--rem:", stamp.date));
+                match stated {
+                    Some(stamp) => assert!(entry_line.contains(&stamp), "{label}: stamp"),
+                    None => assert!(
+                        !entry_line.contains(&format!(" {prefix}2")),
+                        "{label}: no {kind} stamp"
+                    ),
+                }
+            }
+
+            let home_text = case.files.get(&expected.home);
+            let homes: Vec<_> = home_text
+                .map(|text| parse_note(text, &expected.home, &config))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|appearance| {
+                    !appearance.mirror && appearance.reminder.id.as_deref() == Some(&expected.id)
+                })
+                .collect();
+            let home = homes
+                .iter()
+                .find(|appearance| appearance.reminder.token.is_some())
+                .or_else(|| homes.first());
+            let Some(home) = home else {
+                let state = match &expected.stamp {
+                    Some(stamp) if stamp.kind == "removed" => "removed",
+                    _ => "missing",
+                };
+                assert_eq!(expected.state, state, "{label}: state with no home line");
+                assert_eq!(expected.line, None, "{label}");
+                assert_eq!(expected.text, None, "{label}");
+                assert_eq!(expected.due, None, "{label}");
+                assert_eq!(expected.rings_at, None, "{label}");
+                let group = (state == "removed").then(|| "done".to_string());
+                assert_eq!(expected.group, group, "{label}: group");
+                continue;
+            };
+            let home_lines = note_lines(home_text.expect("home text"));
+            let reminder = &home.reminder;
+            assert_eq!(Some(home.line), expected.line, "{label}: home line");
+            assert_eq!(
+                Some(reminder_text(home_lines[home.line])),
+                expected.text,
+                "{label}: text"
+            );
+            assert_eq!(
+                reminder.due.map(|due| due.to_string()),
+                expected.due,
+                "{label}: due"
+            );
+            assert_eq!(
+                reminder
+                    .due
+                    .map(|due| due.at(date_only_at).format("%Y-%m-%dT%H:%M").to_string()),
+                expected.rings_at,
+                "{label}: rings at"
+            );
+            assert_eq!(
+                state_text(reminder.state()),
+                expected.state,
+                "{label}: state"
+            );
+            assert_eq!(
+                group(reminder.state(), reminder.due, now.date()).map(group_text),
+                expected.group.as_deref(),
+                "{label}: group"
+            );
+        }
+    }
+}
+
+fn strip_list(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .unwrap_or(trimmed)
 }
 
 // ---------------------------------------------------------------------------

@@ -4,11 +4,17 @@
 //! completions target what `markdown_conceal::resolve_wikilink_target`
 //! resolves — the vault-relative path without its `.md` extension. Typing
 //! `![` offers the vault's images folder the same way and writes the whole
-//! `![alt](/images/…)` link (V39 §5.4). The provider delegates everything
-//! else to the editor's regular project-backed completions.
+//! `![alt](/images/…)` link (V39 §5.4). Typing `(@` offers the reminder
+//! readings of what follows and writes the canonical token (V45 §8.1). The
+//! provider delegates everything else to the editor's regular project-backed
+//! completions.
 
+use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use chrono::NaiveTime;
 use editor::actions::ShowCompletions;
 use editor::{CompletionProvider, Editor, EditorEvent, EditorMode};
 use gpui::{App, Context, Entity, Task, Window};
@@ -16,8 +22,14 @@ use language::{Buffer, CodeLabel};
 use project::{
     Completion, CompletionDisplayOptions, CompletionResponse, CompletionSource, Project,
 };
-use text::ToOffset as _;
+use text::{Point, ToOffset as _, ToPoint as _};
+use thock_sync_core::{DailyNotes, Due, token_text};
+use util::ResultExt as _;
 
+use crate::markdown_syntax;
+use crate::reminder_calendar::PickReminderDate;
+use crate::reminder_reading;
+use crate::reminders::{ReminderClock, ReminderSettings, due_label, load_reminder_settings};
 use crate::vault::{Vault, VaultStatus};
 
 gpui::actions!(
@@ -61,20 +73,57 @@ fn register(editor: &mut Editor, cx: &mut Context<Editor>) {
 }
 
 fn install(editor: &mut Editor, cx: &mut Context<Editor>) -> bool {
-    let Some(images_dir) = vault_markdown_file(editor, cx) else {
+    let Some(note) = vault_markdown_file(editor, cx) else {
         return false;
     };
-    install_provider(editor, images_dir, cx);
+    let reminder_settings = Rc::new(RefCell::new(ReminderSettings::default()));
+    install_provider(
+        editor,
+        note.images_dir,
+        note.daily,
+        reminder_settings.clone(),
+        cx,
+    );
+    // The presets' time is the vault's; the defaults stand until it loads, and
+    // when `.thock/reminders.toml` can't be read.
+    if let Some(project) = editor.project().cloned() {
+        let observed = crate::reminder_service::observe_settings(&project, cx, {
+            let reminder_settings = reminder_settings.clone();
+            move |_, settings, _| *reminder_settings.borrow_mut() = settings.clone()
+        });
+        if let Some(settings) = observed {
+            *reminder_settings.borrow_mut() = settings;
+            return true;
+        }
+        let fs = project.read(cx).fs().clone();
+        cx.spawn(async move |_, _| {
+            if let Some(settings) = load_reminder_settings(&fs, &note.vault_root)
+                .await
+                .log_err()
+            {
+                *reminder_settings.borrow_mut() = settings;
+            }
+        })
+        .detach();
+    }
     true
 }
 
 /// Installs the provider and the insert-image action on an editor that
 /// passed the vault gate. Split from `install` so tests can drive an editor
 /// without a vault on the real filesystem.
-fn install_provider(editor: &mut Editor, images_dir: String, cx: &mut Context<Editor>) {
+fn install_provider(
+    editor: &mut Editor,
+    images_dir: String,
+    daily: DailyNotes,
+    reminder_settings: Rc<RefCell<ReminderSettings>>,
+    cx: &mut Context<Editor>,
+) {
     let provider = WikilinkCompletionProvider {
         project: editor.project().cloned(),
         images_dir,
+        daily,
+        reminder_settings,
     };
     editor.set_completion_provider(Some(Rc::new(provider)));
     let editor_handle = cx.weak_entity();
@@ -97,9 +146,16 @@ fn insert_image(editor: &mut Editor, window: &mut Window, cx: &mut Context<Edito
     editor.show_completions(&ShowCompletions, window, cx);
 }
 
+/// What the provider needs to know about the vault a note is in.
+struct VaultNote {
+    images_dir: String,
+    daily: DailyNotes,
+    vault_root: PathBuf,
+}
+
 /// Whether the editor's buffer is a `.md` file under a Thock vault root,
-/// returning the vault's images folder when it is.
-fn vault_markdown_file(editor: &Editor, cx: &App) -> Option<String> {
+/// returning what the provider needs from the vault when it is.
+fn vault_markdown_file(editor: &Editor, cx: &App) -> Option<VaultNote> {
     let buffer = editor.buffer().read(cx).as_singleton()?;
     let file = buffer.read(cx).file()?;
     if file.path().extension() != Some("md") {
@@ -108,7 +164,14 @@ fn vault_markdown_file(editor: &Editor, cx: &App) -> Option<String> {
     let file = project::File::from_dyn(Some(file))?;
     let vault_root = file.worktree.read(cx).abs_path();
     match Vault::detect(&vault_root) {
-        VaultStatus::Valid(vault) => Some(vault.config.images.dir),
+        VaultStatus::Valid(vault) => Some(VaultNote {
+            images_dir: vault.config.images.dir,
+            daily: DailyNotes {
+                dir: vault.config.daily.dir,
+                filename: vault.config.daily.filename,
+            },
+            vault_root: vault_root.to_path_buf(),
+        }),
         _ => None,
     }
 }
@@ -118,6 +181,11 @@ struct WikilinkCompletionProvider {
     /// keep working everywhere a wiki-link isn't being typed.
     project: Option<Entity<Project>>,
     images_dir: String,
+    /// Where the vault's daily notes are, so a token in a daily note can
+    /// drop its date (V45 §4.1).
+    daily: DailyNotes,
+    /// The vault's `.thock/reminders.toml`, once loaded.
+    reminder_settings: Rc<RefCell<ReminderSettings>>,
 }
 
 impl CompletionProvider for WikilinkCompletionProvider {
@@ -133,6 +201,12 @@ impl CompletionProvider for WikilinkCompletionProvider {
             return Task::ready(Ok(vec![response]));
         }
         if let Some(response) = image_response(buffer, buffer_position, &self.images_dir, cx) {
+            return Task::ready(Ok(vec![response]));
+        }
+        let tomorrow_at = self.reminder_settings.borrow().tomorrow_at;
+        if let Some(response) =
+            reminder_response(buffer, buffer_position, &self.daily, tomorrow_at, cx)
+        {
             return Task::ready(Ok(vec![response]));
         }
         match &self.project {
@@ -189,6 +263,7 @@ impl CompletionProvider for WikilinkCompletionProvider {
         let snapshot = buffer.read(cx);
         if wikilink_query_offset(snapshot, position).is_some()
             || image_query_offset(snapshot, position).is_some()
+            || reminder_query_offset(snapshot, position).is_some()
         {
             return true;
         }
@@ -329,6 +404,148 @@ fn image_response(
     })
 }
 
+/// The reminder suggestions for the `(@…` under construction at
+/// `buffer_position` (V45 §8.1), or `None` when the cursor isn't in one. A
+/// query with no reading gets no items, so the list closes and `enter` breaks
+/// the line.
+fn reminder_response(
+    buffer: &Entity<Buffer>,
+    buffer_position: text::Anchor,
+    daily: &DailyNotes,
+    tomorrow_at: NaiveTime,
+    cx: &Context<Editor>,
+) -> Option<CompletionResponse> {
+    let buffer = buffer.read(cx);
+    let query_start = reminder_query_offset(buffer, buffer_position)?;
+    let cursor = buffer_position.to_offset(buffer);
+    let query: String = buffer.text_for_range(query_start..cursor).collect();
+    // Markdown autocloses the `(`; the token replaces that `)` too.
+    let closers = usize::from(buffer.chars_at(cursor).next() == Some(')'));
+    let home_day = project::File::from_dyn(buffer.file())
+        .and_then(|file| daily.day_of(file.path.as_unix_str()));
+    let now = ReminderClock::global(cx).now();
+    let today = now.date();
+
+    let mut suggestions: Vec<(String, Due)> = Vec::new();
+    if query.trim().is_empty() {
+        for preset in reminder_reading::presets(now, tomorrow_at) {
+            let reading = preset.reading;
+            let label = match reading.time {
+                Some(time) => format!("{} {}", preset.label, time.format("%H:%M")),
+                None => preset.label.to_string(),
+            };
+            suggestions.push((label, Due::new(reading.date, reading.time)));
+        }
+    } else {
+        let readings = reminder_reading::read(&query, now);
+        for (index, reading) in readings.readings.iter().enumerate() {
+            let due = Due::new(reading.date, reading.time);
+            let mut label = due_label(due, today);
+            if reading.already_past {
+                label.push_str(" · already past");
+            }
+            if index == 0 && !readings.ignored.is_empty() {
+                let ignored: Vec<String> = readings
+                    .ignored
+                    .iter()
+                    .map(|word| format!("\"{word}\""))
+                    .collect();
+                label.push_str(&format!(" · ignores {}", ignored.join(", ")));
+            }
+            suggestions.push((label, due));
+        }
+    }
+
+    let display_options = CompletionDisplayOptions {
+        dynamic_width: true,
+    };
+    // An empty response still counts as the provider's answer, so fallback
+    // word completions don't fill the list it closes.
+    if suggestions.is_empty() {
+        return Some(CompletionResponse {
+            completions: Vec::new(),
+            display_options,
+            is_incomplete: true,
+        });
+    }
+
+    let token_range =
+        buffer.anchor_before(query_start - TOKEN_OPEN.len())..buffer.anchor_after(cursor + closers);
+    // The readings already answer the query, so the menu's own fuzzy filter
+    // must keep them all (`dec 2` would hide *Wed 2 Dec*): matching from the
+    // cursor gives it an empty query, and the incomplete response asks again
+    // on every keystroke.
+    let cursor_anchor = buffer.anchor_after(cursor);
+    let completion = |label: String, new_text: String, replace_range| Completion {
+        replace_range,
+        new_text,
+        label: CodeLabel::new(label, 0..0, Vec::new()),
+        documentation: None,
+        source: CompletionSource::Custom,
+        icon_path: None,
+        icon_color: None,
+        match_start: Some(cursor_anchor),
+        snippet_deduplication_key: None,
+        insert_text_mode: None,
+        confirm: None,
+        group: None,
+    };
+    let mut completions: Vec<Completion> = suggestions
+        .into_iter()
+        .map(|(label, due)| completion(label, token_text(due, home_day), token_range.clone()))
+        .collect();
+    completions.push(Completion {
+        // The calendar reads the typed `(@…` itself and replaces it.
+        confirm: Some(Arc::new(|_, window, cx| {
+            window.dispatch_action(Box::new(PickReminderDate), cx);
+            false
+        })),
+        ..completion(
+            "Pick a date…".to_string(),
+            String::new(),
+            cursor_anchor..cursor_anchor,
+        )
+    });
+
+    Some(CompletionResponse {
+        completions,
+        display_options,
+        is_incomplete: true,
+    })
+}
+
+const TOKEN_OPEN: &str = "(@";
+
+/// The buffer offset where the reminder query starts — just after an open
+/// `(@` before the cursor on its line — when that `(@` is in prose and the
+/// line is not a calendar line (V45 §4.2).
+fn reminder_query_offset(buffer: &Buffer, position: text::Anchor) -> Option<usize> {
+    let query_start = query_offset(buffer, position, reminder_query_start)?;
+    let row = position.to_point(buffer).row;
+    let line_end = Point::new(row, buffer.line_len(row));
+    let line: String = buffer
+        .text_for_range(Point::new(row, 0)..line_end)
+        .collect();
+    if line.contains("<!--gcal:") {
+        return None;
+    }
+    // Whether a line is in a fence or front matter depends only on the lines
+    // above it, so the text up to the end of this line is enough.
+    let above: String = buffer.text_for_range(Point::zero()..line_end).collect();
+    markdown_syntax::is_prose_at(&above, query_start - TOKEN_OPEN.len()).then_some(query_start)
+}
+
+/// Where the reminder query starts inside `line_prefix`: just after the
+/// rightmost `(@` with no `)` between it and the cursor. An escaped `\(@` is
+/// text.
+fn reminder_query_start(line_prefix: &str) -> Option<usize> {
+    let open = line_prefix.rfind(TOKEN_OPEN)?;
+    if line_prefix[open..].contains(')') || line_prefix[..open].ends_with('\\') {
+        return None;
+    }
+    Some(open + TOKEN_OPEN.len())
+}
+
 fn is_image_extension(extension: &str) -> bool {
     IMAGE_EXTENSIONS
         .iter()
@@ -422,7 +639,25 @@ fn closing_bracket_len(following: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{closing_bracket_len, image_query_start, image_slug, wikilink_query_start};
+    use super::*;
+    use chrono::NaiveDate;
+    use editor::code_context_menus::CodeContextMenu;
+    use fs::FakeFs;
+    use gpui::{BorrowAppContext as _, KeyBinding, TestAppContext, VisualTestContext};
+    use project::Project;
+    use serde_json::json;
+    use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
+    use workspace::{MultiWorkspace, Workspace};
+
+    #[test]
+    fn an_open_reminder_token_starts_a_query() {
+        assert_eq!(reminder_query_start("Call (@"), Some(7));
+        assert_eq!(reminder_query_start("Call (@dec 2"), Some(7));
+        assert_eq!(reminder_query_start("(@a) then (@to"), Some(12));
+        assert_eq!(reminder_query_start("Call (@2026-12-02)"), None);
+        assert_eq!(reminder_query_start("Call \\(@dec"), None);
+        assert_eq!(reminder_query_start("Call (dec"), None);
+    }
 
     #[test]
     fn a_freshly_opened_image_link_starts_an_empty_query() {
@@ -488,5 +723,303 @@ mod tests {
         assert_eq!(closing_bracket_len("] word"), 1);
         assert_eq!(closing_bracket_len("word"), 0);
         assert_eq!(closing_bracket_len(""), 0);
+    }
+
+    fn keymap_bindings(content: &str, cx: &App) -> Vec<KeyBinding> {
+        match KeymapFile::load(content, cx) {
+            KeymapFileLoadResult::Success { key_bindings }
+            | KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => key_bindings,
+            KeymapFileLoadResult::JsonParseFailure { error } => panic!("bad keymap: {error}"),
+        }
+    }
+
+    struct Setup {
+        workspace: Entity<Workspace>,
+        editor: Entity<Editor>,
+        cx: VisualTestContext,
+        _vault_dir: tempfile::TempDir,
+    }
+
+    /// A vault whose note `open` holds `text`, open in a workspace with the
+    /// cursor at the end of `text`, on Wednesday 21 October 2026 at 14:05.
+    async fn setup(cx: &mut TestAppContext, open: &str, text: &str) -> Setup {
+        setup_with(cx, open, text, None).await
+    }
+
+    /// `setup`, with `reminders_toml` as the vault's `.thock/reminders.toml`.
+    async fn setup_with(
+        cx: &mut TestAppContext,
+        open: &str,
+        text: &str,
+        reminders_toml: Option<&str>,
+    ) -> Setup {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            editor::init(cx);
+            cx.bind_keys(keymap_bindings(
+                include_str!("../../../assets/keymaps/default-linux.json"),
+                cx,
+            ));
+            let now = NaiveDate::from_ymd_opt(2026, 10, 21)
+                .unwrap()
+                .and_time(NaiveTime::from_hms_opt(14, 5, 0).unwrap());
+            crate::reminders::TestClock::install(now, cx);
+            init(cx);
+            crate::reminder_calendar::init(cx);
+        });
+        let vault_dir = tempfile::tempdir().unwrap();
+        let root = vault_dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".thock")).unwrap();
+        std::fs::write(root.join(".thock/config.toml"), "schema = 1\n").unwrap();
+        let fs = FakeFs::new(cx.executor());
+        let mut tree = json!({ ".thock": { "config.toml": "schema = 1\n" } });
+        if let Some(reminders_toml) = reminders_toml {
+            tree[".thock"]["reminders.toml"] = json!(reminders_toml);
+        }
+        let (folder, file) = open.split_once('/').unwrap();
+        tree[folder][file] = json!(text);
+        fs.insert_tree(&root, tree).await;
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let mut cx = cx.clone();
+        let workspace = multi_workspace.read_with(&cx, |multi, _| multi.workspace().clone());
+        let project_path = project
+            .read_with(&mut cx, |project, cx| {
+                project.find_project_path(root.join(open), cx)
+            })
+            .unwrap();
+        let editor = workspace
+            .update_in(&mut cx, |workspace, window, cx| {
+                workspace.open_path(project_path, None, true, window, cx)
+            })
+            .await
+            .unwrap()
+            .downcast::<Editor>()
+            .unwrap();
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.move_to_end(&Default::default(), window, cx);
+        });
+        cx.run_until_parked();
+        Setup {
+            workspace,
+            editor,
+            cx,
+            _vault_dir: vault_dir,
+        }
+    }
+
+    /// Types `input` the way Markdown's autoclose leaves it: an opening `(`
+    /// gets its `)` and the cursor stays inside.
+    fn type_text(setup: &mut Setup, input: &str) {
+        for character in input.chars() {
+            setup.cx.simulate_input(&character.to_string());
+            if character == '(' {
+                setup.editor.update_in(&mut setup.cx, |editor, window, cx| {
+                    editor.insert(")", window, cx);
+                    editor.move_left(&Default::default(), window, cx);
+                });
+            }
+        }
+        setup.cx.run_until_parked();
+    }
+
+    fn labels(setup: &mut Setup) -> Vec<String> {
+        setup.editor.read_with(&setup.cx, |editor, _| {
+            match editor.context_menu().borrow().as_ref() {
+                Some(CodeContextMenu::Completions(menu)) => {
+                    let completions = menu.completions.borrow();
+                    menu.entries
+                        .borrow()
+                        .iter()
+                        .filter_map(|entry| entry.as_match())
+                        .map(|found| completions[found.candidate_id].label.text.clone())
+                        .collect()
+                }
+                _ => Vec::new(),
+            }
+        })
+    }
+
+    fn text(setup: &mut Setup) -> String {
+        setup
+            .editor
+            .read_with(&setup.cx, |editor, cx| editor.text(cx))
+    }
+
+    #[gpui::test]
+    async fn an_open_token_offers_the_presets(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "Renew passport ").await;
+        type_text(&mut setup, "(@");
+        assert_eq!(
+            labels(&mut setup),
+            [
+                "Later today 17:00",
+                "Tomorrow 09:00",
+                "Monday 09:00",
+                "Pick a date…"
+            ]
+        );
+    }
+
+    #[gpui::test]
+    async fn the_presets_ring_at_the_vaults_tomorrow_time(cx: &mut TestAppContext) {
+        let mut setup = setup_with(
+            cx,
+            "projects/house.md",
+            "Renew passport ",
+            Some("[ring]\ntomorrow_at = \"08:30\"\n"),
+        )
+        .await;
+        type_text(&mut setup, "(@");
+        assert_eq!(
+            labels(&mut setup),
+            [
+                "Later today 17:00",
+                "Tomorrow 08:30",
+                "Monday 08:30",
+                "Pick a date…"
+            ]
+        );
+    }
+
+    #[gpui::test]
+    async fn fallback_words_never_fill_a_closed_list(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "dentistry dentists\nCall ").await;
+        setup.cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.project.all_languages.defaults.completions =
+                        Some(settings::CompletionSettingsContent {
+                            words: Some(settings::WordsCompletionMode::Fallback),
+                            words_min_length: Some(0),
+                            ..Default::default()
+                        });
+                });
+            });
+        });
+        type_text(&mut setup, "dent");
+        assert!(
+            labels(&mut setup).contains(&"dentistry".to_string()),
+            "fallback word completions are on: {:?}",
+            labels(&mut setup)
+        );
+        setup.cx.simulate_keystrokes("escape");
+        type_text(&mut setup, " (@dentist");
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn every_reading_survives_the_filter_and_tab_writes_the_date(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "Renew passport ").await;
+        type_text(&mut setup, "(@dec 2");
+        assert_eq!(labels(&mut setup), ["Wed 2 Dec", "Pick a date…"]);
+        setup.cx.simulate_keystrokes("tab");
+        setup.cx.run_until_parked();
+        assert_eq!(text(&mut setup), "Renew passport (@2026-12-02)");
+    }
+
+    #[gpui::test]
+    async fn readings_name_what_they_ignore_and_what_has_passed(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "Standup ").await;
+        type_text(&mut setup, "(@foo today 9am");
+        assert_eq!(
+            labels(&mut setup),
+            [
+                "Tomorrow 09:00 · already past · ignores \"foo\"",
+                "Pick a date…"
+            ]
+        );
+    }
+
+    #[gpui::test]
+    async fn a_bare_hour_offers_both_sides_of_noon(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "Standup ").await;
+        type_text(&mut setup, "(@10");
+        assert_eq!(
+            labels(&mut setup),
+            ["Today 22:00", "Tomorrow 10:00", "Pick a date…"]
+        );
+    }
+
+    #[gpui::test]
+    async fn a_token_in_its_own_daily_note_drops_the_date(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "daily/2026-10-22.md", "- [ ] Dentist ").await;
+        type_text(&mut setup, "(@tomorrow 10:00");
+        setup.cx.simulate_keystrokes("enter");
+        setup.cx.run_until_parked();
+        assert_eq!(text(&mut setup), "- [ ] Dentist (@10:00)");
+    }
+
+    #[gpui::test]
+    async fn a_query_with_no_reading_closes_the_list(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "Call ").await;
+        type_text(&mut setup, "(@dentist");
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
+        setup.cx.simulate_keystrokes("enter");
+        setup.cx.run_until_parked();
+        assert_eq!(text(&mut setup), "Call (@dentist\n)");
+    }
+
+    /// Puts the cursor at `column` of the first line.
+    fn move_cursor(setup: &mut Setup, column: usize) {
+        setup.editor.update_in(&mut setup.cx, |editor, window, cx| {
+            let point = Point::new(0, column as u32);
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                selections.select_ranges([point..point])
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn no_list_in_inline_code(cx: &mut TestAppContext) {
+        let line = "Call `(@to`";
+        let mut setup = setup(cx, "projects/house.md", line).await;
+        move_cursor(&mut setup, line.len() - 1);
+        type_text(&mut setup, "m");
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn no_list_inside_a_fence_opened_above(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "```\nCall ").await;
+        type_text(&mut setup, "(@tom");
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn a_fence_below_the_line_changes_nothing(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "Call \n```\nnever closed").await;
+        move_cursor(&mut setup, "Call ".len());
+        type_text(&mut setup, "(@tom");
+        assert!(
+            !labels(&mut setup).is_empty(),
+            "a fence below the line changes nothing"
+        );
+    }
+
+    #[gpui::test]
+    async fn no_list_on_a_calendar_line(cx: &mut TestAppContext) {
+        let line = "- [ ] 10:00 Sync () <!--gcal:abc-->";
+        let mut setup = setup(cx, "daily/2026-10-21.md", line).await;
+        move_cursor(&mut setup, line.find("()").unwrap() + 1);
+        type_text(&mut setup, "@tom");
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn pick_a_date_opens_the_calendar(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "Renew passport ").await;
+        type_text(&mut setup, "(@dec 2");
+        setup.cx.simulate_keystrokes("down enter");
+        setup.cx.run_until_parked();
+        let calendar = setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            workspace.active_modal::<crate::reminder_calendar::ReminderCalendar>(cx)
+        });
+        assert!(calendar.is_some(), "Pick a date… opens the calendar");
+        assert_eq!(text(&mut setup), "Renew passport (@dec 2)");
     }
 }
