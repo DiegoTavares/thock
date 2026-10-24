@@ -48,6 +48,15 @@ pub enum Placement {
     BeforeChildren,
 }
 
+/// The line an `append` lands after, with its indented continuation
+/// (V46 §4.6). A missing anchor falls back to the write's `placement`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Anchor {
+    pub line_hash: String,
+    #[serde(default)]
+    pub ordinal: usize,
+}
+
 /// Where a `move_block` lands inside its destination group (V38 §7.1).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,6 +90,8 @@ pub enum Operation {
         blank_line_before: bool,
         #[serde(default)]
         create_from_template: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<Anchor>,
     },
     ReplaceLine {
         heading: Option<Heading>,
@@ -565,6 +576,7 @@ mod tests {
                 placement: Placement::BeforeChildren,
                 blank_line_before: true,
                 create_from_template: false,
+                after: None,
             },
         );
         let json = write.to_json();
@@ -573,5 +585,22 @@ mod tests {
             r#"{"v":1,"client_id":"c","path":"p.md","made_at":"","device_id":"","kind":"append","heading":null,"lines":["a"],"placement":"before_children","blank_line_before":true,"create_from_template":false}"#
         );
         assert_eq!(parse_write(&json).expect("parses"), write);
+    }
+
+    #[test]
+    fn an_anchored_append_round_trips() {
+        let json = r#"{"v":1,"client_id":"c","path":"p.md","made_at":"","device_id":"","kind":"append","heading":null,"lines":["- [ ] b"],"placement":"before_children","blank_line_before":false,"create_from_template":false,"after":{"line_hash":"abc","ordinal":1}}"#;
+        let write = parse_write(json).expect("parses");
+        match &write.operation {
+            Operation::Append { after, .. } => assert_eq!(
+                after,
+                &Some(Anchor {
+                    line_hash: "abc".into(),
+                    ordinal: 1,
+                })
+            ),
+            other => panic!("not an append: {other:?}"),
+        }
+        assert_eq!(write.to_json(), json);
     }
 }

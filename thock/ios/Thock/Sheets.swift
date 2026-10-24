@@ -7,9 +7,12 @@ import ThockKit
 struct InAppClipSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @State private var restored: ClipDraft?
+    @State private var current = ClipDraft()
+    @State private var owner = UUID()
 
     var body: some View {
-        ClipSheet(draft: ClipDraft(), asksForLink: true) {
+        ClipSheet(draft: restored ?? ClipDraft(), asksForLink: true) {
             dismiss()
         } onSave: { clip in
             if model.perform({ try $0.clip(clip) }) {
@@ -17,7 +20,21 @@ struct InAppClipSheet: View {
                 model.show(clip.article == nil ? "Link saved to your inbox" : "Saved to your inbox, text kept")
             }
             dismiss()
+        } onDraftChange: { current = $0 }
+        .id(restored == nil ? 0 : 1)
+        .onAppear {
+            if let draft = model.takeRestoredDraft() {
+                restored = ClipDraft(url: draft.link, why: draft.why)
+                current = restored ?? current
+            }
+            model.setLeaving(owner) {
+                var draft = ResumePoint.Draft()
+                draft.link = current.url
+                draft.why = current.why
+                return LiveEditor(draft: draft)
+            }
         }
+        .onDisappear { model.clearLeaving(owner) }
     }
 }
 
@@ -42,6 +59,7 @@ struct ReceiptsScreen: View {
         let others = (model.store?.waitingInboxNotes() ?? []).filter { !mine.contains($0.path) && !model.isBeingTriaged($0.path) }
         VStack(alignment: .leading, spacing: 0) {
             SheetHeader(leading: "", title: "", trailing: "Done", onLeading: {}, onTrailing: { dismiss() })
+                .padding(.horizontal, 20)
                 .padding(.bottom, 4)
             VStack(alignment: .leading, spacing: 4) {
                 Text("INBOX")

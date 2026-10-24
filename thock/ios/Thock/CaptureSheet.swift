@@ -2,11 +2,11 @@ import SwiftUI
 import ThockKit
 
 /// The capture sheet (V33 §6): rises over whatever is open, keyboard up,
-/// cursor blinking. Done saves; so does swiping it away.
+/// cursor blinking. Done saves; so does swiping it away. Leaving the app
+/// keeps it open with what it holds, written nowhere until saved (V46 §5.3).
 struct CaptureSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.scenePhase) private var scenePhase
     var entry: String
     var preset: CaptureDestination?
 
@@ -19,6 +19,8 @@ struct CaptureSheet: View {
     @State private var images: [ImageAttachment] = []
     @State private var handle = EditorHandle()
     @State private var finished = false
+    @State private var initial: [Block] = []
+    @State private var owner = UUID()
 
     private var isEmpty: Bool {
         blocks.allSatisfy { $0.kind == .blank } && images.isEmpty
@@ -61,9 +63,10 @@ struct CaptureSheet: View {
                 save()
                 dismiss()
             }
-            RichTextEditor(handle: handle, placeholder: "What's on your mind?", fontSize: 19) { query in
+            RichTextEditor(initial: initial, handle: handle, placeholder: "What's on your mind?", fontSize: 19) { query in
                 model.session?.noteTitles(matching: query) ?? []
             } onChange: { blocks = $0 }
+            .id(initial.isEmpty ? 0 : 1)
             .frame(maxHeight: .infinity)
 
             AttachmentStrip(images: $images)
@@ -107,15 +110,36 @@ struct CaptureSheet: View {
         }
         .onAppear {
             destination = preset ?? model.chip(for: entry)
-        }
-        .onDisappear(perform: save)
-        .onChange(of: scenePhase) { _, phase in
-            // Locking the phone mid-thought keeps the thought.
-            if phase == .background, !isEmpty {
-                save()
-                dismiss()
+            if let draft = model.takeRestoredDraft() {
+                restore(draft)
             }
+            model.setLeaving(owner) { LiveEditor(cursor: handle.cursor, draft: draft()) }
         }
+        .onDisappear {
+            model.clearLeaving(owner)
+            save()
+        }
+    }
+
+    private func draft() -> ResumePoint.Draft {
+        var draft = ResumePoint.Draft()
+        let live = handle.blocks
+        draft.markdown = EditorDocument(blocks: live.isEmpty ? blocks : live).lines().joined(separator: "\n")
+        draft.destination = destination
+        draft.due = due?.description
+        draft.images = images
+        return draft
+    }
+
+    private func restore(_ draft: ResumePoint.Draft) {
+        initial = Blocks.parse(draft.markdown).filter { $0.kind != .blank }
+        blocks = initial
+        destination = draft.destination ?? destination
+        due = draft.due.flatMap(ReminderDue.init)
+        if destination == .reminder, due == nil {
+            destination = beforeReminder
+        }
+        images = draft.images
     }
 
     private func save() {

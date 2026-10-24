@@ -27,7 +27,7 @@ struct CardView: View {
                 .overlay(alignment: .leading) { Rectangle().fill(Theme.amber).frame(width: 2) }
                 .clipShape(UnevenRoundedRectangle(bottomTrailingRadius: 10, topTrailingRadius: 10))
             case .preamble:
-                BlockList(blocks: card.blocks)
+                PreambleCard(card: card, view: view, note: note)
             case .prose:
                 ProseCard(card: card, view: view, note: note)
             }
@@ -59,35 +59,81 @@ struct ProseCard: View {
                     if !model.isBeingRemoved(item, note: note) {
                         PlannerRow(item: item, note: note, timing: $timing, editing: $editing, reminding: $reminding, allowsTime: false)
                     }
-                } else if editable, view.isEditable(block, in: card) {
-                    BlockView(block: block)
-                        .contentShape(Rectangle())
-                        .onTapGesture { model.sheet = .section(note: note, card: card.id, editing: block.line) }
-                        .accessibilityAddTraits(.isButton)
-                        .accessibilityHint("Edits this line")
-                } else if editable, NoteView.isPrompt(block) {
+                } else if editable, let heading = card.heading, view.isEditable(block, in: card) {
+                    EditableBlock(block: block) { model.sheet = .section(note: note, section: .card(heading), editing: block.line) }
+                } else if editable, let heading = card.heading, NoteView.isPrompt(block) {
                     // The prompt stays in the file; writing starts below it.
                     BlockView(block: block)
                         .contentShape(Rectangle())
-                        .onTapGesture { model.sheet = .section(note: note, card: card.id, editing: nil) }
+                        .onTapGesture { model.sheet = .section(note: note, section: .card(heading), editing: nil) }
                         .accessibilityAddTraits(.isButton)
                         .accessibilityHint("Starts a paragraph")
                 } else {
                     BlockView(block: block)
                 }
             }
-            if editable {
-                Text(view.kind == .weekly ? "Add a note…" : "Add a line…")
-                    .font(.system(size: 17))
-                    .foregroundStyle(Theme.dim)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture { model.sheet = .section(note: note, card: card.id, editing: nil) }
-                    .accessibilityLabel("Add to \(card.title)")
-                    .accessibilityAddTraits(.isButton)
+            if editable, let heading = card.heading {
+                AddProseRow(title: view.kind == .weekly ? "Add a note…" : "Add a line…", label: "Add to \(card.title)") {
+                    model.sheet = .section(note: note, section: .card(heading), editing: nil)
+                }
             }
         }
         .lineSheets(timing: $timing, editing: $editing, reminding: $reminding, note: note)
+    }
+}
+
+/// The text between a note's title and its first section (V46 §4.5). It
+/// edits like a section when the note has a title to write it under.
+struct PreambleCard: View {
+    @Environment(AppModel.self) private var model
+    var card: NoteCard
+    var view: NoteView
+    var note: NoteID
+
+    var body: some View {
+        let editable = !model.isReadOnly && card.heading != nil
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(card.blocks.filter { $0.kind != .blank && $0.kind != .rule }) { block in
+                if editable, view.isEditable(block, in: card) {
+                    EditableBlock(block: block) { model.sheet = .section(note: note, section: .preamble, editing: block.line) }
+                } else {
+                    BlockView(block: block)
+                }
+            }
+        }
+    }
+}
+
+/// A block of the person's own prose: a tap opens it live in the editor.
+struct EditableBlock: View {
+    var block: Block
+    var onTap: () -> Void
+
+    var body: some View {
+        BlockView(block: block)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onTap)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint("Edits this line")
+    }
+}
+
+/// The dim line under a run of prose that starts a new paragraph there.
+struct AddProseRow: View {
+    var title: String
+    var label: String
+    var size: CGFloat = 17
+    var onTap: () -> Void
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: size))
+            .foregroundStyle(Theme.dim)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onTap)
+            .accessibilityLabel(label)
+            .accessibilityAddTraits(.isButton)
     }
 }
 
@@ -289,8 +335,12 @@ struct JournalCard: View {
     var journal: Journal
     var day: VaultDay
 
+    /// A tap on an entry opens that entry; a tap anywhere else on today's
+    /// journal starts a new one (V46 §4.1). Another day's entries edit in
+    /// place, but take no new one (§4.3).
     var body: some View {
-        let editable = day == .today() && !model.isReadOnly
+        let editable = !model.isReadOnly
+        let isToday = day == .today()
         VStack(alignment: .leading, spacing: 10) {
             CardLabel(title: card.title)
             let written = journal.written
@@ -302,18 +352,42 @@ struct JournalCard: View {
             ForEach(card.blocks.filter { $0.kind != .blank && $0.kind != .rule }) { block in
                 if let entry = journal.entries.first(where: { $0.line == block.line }), block.kind == .paragraph {
                     if !entry.isPrompt {
-                        JournalParagraph(entry: entry)
+                        JournalEntryView(entry: entry)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if editable { model.sheet = .journal(day: day, entry: entry.line) }
+                            }
+                            .accessibilityAddTraits(editable ? .isButton : [])
+                            .accessibilityHint(editable ? "Edits this entry" : "")
                     }
-                } else {
+                } else if !journal.entries.contains(where: { $0.contains(line: block.line) }) {
                     BlockView(block: block)
                 }
             }
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            if editable { model.sheet = .journal }
+            if editable, isToday { model.openJournal() }
         }
-        .accessibilityHint(editable ? "Opens the journal" : "")
+        .accessibilityHint(editable && isToday ? "Starts a journal entry" : "")
+    }
+}
+
+/// One journal entry: its stamped paragraph and the bullets and quotes that
+/// belong to it (V46 §4.2).
+struct JournalEntryView: View {
+    var entry: JournalEntry
+    var color = Theme.ink
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            JournalParagraph(entry: entry, color: color)
+            ForEach(entry.attached) { block in
+                BlockView(block: block)
+                    .foregroundStyle(color)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -365,13 +439,31 @@ struct PlannerCard: View {
                 ForEach(group.items.filter { !model.isBeingRemoved($0, note: note) }) { item in
                     PlannerRow(item: item, note: note, timing: $timing, editing: $editing, reminding: $reminding)
                 }
-                ForEach(group.notes) { block in
-                    BlockView(block: block)
-                        .padding(.vertical, 5)
-                }
-                // The day's Reminders section is the desk's to write.
-                if !group.isCalendar, !group.isReminders, !model.isReadOnly {
+                // The calendar and the day's Reminders section are the
+                // desk's to write. Elsewhere a new task goes under the last
+                // one, and text a capture left among them sits below, with
+                // its own way in (V46 §4.6).
+                let writable = !group.isCalendar && !group.isReminders && !model.isReadOnly
+                if writable {
                     AddLineRow(group: group, note: note)
+                }
+                // Text needs a heading in the file to be written under.
+                let takesText = writable && planner.exists
+                ForEach(group.notes) { block in
+                    if takesText, let heading = group.heading, NoteView.isEditableText(block) {
+                        EditableBlock(block: block) { model.sheet = .section(note: note, section: .plannerGroup(heading), editing: block.line) }
+                            .padding(.vertical, 5)
+                    } else {
+                        BlockView(block: block)
+                            .padding(.vertical, 5)
+                    }
+                }
+                if takesText, let heading = group.heading {
+                    AddProseRow(title: "Add a note…", label: group.name.map { "Add a note to \($0)" } ?? "Add a note", size: 15) {
+                        model.sheet = .section(note: note, section: .plannerGroup(heading), editing: nil)
+                    }
+                    .padding(.leading, 30)
+                    .padding(.vertical, 4)
                 }
             }
         }

@@ -86,13 +86,18 @@ pub fn apply(existing: Option<&str>, write: &Write, seed: Option<&str>) -> Appli
             lines,
             placement,
             blank_line_before,
+            after,
             ..
         } => {
             let section = locate(&mut document, heading.as_ref(), &mut outcome);
-            let at = match placement {
+            let anchored = after.as_ref().and_then(|anchor| {
+                find_line(&document, &section, &anchor.line_hash, anchor.ordinal)
+                    .map(|index| block_end(&document, &section, index))
+            });
+            let at = anchored.unwrap_or(match placement {
                 Placement::End => section.body_end,
                 Placement::BeforeChildren => section.own_end,
-            };
+            });
             insert_lines(&mut document, &section, at, lines, *blank_line_before);
             Outcome::Applied
         }
@@ -687,6 +692,7 @@ mod tests {
             placement: Placement::End,
             blank_line_before: false,
             create_from_template: false,
+            after: None,
         })
     }
 
@@ -713,6 +719,7 @@ mod tests {
                 placement: Placement::BeforeChildren,
                 blank_line_before: false,
                 create_from_template: false,
+                after: None,
             }),
             None,
         );
@@ -732,6 +739,7 @@ mod tests {
                 placement: Placement::End,
                 blank_line_before: true,
                 create_from_template: false,
+                after: None,
             }),
             None,
         );
@@ -749,6 +757,7 @@ mod tests {
                 placement: Placement::End,
                 blank_line_before: true,
                 create_from_template: false,
+                after: None,
             }),
             None,
         );
@@ -796,6 +805,7 @@ mod tests {
                 placement: Placement::End,
                 blank_line_before: false,
                 create_from_template: true,
+                after: None,
             }),
             Some("# Day\n\n## Journal\n\n## Day planner\n"),
         );

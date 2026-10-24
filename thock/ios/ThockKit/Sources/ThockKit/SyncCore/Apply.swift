@@ -75,7 +75,10 @@ extension SyncCore {
         case .create:
             break
         case .append:
-            let index = write.placement == .beforeChildren ? section.ownEnd : section.bodyEnd
+            var index = write.placement == .beforeChildren ? section.ownEnd : section.bodyEnd
+            if let anchor = write.after, let line = targetLine(in: file, section: section, hash: anchor.lineHash, ordinal: anchor.ordinal) {
+                index = blockEnd(from: line, in: section, file: file)
+            }
             insert(write.lines, at: index, blankLineBefore: write.blankLineBefore, in: &file, section: section)
         case .replaceLine:
             let newLine = write.newLine ?? ""

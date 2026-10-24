@@ -506,6 +506,14 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   Design reference: https://claude.ai/artifact/XkxotTy8NuxSNtx9Xk7e6M. Spec
   `specs/v45-reminders.md`. _(shipped on `main` with the V45 PR; desk ringing on macOS waits for V35's
   bundle identity, and silent push (§10.6) is its own change on `v45-push`)_
+- [x] **Edit in place on the phone, and come back to where you were:** a tap on any block of the
+  user's own prose opens it live: a journal entry with the bullets under it, a section with a
+  level-1 heading of the user's (no longer mistaken for the agent's voice), the text above the
+  first section and the notes under a planner group. The planner's *Add a line* sits under the
+  last task, with *Add a note…* below any text an idea dropped there. Leaving the app keeps the
+  canvas, the sheet, the entry and the cursor, through Face ID and termination; only today's
+  canvas is home. A privacy cover keeps the vault out of the app switcher. Spec
+  `specs/v46-phone-edit-in-place.md`. _(shipped on `main` with the V46 PR)_
 
 ---
 

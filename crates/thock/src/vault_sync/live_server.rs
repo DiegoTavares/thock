@@ -319,6 +319,7 @@ fn queue_phone_write(
             placement: Placement::End,
             blank_line_before: false,
             create_from_template: false,
+            after: None,
         },
     };
     let envelope = thock_sync_core::seal(

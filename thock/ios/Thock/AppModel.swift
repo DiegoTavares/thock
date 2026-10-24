@@ -31,16 +31,20 @@ enum Appearance: String, CaseIterable, Identifiable {
 
 enum AppSheet: Identifiable, Equatable {
     case capture(entry: String, preset: CaptureDestination?)
-    case journal
+    /// A day's journal, with the entry at `entry` open, or a new entry when
+    /// it is `nil` (V46 §4.1).
+    case journal(day: VaultDay, entry: Int?)
     case clip
     case ask
     case receipts
     case you
     case calendar
-    /// A prose section open for a paragraph edit (V37 §6): the card's
-    /// heading line and the paragraph being edited, or `nil` for a new one.
-    case section(note: NoteID, card: Int, editing: Int?)
+    /// A run of prose open for editing (V37 §6, V46 §4.5): the line being
+    /// edited, or `nil` for a new paragraph.
+    case section(note: NoteID, section: SectionKey, editing: Int?)
 
+    // The id stays put while the sheet's own state moves, so a restore of
+    // the sheet that is already up updates it instead of presenting again.
     var id: String {
         switch self {
         case .capture(let entry, _): return "capture-\(entry)"
@@ -50,9 +54,26 @@ enum AppSheet: Identifiable, Equatable {
         case .receipts: return "receipts"
         case .you: return "you"
         case .calendar: return "calendar"
-        case .section(_, let card, _): return "section-\(card)"
+        case .section: return "section"
         }
     }
+
+    /// Whether the sheet shows what the vault holds, so it stays behind the
+    /// lock. A capture or a clip shows only what the person types.
+    var readsVault: Bool {
+        switch self {
+        case .capture, .clip: return false
+        default: return true
+        }
+    }
+}
+
+/// What the open editor needs to come back to exactly (V46 §5.3), handed
+/// over by the sheet on the way to the background.
+struct LiveEditor {
+    var line: Int?
+    var cursor: Int?
+    var draft: ResumePoint.Draft?
 }
 
 struct Toast: Equatable, Identifiable {
@@ -81,9 +102,18 @@ final class AppModel {
     var revision = 0
     var syncState: SyncState = .notConnected
     var diagnostics = SyncDiagnostics()
-    var sheet: AppSheet?
+    var sheet: AppSheet? {
+        didSet { updateCover() }
+    }
     var toast: Toast?
-    var isUnlocked = false
+    var isUnlocked = false {
+        didSet { updateCover() }
+    }
+    /// The scene is not frontmost: the app switcher, a system prompt, or on
+    /// the way to the background.
+    var isInactive = false {
+        didSet { updateCover() }
+    }
     var selectedDay: VaultDay = .today()
     var selectedWeek: VaultWeek = .current()
     /// Where the canvases' pages are centred. Only a jump moves them, never
@@ -129,6 +159,13 @@ final class AppModel {
     /// Set on launch and on every return from the background.
     private var needsGreeting = true
     private var entryAfterUnlock: EntryPoint?
+    /// Set by the open editor: commits what it holds and says where it is,
+    /// so leaving the app loses nothing (V46 §5.3).
+    @ObservationIgnored private var leaving: (() -> LiveEditor)?
+    @ObservationIgnored private var leavingOwner: UUID?
+    /// What a restored editor starts from, taken once by the sheet.
+    @ObservationIgnored private var restoredCursor: Int?
+    @ObservationIgnored private var restoredDraft: ResumePoint.Draft?
 
     init() {
         appearance = ThockEnvironment.defaults.string(forKey: "appearance").flatMap(Appearance.init(rawValue:)) ?? .dark
@@ -455,9 +492,36 @@ final class AppModel {
         Task { await engine?.start() }
         guard needsGreeting else { return }
         needsGreeting = false
-        // Every launch is today (V33 §5, H1); so is every return.
-        goToToday()
         let entry = EntryPoint.take()
+        let point = takeResumePoint()
+        // Anywhere but today's canvas comes back as it was left (V46 §5.2);
+        // a widget, a shortcut or a link asks for something else instead.
+        if entry == nil, !remindersRequested, let point, !point.isHome {
+            resume(point)
+            if point.needsUnlock || isPractice {
+                Task { await unlock() }
+            }
+            return
+        }
+        // Every launch is today (V33 §5, H1); so is every return from it.
+        goToToday()
+        if entry != .idea, case .capture(let kind, _)? = point?.sheet, let draft = point?.draft,
+           sheet?.id != AppSheet.capture(entry: kind, preset: nil).id {
+            // Something else was asked for and the capture is no longer up
+            // to come back to: it is kept the way leaving the app kept one
+            // before V46, saved where it was going.
+            saveDraftedCapture(draft, entry: kind)
+        }
+        if case .capture(let kind, _)? = point?.sheet, entry == .idea {
+            // The capture that was open when the app left is the one a
+            // capture shortcut opens again, with what it held.
+            if sheet?.id != AppSheet.capture(entry: kind, preset: nil).id {
+                restoredDraft = point?.draft
+                sheet = .capture(entry: kind, preset: nil)
+            }
+            if isPractice { Task { await unlock() } }
+            return
+        }
         if let entry, entry != .journal {
             // Writing needs no unlock: the sheet rises over the locked canvas.
             open(entry)
@@ -476,6 +540,7 @@ final class AppModel {
 
     func wentToBackground() {
         commitPendingRemoval()
+        saveResumePoint(leaving?())
         isUnlocked = false
         needsGreeting = true
         // A suspended app would hold the stream open (SyncEngine.start).
@@ -494,10 +559,201 @@ final class AppModel {
         }
         switch entry {
         case .idea: sheet = .capture(entry: "idea", preset: nil)
-        case .journal: sheet = .journal
+        case .journal: openJournal()
         case .clip: sheet = .clip
         case .ask: sheet = .ask
         }
+    }
+
+    /// Today's journal: the phone's own last entry when it was written a
+    /// few minutes ago (a thought typed in two bursts stays one thought),
+    /// otherwise a new one.
+    func openJournal() {
+        sheet = .journal(day: .today(), entry: session?.journalEntryToContinue()?.line)
+    }
+
+    // MARK: Coming back (V46 §5)
+
+    private static var resumeURL: URL {
+        ThockEnvironment.container.appendingPathComponent("resume.json")
+    }
+
+    /// The open editor registers how to leave it. The token keeps a sheet
+    /// that is going away from clearing the next one's.
+    func setLeaving(_ owner: UUID, _ leave: @escaping () -> LiveEditor) {
+        leavingOwner = owner
+        leaving = leave
+    }
+
+    func clearLeaving(_ owner: UUID) {
+        guard leavingOwner == owner else { return }
+        leaving = nil
+        leavingOwner = nil
+    }
+
+    func takeRestoredCursor() -> Int? {
+        defer { restoredCursor = nil }
+        return restoredCursor
+    }
+
+    func takeRestoredDraft() -> ResumePoint.Draft? {
+        defer { restoredDraft = nil }
+        return restoredDraft
+    }
+
+    private func saveResumePoint(_ editor: LiveEditor?) {
+        guard phase == .ready else { return }
+        let canvas: ResumePoint.Canvas
+        if showingBacklog {
+            canvas = .backlog
+        } else if showingReminders {
+            canvas = .reminders
+        } else if showingWeek {
+            canvas = .week(selectedWeek)
+        } else {
+            canvas = .day(selectedDay)
+        }
+        var point = ResumePoint(canvas: canvas, cursor: editor?.cursor, leftOn: .today())
+        switch sheet {
+        case .journal(let day, _)?:
+            let heading = session?.view(day)?.journal.heading
+            let entry = editor?.line.flatMap { line in heading.flatMap { session?.lineKey(line: line, heading: $0, note: .day(day)) } }
+            point.sheet = .journal(day: day, entry: entry)
+        case .section(let note, let key, _)?:
+            let heading = session?.view(note)?.section(key)?.heading
+            let editing = editor?.line.flatMap { line in heading.flatMap { session?.lineKey(line: line, heading: $0, note: note) } }
+            point.sheet = .section(note: note, section: key, editing: editing)
+        case .capture(let entry, let preset)?:
+            point.sheet = .capture(entry: entry, preset: preset)
+            point.draft = editor?.draft
+        case .clip?:
+            point.sheet = .clip
+            point.draft = editor?.draft
+        case .ask?: point.sheet = .ask
+        case .receipts?: point.sheet = .receipts
+        case .you?: point.sheet = .you
+        case .calendar?: point.sheet = .calendar
+        case nil: break
+        }
+        do {
+            if point.isHome {
+                try? FileManager.default.removeItem(at: Self.resumeURL)
+            } else {
+                try point.save(to: Self.resumeURL)
+            }
+        } catch {
+            NSLog("Thock could not keep where it was: \(error)")
+        }
+    }
+
+    private func saveDraftedCapture(_ draft: ResumePoint.Draft, entry: String) {
+        let blocks = Blocks.parse(draft.markdown).filter { $0.kind != .blank }
+        guard !blocks.isEmpty || !draft.images.isEmpty else { return }
+        let due = draft.due.flatMap(ReminderDue.init)
+        var destination = draft.destination ?? chip(for: entry)
+        if destination == .reminder, due == nil {
+            destination = .today
+        }
+        saveCapture(blocks: blocks, destination: destination, images: draft.images, due: due, entry: entry)
+    }
+
+    private func takeResumePoint() -> ResumePoint? {
+        let point = ResumePoint.load(from: Self.resumeURL)
+        try? FileManager.default.removeItem(at: Self.resumeURL)
+        return point
+    }
+
+    /// Puts the canvas and the sheet back as they were left. A line the desk
+    /// changed meanwhile opens as a new one in the same place: what was
+    /// typed there was already written on the way out.
+    private func resume(_ point: ResumePoint) {
+        dayPagesAnchor = .today()
+        weekPagesAnchor = .current()
+        showingWeek = false
+        showingBacklog = false
+        showingReminders = false
+        switch point.canvas {
+        case .day(let day):
+            dayPagesAnchor = day
+            selectedDay = day
+        case .week(let week):
+            weekPagesAnchor = week
+            selectedWeek = week
+            showingWeek = true
+        case .backlog:
+            showingBacklog = true
+        case .reminders:
+            showingReminders = true
+        }
+        var changed = false
+        var target: AppSheet?
+        switch point.sheet {
+        case .journal(let day, let key)?:
+            var line: Int?
+            if let key, let heading = session?.view(day)?.journal.heading {
+                line = session?.line(for: key, heading: heading, note: .day(day))
+                changed = line == nil
+            }
+            target = .journal(day: day, entry: line)
+        case .section(let note, let key, let editing)?:
+            guard let section = session?.view(note)?.section(key) else {
+                sheet = nil
+                show("That part of the note changed at the desk.")
+                return
+            }
+            var line: Int?
+            if let editing {
+                line = session?.line(for: editing, heading: section.heading, note: note)
+                if let found = line, !section.editable.contains(found) {
+                    line = nil
+                }
+                changed = line == nil
+            }
+            target = .section(note: note, section: key, editing: line)
+        case .capture(let entry, let preset)?: target = .capture(entry: entry, preset: preset)
+        case .clip?: target = .clip
+        case .ask?: target = .ask
+        case .receipts?: target = .receipts
+        case .you?: target = .you
+        case .calendar?: target = .calendar
+        case nil: target = nil
+        }
+        // A sheet still up from before the app was suspended keeps its own
+        // state; only one presented again starts from the saved one.
+        let presentsAgain = target != nil && sheet?.id != target?.id
+        switch target {
+        case .journal?, .section?:
+            restoredCursor = presentsAgain && !changed ? point.cursor : nil
+            restoredDraft = nil
+        case .capture?, .clip?:
+            restoredCursor = nil
+            restoredDraft = presentsAgain ? point.draft : nil
+        default:
+            restoredCursor = nil
+            restoredDraft = nil
+        }
+        if target != sheet {
+            sheet = target
+        }
+        #if DEBUG
+        // What the smoke script checks came back (script/smoke).
+        try? String(describing: target).write(toFile: NSTemporaryDirectory() + "resume-dump.txt", atomically: true, encoding: .utf8)
+        #endif
+        if changed {
+            show("That line changed at the desk.")
+        }
+    }
+
+    /// The privacy cover (V46 §5.4): over everything, sheets included, while
+    /// the app is not frontmost, and while a sheet that reads the vault is
+    /// up behind the lock.
+    var isCovered: Bool {
+        guard phase == .ready else { return false }
+        return isInactive || (!isUnlocked && (sheet?.readsVault ?? false))
+    }
+
+    private func updateCover() {
+        PrivacyCover.update(covered: isCovered, model: self)
     }
 
     // MARK: The calendar

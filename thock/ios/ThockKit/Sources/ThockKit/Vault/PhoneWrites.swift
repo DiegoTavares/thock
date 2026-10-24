@@ -708,8 +708,14 @@ public struct PhoneWrites: Sendable {
         guard let found = file.resolve(heading) else { return nil }
         let section = file.section(of: found)
         var body = file.lines[section.body].map(\.text)
-        let start = line - section.start
-        guard start >= 0, start + source.count <= body.count else { return nil }
+        // The lines the editor opened may have moved since (a sync landed
+        // while it was open): find them again by what they say, or write
+        // nothing rather than replace whatever sits there now. Of two copies
+        // of the same words, the one nearer where it was opened is it.
+        let current = body
+        let opened = line - section.start
+        let fits = { (start: Int) in start >= 0 && start + source.count <= current.count && Array(current[start..<(start + source.count)]) == source }
+        guard let start = current.indices.filter(fits).min(by: { abs($0 - opened) < abs($1 - opened) }) else { return nil }
         var write = document(.replaceSection, path: path)
         write.heading = heading
         write.baseHash = SyncCore.sectionHash(lines: body)
@@ -725,7 +731,7 @@ public struct PhoneWrites: Sendable {
 
     /// Appends what the editor holds at the end of a prose section, before
     /// the next heading. The note is created from its template when missing.
-    public func appendParagraph(blocks: [Block], heading: HeadingRef, note: NoteID) -> PlannedWrite? {
+    public func appendParagraph(blocks: [Block], heading: HeadingRef, placement: Placement = .end, note: NoteID) -> PlannedWrite? {
         let content = blocks.filter { $0.kind != .blank }.map { block -> Block in
             var block = block
             block.touched = true
@@ -735,6 +741,7 @@ public struct PhoneWrites: Sendable {
         guard !lines.joined().trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
         var write = document(.append, path: config.path(note))
         write.heading = heading
+        write.placement = placement
         write.lines = lines
         write.blankLineBefore = true
         write.createFromTemplate = true
@@ -810,17 +817,27 @@ public struct PhoneWrites: Sendable {
     }
 
     /// A new line at the end of the planner, or of the group it was added from.
-    public func addLine(_ text: String, group: PlannerGroup?, planner: Planner, note: NoteID) -> PlannedWrite? {
+    /// A new task in a planner group, right under the group's last task so
+    /// it stays with the list rather than below text a capture left there
+    /// (V46 §4.6). `text` is the note as it stands, for the anchor's ordinal.
+    public func addLine(_ text: String, group: PlannerGroup?, planner: Planner, note: NoteID, noteText: String? = nil) -> PlannedWrite? {
         let cleaned = text.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
         guard !cleaned.isEmpty else { return nil }
         var write = document(.append, path: config.path(note))
         write.lines = ["- [ ] " + cleaned]
+        let target: PlannerGroup?
         if let group, group.name != nil, let heading = group.heading {
             write.heading = heading
             write.placement = .end
+            target = group
         } else {
             write.heading = planner.heading
             write.placement = .beforeChildren
+            target = planner.groups.first
+        }
+        if let last = target?.items.last, let heading = write.heading {
+            let ordinal = noteText.map { self.ordinal(of: last.line, hash: last.hash, in: $0, heading: heading) } ?? last.ordinal
+            write.after = LineAnchor(lineHash: last.hash, ordinal: ordinal)
         }
         write.createFromTemplate = true
         return PlannedWrite(document: write, seed: seed(for: note))

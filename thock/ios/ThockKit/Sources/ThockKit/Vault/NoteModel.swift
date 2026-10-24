@@ -5,7 +5,8 @@ public enum CardKind: Equatable, Sendable {
     case preamble
     case journal
     case planner
-    /// A level-1 heading after the user's sections: the agent's voice.
+    /// A level-1 heading after the user's sections that Thock's agent
+    /// writes (`VaultConfig.agentHeadings`): the agent's voice.
     case agent
     case prose
 }
@@ -59,6 +60,9 @@ public struct PlannerGroup: Identifiable, Equatable, Sendable {
     /// Plain text written among the tasks, such as a capture that was not a
     /// checkbox. Drawn below the group's tasks, never ticked.
     public var notes: [Block] = []
+    /// Every block of the group's own lines, tasks included, in order: what
+    /// the section editor shows around a note being edited.
+    public var blocks: [Block] = []
     /// The day's Reminders section (V45 §7): the desk keeps it, the phone
     /// only ticks its lines.
     public var isReminders = false
@@ -85,9 +89,19 @@ public struct JournalEntry: Identifiable, Equatable, Sendable {
     public var time: String?
     /// The paragraph's inline Markdown after the time prefix.
     public var text: String
+    /// Every file line the entry spans, from the paragraph to its last
+    /// attached block, blank lines between them included.
     public var source: [String]
     /// The template's italic prompt, shown only while the journal is empty.
     public var isPrompt: Bool
+    /// The bullets and quotes directly under the paragraph, which belong to
+    /// it (V46 §4.2): a thought written as a line and a list is one entry.
+    public var attached: [Block] = []
+
+    /// Whether `line` is the paragraph or one of its attached blocks.
+    public func contains(line: Int) -> Bool {
+        line == self.line || attached.contains { $0.line == line }
+    }
 }
 
 public struct Journal: Equatable, Sendable {
@@ -135,7 +149,8 @@ public struct NoteView: Equatable, Sendable {
         let cardLevel = inside.map(\.level).min() ?? 2
         var cardHeadings = inside.filter { $0.level == cardLevel }
         // Past the title's section only another level-1 heading (the agent's
-        // voice) starts a card; its subheadings are part of it.
+        // voice, or a section of the person's own) starts a card; its
+        // subheadings are part of it.
         cardHeadings += afterTitle.filter { $0.index >= titleEnd && $0.level == 1 }
         // The planner and journal draw their own subsections (the desk's
         // `Calendar` among them), so those never become cards of their own,
@@ -153,7 +168,8 @@ public struct NoteView: Equatable, Sendable {
         if preambleStart < preambleEnd {
             let blocks = Blocks.parse(lines: Array(lines[preambleStart..<preambleEnd]), firstLine: preambleStart, alreadyInsideNote: preambleStart > 0)
             if blocks.contains(where: { $0.kind != .blank && $0.kind != .rule }) {
-                cards.append(NoteCard(id: preambleStart, kind: .preamble, title: "", heading: nil, blocks: blocks))
+                // Its lines are the title's own, so a write names the title.
+                cards.append(NoteCard(id: preambleStart, kind: .preamble, title: "", heading: titleHeading.map { Self.reference($0, in: headings) }, blocks: blocks))
             }
         }
         for (position, heading) in cardHeadings.enumerated() {
@@ -163,7 +179,7 @@ public struct NoteView: Equatable, Sendable {
                 kind = .planner
             } else if heading.index == journalHeading?.index {
                 kind = .journal
-            } else if heading.level == 1, titleHeading != nil {
+            } else if heading.level == 1, titleHeading != nil, config.isAgentHeading(heading.text) {
                 kind = .agent
             } else {
                 kind = .prose
@@ -177,17 +193,50 @@ public struct NoteView: Equatable, Sendable {
         self.journal = Self.journal(file: file, heading: journalHeading, headings: headings, config: config)
     }
 
-    /// The text the phone may replace in place (V37 §6, §8): a paragraph, a
-    /// bullet or a quote in one of the user's own prose sections. Checklist
-    /// lines have their own moves (`NoteCard.items`); a numbered item is
-    /// left alone because the editor would write it back as a bullet. The
-    /// preamble, the agent's sections and anything outside the subset stay
-    /// as the desk wrote them.
+    /// The text the phone may replace in place (V37 §6, §8; V46 §4.5): a
+    /// paragraph, a bullet or a quote in one of the user's own prose
+    /// sections, or above the first section when the note has a title to
+    /// write under. Checklist lines have their own moves (`NoteCard.items`);
+    /// a numbered item is left alone because the editor would write it back
+    /// as a bullet. The agent's sections and anything outside the subset
+    /// stay as the desk wrote them.
     public func isEditable(_ block: Block, in card: NoteCard) -> Bool {
-        guard card.kind == .prose, !Self.isPrompt(block) else { return false }
+        switch card.kind {
+        case .prose: break
+        case .preamble: guard card.heading != nil else { return false }
+        default: return false
+        }
+        return Self.isEditableText(block)
+    }
+
+    /// A paragraph, a bullet or a quote: the blocks the editor writes back
+    /// as they were.
+    public static func isEditableText(_ block: Block) -> Bool {
+        guard !isPrompt(block) else { return false }
         switch block.kind {
         case .paragraph, .bullet, .quote: return true
         default: return false
+        }
+    }
+
+    /// A run of the person's prose as the section editor opens it, or `nil`
+    /// when the note no longer has it.
+    public func section(_ key: SectionKey) -> EditableSection? {
+        switch key {
+        case .card(let reference):
+            guard let card = cards.first(where: { $0.kind == .prose && $0.heading == reference }), let heading = card.heading else { return nil }
+            return EditableSection(key: key, title: card.title, heading: heading, blocks: card.blocks,
+                                   editable: Set(card.blocks.filter { isEditable($0, in: card) }.map(\.line)), placement: .end)
+        case .preamble:
+            guard let card = cards.first(where: { $0.kind == .preamble }), let heading = card.heading else { return nil }
+            return EditableSection(key: key, title: "Top of the note", heading: heading, blocks: card.blocks,
+                                   editable: Set(card.blocks.filter { isEditable($0, in: card) }.map(\.line)), placement: .beforeChildren)
+        case .plannerGroup(let reference):
+            guard planner.exists, let group = planner.groups.first(where: { $0.heading == reference }), let heading = group.heading,
+                  !group.isCalendar, !group.isReminders
+            else { return nil }
+            return EditableSection(key: key, title: group.name ?? Inline.plainText(planner.heading.text), heading: heading, blocks: group.blocks,
+                                   editable: Set(group.notes.filter(Self.isEditableText).map(\.line)), placement: .beforeChildren)
         }
     }
 
@@ -298,7 +347,9 @@ public struct NoteView: Equatable, Sendable {
             let end = position + 1 < groups.count ? groups[position + 1].id : section.end
             guard start < end else { continue }
             let lines = file.lines[start..<end].map(\.text)
-            groups[position].notes = Blocks.parse(lines: lines, firstLine: start, alreadyInsideNote: true).filter(Self.isPlannerNote)
+            let blocks = Blocks.parse(lines: lines, firstLine: start, alreadyInsideNote: true).filter { $0.line != groups[position].id }
+            groups[position].blocks = blocks
+            groups[position].notes = blocks.filter(Self.isPlannerNote)
         }
         return Planner(heading: reference, exists: true, groups: groups)
     }
@@ -338,12 +389,44 @@ public struct NoteView: Equatable, Sendable {
         let lines = file.lines[section.own].map(\.text)
         let blocks = Blocks.parse(lines: lines, firstLine: section.start, alreadyInsideNote: true)
         var entries: [JournalEntry] = []
-        for block in blocks where block.kind == .paragraph {
+        var index = 0
+        while index < blocks.count {
+            let block = blocks[index]
+            index += 1
+            guard block.kind == .paragraph else { continue }
             let (time, text) = Self.splitTimestamp(block.text)
             let isPrompt = entries.isEmpty && time == nil && Self.isItalicOnly(block.text)
-            entries.append(JournalEntry(line: block.line, time: time, text: text, source: block.source, isPrompt: isPrompt))
+            var attached: [Block] = []
+            if !isPrompt {
+                var scan = index
+                while scan < blocks.count {
+                    if blocks[scan].kind == .blank {
+                        scan += 1
+                        continue
+                    }
+                    guard Self.attachesToEntry(blocks[scan]) else { break }
+                    attached.append(blocks[scan])
+                    scan += 1
+                    index = scan
+                }
+            }
+            let last = attached.last ?? block
+            let start = block.line - section.start
+            let end = min(last.line - section.start + max(last.source.count, 1), lines.count)
+            let source = start >= 0 && start < end ? Array(lines[start..<end]) : block.source
+            entries.append(JournalEntry(line: block.line, time: time, text: text, source: source, isPrompt: isPrompt, attached: attached))
         }
         return Journal(heading: reference(heading, in: headings), exists: true, entries: entries, blocks: blocks)
+    }
+
+    /// A bullet or a quote joins the paragraph above it. A checklist line, a
+    /// numbered item or a table ends the entry: each keeps its own way of
+    /// being changed, and none is rewritten by a paragraph edit.
+    static func attachesToEntry(_ block: Block) -> Bool {
+        switch block.kind {
+        case .bullet, .quote: return true
+        default: return false
+        }
     }
 
     /// `**21:14** · words` → (`21:14`, `words`).
@@ -363,6 +446,31 @@ public struct NoteView: Equatable, Sendable {
     static func isItalicOnly(_ text: String) -> Bool {
         let runs = Inline.parse(text.replacingOccurrences(of: "\n", with: " ")).filter { !$0.comment }
         return !runs.isEmpty && runs.allSatisfy { $0.italic || $0.text.allSatisfy(\.isWhitespace) || $0.code }
+    }
+}
+
+/// Which run of prose the section editor has open (V46 §4.5): a prose
+/// card's section, the text above the first section, or the notes of one
+/// planner group. Named by headings, so it survives lines moving.
+public enum SectionKey: Equatable, Codable, Sendable {
+    case card(HeadingRef)
+    case preamble
+    case plannerGroup(HeadingRef)
+}
+
+/// A run of the person's prose open for editing: the blocks drawn, the
+/// lines a tap may replace, and where a new paragraph lands.
+public struct EditableSection: Equatable, Sendable {
+    public var key: SectionKey
+    public var title: String
+    /// The heading every write names.
+    public var heading: HeadingRef
+    public var blocks: [Block]
+    public var editable: Set<Int>
+    public var placement: Placement
+
+    public func isEditable(_ block: Block) -> Bool {
+        editable.contains(block.line)
     }
 }
 

@@ -230,6 +230,12 @@ public struct VaultConfig: Equatable, Sendable {
     /// Review ritual's `# Week Goals` after it. Without the alias a
     /// level-1 `# Week Goals` reads as the agent's voice and cannot be ticked.
     public var goalsHeadings = ["Goals", "Week goals"]
+    /// The level-1 sections Thock's agent appends after a note's title:
+    /// Wrap Today's closure, Week Review's take, Reading Week's, the Money
+    /// ritual's pointer, and *Keep this* on the phone. Any other level-1
+    /// heading there is the person's own section and opens for editing like
+    /// one (V46 §4.4).
+    public var agentHeadings = ["Daily Closure", "AI Week Review", "Reading Week", "Money", PhoneWrites.keptHeading]
     public var inboxDir = "inbox"
     /// Where every picture a note links lives (V39 §4.1): `[images] dir`.
     public var imagesDir = "images"
@@ -242,6 +248,11 @@ public struct VaultConfig: Equatable, Sendable {
     public var reminders = ReminderSettings()
 
     public init() {}
+
+    public func isAgentHeading(_ text: String) -> Bool {
+        let key = SyncCore.headingKey(Inline.plainText(text))
+        return agentHeadings.contains { SyncCore.headingKey($0) == key }
+    }
 
     public init(config: String?, inboxConfig: String? = nil, remindersConfig: String? = nil) {
         self.init()
@@ -374,7 +385,7 @@ public struct VaultConfig: Equatable, Sendable {
 }
 
 /// A note the canvas can show and the phone can write to: a day or a week.
-public enum NoteID: Hashable, Sendable {
+public enum NoteID: Hashable, Sendable, Codable {
     case day(VaultDay)
     case week(VaultWeek)
 
@@ -393,7 +404,7 @@ public enum NoteID: Hashable, Sendable {
 
 /// An ISO week, the unit the vault names weekly notes by (`2026-W41` runs
 /// Monday 5 to Sunday 11 October).
-public struct VaultWeek: Hashable, Comparable, Sendable {
+public struct VaultWeek: Hashable, Comparable, Sendable, Codable {
     public var year: Int
     public var week: Int
 

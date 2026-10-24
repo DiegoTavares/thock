@@ -10,7 +10,9 @@
 #   3. a Reminder capture and Remind me… on a backlog task land in
 #      `reminders.md` and the backlog with a token and an id, and Done ticks
 #      the reminder;
-#   4. text typed into the capture editor is saved as the expected Markdown.
+#   4. text typed into the capture editor is saved as the expected Markdown;
+#   5. a journal entry typed, then left for another app, is written on the
+#      way out and open again, on that entry, when the app comes back.
 #
 # Exits non-zero on the first failure.
 #
@@ -123,6 +125,14 @@ dump_exists() {
     [[ -s "$(xcrun simctl get_app_container "$udid" "$bundle" data)/tmp/editor-dump.md" ]]
 }
 
+resume_kept() {
+    grep -q '"journal"' "$(shared_container)/resume.json"
+}
+
+resume_restored() {
+    grep -q 'journal(day: .*entry: Optional(' "$(xcrun simctl get_app_container "$udid" "$bundle" data)/tmp/resume-dump.txt"
+}
+
 IFS=$'\t' read -r udid name < <(pick_simulator) || fail "could not pick a simulator"
 step "simulator $name ($udid)"
 xcrun simctl boot "$udid" 2>/dev/null || true
@@ -215,6 +225,19 @@ wait_for "the editor's Markdown in tmp/editor-dump.md" dump_exists
 dump="$(cat "$(xcrun simctl get_app_container "$udid" "$bundle" data)/tmp/editor-dump.md")"
 expected=$'Plain **bold** end\n\n- [ ] a task'
 [[ "$dump" == "$expected" ]] || fail "the editor wrote:"$'\n'"$dump"$'\n'"expected:"$'\n'"$expected"
+
+step "coming back: the journal where it was left"
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+rm -f "$(xcrun simctl get_app_container "$udid" "$bundle" data)/tmp/editor-dump.md"
+xcrun simctl launch "$udid" "$bundle" -thock-open journal -thock-type "$token resumed" >/dev/null
+wait_for "the journal editor typed into" dump_exists
+# Another app in front sends Thock to the background, as the home gesture does.
+xcrun simctl launch "$udid" com.apple.Preferences >/dev/null
+wait_for "the entry written on the way out" store_has "$token resumed"
+wait_for "where the app was left" resume_kept
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+xcrun simctl launch "$udid" "$bundle" >/dev/null
+wait_for "the journal open again on that entry" resume_restored
 
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 step "passed"
