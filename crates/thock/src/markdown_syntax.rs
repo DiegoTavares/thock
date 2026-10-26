@@ -130,6 +130,13 @@ pub fn inline_strikethroughs(line: &str) -> Vec<InlineStrikethrough> {
     each_strikethrough(line, 0, &strikethrough_exclusions(line))
 }
 
+/// The `*emphasis*` runs on a single line, each followed by the runs nested
+/// inside it, with byte ranges into that line. Honours the same exclusions as
+/// `inline_strikethroughs`.
+pub fn inline_emphases(line: &str) -> Vec<InlineEmphasis> {
+    each_emphasis(line, 0, &strikethrough_exclusions(line), 0)
+}
+
 /// A `[[wikilink]]` located under a cursor: the full construct's byte range
 /// and the target note's byte range (the part before the `|` of an alias).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,17 +502,18 @@ fn blockquote_range(line: &str) -> Option<Range<usize>> {
 
 /// A `` `code` `` span parsed from a single line, both ranges
 /// line-relative.
-struct InlineCode {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineCode {
     /// The full construct, backtick delimiters included.
-    range: Range<usize>,
+    pub range: Range<usize>,
     /// The code between the delimiters.
-    text: Range<usize>,
+    pub text: Range<usize>,
 }
 
 /// The inline code spans of `line`, delimiters included. Backtick runs pair
 /// with the next run of the same length; an unmatched run is literal text and
 /// scanning continues past it.
-fn code_spans(line: &str) -> Vec<InlineCode> {
+pub fn code_spans(line: &str) -> Vec<InlineCode> {
     let bytes = line.as_bytes();
     let mut runs = Vec::new();
     let mut cursor = 0;
@@ -810,21 +818,31 @@ fn parse_strikethrough(line: &str, open: usize) -> Option<InlineStrikethrough> {
 
 /// A `*emphasised*` run parsed from a single line, all ranges line-relative.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct InlineEmphasis {
+pub struct InlineEmphasis {
     /// The full construct, delimiters included.
-    range: Range<usize>,
+    pub range: Range<usize>,
     /// The emphasised text between the delimiters.
-    text: Range<usize>,
+    pub text: Range<usize>,
     /// How long the delimiter runs are: one is italic, two bold, three both.
     length: usize,
 }
 
 impl InlineEmphasis {
+    /// Whether the run is `**bold**` or `***both***`.
+    pub fn is_bold(&self) -> bool {
+        self.length >= 2
+    }
+
+    /// Whether the run is `*italic*` or `***both***`.
+    pub fn is_italic(&self) -> bool {
+        self.length != 2
+    }
+
     /// The style kinds the run's text takes. A `***both***` run yields two,
     /// which land in separate highlight slots and merge on screen.
     fn kinds(&self) -> impl Iterator<Item = SpanKind> {
-        let bold = (self.length >= 2).then_some(SpanKind::Bold);
-        let italic = (self.length != 2).then_some(SpanKind::Italic);
+        let bold = self.is_bold().then_some(SpanKind::Bold);
+        let italic = self.is_italic().then_some(SpanKind::Italic);
         bold.into_iter().chain(italic)
     }
 }
