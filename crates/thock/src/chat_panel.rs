@@ -27,9 +27,9 @@ use editor::{
 };
 use gpui::{
     Action, AnyWindowHandle, App, Bounds, Context, Entity, EntityId, FocusHandle, Focusable,
-    FontFeatures, FontWeight, HighlightStyle, KeyContext, Pixels, PromptLevel, ScrollHandle,
-    SharedString, Subscription, Task, TextStyleRefinement, UnderlineStyle, WeakEntity, Window,
-    actions, div, point, px, relative, size,
+    FontFeatures, FontWeight, HighlightStyle, KeyContext, Pixels, ScrollHandle, SharedString,
+    Subscription, Task, TextStyleRefinement, UnderlineStyle, WeakEntity, Window, actions, div,
+    point, px, relative, size,
 };
 use language::language_settings::SoftWrap;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
@@ -47,7 +47,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use text::{Bias, Point};
 use ui::prelude::*;
-use ui::{KeyBinding, Label, ProgressBar, SpinnerLabel, Tooltip};
+use ui::{IconButton, KeyBinding, Label, ProgressBar, SpinnerLabel, Tooltip};
 use util::ResultExt as _;
 use workspace::{OpenOptions, OpenVisible, Workspace, WorkspaceSettings};
 
@@ -516,7 +516,10 @@ struct ChatSession {
     thread: Entity<AcpThread>,
     /// Kept alive for the session: dropping the last handle ends the agent
     /// process.
-    _connection: Rc<dyn AgentConnection>,
+    connection: Rc<dyn AgentConnection>,
+    /// The model tier the process was launched with; a new chat reuses the
+    /// process only when it runs the conversation tier.
+    tier: ModelTier,
     turns: u32,
     max_turns: u32,
     /// V26 §5.5: per-call failures are invisible, but a turn that could not
@@ -1277,6 +1280,8 @@ pub struct ChatPanel {
     suppressed: Option<u64>,
     /// Folds a reply's bubble into the dot once it has lingered (§5.2).
     reply_linger: Option<Task<()>>,
+    /// Whether the window is in front; a reply lingers only while it is.
+    window_active: bool,
     /// The Needs-you bubble's height from its last paint, to place it.
     bubble_height: Pixels,
     /// The bubble couldn't clear the caret's line and took the thread's
@@ -1399,14 +1404,25 @@ impl ChatPanel {
                 editor
             });
             let focus_handle = cx.focus_handle();
-            // Focus leaving for a note folds the thread (§5.2). Nothing is
-            // given back then: the note has the focus already.
+            // Focus leaving for a note folds a bubble into the dot (§5.2). The
+            // thread stays open so you can write beside it; only the summon
+            // key, the pebble or `escape` fold it.
             let focus_out =
                 cx.on_focus_out(&focus_handle, window, |this: &mut Self, _, window, cx| {
-                    if !this.focus_handle.contains_focused(window, cx) {
+                    if this.bubble_up && !this.focus_handle.contains_focused(window, cx) {
                         this.fold_quietly(cx);
                     }
                 });
+            // A reply that lands while you're in another app waits for you to
+            // come back before its seconds start (§5.2).
+            let activation = cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+                this.window_active = window.is_window_active();
+                if this.window_active {
+                    this.linger_reply(cx);
+                } else {
+                    this.reply_linger = None;
+                }
+            });
             let mut this = Self {
                 workspace: weak_workspace,
                 window_handle: window.window_handle(),
@@ -1423,6 +1439,7 @@ impl ChatPanel {
                 waiting_generation: 0,
                 suppressed: None,
                 reply_linger: None,
+                window_active: window.is_window_active(),
                 bubble_height: px(160.),
                 bubble_needs_room: false,
                 collapsed_desk: false,
@@ -1458,7 +1475,12 @@ impl ChatPanel {
                 opener: None,
                 opener_pause: None,
                 opener_linger: None,
-                _subscriptions: vec![project_subscription, workspace_subscription, focus_out],
+                _subscriptions: vec![
+                    project_subscription,
+                    workspace_subscription,
+                    focus_out,
+                    activation,
+                ],
             };
             this.refresh_vault_status(cx);
             this.load_connection(cx);
@@ -1505,10 +1527,10 @@ impl ChatPanel {
     }
 
     /// You typed in the note (§5.2): a bubble that was up folds into the dot
-    /// and stays folded, the thread folds, and whatever waits floats up only
-    /// after two seconds without another edit.
+    /// and stays folded, and whatever waits floats up only after two seconds
+    /// without another edit. An open thread stays open beside the note.
     fn note_edited(&mut self, cx: &mut Context<Self>) {
-        if self.thread_open || self.bubble_up {
+        if self.bubble_up {
             self.fold_quietly(cx);
         }
         self.typing = Some(cx.spawn(async move |this, cx| {
@@ -1535,19 +1557,26 @@ impl ChatPanel {
             return;
         }
         self.bubble_up = true;
-        if self.waiting == Some(Waiting::Reply) {
-            self.reply_linger = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(REPLY_LINGER).await;
-                this.update(cx, |this, cx| {
-                    if this.waiting == Some(Waiting::Reply) && this.bubble_up {
-                        this.bubble_up = false;
-                        cx.notify();
-                    }
-                })
-                .ok();
-            }));
-        }
+        self.linger_reply(cx);
         cx.notify();
+    }
+
+    /// Starts a floating reply's eight seconds, counted only while the
+    /// window is in front so the reply is never folded before you saw it.
+    fn linger_reply(&mut self, cx: &mut Context<Self>) {
+        if self.waiting != Some(Waiting::Reply) || !self.bubble_up || !self.window_active {
+            return;
+        }
+        self.reply_linger = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REPLY_LINGER).await;
+            this.update(cx, |this, cx| {
+                if this.waiting == Some(Waiting::Reply) && this.bubble_up {
+                    this.bubble_up = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
     }
 
     /// The caret's line in the active note, in window coordinates, for a
@@ -1881,6 +1910,16 @@ impl ChatPanel {
                     self.open_thread(window, cx);
                 }
             }
+        }
+    }
+
+    /// Clicking the pebble folds an open thread even while you write in the
+    /// note beside it; otherwise it acts like `cmd-?`.
+    fn pebble_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread_open {
+            self.fold(window, cx);
+        } else {
+            self.toggle_focus(window, cx);
         }
     }
 
@@ -2619,7 +2658,8 @@ impl ChatPanel {
         self.session = Some(ChatSession {
             title: request.title.clone().into(),
             thread,
-            _connection: connection,
+            connection,
+            tier: request.tier,
             turns: 0,
             max_turns,
             turn_failure: None,
@@ -2984,35 +3024,77 @@ impl ChatPanel {
         }
     }
 
-    /// Asks before setting aside a conversation that has something in it.
+    /// Clears the conversation without folding the thread or ending the
+    /// agent: the running process starts a fresh session, so nothing said
+    /// before carries over.
     fn new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
-        let has_transcript = self
+        self.open_thread(window, cx);
+        let request = LaunchRequest::conversation();
+        let has_allowance = self
+            .entitlement()
+            .is_some_and(|entitlement| !entitlement.is_exhausted());
+        let connection = self
             .session
             .as_ref()
-            .is_some_and(|session| !session.thread.read(cx).entries().is_empty());
-        if !has_transcript {
-            self.start_new_chat(window, cx);
-            return;
+            .filter(|session| session.tier == request.tier && has_allowance)
+            .map(|session| session.connection.clone());
+        match connection {
+            Some(connection) => self.restart_session(request, connection, window, cx),
+            None => self.launch(request, window, cx),
         }
-        let answer = window.prompt(
-            PromptLevel::Info,
-            "Start a new chat?",
-            Some("This conversation closes and Thock starts fresh."),
-            &["Start New Chat", "Cancel"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await? == 0 {
-                this.update_in(cx, |this, window, cx| this.start_new_chat(window, cx))?;
-            }
-            anyhow::Ok(())
-        })
-        .detach_and_log_err(cx);
     }
 
-    fn start_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_thread(window, cx);
-        self.launch(LaunchRequest::conversation(), window, cx);
+    fn restart_session(
+        &mut self,
+        request: LaunchRequest,
+        connection: Rc<dyn AgentConnection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(previous) = self.session.take() {
+            let session_id = previous.thread.read(cx).session_id().clone();
+            previous
+                .thread
+                .update(cx, |thread, cx| thread.cancel(cx))
+                .detach();
+            if connection.supports_close_session() {
+                connection
+                    .clone()
+                    .close_session(&session_id, cx)
+                    .detach_and_log_err(cx);
+            }
+        }
+        self.reset_transcript_state();
+        crate::history::checkpoint_before_ai_write(&self.project, cx);
+        self.note_session_for_memory_nudge(cx);
+        self.starting = Some("Starting a new chat…".into());
+        self.view = PanelView::Chat;
+        cx.notify();
+
+        let max_turns = self
+            .entitlement()
+            .map(|entitlement| entitlement.limits.max_turns_per_session)
+            .unwrap_or(0);
+        let work_dirs = self.project.read(cx).default_path_list(cx);
+        let new_session = connection
+            .clone()
+            .new_session(self.project.clone(), work_dirs, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let started = new_session.await;
+            this.update_in(cx, |this, window, cx| {
+                this.starting = None;
+                match started {
+                    Ok(thread) => {
+                        this.attach_session(request, connection, thread, max_turns, window, cx)
+                    }
+                    Err(error) => {
+                        this.show_error(format!("Couldn't start a new chat: {error:#}"), cx)
+                    }
+                }
+                cx.notify();
+            })
+        })
+        .detach_and_log_err(cx);
     }
 
     fn focus_input(&mut self, _: &FocusChatInput, window: &mut Window, cx: &mut Context<Self>) {
@@ -5296,6 +5378,16 @@ impl ChatPanel {
                     gpui::linear_color_stop(page.opacity(0.), 1.),
                 ),
             ))
+            .child(
+                div().absolute().top_2().right_1().child(
+                    IconButton::new("thock-chat-new", IconName::Plus)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::for_action_title("New Chat", &NewChat))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.new_chat(&NewChat, window, cx)),
+                        ),
+                ),
+            )
             .into_any_element()
     }
 
@@ -5541,7 +5633,7 @@ impl ChatPanel {
                         .bg(accent),
                 )
             })
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_focus(window, cx)))
+            .on_click(cx.listener(|this, _, window, cx| this.pebble_clicked(window, cx)))
             .into_any_element()
     }
 
@@ -7178,55 +7270,105 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_new_chat_key_asks_before_closing_a_conversation(cx: &mut TestAppContext) {
+    async fn the_new_chat_key_clears_the_conversation_on_the_running_agent(
+        cx: &mut TestAppContext,
+    ) {
         let mut setup = setup(cx).await;
+        connect(&mut setup);
         let connection = Rc::new(StubAgentConnection::new());
-        start_wrap_today(&mut setup, connection, None, vec![says("Seven of eleven.")]).await;
+        let first_session = start_wrap_today(
+            &mut setup,
+            connection.clone(),
+            None,
+            vec![says("Seven of eleven.")],
+        )
+        .await;
         setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
             panel.open_thread(window, cx);
             window.focus(&panel.message_editor.focus_handle(cx), cx);
         });
         setup.cx.run_until_parked();
-        let composer = setup
-            .panel
-            .read_with(&setup.cx, |panel, _| panel.message_editor.clone());
-        assert!(is_focused(&mut setup, &composer));
-
-        setup.cx.simulate_keystrokes("ctrl-n");
-        setup.cx.run_until_parked();
-        assert!(setup.cx.has_pending_prompt(), "it asks first");
-        setup.cx.simulate_prompt_answer("Cancel");
-        setup.cx.run_until_parked();
-        let pending_launch = |setup: &Setup| {
-            setup
-                .panel
-                .read_with(&setup.cx, |panel, _| panel.pending_launch.is_some())
-        };
-        assert!(!pending_launch(&setup), "cancel keeps the conversation");
         assert_eq!(visible(&setup), "You started Wrap Today\nSeven of eleven.");
 
         setup.cx.simulate_keystrokes("ctrl-n");
         setup.cx.run_until_parked();
-        setup.cx.simulate_prompt_answer("Start New Chat");
-        setup.cx.run_until_parked();
-        assert!(
-            pending_launch(&setup),
-            "a new chat launches, waiting on the connection"
-        );
+        assert!(!setup.cx.has_pending_prompt(), "it doesn't ask");
+        assert_eq!(presence(&setup), Presence::Talking, "the thread stays open");
+        assert_eq!(visible(&setup), "");
+        setup.panel.read_with(&setup.cx, |panel, cx| {
+            let session = panel.session.as_ref().expect("a fresh session");
+            assert_ne!(session.thread.read(cx).session_id(), &first_session);
+            assert!(
+                Rc::ptr_eq(
+                    &(session.connection.clone().into_any()),
+                    &(connection.clone().into_any())
+                ),
+                "the same agent process carries the new chat"
+            );
+            assert!(panel.pending_launch.is_none());
+        });
     }
 
     #[gpui::test]
-    async fn focus_leaving_for_a_note_folds_the_thread(cx: &mut TestAppContext) {
+    async fn the_thread_stays_open_while_you_write_in_the_note(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
         connect(&mut setup);
         let editor = open_note(&mut setup).await;
         setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
+
         setup.cx.focus(&editor);
         setup.cx.run_until_parked();
+        assert_eq!(
+            presence(&setup),
+            Presence::Talking,
+            "focus leaving keeps it"
+        );
+        assert_eq!(inset(&setup), Some(px(INSET)));
+        setup.cx.simulate_keystrokes("a b c");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking, "typing keeps it");
+
+        // From the note the summon key goes back to the thread, and a second
+        // press folds it.
+        setup.cx.simulate_keystrokes("ctrl-?");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
+        assert!(!is_focused(&mut setup, &editor));
+        setup.cx.simulate_keystrokes("ctrl-?");
+        setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Resting);
+        assert!(
+            is_focused(&mut setup, &editor),
+            "focus goes back to the note"
+        );
         assert_eq!(inset(&setup), None);
+    }
+
+    #[gpui::test]
+    async fn clicking_the_pebble_folds_the_thread_from_the_note(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        connect(&mut setup);
+        let editor = open_note(&mut setup).await;
+        setup.cx.simulate_keystrokes("ctrl-?");
+        setup.cx.run_until_parked();
+        setup.cx.focus(&editor);
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
+
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            panel.pebble_clicked(window, cx)
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Resting);
+        assert!(is_focused(&mut setup, &editor), "the note keeps the focus");
+
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            panel.pebble_clicked(window, cx)
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking, "and it opens again");
     }
 
     #[gpui::test]
@@ -7362,6 +7504,34 @@ mod tests {
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
         assert_eq!(waiting(&setup), None);
+    }
+
+    #[gpui::test]
+    async fn a_reply_from_while_you_were_away_lingers_once_you_are_back(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        setup.cx.deactivate_window();
+        let connection = Rc::new(StubAgentConnection::new());
+        start_wrap_today(&mut setup, connection, None, vec![says("Done.")]).await;
+        assert_eq!(presence(&setup), Presence::NeedsYou);
+        advance(&mut setup, Duration::from_secs(20));
+        assert!(bubble_up(&setup), "away, the reply waits for you");
+
+        setup.cx.update(|window, _| window.activate_window());
+        setup.cx.run_until_parked();
+        advance(&mut setup, Duration::from_secs(5));
+        assert!(bubble_up(&setup), "back, it shows for a few seconds");
+
+        // Leaving mid-linger starts the seconds over on return.
+        setup.cx.deactivate_window();
+        advance(&mut setup, Duration::from_secs(10));
+        assert!(bubble_up(&setup), "the seconds stop while away");
+        setup.cx.update(|window, _| window.activate_window());
+        setup.cx.run_until_parked();
+        advance(&mut setup, Duration::from_secs(5));
+        assert!(bubble_up(&setup));
+        advance(&mut setup, Duration::from_secs(3));
+        assert!(!bubble_up(&setup));
+        assert_eq!(waiting(&setup), Some(Waiting::Reply), "then the dot");
     }
 
     #[gpui::test]
