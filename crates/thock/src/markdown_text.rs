@@ -1,14 +1,16 @@
 //! Inline Markdown for panel rows. A vault's task lines are Markdown, so
-//! `[name](url)` and `[[wikilinks]]` should read as links in a pane, and
-//! `~~text~~` as struck through, instead of as syntax — but the file keeps the
-//! raw text, and so does the inline editor.
+//! `[name](url)` and `[[wikilinks]]` should read as links in a pane,
+//! `**bold**`, `*italic*`, `~~struck~~` and `` `code` `` as styled text,
+//! instead of as syntax — but the file keeps the raw text, and so does the
+//! inline editor.
 //! Parsing delegates to `markdown_syntax`, so a pane and the Markdown editor
-//! agree on what a link is; the colours below are the same ones the editor
-//! paints (spec V10 §7.1), minus the underline a dense row can't afford.
+//! agree on what each construct is; the colours below are the same ones the
+//! editor paints (spec V10 §7.1), minus the underline a dense row can't afford.
 
 use gpui::{
-    AnyElement, App, ElementId, Entity, HighlightStyle, Hsla, InteractiveText, IntoElement as _,
-    SharedString, StrikethroughStyle, StyledText, TaskExt as _, WeakEntity, px,
+    AnyElement, App, ElementId, Entity, FontStyle, FontWeight, HighlightStyle, Hsla,
+    InteractiveText, IntoElement as _, SharedString, StrikethroughStyle, StyledText, TaskExt as _,
+    WeakEntity, px,
 };
 use project::{Project, ProjectPath};
 use ui::ActiveTheme as _;
@@ -18,15 +20,27 @@ use workspace::Workspace;
 use crate::markdown_conceal::resolve_wikilink_target;
 use crate::markdown_syntax;
 
-/// A run of a line as it should display: literal or linked text, struck
-/// through or not.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A run of a line as it should display: literal or linked text, and the
+/// inline styles it sits inside.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InlineSpan {
     pub text: String,
     /// Where the run points, when it is a link label.
     pub target: Option<LinkTarget>,
     /// Whether the run sits inside a `~~strikethrough~~`.
     pub struck: bool,
+    /// Whether the run sits inside `**bold**` emphasis.
+    pub bold: bool,
+    /// Whether the run sits inside `*italic*` emphasis.
+    pub italic: bool,
+    /// Whether the run is the text of a `` `code` `` span.
+    pub code: bool,
+}
+
+impl InlineSpan {
+    fn is_plain(&self) -> bool {
+        self.target.is_none() && !self.struck && !self.bold && !self.italic && !self.code
+    }
 }
 
 /// Where an inline link points.
@@ -39,15 +53,24 @@ pub enum LinkTarget {
     Note(String),
 }
 
-/// A construct that displays as something other than its source: a link,
-/// shown as its label, or a `~~` delimiter, shown as nothing.
+/// A construct that displays as something other than its source: a link or
+/// code span, shown as its text, or a style delimiter, shown as nothing.
 enum Atom {
     Link {
         label: std::ops::Range<usize>,
         target: LinkTarget,
     },
+    Code(std::ops::Range<usize>),
     StrikeOpen,
     StrikeClose,
+    EmphasisOpen {
+        bold: bool,
+        italic: bool,
+    },
+    EmphasisClose {
+        bold: bool,
+        italic: bool,
+    },
 }
 
 /// Splits `text` into the runs a row displays. Anything that isn't a
@@ -68,41 +91,68 @@ pub fn parse_inline_spans(text: &str) -> Vec<InlineSpan> {
             },
         ));
     }
+    for code in markdown_syntax::code_spans(text) {
+        atoms.push((code.range, Atom::Code(code.text)));
+    }
     for run in markdown_syntax::inline_strikethroughs(text) {
         atoms.push((run.range.start..run.text.start, Atom::StrikeOpen));
         atoms.push((run.text.end..run.range.end, Atom::StrikeClose));
     }
-    // Links and delimiters never overlap, so start order is a total order.
+    for run in markdown_syntax::inline_emphases(text) {
+        let (bold, italic) = (run.is_bold(), run.is_italic());
+        atoms.push((
+            run.range.start..run.text.start,
+            Atom::EmphasisOpen { bold, italic },
+        ));
+        atoms.push((
+            run.text.end..run.range.end,
+            Atom::EmphasisClose { bold, italic },
+        ));
+    }
+    // Links, code spans and delimiters never overlap, so start order is a
+    // total order.
     atoms.sort_by_key(|(range, _)| range.start);
 
     let mut spans = Vec::new();
     let mut literal_start = 0;
-    let mut struck = false;
+    let mut style = InlineSpan::default();
+    // Emphasis nests, so each style is a depth rather than a flag.
+    let mut bold_depth = 0usize;
+    let mut italic_depth = 0usize;
+    let span = |text: &str, style: &InlineSpan| InlineSpan {
+        text: text.to_string(),
+        ..style.clone()
+    };
     for (range, atom) in atoms {
         if literal_start < range.start {
-            spans.push(InlineSpan {
-                text: text[literal_start..range.start].to_string(),
-                target: None,
-                struck,
-            });
+            spans.push(span(&text[literal_start..range.start], &style));
         }
         match atom {
             Atom::Link { label, target } => spans.push(InlineSpan {
-                text: text[label].to_string(),
                 target: Some(target),
-                struck,
+                ..span(&text[label], &style)
             }),
-            Atom::StrikeOpen => struck = true,
-            Atom::StrikeClose => struck = false,
+            Atom::Code(code) => spans.push(InlineSpan {
+                code: true,
+                ..span(&text[code], &style)
+            }),
+            Atom::StrikeOpen => style.struck = true,
+            Atom::StrikeClose => style.struck = false,
+            Atom::EmphasisOpen { bold, italic } => {
+                bold_depth += usize::from(bold);
+                italic_depth += usize::from(italic);
+            }
+            Atom::EmphasisClose { bold, italic } => {
+                bold_depth -= usize::from(bold);
+                italic_depth -= usize::from(italic);
+            }
         }
+        style.bold = bold_depth > 0;
+        style.italic = italic_depth > 0;
         literal_start = range.end;
     }
     if literal_start < text.len() {
-        spans.push(InlineSpan {
-            text: text[literal_start..].to_string(),
-            target: None,
-            struck,
-        });
+        spans.push(span(&text[literal_start..], &style));
     }
     spans
 }
@@ -146,9 +196,20 @@ pub fn external_link_color(cx: &App) -> Hsla {
         .unwrap_or_else(|| cx.theme().colors().text_accent)
 }
 
+/// The colour a `` `code` `` span takes in the Markdown editor: the name the
+/// Markdown grammar gives it, so a vault note and a fenced block in the same
+/// theme agree on what code looks like.
+pub fn code_color(cx: &App) -> Hsla {
+    cx.theme()
+        .syntax()
+        .style_for_name("text.literal")
+        .and_then(|style| style.color)
+        .unwrap_or(cx.theme().colors().text_muted)
+}
+
 /// One row of Markdown rendered for a panel: link labels lose their syntax,
-/// take the editor's link colours, and open on click, and `~~struck~~` text
-/// loses its delimiters and takes the line. Returns the text element only —
+/// take the editor's link colours, and open on click, and bold, italic,
+/// struck and code text lose their delimiters and take their style. Returns the text element only —
 /// the caller wraps it in the `Label`/`LabelLike` that carries the row's
 /// size, colour and truncation.
 pub fn render_markdown_row(
@@ -164,10 +225,7 @@ pub fn render_markdown_row(
     let text = thock_sync_core::strip_reminder(text);
     let text = text.as_str();
     let spans = parse_inline_spans(text);
-    if spans
-        .iter()
-        .all(|span| span.target.is_none() && !span.struck)
-    {
+    if spans.iter().all(InlineSpan::is_plain) {
         return SharedString::from(text.to_string()).into_any_element();
     }
     let mut display = String::new();
@@ -178,15 +236,18 @@ pub fn render_markdown_row(
         let start = display.len();
         display.push_str(&span.text);
         let range = start..display.len();
-        let color = span.target.as_ref().map(|target| match target {
-            LinkTarget::Url(_) => external_link_color(cx),
-            LinkTarget::Note(_) => wikilink_color(cx),
-        });
-        if color.is_some() || span.struck {
+        let color = match &span.target {
+            Some(LinkTarget::Url(_)) => Some(external_link_color(cx)),
+            Some(LinkTarget::Note(_)) => Some(wikilink_color(cx)),
+            None => span.code.then(|| code_color(cx)),
+        };
+        if !span.is_plain() {
             highlights.push((
                 range.clone(),
                 HighlightStyle {
                     color,
+                    font_weight: span.bold.then_some(FontWeight::BOLD),
+                    font_style: span.italic.then_some(FontStyle::Italic),
                     strikethrough: span.struck.then(|| StrikethroughStyle {
                         thickness: px(1.),
                         color: None,
@@ -270,24 +331,39 @@ mod tests {
     fn text(value: &str) -> InlineSpan {
         InlineSpan {
             text: value.to_string(),
-            target: None,
-            struck: false,
+            ..Default::default()
         }
     }
 
     fn url(value: &str, url: &str) -> InlineSpan {
         InlineSpan {
-            text: value.to_string(),
             target: Some(LinkTarget::Url(url.to_string())),
-            struck: false,
+            ..text(value)
         }
     }
 
     fn note(value: &str, target: &str) -> InlineSpan {
         InlineSpan {
-            text: value.to_string(),
             target: Some(LinkTarget::Note(target.to_string())),
-            struck: false,
+            ..text(value)
+        }
+    }
+
+    fn bold(span: InlineSpan) -> InlineSpan {
+        InlineSpan { bold: true, ..span }
+    }
+
+    fn italic(span: InlineSpan) -> InlineSpan {
+        InlineSpan {
+            italic: true,
+            ..span
+        }
+    }
+
+    fn code(value: &str) -> InlineSpan {
+        InlineSpan {
+            code: true,
+            ..text(value)
         }
     }
 
@@ -430,5 +506,63 @@ mod tests {
             parse_inline_spans("Fill https://example.com/sheet"),
             vec![text("Fill https://example.com/sheet")]
         );
+    }
+
+    #[test]
+    fn emphasis_drops_its_delimiters_and_styles_the_run() {
+        assert_eq!(
+            parse_inline_spans("Ship **today**, *maybe* ***both***"),
+            vec![
+                text("Ship "),
+                bold(text("today")),
+                text(", "),
+                italic(text("maybe")),
+                text(" "),
+                bold(italic(text("both"))),
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_emphasis_stacks() {
+        assert_eq!(
+            parse_inline_spans("**bold *and italic* here**"),
+            vec![
+                bold(text("bold ")),
+                bold(italic(text("and italic"))),
+                bold(text(" here")),
+            ]
+        );
+    }
+
+    #[test]
+    fn emphasis_carries_into_a_link() {
+        assert_eq!(
+            parse_inline_spans("**Investigate [ticket](https://a.example/1)**"),
+            vec![
+                bold(text("Investigate ")),
+                bold(url("ticket", "https://a.example/1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn code_drops_its_backticks_and_keeps_its_contents_literal() {
+        assert_eq!(
+            parse_inline_spans("Run `cargo *test*` then [[notes]]"),
+            vec![
+                text("Run "),
+                code("cargo *test*"),
+                text(" then "),
+                note("notes", "notes"),
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_emphasis_stays_literal() {
+        for line in ["snake_case_name", "2*3*4", "**unclosed", "* not emphasis *"] {
+            assert_eq!(parse_inline_spans(line), vec![text(line)], "{line}");
+        }
     }
 }

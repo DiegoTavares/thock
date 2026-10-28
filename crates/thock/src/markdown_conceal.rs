@@ -2346,14 +2346,7 @@ fn slot_color(slot: usize, cx: &App) -> Hsla {
     let colors = cx.theme().colors();
     match slot {
         QUOTE_SLOT => colors.text_muted,
-        // The name the Markdown grammar gives a code span, so a vault note
-        // and a fenced block in the same theme agree on what code looks like.
-        CODE_SLOT => cx
-            .theme()
-            .syntax()
-            .style_for_name("text.literal")
-            .and_then(|style| style.color)
-            .unwrap_or(colors.text_muted),
+        CODE_SLOT => markdown_text::code_color(cx),
         WIKILINK_SLOT => markdown_text::wikilink_color(cx),
         LINK_SLOT => markdown_text::external_link_color(cx),
         EMAIL_SENDER_SLOT => sender_color(false, cx),

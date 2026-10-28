@@ -10,6 +10,7 @@ use crate::backlog_panel::{
 use crate::backlog_panel::{BacklogFolds, BacklogPanel, BacklogView, ToggleBacklogFocus};
 use crate::day_plan::{DayPlan, ItemTiming, ItemWeight, PlanItem};
 use crate::day_planner_panel::{DayPlannerPanel, ToggleDayPlannerFocus};
+use crate::markdown_text::render_markdown_row;
 use crate::notes::NoteKind;
 use crate::reminder_service::ReminderEvent;
 use crate::reminders_panel::{
@@ -255,6 +256,7 @@ struct TodayPlan {
 
 pub struct DeskPanel {
     project: Entity<Project>,
+    workspace: WeakEntity<Workspace>,
     backlog: Entity<BacklogPanel>,
     planner: Entity<DayPlannerPanel>,
     reminders: Entity<RemindersPanel>,
@@ -295,6 +297,7 @@ impl DeskPanel {
         let planner = DayPlannerPanel::new(workspace, window, cx);
         let reminders = RemindersPanel::new(workspace, window, cx);
         let project = workspace.project().clone();
+        let weak_workspace = workspace.weak_handle();
         cx.new(|cx| {
             let mut subscriptions = Vec::new();
             subscriptions.push(cx.subscribe(
@@ -344,6 +347,7 @@ impl DeskPanel {
             });
             let mut this = Self {
                 project,
+                workspace: weak_workspace,
                 backlog,
                 planner,
                 reminders,
@@ -670,7 +674,13 @@ impl DeskPanel {
                 div()
                     .text_size(rems(0.875))
                     .text_color(colors.text)
-                    .child(SharedString::from(card.line.clone())),
+                    .child(render_markdown_row(
+                        "thock-desk-next-card-line".into(),
+                        &card.line,
+                        &self.project,
+                        &self.workspace,
+                        cx,
+                    )),
             )
             .on_click(cx.listener(|this, _, window, cx| this.reveal_card(window, cx)))
             .into_any_element()
