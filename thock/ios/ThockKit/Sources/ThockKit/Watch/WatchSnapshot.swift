@@ -187,27 +187,27 @@ public struct WatchTimelineEntry: Hashable, Sendable {
     /// "now" is drawn. Not `date` less midnight, which is an hour off on a
     /// day the clocks change.
     public var minute: Int
-    /// Minutes after midnight where the five-hour track starts.
+    /// Minutes after midnight where the four-hour track starts.
     public var windowStart: Int
-    /// The next timed row: the header's *14:00 Dentist*.
+    /// The next timed row: the first line's *14:00 Dentist*.
     public var next: WatchRow?
-    /// Open tasks and reminders, timed or not: *3 left*.
+    /// The timed row after `next`: the second line.
+    public var following: WatchRow?
+    /// Open tasks and reminders, timed or not: the inline *3 left*.
     public var left: Int
-    /// Open tasks and reminders with no time: *2 anytime*.
-    public var anytime: Int
 
-    public init(date: Date, minute: Int, windowStart: Int, next: WatchRow?, left: Int, anytime: Int) {
+    public init(date: Date, minute: Int, windowStart: Int, next: WatchRow?, following: WatchRow? = nil, left: Int) {
         self.date = date
         self.minute = minute
         self.windowStart = windowStart
         self.next = next
+        self.following = following
         self.left = left
-        self.anytime = anytime
     }
 }
 
 public enum TimelineEntries {
-    public static let windowMinutes = 5 * 60
+    public static let windowMinutes = 4 * 60
     public static let step = 15
 
     /// One entry now and one on every quarter hour after it to midnight, so
@@ -216,11 +216,10 @@ public enum TimelineEntries {
     /// repeat has its first.
     public static func entries(rows: [WatchRow], today: VaultDay, now: Date, calendar: Calendar = .current) -> [WatchTimelineEntry] {
         guard let midnight = calendar.date(from: DateComponents(year: today.year, month: today.month, day: today.day)) else { return [] }
-        let open = rows.filter { !$0.done && $0.kind != .calendar }
-        let left = open.count
-        let anytime = open.filter { $0.start == nil }.count
+        let left = rows.filter { !$0.done && $0.kind != .calendar }.count
         func entry(_ date: Date, _ minute: Int) -> WatchTimelineEntry {
-            WatchTimelineEntry(date: date, minute: minute, windowStart: minute / 30 * 30, next: next(rows, at: minute), left: left, anytime: anytime)
+            let ahead = upcoming(rows, at: minute)
+            return WatchTimelineEntry(date: date, minute: minute, windowStart: minute / 30 * 30, next: ahead.first, following: ahead.dropFirst().first, left: left)
         }
         var minute = 0
         if now > midnight, VaultDay(now, calendar: calendar) == today {
@@ -244,11 +243,19 @@ public enum TimelineEntries {
     /// calendar event already started. A task or reminder stays next until
     /// it ends.
     public static func next(_ rows: [WatchRow], at minute: Int) -> WatchRow? {
-        rows.filter { row in
-            guard let start = row.start, !row.done else { return false }
-            if row.kind == .calendar { return start >= minute }
-            return (row.end ?? start) >= minute
-        }
-        .min { ($0.start ?? 0) < ($1.start ?? 0) }
+        upcoming(rows, at: minute).first
+    }
+
+    /// The timed rows still ahead at `minute`, by start time, ties in the
+    /// planner's order.
+    public static func upcoming(_ rows: [WatchRow], at minute: Int) -> [WatchRow] {
+        rows.enumerated()
+            .filter { _, row in
+                guard let start = row.start, !row.done else { return false }
+                if row.kind == .calendar { return start >= minute }
+                return (row.end ?? start) >= minute
+            }
+            .sorted { ($0.element.start ?? 0, $0.offset) < ($1.element.start ?? 0, $1.offset) }
+            .map(\.element)
     }
 }

@@ -174,7 +174,37 @@ final class WatchTests: XCTestCase {
         XCTAssertEqual(TimelineEntries.next(rows, at: 961)?.label, nil)
         let entry = TimelineEntries.entries(rows: rows, today: today, now: at(14, 5), calendar: calendar).first
         XCTAssertEqual(entry?.left, 3)
-        XCTAssertEqual(entry?.anytime, 1)
+    }
+
+    func testTheWindowIsFourHours() {
+        XCTAssertEqual(TimelineEntries.windowMinutes, 240)
+    }
+
+    func testTheSecondLineSkipsDoneRowsAndCalendarRowsAlreadyStarted() {
+        let rows = [
+            row("Standup", .calendar, start: 840, end: 900),
+            row("Brief", start: 870, end: 900, done: true),
+            row("Call", .task, start: 870, end: 960),
+            row("Review", .calendar, start: 900, end: 930),
+            row("Dentist", .reminder, start: 960),
+            row("Milk"),
+        ]
+        let early = TimelineEntries.entries(rows: rows, today: today, now: at(13, 50), calendar: calendar).first
+        XCTAssertEqual(early?.next?.label, "Standup")
+        XCTAssertEqual(early?.following?.label, "Call", "a done row is not the second line")
+        let started = TimelineEntries.entries(rows: rows, today: today, now: at(14, 50), calendar: calendar).first
+        XCTAssertEqual(started?.next?.label, "Call", "a started calendar event is not next")
+        XCTAssertEqual(started?.following?.label, "Review")
+        let later = TimelineEntries.entries(rows: rows, today: today, now: at(15, 10), calendar: calendar).first
+        XCTAssertEqual(later?.next?.label, "Call")
+        XCTAssertEqual(later?.following?.label, "Dentist", "the started Review is skipped")
+    }
+
+    func testOneItemLeftHasNoSecondLine() {
+        let rows = [row("Brief", start: 780, end: 810), row("Dentist", .reminder, start: 840), row("Milk")]
+        let entry = TimelineEntries.entries(rows: rows, today: today, now: at(13, 50), calendar: calendar).first
+        XCTAssertEqual(entry?.next?.label, "Dentist")
+        XCTAssertNil(entry?.following)
     }
 
     func testTheHeaderNamesTheDentistFromTheMomentThePreviousItemEnds() {
@@ -188,10 +218,10 @@ final class WatchTests: XCTestCase {
 
     func testAnEmptyDayAndNowAfterTheLastItem() {
         let empty = TimelineEntries.entries(rows: [], today: today, now: now, calendar: calendar)
-        XCTAssertTrue(empty.allSatisfy { $0.next == nil && $0.left == 0 && $0.anytime == 0 })
+        XCTAssertTrue(empty.allSatisfy { $0.next == nil && $0.following == nil && $0.left == 0 })
         let late = TimelineEntries.entries(rows: [row("Brief", start: 540, end: 600)], today: today, now: at(22, 10), calendar: calendar)
         XCTAssertEqual(late.count, 8)
-        XCTAssertTrue(late.allSatisfy { $0.next == nil })
+        XCTAssertTrue(late.allSatisfy { $0.next == nil && $0.following == nil })
         XCTAssertEqual(late.first?.left, 1, "still open, though its hour has gone")
     }
 

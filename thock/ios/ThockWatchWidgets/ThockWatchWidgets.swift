@@ -21,7 +21,7 @@ struct TodayEntry: TimelineEntry {
         /// No snapshot yet, the phone is not connected, or the snapshot is too
         /// old to hold today: the phone has not been opened in over a week.
         case notConnected
-        case day(VaultDay, rows: [WatchRow], moment: WatchTimelineEntry)
+        case day(rows: [WatchRow], moment: WatchTimelineEntry)
     }
 
     var date: Date
@@ -37,8 +37,8 @@ struct TodayProvider: TimelineProvider {
             WatchRow(hash: "3", ordinal: 0, kind: .reminder, start: 14 * 60, label: "Dentist"),
         ]
         let moment = TimelineEntries.entries(rows: rows, today: .today(), now: now).first
-            ?? WatchTimelineEntry(date: now, minute: 0, windowStart: 0, next: nil, left: 0, anytime: 0)
-        return TodayEntry(date: now, content: .day(.today(), rows: rows, moment: moment))
+            ?? WatchTimelineEntry(date: now, minute: 0, windowStart: 0, next: nil, left: 0)
+        return TodayEntry(date: now, content: .day(rows: rows, moment: moment))
     }
 
     func getSnapshot(in context: Context, completion: @escaping (TodayEntry) -> Void) {
@@ -54,7 +54,7 @@ struct TodayProvider: TimelineProvider {
     }
 
     /// One entry every quarter hour to midnight, so the window and the
-    /// header move without a reload (§7.3).
+    /// next lines move without a reload (§7.3).
     func entries(now: Date) -> [TodayEntry] {
         let snapshot = WatchFiles(folder: WatchEnvironment.container).snapshot()
         // The watch's date: a snapshot from before midnight still holds it.
@@ -64,7 +64,7 @@ struct TodayProvider: TimelineProvider {
         }
         let rows = snapshot.day(today)?.rows ?? []
         return TimelineEntries.entries(rows: rows, today: today, now: now).map { moment in
-            TodayEntry(date: moment.date, content: .day(today, rows: rows, moment: moment))
+            TodayEntry(date: moment.date, content: .day(rows: rows, moment: moment))
         }
     }
 }
@@ -77,7 +77,7 @@ struct TodayComplication: Widget {
                 .widgetURL(WatchEnvironment.todayURL)
         }
         .configurationDisplayName("Today")
-        .description("Five hours of today's plan, and what comes next.")
+        .description("What comes next, and four hours of today's plan.")
         .supportedFamilies([.accessoryRectangular, .accessoryInline])
     }
 }
@@ -91,11 +91,11 @@ struct TodayView: View {
         case .notConnected:
             Text("Open Thock on your iPhone")
                 .font(.footnote)
-        case .day(let day, let rows, let moment):
+        case .day(let rows, let moment):
             if family == .accessoryInline {
                 inline(moment)
             } else {
-                rectangular(day: day, rows: rows, moment: moment)
+                rectangular(rows: rows, moment: moment)
             }
         }
     }
@@ -106,10 +106,6 @@ struct TodayView: View {
 
     private static func next(_ row: WatchRow) -> String {
         "\(row.start.map(clock) ?? "") \(row.label)"
-    }
-
-    private static func counts(_ moment: WatchTimelineEntry) -> String {
-        moment.anytime > 0 ? "\(moment.left) left · \(moment.anytime) anytime" : "\(moment.left) left"
     }
 
     private func inline(_ moment: WatchTimelineEntry) -> some View {
@@ -125,47 +121,93 @@ struct TodayView: View {
         .privacySensitive()
     }
 
-    private func rectangular(day: VaultDay, rows: [WatchRow], moment: WatchTimelineEntry) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(day.formatted("ddd D").uppercased())
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(WatchTheme.amber)
-                    .widgetAccentable()
-                Spacer(minLength: 2)
-                Group {
-                    if let next = moment.next {
-                        Text(Self.next(next))
-                    } else if moment.left > 0 {
-                        Text("\(moment.left) left")
-                    }
-                }
-                .font(.system(size: 13, weight: .medium))
-                .lineLimit(1)
-                .privacySensitive()
-            }
+    private func rectangular(rows: [WatchRow], moment: WatchTimelineEntry) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
             if rows.isEmpty {
                 Text("Nothing planned today")
-                    .font(.system(size: 12))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.secondary)
-            } else if moment.left > 0 {
-                Text(Self.counts(moment))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+            } else {
+                if let next = moment.next {
+                    NextLine(row: next, primary: true)
+                } else {
+                    Text("Nothing more today")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                if let following = moment.following {
+                    NextLine(row: following, primary: false)
+                } else {
+                    // An empty second line keeps the track where it always is.
+                    Text(verbatim: " ")
+                        .font(.system(size: 13))
+                }
+                Spacer(minLength: 0)
                 TimelineTrack(rows: rows, moment: moment)
             }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+/// One coming item: its kind as a shape, its time, its words. The first is
+/// in the accent and semibold, the second muted.
+struct NextLine: View {
+    var row: WatchRow
+    var primary: Bool
+
+    private var size: CGFloat { primary ? 15 : 13 }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 4) {
+            glyph
+                .frame(width: 9)
+            if let start = row.start {
+                Text(ClockTime(clampingHour: start / 60 % 24, minute: start % 60).description)
+                    .font(.system(size: size, weight: primary ? .semibold : .regular, design: .monospaced))
+                    .foregroundStyle(primary ? AnyShapeStyle(WatchTheme.amber) : AnyShapeStyle(.secondary))
+                    .widgetAccentable(primary)
+            }
+            Text(row.label)
+                .font(.system(size: size, weight: primary ? .semibold : .regular))
+                .foregroundStyle(primary ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .privacySensitive()
+        }
+    }
+
+    @ViewBuilder
+    private var glyph: some View {
+        let style = primary ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary)
+        switch row.kind {
+        case .reminder:
+            Image(systemName: "bell.fill")
+                .font(.system(size: size - 5, weight: .semibold))
+                .foregroundStyle(style)
+                .accessibilityLabel("Reminder")
+        case .task:
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(style)
+                .frame(width: 4, height: size - 3)
+                .accessibilityLabel("Task")
+        case .calendar:
+            RoundedRectangle(cornerRadius: 1.5)
+                .strokeBorder(style, lineWidth: 1.2)
+                .frame(width: 5, height: size - 3)
+                .accessibilityLabel("Event")
         }
     }
 }
 
-/// Five hours from the half hour before now: tasks filled, events outlined,
-/// reminders a tick and a line, done items faint, now an accent line.
-/// Every difference is a shape or an opacity too, for tinted faces.
+/// Four hours from the half hour before now: tasks filled, events
+/// outlined, reminders a tick and a line, done items faint, now an accent
+/// line. Every difference is a shape or an opacity too, for tinted faces.
 struct TimelineTrack: View {
     var rows: [WatchRow]
     var moment: WatchTimelineEntry
 
-    private let trackHeight: CGFloat = 10
+    private let trackHeight: CGFloat = 6
 
     var body: some View {
         GeometryReader { geometry in
@@ -186,25 +228,26 @@ struct TimelineTrack: View {
                 }
                 Rectangle()
                     .fill(WatchTheme.amber)
-                    .frame(width: 2, height: trackHeight + 6)
-                    .offset(x: x(nowMinute) - 1)
+                    .frame(width: 2, height: trackHeight + 5)
+                    .offset(x: x(nowMinute) - 1, y: 0.5)
                     .widgetAccentable()
                 Circle()
                     .fill(WatchTheme.amber)
-                    .frame(width: 5, height: 5)
-                    .offset(x: x(nowMinute) - 2.5, y: -2)
+                    .frame(width: 4, height: 4)
+                    .offset(x: x(nowMinute) - 2, y: -1.5)
                     .widgetAccentable()
                 ForEach(hours(from: start), id: \.self) { hour in
+                    // Kept inside the frame, so the first and last hours are never cut.
                     Text(String(format: "%02d", hour % 24))
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .offset(x: x(hour * 60) - 6, y: trackHeight + 7)
+                        .offset(x: min(max(x(hour * 60) - 6, 0), width - 12), y: trackHeight + 6)
                 }
             }
             .frame(width: width, alignment: .leading)
             .clipped()
         }
-        .frame(height: trackHeight + 18)
+        .frame(height: trackHeight + 17)
     }
 
     private func hours(from start: Int) -> [Int] {
@@ -217,14 +260,14 @@ struct TimelineTrack: View {
         let opacity = row.done ? 0.25 : 1
         switch row.kind {
         case .task:
-            RoundedRectangle(cornerRadius: 2)
+            RoundedRectangle(cornerRadius: 1.5)
                 .fill(.primary)
                 .frame(width: max(right - left, 2), height: trackHeight)
                 .offset(x: left, y: 3)
                 .opacity(opacity)
         case .calendar:
-            RoundedRectangle(cornerRadius: 2)
-                .stroke(WatchTheme.cal, lineWidth: 1.5)
+            RoundedRectangle(cornerRadius: 1.5)
+                .stroke(WatchTheme.cal, lineWidth: 1.2)
                 .frame(width: max(right - left, 2), height: trackHeight)
                 .offset(x: left, y: 3)
                 .opacity(opacity)
