@@ -28,7 +28,11 @@ struct TickLineIntent: AppIntent {
     func perform() async throws -> some IntentResult {
         let store = try ThockEnvironment.openStore()
         if let day = VaultDay(iso: day) {
-            try VaultSession(store: store).tick(hash: hash, ordinal: ordinal, day: day)
+            do {
+                try VaultSession(store: store).tick(hash: hash, ordinal: ordinal, day: day)
+            } catch VaultSessionError.lineChanged {
+                // The widget redraws from the store below, without the line.
+            }
         }
         WidgetCenter.shared.reloadAllTimelines()
         return .result()

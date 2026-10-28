@@ -106,6 +106,16 @@ public final class VaultStore: @unchecked Sendable {
                 kept INTEGER NOT NULL DEFAULT 0
             )
             """)
+        // The watch's requests already handled (V48 §6.3), so one sent twice
+        // is answered again without writing again.
+        try database.execute("""
+            CREATE TABLE IF NOT EXISTS watch_requests (
+                id TEXT PRIMARY KEY,
+                outcome TEXT NOT NULL,
+                message TEXT,
+                handled_at INTEGER NOT NULL
+            )
+            """)
         try createSearchIndex()
         if let url {
             // Background refresh has to read the store while the phone is
@@ -599,10 +609,38 @@ public final class VaultStore: @unchecked Sendable {
         }
     }
 
+    // MARK: The watch
+
+    /// What the phone answered a watch request with, when it has handled it.
+    public func watchRequest(id: UUID) -> WatchAck? {
+        locked {
+            guard let row = (try? database.query("SELECT outcome, message FROM watch_requests WHERE id = ?", [.text(id.uuidString)]))?.first,
+                  let outcome = row[0].string.flatMap(WatchAck.Outcome.init(rawValue:))
+            else { return nil }
+            return WatchAck(id: id, outcome: outcome, message: row[1].string)
+        }
+    }
+
+    public func recordWatchRequest(_ ack: WatchAck, at: Date) throws {
+        try locked {
+            try database.execute(
+                "INSERT INTO watch_requests (id, outcome, message, handled_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+                [.text(ack.id.uuidString), .text(ack.outcome.rawValue), ack.message.map { .text($0) } ?? .null, .int(Int64(at.timeIntervalSince1970))])
+        }
+    }
+
+    /// Forgets requests handled before `date`. A watch resends within
+    /// minutes, or days at most; never a month later.
+    public func pruneWatchRequests(before date: Date) throws {
+        try locked {
+            try database.execute("DELETE FROM watch_requests WHERE handled_at < ?", [.int(Int64(date.timeIntervalSince1970))])
+        }
+    }
+
     /// Forgets the vault: used when the desk disconnects this phone.
     public func wipe() {
         locked {
-            for table in ["files", "pending_writes", "captures", "ask_turns"] {
+            for table in ["files", "pending_writes", "captures", "ask_turns", "watch_requests"] {
                 try? database.execute("DELETE FROM \(table)")
             }
             // The search index outlives the vault it was built for.
