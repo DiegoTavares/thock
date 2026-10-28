@@ -127,6 +127,7 @@ struct TodayView: View {
                 Text("Nothing planned today")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.secondary)
+                    .frame(height: NextLine.primaryHeight)
             } else {
                 if let next = moment.next {
                     NextLine(row: next, primary: true)
@@ -134,68 +135,71 @@ struct TodayView: View {
                     Text("Nothing more today")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.secondary)
+                        .frame(height: NextLine.primaryHeight)
                 }
                 if let following = moment.following {
                     NextLine(row: following, primary: false)
                 } else {
-                    // An empty second line keeps the track where it always is.
-                    Text(verbatim: " ")
-                        .font(.system(size: 13))
+                    Color.clear
+                        .frame(height: NextLine.secondaryHeight)
                 }
-                Spacer(minLength: 0)
                 TimelineTrack(rows: rows, moment: moment)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-/// One coming item: its kind as a shape, its time, its words. The first is
-/// in the accent and semibold, the second muted.
+/// One coming item: its kind as a symbol, its time, its words. The first is
+/// semibold with its time in the accent, the second muted.
 struct NextLine: View {
+    static let primaryHeight: CGFloat = 19
+    static let secondaryHeight: CGFloat = 16
+
     var row: WatchRow
     var primary: Bool
 
-    private var size: CGFloat { primary ? 15 : 13 }
-
     var body: some View {
-        HStack(alignment: .center, spacing: 4) {
-            glyph
-                .frame(width: 9)
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.system(size: primary ? 10 : 9, weight: .semibold))
+                .accessibilityLabel(kindName)
             if let start = row.start {
-                Text(ClockTime(clampingHour: start / 60 % 24, minute: start % 60).description)
-                    .font(.system(size: size, weight: primary ? .semibold : .regular, design: .monospaced))
-                    .foregroundStyle(primary ? AnyShapeStyle(WatchTheme.amber) : AnyShapeStyle(.secondary))
-                    .widgetAccentable(primary)
+                let time = ClockTime(clampingHour: start / 60 % 24, minute: start % 60).description
+                if primary {
+                    Text(time)
+                        .fontDesign(.monospaced)
+                        .foregroundStyle(WatchTheme.amber)
+                        .widgetAccentable()
+                } else {
+                    Text(time)
+                        .fontDesign(.monospaced)
+                }
             }
             Text(row.label)
-                .font(.system(size: size, weight: primary ? .semibold : .regular))
-                .foregroundStyle(primary ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .lineLimit(1)
-                .truncationMode(.tail)
                 .privacySensitive()
+        }
+        .font(.system(size: primary ? 15 : 13, weight: primary ? .semibold : .regular))
+        .foregroundStyle(primary ? Color.primary : Color.secondary)
+        .frame(height: primary ? Self.primaryHeight : Self.secondaryHeight)
+    }
+
+    /// A bell, a filled bar or an outlined one: told apart by shape on a
+    /// tinted face.
+    private var symbol: String {
+        switch row.kind {
+        case .reminder: return "bell.fill"
+        case .task: return "capsule.portrait.fill"
+        case .calendar: return "capsule.portrait"
         }
     }
 
-    @ViewBuilder
-    private var glyph: some View {
-        let style = primary ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary)
+    private var kindName: String {
         switch row.kind {
-        case .reminder:
-            Image(systemName: "bell.fill")
-                .font(.system(size: size - 5, weight: .semibold))
-                .foregroundStyle(style)
-                .accessibilityLabel("Reminder")
-        case .task:
-            RoundedRectangle(cornerRadius: 1.5)
-                .fill(style)
-                .frame(width: 4, height: size - 3)
-                .accessibilityLabel("Task")
-        case .calendar:
-            RoundedRectangle(cornerRadius: 1.5)
-                .strokeBorder(style, lineWidth: 1.2)
-                .frame(width: 5, height: size - 3)
-                .accessibilityLabel("Event")
+        case .reminder: return "Reminder"
+        case .task: return "Task"
+        case .calendar: return "Event"
         }
     }
 }
@@ -208,6 +212,7 @@ struct TimelineTrack: View {
     var moment: WatchTimelineEntry
 
     private let trackHeight: CGFloat = 6
+    static let height: CGFloat = 24
 
     var body: some View {
         GeometryReader { geometry in
@@ -229,25 +234,27 @@ struct TimelineTrack: View {
                 Rectangle()
                     .fill(WatchTheme.amber)
                     .frame(width: 2, height: trackHeight + 5)
-                    .offset(x: x(nowMinute) - 1, y: 0.5)
+                    .offset(x: x(nowMinute) - 1, y: 1.5)
                     .widgetAccentable()
                 Circle()
                     .fill(WatchTheme.amber)
                     .frame(width: 4, height: 4)
-                    .offset(x: x(nowMinute) - 2, y: -1.5)
+                    .offset(x: x(nowMinute) - 2, y: 0)
                     .widgetAccentable()
                 ForEach(hours(from: start), id: \.self) { hour in
                     // Kept inside the frame, so the first and last hours are never cut.
                     Text(String(format: "%02d", hour % 24))
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .offset(x: min(max(x(hour * 60) - 6, 0), width - 12), y: trackHeight + 6)
+                        .offset(x: min(max(x(hour * 60) - 6, 0), width - 12), y: trackHeight + 7)
                 }
             }
-            .frame(width: width, alignment: .leading)
+            // The full height, or the clip cuts off the hour numbers, which
+            // are drawn below the tallest shape.
+            .frame(width: width, height: Self.height, alignment: .topLeading)
             .clipped()
         }
-        .frame(height: trackHeight + 17)
+        .frame(height: Self.height)
     }
 
     private func hours(from start: Int) -> [Int] {
