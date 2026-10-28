@@ -391,6 +391,9 @@ final class WatchModel {
     /// Back from the wrist going down: a draft comes back on its screen, and
     /// the Capture control's request is taken.
     func becameActive() {
+        // A new build's complication keeps the timeline the old one made
+        // until something reloads it.
+        WidgetCenter.shared.reloadTimelines(ofKind: WatchEnvironment.todayKind)
         if WatchEnvironment.defaults.bool(forKey: WatchEnvironment.pendingCaptureKey) {
             WatchEnvironment.defaults.removeObject(forKey: WatchEnvironment.pendingCaptureKey)
             startCapture(voice: true)
