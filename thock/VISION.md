@@ -514,6 +514,12 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   canvas, the sheet, the entry and the cursor, through Face ID and termination; only today's
   canvas is home. A privacy cover keeps the vault out of the app switcher. Spec
   `specs/v46-phone-edit-in-place.md`. _(shipped on `main` with the V46 PR)_
+- [x] **Sort the day's loose ends in one sheet:** the Thock Agent gets a second question tool,
+  `sort`: a list of items, each with its own row of choices, answered at once inline in the chat.
+  The agent pre-selects what it can justify and says why on the row; a row it can't justify waits
+  for you, and the sheet won't apply until every row has an answer. Wrap Today asks about finished
+  tasks, today's reminders and open tasks in that one sheet instead of up to a dozen questions.
+  Spec `specs/v47-wrap-sheet.md`. _(shipped on `main` with the V47 PR)_
 
 ---
 

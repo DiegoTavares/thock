@@ -528,6 +528,8 @@ struct ChatSession {
     /// Whether the first message is a ritual's kickoff prompt, which shows
     /// as a marker rather than as your bubble (V44 decision 7).
     kickoff: bool,
+    /// Where a sheet's answers go for the `sort` tool to read (V47 §5.2).
+    answers_dir: PathBuf,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -606,11 +608,13 @@ enum EntryShape {
     Hidden,
 }
 
-/// A question still waiting for you: an elicitation, or an `ask` request.
+/// A question still waiting for you: an elicitation, an `ask` request, or a
+/// `sort` request, keyed by its `pi-ui-*` request id.
 #[derive(Clone)]
 enum PendingQuestion {
     Elicitation(ElicitationEntryId),
     Ask(acp::ToolCallId),
+    Sort(acp::ToolCallId),
 }
 
 /// pi-acp carries a Pi extension's `select` as a permission request whose
@@ -638,6 +642,191 @@ fn ask_options(options: &PermissionOptions) -> Vec<&acp::PermissionOption> {
     }
 }
 
+/// The `select` title the `sort` tool raises, `sort:<toolCallId>`, which
+/// ties the request to the call carrying the sheet (V47 §5.2).
+const SORT_REQUEST_PREFIX: &str = "sort:";
+
+/// The model's own `sort` tool call, whose arguments are the sheet. Like
+/// `ask`'s, it has nothing to show and nothing to count.
+fn is_sort_call(tool_call: &ToolCall) -> bool {
+    tool_call
+        .raw_input
+        .as_ref()
+        .is_some_and(|input| input.get("question").is_some() && input.get("groups").is_some())
+}
+
+/// The `sort` call a `pi-ui-*` request holds the turn for, read from the
+/// request's title.
+fn sort_call_id(request: &ToolCall) -> Option<acp::ToolCallId> {
+    if !is_ask_request(&request.id) {
+        return None;
+    }
+    let title = request.raw_input.as_ref()?.get("title")?.as_str()?;
+    let id = title.strip_prefix(SORT_REQUEST_PREFIX)?;
+    (!id.is_empty()).then(|| acp::ToolCallId::from(id.to_string()))
+}
+
+/// The answers file the `sort` tool reads for a call, inside the session's
+/// answers folder. The id comes from the model's provider, so anything but
+/// `[A-Za-z0-9_-]` becomes `_`, exactly as `ask.ts` names it; that also keeps
+/// the file inside the folder.
+fn sort_answers_file(answers_dir: &Path, call_id: &acp::ToolCallId) -> PathBuf {
+    let name: String = call_id
+        .0
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    answers_dir.join(format!("{name}.json"))
+}
+
+/// A `sort` sheet (V47 §5.1), as the model called the tool.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct SortSheet {
+    question: String,
+    groups: Vec<SortGroup>,
+    #[serde(default)]
+    footnote: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct SortGroup {
+    title: String,
+    choices: Vec<String>,
+    items: Vec<SortItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct SortItem {
+    id: String,
+    text: String,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    suggested: Option<String>,
+}
+
+/// One row of a sheet: its group and the item.
+struct SheetRow<'a> {
+    group: &'a SortGroup,
+    item: &'a SortItem,
+}
+
+impl SortSheet {
+    /// The sheet in a call's arguments, once they form a whole one the tool
+    /// would accept. Arguments still streaming in, or a call the tool will
+    /// refuse, show nothing (R1b).
+    fn parse(raw_input: &serde_json::Value) -> Option<Self> {
+        let sheet: SortSheet = serde_json::from_value(raw_input.clone()).ok()?;
+        let mut ids = HashSet::default();
+        let groups_valid = (1..=3).contains(&sheet.groups.len())
+            && sheet.groups.iter().all(|group| {
+                (2..=6).contains(&group.choices.len())
+                    && group.items.iter().all(|item| {
+                        ids.insert(item.id.as_str())
+                            && item
+                                .suggested
+                                .as_ref()
+                                .is_none_or(|suggested| group.choices.contains(suggested))
+                    })
+            });
+        (groups_valid && (1..=40).contains(&ids.len())).then_some(sheet)
+    }
+
+    fn rows(&self) -> Vec<SheetRow<'_>> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.items.iter().map(move |item| SheetRow { group, item }))
+            .collect()
+    }
+
+    /// Each row's choice: what you set, or else what the agent suggested.
+    fn answers(&self, set: &HashMap<String, usize>) -> Vec<Option<usize>> {
+        self.rows()
+            .iter()
+            .map(|row| {
+                set.get(&row.item.id).copied().or_else(|| {
+                    let suggested = row.item.suggested.as_ref()?;
+                    row.group
+                        .choices
+                        .iter()
+                        .position(|choice| choice == suggested)
+                })
+            })
+            .collect()
+    }
+
+    /// What the tool reads back: every item's id and the label of its
+    /// choice. `None` while a row still needs you.
+    fn answers_json(&self, set: &HashMap<String, usize>) -> Option<String> {
+        let answers = self
+            .rows()
+            .iter()
+            .zip(self.answers(set))
+            .map(|(row, answer)| {
+                let label = row.group.choices.get(answer?)?;
+                Some((row.item.id.clone(), label.clone()))
+            })
+            .collect::<Option<BTreeMap<String, String>>>()?;
+        serde_json::to_string(&answers).ok()
+    }
+
+    /// The line the sheet folds into once applied (§4.3): how many rows
+    /// took each choice, in the order the choices are listed.
+    fn receipt(&self, set: &HashMap<String, usize>) -> String {
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+        for group in &self.groups {
+            for choice in &group.choices {
+                if !counts.iter().any(|(label, _)| *label == choice.as_str()) {
+                    counts.push((choice.as_str(), 0));
+                }
+            }
+        }
+        let rows = self.rows();
+        for (row, answer) in rows.iter().zip(self.answers(set)) {
+            let Some(label) = answer.and_then(|answer| row.group.choices.get(answer)) else {
+                continue;
+            };
+            if let Some((_, count)) = counts.iter_mut().find(|(seen, _)| *seen == label) {
+                *count += 1;
+            }
+        }
+        let counted = counts
+            .iter()
+            .filter(|(_, count)| *count > 0)
+            .map(|(label, count)| format!("{count} {label}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("Sorted {}: {counted}", rows.len())
+    }
+}
+
+/// The sheet's last line: how many rows are set and how many need you.
+fn sheet_tally(answers: &[Option<usize>]) -> String {
+    let set = answers.iter().filter(|answer| answer.is_some()).count();
+    match answers.len() - set {
+        0 => format!("{set} set"),
+        needs_you => format!("{set} set · {needs_you} needs you"),
+    }
+}
+
+/// Where you are in a pending sheet: the selected row, and the rows you set
+/// yourself, by item id. A row you haven't touched keeps the agent's
+/// suggestion, so nothing is copied out of the call and nothing goes stale
+/// while its arguments finish arriving.
+#[derive(Default)]
+struct SheetState {
+    selected: usize,
+    set: HashMap<String, usize>,
+    /// The answers are being written; a second `enter` must not send twice.
+    applying: bool,
+}
+
 fn entry_shape(entry: &AgentThreadEntry, thread: &AcpThread) -> EntryShape {
     match entry {
         AgentThreadEntry::UserMessage(_) => EntryShape::User,
@@ -660,7 +849,11 @@ fn entry_shape(entry: &AgentThreadEntry, thread: &AcpThread) -> EntryShape {
                 ),
             }
         }
-        AgentThreadEntry::ToolCall(tool_call) if is_ask_call(tool_call) => EntryShape::Hidden,
+        AgentThreadEntry::ToolCall(tool_call)
+            if is_ask_call(tool_call) || is_sort_call(tool_call) =>
+        {
+            EntryShape::Hidden
+        }
         AgentThreadEntry::ToolCall(tool_call) => EntryShape::Tool(tool_call.id.clone()),
         AgentThreadEntry::Elicitation(id) => EntryShape::Question {
             answered: thread.elicitation(id).is_none_or(|(_, elicitation)| {
@@ -1113,6 +1306,10 @@ pub struct ChatPanel {
     session: Option<ChatSession>,
     /// What the launch is doing while there is no session to show yet.
     starting: Option<SharedString>,
+    /// The launch being set up, shown in the thread straight away: starting
+    /// the agent takes seconds, and what you sent must not vanish meanwhile.
+    /// It gives way once the thread has rows of its own.
+    opening: Option<LaunchRequest>,
     message_editor: Entity<Editor>,
     scroll_handle: ScrollHandle,
     /// The selected row, keyed so it survives the re-fold while a turn
@@ -1128,8 +1325,12 @@ pub struct ChatPanel {
     /// The highlighted chip per pending `ask` request.
     ask_choices: HashMap<acp::ToolCallId, usize>,
     /// The label you picked per answered `ask` request, shown as your
-    /// bubble.
+    /// bubble, and the receipt line of each applied sheet.
     ask_answers: HashMap<acp::ToolCallId, SharedString>,
+    /// Where you are in each pending `sort` sheet, by request id.
+    sheets: HashMap<acp::ToolCallId, SheetState>,
+    /// The sheet's own scroll, so a long one keeps its selected row in view.
+    sheet_scroll: ScrollHandle,
     /// Thock's replies as bubbles (§5.4), by entry index.
     bubbles: HashMap<usize, ReplyBubbles>,
     /// When each turn started, by the entry that started it: your message,
@@ -1237,6 +1438,7 @@ impl ChatPanel {
                 view: PanelView::Chat,
                 session: None,
                 starting: None,
+                opening: None,
                 message_editor,
                 scroll_handle: ScrollHandle::new(),
                 selected: None,
@@ -1245,6 +1447,8 @@ impl ChatPanel {
                 elicitation_editors: HashMap::default(),
                 ask_choices: HashMap::default(),
                 ask_answers: HashMap::default(),
+                sheets: HashMap::default(),
+                sheet_scroll: ScrollHandle::new(),
                 bubbles: HashMap::default(),
                 turn_times: BTreeMap::new(),
                 show_usage: false,
@@ -2325,6 +2529,7 @@ impl ChatPanel {
         // handles drop here and its process ends with them.
         self.session = None;
         self.reset_transcript_state();
+        self.opening = request.kickoff.is_some().then(|| request.clone());
         self.starting = Some("Setting up the Thock Agent…".into());
         self.view = PanelView::Chat;
         cx.notify();
@@ -2339,7 +2544,7 @@ impl ChatPanel {
         let tier = request.tier;
         cx.spawn(async move |this, cx| {
             let started = async {
-                let command =
+                let (command, answers_dir) =
                     hosted_agent::prepare_launch(&project, vault, tier, &model, &api_key, cx)
                         .await?;
                 this.update(cx, |this, cx| {
@@ -2355,17 +2560,35 @@ impl ChatPanel {
                             .new_session(project.clone(), work_dirs, cx)
                     })
                     .await?;
-                anyhow::Ok((connection, thread))
+                anyhow::Ok((connection, thread, answers_dir))
             }
             .await;
             window_handle.update(cx, |_, window, cx| {
                 this.update(cx, |this, cx| {
                     this.starting = None;
                     match started {
-                        Ok((connection, thread)) => {
-                            this.attach_session(request, connection, thread, max_turns, window, cx);
+                        Ok((connection, thread, answers_dir)) => {
+                            this.attach_session(
+                                request,
+                                connection,
+                                thread,
+                                answers_dir,
+                                max_turns,
+                                window,
+                                cx,
+                            );
                         }
                         Err(error) => {
+                            this.opening = None;
+                            // A message typed into a new chat goes back to
+                            // the composer, so it can be sent again.
+                            if !request.is_ritual()
+                                && let Some(text) = request.kickoff
+                                && this.message_editor.read(cx).is_empty(cx)
+                            {
+                                this.message_editor
+                                    .update(cx, |editor, cx| editor.set_text(text, window, cx));
+                            }
                             let message = match error.downcast_ref::<acp_thread::AuthRequired>() {
                                 Some(_) => "The Thock Agent couldn't sign in to its model \
                                             gateway. Reconnect Thock Plus and try again."
@@ -2387,6 +2610,7 @@ impl ChatPanel {
         request: LaunchRequest,
         connection: Rc<dyn AgentConnection>,
         thread: Entity<AcpThread>,
+        answers_dir: PathBuf,
         max_turns: u32,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2401,6 +2625,7 @@ impl ChatPanel {
             turn_failure: None,
             last_sent: None,
             kickoff: request.is_ritual(),
+            answers_dir,
             _subscriptions: vec![subscription],
         });
         if let Some(kickoff) = request.kickoff {
@@ -2414,6 +2639,7 @@ impl ChatPanel {
 
     /// Drops everything keyed to a session's transcript when it goes away.
     fn reset_transcript_state(&mut self) {
+        self.opening = None;
         self.bubbles.clear();
         self.turn_times.clear();
         self.mentions.clear();
@@ -2426,6 +2652,7 @@ impl ChatPanel {
         self.elicitation_editors.clear();
         self.ask_choices.clear();
         self.ask_answers.clear();
+        self.sheets.clear();
     }
 
     fn handle_thread_event(
@@ -2868,6 +3095,18 @@ impl ChatPanel {
     /// nothing mechanical leaks (G7).
     #[cfg(test)]
     fn visible_text(&self, cx: &App) -> String {
+        if let Some(request) = self.opening_request(cx) {
+            let sent = if request.is_ritual() {
+                format!("You started {}", request.title)
+            } else {
+                request.kickoff.clone().unwrap_or_default()
+            };
+            let status = self
+                .starting
+                .as_ref()
+                .map_or_else(|| summarize_activity(&[], true), ToString::to_string);
+            return format!("{sent}\n{status}");
+        }
         let Some(session) = &self.session else {
             return String::new();
         };
@@ -2889,6 +3128,10 @@ impl ChatPanel {
                 Some(AgentThreadEntry::ToolCall(tool_call)) => {
                     match self.ask_answers.get(&tool_call.id) {
                         Some(answer) => answer.to_string(),
+                        None if sort_call_id(tool_call).is_some() => self
+                            .sheet(&tool_call.id, cx)
+                            .map(|sheet| self.sheet_text(&tool_call.id, &sheet))
+                            .unwrap_or_default(),
                         None => tool_call.label.read(cx).source().to_string(),
                     }
                 }
@@ -2935,10 +3178,67 @@ impl ChatPanel {
             .join("\n")
     }
 
+    /// A pending sheet as it paints, one line per row: the selected row
+    /// marked `▸` with its chips, the chosen one in brackets.
+    #[cfg(test)]
+    fn sheet_text(&self, request_id: &acp::ToolCallId, sheet: &SortSheet) -> String {
+        let empty = HashMap::default();
+        let set = self
+            .sheets
+            .get(request_id)
+            .map_or(&empty, |state| &state.set);
+        let answers = sheet.answers(set);
+        let selected = self.sheet_selected_row(request_id, sheet);
+        let mut lines = vec![sheet.question.clone()];
+        let mut previous_group = None;
+        for (index, (row, answer)) in sheet.rows().iter().zip(answers.iter()).enumerate() {
+            if previous_group != Some(row.group.title.as_str()) {
+                lines.push(row.group.title.to_uppercase());
+                previous_group = Some(row.group.title.as_str());
+            }
+            let marker = if index == selected { "▸" } else { " " };
+            let label = answer
+                .and_then(|answer| row.group.choices.get(answer))
+                .map_or("needs you", String::as_str);
+            lines.push(format!("{marker} {} · {label}", row.item.text));
+            if let Some(note) = &row.item.note {
+                lines.push(format!("    {note}"));
+            }
+            if index == selected {
+                let chips = row
+                    .group
+                    .choices
+                    .iter()
+                    .enumerate()
+                    .map(|(choice_index, choice)| {
+                        if Some(choice_index) == *answer {
+                            format!("[{choice}]")
+                        } else {
+                            choice.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                lines.push(format!("    {chips}"));
+            }
+        }
+        if let Some(footnote) = &sheet.footnote {
+            lines.push(footnote.clone());
+        }
+        lines.push(sheet_tally(&answers));
+        lines.join("\n")
+    }
+
     /// The chips of the newest pending question, or of an opener up, for
     /// the tests.
     #[cfg(test)]
     fn visible_chips(&self, cx: &App) -> Vec<String> {
+        if let Some(PendingQuestion::Sort(id)) = self.latest_pending_question(cx) {
+            return self
+                .sheet_row_choices(&id, cx)
+                .map(|(choices, _)| choices.iter().map(ToString::to_string).collect())
+                .unwrap_or_default();
+        }
         self.latest_pending_question(cx)
             .and_then(|question| self.question_choices(&question, cx))
             .map(|(choices, _)| choices.iter().map(ToString::to_string).collect())
@@ -3011,7 +3311,21 @@ impl ChatPanel {
         }
     }
 
+    /// The sheet under the selection, which the row keys move through
+    /// before they move through the thread.
+    fn selected_sheet(&self, cx: &App) -> Option<acp::ToolCallId> {
+        match self.selected_pending_question(cx)? {
+            PendingQuestion::Sort(id) => self.sheet(&id, cx).is_some().then_some(id),
+            _ => None,
+        }
+    }
+
     fn select_next(&mut self, _: &menu::SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected_sheet(cx)
+            && self.move_sheet_row(&id, 1, cx)
+        {
+            return;
+        }
         self.select_by_offset(1, cx);
     }
 
@@ -3021,10 +3335,39 @@ impl ChatPanel {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(id) = self.selected_sheet(cx)
+            && self.move_sheet_row(&id, -1, cx)
+        {
+            return;
+        }
         self.select_by_offset(-1, cx);
     }
 
+    /// `g g`/`shift-g` on a sheet go to its first or last row; once there,
+    /// to the thread's.
+    fn select_sheet_edge(&mut self, last: bool, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self.selected_sheet(cx) else {
+            return false;
+        };
+        let Some(sheet) = self.sheet(&id, cx) else {
+            return false;
+        };
+        let edge = if last {
+            sheet.rows().len().saturating_sub(1)
+        } else {
+            0
+        };
+        if self.sheet_selected_row(&id, &sheet) == edge {
+            return false;
+        }
+        self.select_sheet_row(&id, edge, cx);
+        true
+    }
+
     fn select_first(&mut self, _: &menu::SelectFirst, _: &mut Window, cx: &mut Context<Self>) {
+        if self.select_sheet_edge(false, cx) {
+            return;
+        }
         let items = self.items(cx);
         if let Some(position) = Self::selectable_positions(&items).first() {
             self.select_position(&items, *position, cx);
@@ -3032,6 +3375,9 @@ impl ChatPanel {
     }
 
     fn select_last(&mut self, _: &menu::SelectLast, _: &mut Window, cx: &mut Context<Self>) {
+        if self.select_sheet_edge(true, cx) {
+            return;
+        }
         let items = self.items(cx);
         if let Some(position) = Self::selectable_positions(&items).last() {
             self.select_position(&items, *position, cx);
@@ -3070,7 +3416,10 @@ impl ChatPanel {
                 tool_call.status,
                 ToolCallStatus::WaitingForConfirmation { .. }
             )
-            .then(|| PendingQuestion::Ask(tool_call.id.clone())),
+            .then(|| match sort_call_id(tool_call) {
+                Some(_) => PendingQuestion::Sort(tool_call.id.clone()),
+                None => PendingQuestion::Ask(tool_call.id.clone()),
+            }),
             _ => None,
         }
     }
@@ -3114,7 +3463,246 @@ impl ChatPanel {
                     chosen,
                 ))
             }
+            PendingQuestion::Sort(_) => None,
         }
+    }
+
+    /// The sheet a `sort` request shows, once its call's arguments are a
+    /// whole sheet (R1b: the request can arrive before them).
+    fn sheet(&self, request_id: &acp::ToolCallId, cx: &App) -> Option<SortSheet> {
+        let thread = self.session.as_ref()?.thread.read(cx);
+        let (_, request) = thread.tool_call(request_id)?;
+        let (_, call) = thread.tool_call(&sort_call_id(request)?)?;
+        SortSheet::parse(call.raw_input.as_ref()?)
+    }
+
+    /// The selected row of a sheet, kept inside the rows it has now.
+    fn sheet_selected_row(&self, request_id: &acp::ToolCallId, sheet: &SortSheet) -> usize {
+        let selected = self
+            .sheets
+            .get(request_id)
+            .map_or(0, |state| state.selected);
+        selected.min(sheet.rows().len().saturating_sub(1))
+    }
+
+    /// The selected row's chips and its choice, if it has one.
+    fn sheet_row_choices(
+        &self,
+        request_id: &acp::ToolCallId,
+        cx: &App,
+    ) -> Option<(Vec<SharedString>, Option<usize>)> {
+        let sheet = self.sheet(request_id, cx)?;
+        let selected = self.sheet_selected_row(request_id, &sheet);
+        let set = self.sheets.get(request_id).map(|state| &state.set);
+        let answer = sheet
+            .answers(set.unwrap_or(&HashMap::default()))
+            .get(selected)
+            .copied()
+            .flatten();
+        let rows = sheet.rows();
+        let row = rows.get(selected)?;
+        Some((
+            row.group
+                .choices
+                .iter()
+                .map(|choice| choice.clone().into())
+                .collect(),
+            answer,
+        ))
+    }
+
+    fn select_sheet_row(
+        &mut self,
+        request_id: &acp::ToolCallId,
+        row: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.sheets.entry(request_id.clone()).or_default().selected = row;
+        self.sheet_scroll.scroll_to_item(row);
+        cx.notify();
+    }
+
+    /// `up`/`down` inside a sheet. Returns false at its edge, where the
+    /// selection moves on to the thread's rows.
+    fn move_sheet_row(
+        &mut self,
+        request_id: &acp::ToolCallId,
+        offset: isize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(sheet) = self.sheet(request_id, cx) else {
+            return false;
+        };
+        let next = self.sheet_selected_row(request_id, &sheet) as isize + offset;
+        if next < 0 || next >= sheet.rows().len() as isize {
+            return false;
+        }
+        self.select_sheet_row(request_id, next as usize, cx);
+        true
+    }
+
+    /// `left`/`right`: the selected row's choice moves to the chip beside
+    /// it. A row that needs you starts at the first chip.
+    fn cycle_sheet_choice(
+        &mut self,
+        request_id: &acp::ToolCallId,
+        direction: i32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sheet) = self.sheet(request_id, cx) else {
+            return;
+        };
+        let Some((choices, answer)) = self.sheet_row_choices(request_id, cx) else {
+            return;
+        };
+        let next = match answer {
+            Some(current) if direction > 0 => (current + 1).min(choices.len().saturating_sub(1)),
+            Some(current) => current.saturating_sub(1),
+            None => 0,
+        };
+        let selected = self.sheet_selected_row(request_id, &sheet);
+        if let Some(row) = sheet.rows().get(selected) {
+            self.sheets
+                .entry(request_id.clone())
+                .or_default()
+                .set
+                .insert(row.item.id.clone(), next);
+        }
+        cx.notify();
+    }
+
+    /// `1`–`9`, or a click on a chip: sets the selected row's choice and
+    /// moves to the next row.
+    fn pick_sheet_choice(
+        &mut self,
+        request_id: &acp::ToolCallId,
+        choice: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sheet) = self.sheet(request_id, cx) else {
+            return;
+        };
+        let selected = self.sheet_selected_row(request_id, &sheet);
+        let rows = sheet.rows();
+        let Some(row) = rows.get(selected) else {
+            return;
+        };
+        if choice >= row.group.choices.len() {
+            return;
+        }
+        self.sheets
+            .entry(request_id.clone())
+            .or_default()
+            .set
+            .insert(row.item.id.clone(), choice);
+        if selected + 1 < rows.len() {
+            self.select_sheet_row(request_id, selected + 1, cx);
+        }
+        cx.notify();
+    }
+
+    /// `enter` on a sheet (§4.2): with a row still needing you, that row is
+    /// selected and nothing is sent. Otherwise the answers are written where
+    /// the `sort` tool reads them, and only then is `Apply` picked, so the
+    /// tool never wakes to a missing file.
+    fn apply_sheet(
+        &mut self,
+        request_id: &acp::ToolCallId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sheet) = self.sheet(request_id, cx) else {
+            return;
+        };
+        let Some(session) = &self.session else {
+            return;
+        };
+        let call_id = session
+            .thread
+            .read(cx)
+            .tool_call(request_id)
+            .and_then(|(_, request)| sort_call_id(request));
+        let Some(call_id) = call_id else {
+            return;
+        };
+        let path = sort_answers_file(&session.answers_dir, &call_id);
+        let answers_dir = session.answers_dir.clone();
+        let state = self.sheets.entry(request_id.clone()).or_default();
+        if state.applying {
+            return;
+        }
+        if let Some(unset) = sheet.answers(&state.set).iter().position(Option::is_none) {
+            self.select_sheet_row(request_id, unset, cx);
+            return;
+        }
+        let Some(answers) = sheet.answers_json(&state.set) else {
+            return;
+        };
+        let receipt: SharedString = sheet.receipt(&state.set).into();
+        state.applying = true;
+        let fs = self.project.read(cx).fs().clone();
+        let request_id = request_id.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let written = async {
+                fs.create_dir(&answers_dir).await?;
+                fs.atomic_write(path, answers).await
+            }
+            .await;
+            this.update_in(cx, |this, window, cx| match written {
+                Ok(()) => this.sheet_applied(&request_id, receipt, window, cx),
+                Err(error) => {
+                    log::error!("Thock: couldn't write the sheet's answers: {error:#}");
+                    if let Some(state) = this.sheets.get_mut(&request_id) {
+                        state.applying = false;
+                    }
+                    this.show_error(
+                        "Your answers couldn't be saved, so nothing moved. Press enter to try again."
+                            .to_string(),
+                        cx,
+                    );
+                    cx.notify();
+                }
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// The answers are on disk: `Apply` lets the tool read them, and the
+    /// sheet folds into its receipt line.
+    fn sheet_applied(
+        &mut self,
+        request_id: &acp::ToolCallId,
+        receipt: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let thread = session.thread.clone();
+        let apply = thread
+            .read(cx)
+            .tool_call(request_id)
+            .and_then(|(index, request)| {
+                let ToolCallStatus::WaitingForConfirmation { options, .. } = &request.status else {
+                    return None;
+                };
+                let option = ask_options(options).into_iter().next()?;
+                Some((index, option.option_id.clone(), option.kind))
+            });
+        let Some((entry_index, option_id, kind)) = apply else {
+            return;
+        };
+        self.sheets.remove(request_id);
+        self.ask_answers.insert(request_id.clone(), receipt);
+        thread.update(cx, |thread, cx| {
+            thread.authorize_tool_call(
+                request_id.clone(),
+                SelectedPermissionOutcome::new(option_id, kind),
+                cx,
+            );
+        });
+        self.question_settled(Some(entry_index), window, cx);
     }
 
     /// `right`/`l`: open the selected activity's detail, or move to the next
@@ -3135,6 +3723,10 @@ impl ChatPanel {
     }
 
     fn expand_or_cycle(&mut self, direction: i32, cx: &mut Context<Self>) {
+        if let Some(PendingQuestion::Sort(id)) = self.selected_pending_question(cx) {
+            self.cycle_sheet_choice(&id, direction, cx);
+            return;
+        }
         if let Some(question) = self.selected_pending_question(cx) {
             self.cycle_choice(&question, direction, cx);
             return;
@@ -3206,6 +3798,7 @@ impl ChatPanel {
             PendingQuestion::Ask(id) => {
                 self.ask_choices.insert(id.clone(), next);
             }
+            PendingQuestion::Sort(_) => {}
         }
         cx.notify();
     }
@@ -3225,12 +3818,29 @@ impl ChatPanel {
             match question {
                 PendingQuestion::Elicitation(id) => thread.elicitation(id).map(|(index, _)| index),
                 PendingQuestion::Ask(id) => thread.tool_call(id).map(|(index, _)| index),
+                PendingQuestion::Sort(_) => None,
             }
         });
         match question {
             PendingQuestion::Elicitation(id) => self.answer_elicitation(id, choice, cx),
             PendingQuestion::Ask(id) => self.answer_ask(id, choice, cx),
+            // A sheet settles once its answers are written.
+            PendingQuestion::Sort(id) => {
+                self.apply_sheet(id, window, cx);
+                return;
+            }
         }
+        self.question_settled(turn_start, window, cx);
+    }
+
+    /// The question at `turn_start` was answered: the answer starts the next
+    /// turn, and a bubble folds with focus going back to where it was.
+    fn question_settled(
+        &mut self,
+        turn_start: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(turn_start) = turn_start {
             self.turn_times.insert(turn_start, Local::now());
         }
@@ -3292,6 +3902,10 @@ impl ChatPanel {
             self.answer_pair(action.0, window, cx);
             return;
         };
+        if let PendingQuestion::Sort(id) = &question {
+            self.pick_sheet_choice(id, action.0, cx);
+            return;
+        }
         let Some((choices, _)) = self.question_choices(&question, cx) else {
             return;
         };
@@ -3793,7 +4407,13 @@ impl ChatPanel {
         // A row whose entry isn't the kind its item promises (a stale index
         // mid-stream) renders nothing rather than panicking.
         let body: AnyElement = match item {
-            ChatItem::Kickoff(_) => self.render_kickoff(cx),
+            ChatItem::Kickoff(_) => self.render_kickoff(
+                self.session
+                    .as_ref()
+                    .map(|session| session.title.clone())
+                    .unwrap_or_default(),
+                cx,
+            ),
             ChatItem::User(index) => match entries.get(*index) {
                 Some(AgentThreadEntry::UserMessage(message)) => {
                     self.render_user_message(message, window, cx)
@@ -3808,6 +4428,11 @@ impl ChatPanel {
             },
             ChatItem::Question(index) => match entries.get(*index) {
                 Some(AgentThreadEntry::Elicitation(id)) => self.render_elicitation(id, cx),
+                Some(AgentThreadEntry::ToolCall(tool_call))
+                    if sort_call_id(tool_call).is_some() =>
+                {
+                    self.render_sheet(tool_call, cx)
+                }
                 Some(AgentThreadEntry::ToolCall(tool_call)) => self.render_ask(tool_call, cx),
                 _ => div().into_any_element(),
             },
@@ -3888,12 +4513,7 @@ impl ChatPanel {
 
     /// The marker a ritual's kickoff leaves (decision 7): the prompt went to
     /// the agent unchanged, but it isn't something you typed.
-    fn render_kickoff(&self, cx: &Context<Self>) -> AnyElement {
-        let title = self
-            .session
-            .as_ref()
-            .map(|session| session.title.clone())
-            .unwrap_or_default();
+    fn render_kickoff(&self, title: SharedString, cx: &Context<Self>) -> AnyElement {
         h_flex()
             .w_full()
             .justify_center()
@@ -4066,6 +4686,210 @@ impl ChatPanel {
                 },
                 cx,
             ))
+            .into_any_element()
+    }
+
+    /// A sheet from the `sort` tool (V47 §4.1): the question, then every row
+    /// with its choice, the footnote and the count of what is set. Only the
+    /// selected row shows its chips, so five choices fit the thread's column
+    /// (R3). Once applied, the receipt line is your bubble.
+    fn render_sheet(&self, request: &ToolCall, cx: &Context<Self>) -> AnyElement {
+        let sheet = self.sheet(&request.id, cx);
+        if !matches!(
+            request.status,
+            ToolCallStatus::WaitingForConfirmation { .. }
+        ) {
+            return match (self.ask_answers.get(&request.id), sheet) {
+                (Some(receipt), _) => {
+                    self.render_you(Label::new(receipt.clone()).into_any_element(), false, cx)
+                }
+                (None, Some(sheet)) => self.status_line(sheet.question, cx).into_any_element(),
+                (None, None) => div().into_any_element(),
+            };
+        }
+        let Some(sheet) = sheet else {
+            return div().into_any_element();
+        };
+        let empty = HashMap::default();
+        let set = self
+            .sheets
+            .get(&request.id)
+            .map_or(&empty, |state| &state.set);
+        let answers = sheet.answers(set);
+        let selected = self.sheet_selected_row(&request.id, &sheet);
+        let colors = cx.theme().colors();
+        let mut rows = Vec::new();
+        let mut previous_group = None;
+        for (index, (row, answer)) in sheet.rows().iter().zip(answers.iter()).enumerate() {
+            let first_in_group = previous_group != Some(row.group.title.as_str());
+            previous_group = Some(row.group.title.as_str());
+            let is_selected = index == selected;
+            let answer_label = answer.and_then(|answer| row.group.choices.get(answer));
+            let choices: Vec<SharedString> = row
+                .group
+                .choices
+                .iter()
+                .map(|choice| choice.clone().into())
+                .collect();
+            let request_id = request.id.clone();
+            let chip_request_id = request.id.clone();
+            rows.push(
+                v_flex()
+                    .id(("thock-chat-sheet-row", index))
+                    .w_full()
+                    .when(first_in_group, |this| {
+                        this.child(
+                            div()
+                                .pt_1()
+                                .pb_0p5()
+                                .px_2()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(rems_from_px(11.))
+                                .text_color(colors.text_placeholder)
+                                .child(row.group.title.to_uppercase()),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .px_2()
+                            .py_1()
+                            .gap_1()
+                            .rounded_md()
+                            .border_l_2()
+                            .border_color(if is_selected {
+                                colors.border_focused
+                            } else {
+                                gpui::transparent_black()
+                            })
+                            .when(is_selected, |this| this.bg(colors.element_hover))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(rems_from_px(13.))
+                                            .child(row.item.text.clone()),
+                                    )
+                                    .child(match answer_label {
+                                        Some(label) => div()
+                                            .px_2()
+                                            .rounded_full()
+                                            .bg(colors.element_selected)
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_size(rems_from_px(12.))
+                                            .child(label.clone())
+                                            .into_any_element(),
+                                        None => Label::new("needs you")
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted)
+                                            .into_any_element(),
+                                    }),
+                            )
+                            .when_some(row.item.note.clone(), |this, note| {
+                                this.child(
+                                    Label::new(note).size(LabelSize::XSmall).color(Color::Muted),
+                                )
+                            })
+                            .when(is_selected, |this| {
+                                // `usize::MAX` highlights no chip: the row
+                                // needs you.
+                                this.child(self.render_chips(
+                                    &choices,
+                                    answer.unwrap_or(usize::MAX),
+                                    move |this, choice, _window, cx| {
+                                        // The row's own click would select
+                                        // it again, undoing the move on.
+                                        cx.stop_propagation();
+                                        this.pick_sheet_choice(&chip_request_id, choice, cx)
+                                    },
+                                    cx,
+                                ))
+                            }),
+                    )
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.select_sheet_row(&request_id, index, cx)
+                    })),
+            );
+        }
+        let needs_you = answers.iter().any(Option::is_none);
+        let tally = sheet_tally(&answers);
+        let request_id = request.id.clone();
+        v_flex()
+            .w_full()
+            .items_start()
+            .gap_2()
+            .child(self.thock_bubble(div().child(sheet.question.clone()).into_any_element(), cx))
+            .child(
+                v_flex()
+                    .w_full()
+                    .p_1()
+                    .gap_1()
+                    .rounded(px(12.))
+                    .bg(colors.text.opacity(0.04))
+                    .child(
+                        v_flex()
+                            .id("thock-chat-sheet")
+                            .w_full()
+                            .max_h(px(360.))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.sheet_scroll)
+                            .children(rows),
+                    )
+                    .when_some(sheet.footnote.clone(), |this, footnote| {
+                        this.child(
+                            div().px_2().child(
+                                Label::new(footnote)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .px_2()
+                            .pb_1()
+                            .justify_between()
+                            .child(
+                                Label::new(tally)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                h_flex()
+                                    .id("thock-chat-sheet-apply")
+                                    .gap_1p5()
+                                    .items_center()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .when(!needs_you, |this| this.bg(colors.element_selected))
+                                    .cursor_pointer()
+                                    .child(
+                                        KeyBinding::for_action_in(
+                                            &menu::Confirm,
+                                            &self.focus_handle,
+                                            cx,
+                                        )
+                                        .size(rems_from_px(10.)),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_size(rems_from_px(12.5))
+                                            .child("apply"),
+                                    )
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.apply_sheet(&request_id, window, cx)
+                                    })),
+                            ),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -4359,6 +5183,48 @@ impl ChatPanel {
             .collect()
     }
 
+    /// The launch being set up, until the thread has rows of its own
+    /// (`opening`): the ritual's marker or your bubble, then what the setup
+    /// is doing.
+    fn opening_request(&self, cx: &App) -> Option<&LaunchRequest> {
+        self.opening
+            .as_ref()
+            .filter(|_| self.session.is_none() || self.items(cx).is_empty())
+    }
+
+    fn render_opening(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let request = self.opening_request(cx)?;
+        let sent = if request.is_ritual() {
+            self.render_kickoff(request.title.clone().into(), cx)
+        } else {
+            let text = request.kickoff.clone().unwrap_or_default();
+            self.render_you(
+                Label::new(text.clone()).into_any_element(),
+                needs_full_width(&text),
+                cx,
+            )
+        };
+        let status: SharedString = self
+            .starting
+            .clone()
+            .unwrap_or_else(|| summarize_activity(&[], true).into());
+        Some(
+            v_flex()
+                .w_full()
+                .pt(px(10.))
+                .gap(px(10.))
+                .child(sent)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(SpinnerLabel::new().size(LabelSize::Small))
+                        .child(self.status_line(status, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// V26 §5.5: the one place a broken turn is allowed to say so, in plain
     /// language without error styling, with `r` to try again.
     fn render_failure(&self, cx: &Context<Self>) -> Option<AnyElement> {
@@ -4414,6 +5280,7 @@ impl ChatPanel {
             .pt(px(96.))
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
+            .children(self.render_opening(cx))
             .children(self.render_items(0, window, cx))
             .children(self.render_failure(cx));
         div()
@@ -4831,14 +5698,23 @@ impl Render for ChatPanel {
         } else {
             key_context.add("menu");
             // The chips' keys: `1`–`9`, and `y`/`n` for a pair (§5.12).
-            keyed_chips = self
-                .latest_pending_question(cx)
-                .and_then(|question| self.question_choices(&question, cx))
-                .map(|(choices, _)| choices.len())
+            // A sheet's number keys pick the selected row's chip, and it
+            // has no pair: `y`/`n` would answer for every row at once.
+            let question = self.latest_pending_question(cx);
+            let sheet = matches!(question, Some(PendingQuestion::Sort(_)));
+            keyed_chips = question
+                .and_then(|question| match &question {
+                    PendingQuestion::Sort(id) => self
+                        .sheet_row_choices(id, cx)
+                        .map(|(choices, _)| choices.len()),
+                    _ => self
+                        .question_choices(&question, cx)
+                        .map(|(choices, _)| choices.len()),
+                })
                 .or_else(|| self.two_chips_waiting().then_some(2));
             if let Some(count) = keyed_chips {
                 key_context.add("choice");
-                if count == 2 {
+                if count == 2 && !sheet {
                     key_context.add("choice_pair");
                 }
             }
@@ -5552,6 +6428,7 @@ mod tests {
                 ),
                 connection,
                 thread,
+                PathBuf::from("/data/pi/default/answers"),
                 0,
                 window,
                 cx,
@@ -5864,6 +6741,411 @@ mod tests {
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
         assert_eq!(visible_chips(&setup), ["Tick it", "Not yet"]);
+    }
+
+    /// A Wrap Today sheet: a finished task, one that is going to Soon, one
+    /// that needs you, and a reminder.
+    fn wrap_sheet() -> serde_json::Value {
+        json!({
+            "question": "Where should today's loose ends go?",
+            "groups": [
+                {
+                    "title": "Tasks",
+                    "choices": ["Done", "Soon", "Someday", "Leave"],
+                    "items": [
+                        {
+                            "id": "t1",
+                            "text": "Draft Q4 budget",
+                            "note": "commit 3f1c2a \"budget v1\"",
+                            "suggested": "Done",
+                        },
+                        {
+                            "id": "t2",
+                            "text": "Call the plumber",
+                            "note": "carried 2 days",
+                            "suggested": "Soon",
+                        },
+                        { "id": "t3", "text": "Renew passport" },
+                    ],
+                },
+                {
+                    "title": "Reminders",
+                    "choices": ["Done", "Tomorrow 09:00", "Next week", "Drop", "Leave"],
+                    "items": [
+                        { "id": "r1", "text": "Pay rent", "suggested": "Tomorrow 09:00" },
+                    ],
+                },
+            ],
+            "footnote": "Already in your backlog: Fix the bike",
+        })
+    }
+
+    /// The model's own call of the `sort` tool.
+    fn sort_call(id: &'static str, sheet: serde_json::Value) -> acp::SessionUpdate {
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(id, "sort")
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::InProgress)
+                .raw_input(sheet),
+        )
+    }
+
+    /// The `select` the `sort` tool raises to hold the turn.
+    fn sort_request(id: &'static str, call_id: &str) -> acp::SessionUpdate {
+        let title = format!("sort:{call_id}");
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(id, title.clone())
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Pending)
+                .raw_input(json!({ "method": "select", "title": title, "options": ["Apply"] })),
+        )
+    }
+
+    /// Raises `wrap_sheet` through the `sort` tool: the turn is waiting on
+    /// it when this returns.
+    async fn sort_question(setup: &mut Setup) -> Rc<StubAgentConnection> {
+        let connection = Rc::new(StubAgentConnection::new().with_permission_requests(
+            HashMap::from_iter([(acp::ToolCallId::from("pi-ui-1"), choices(&["Apply"]))]),
+        ));
+        let updates = vec![
+            says("Here's what's still open."),
+            sort_call("call_1", wrap_sheet()),
+            sort_request("pi-ui-1", "call_1"),
+        ];
+        start_wrap_today(setup, connection.clone(), None, updates).await;
+        connection
+    }
+
+    fn sheet_lines(setup: &Setup) -> Vec<String> {
+        visible(setup)
+            .lines()
+            .skip_while(|line| !line.starts_with("Where should"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn answers_file(setup: &Setup) -> PathBuf {
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            let session = panel.session.as_ref().expect("a session is open");
+            sort_answers_file(&session.answers_dir, &acp::ToolCallId::from("call_1"))
+        })
+    }
+
+    /// The shipped vim keymap. `vim::MenuSelectNext` lives in the vim crate,
+    /// which this crate doesn't link; it dispatches `menu::SelectNext`.
+    fn bind_vim(setup: &mut Setup) {
+        setup.cx.update(|_, cx| {
+            let bindings =
+                match KeymapFile::load(include_str!("../../../assets/keymaps/vim.json"), cx) {
+                    KeymapFileLoadResult::Success { key_bindings }
+                    | KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => key_bindings,
+                    KeymapFileLoadResult::JsonParseFailure { error } => {
+                        panic!("bad keymap: {error}")
+                    }
+                };
+            cx.bind_keys(bindings);
+            cx.bind_keys([
+                gpui::KeyBinding::new("j", menu::SelectNext, Some("ThockChatPanel && !editing")),
+                gpui::KeyBinding::new(
+                    "k",
+                    menu::SelectPrevious,
+                    Some("ThockChatPanel && !editing"),
+                ),
+            ]);
+        });
+    }
+
+    #[test]
+    fn a_sheet_parses_only_once_the_tool_would_take_it() {
+        let sheet = SortSheet::parse(&wrap_sheet()).expect("a whole sheet");
+        assert_eq!(sheet.rows().len(), 4);
+        assert_eq!(
+            sheet.answers(&HashMap::default()),
+            [Some(0), Some(1), None, Some(1)]
+        );
+        // Arguments still streaming in, and calls the tool refuses.
+        assert_eq!(
+            SortSheet::parse(&json!({ "question": "Where?", "groups": [] })),
+            None
+        );
+        let mut unknown_suggestion = wrap_sheet();
+        unknown_suggestion["groups"][0]["items"][0]["suggested"] = json!("Tomorrow");
+        assert_eq!(SortSheet::parse(&unknown_suggestion), None);
+        let mut repeated_id = wrap_sheet();
+        repeated_id["groups"][1]["items"][0]["id"] = json!("t1");
+        assert_eq!(SortSheet::parse(&repeated_id), None);
+    }
+
+    #[test]
+    fn a_sheet_answers_with_labels_and_counts_them_in_choice_order() {
+        let sheet = SortSheet::parse(&wrap_sheet()).unwrap();
+        assert_eq!(
+            sheet.answers_json(&HashMap::default()),
+            None,
+            "t3 needs you"
+        );
+        let set = HashMap::from_iter([("t3".to_string(), 2), ("r1".to_string(), 0)]);
+        assert_eq!(
+            sheet.answers_json(&set).as_deref(),
+            Some(r#"{"r1":"Done","t1":"Done","t2":"Soon","t3":"Someday"}"#)
+        );
+        assert_eq!(sheet.receipt(&set), "Sorted 4: 2 Done, 1 Soon, 1 Someday");
+    }
+
+    #[test]
+    fn the_answers_file_stays_in_its_folder() {
+        let folder = Path::new("/data/pi/answers");
+        assert_eq!(
+            sort_answers_file(folder, &acp::ToolCallId::from("call_1")),
+            folder.join("call_1.json")
+        );
+        assert_eq!(
+            sort_answers_file(folder, &acp::ToolCallId::from("../call|1")),
+            folder.join("___call_1.json")
+        );
+    }
+
+    #[gpui::test]
+    async fn a_sort_request_shows_the_sheet_with_its_suggestions(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        sort_question(&mut setup).await;
+        assert_eq!(
+            sheet_lines(&setup),
+            [
+                "Where should today's loose ends go?",
+                "TASKS",
+                "▸ Draft Q4 budget · Done",
+                "    commit 3f1c2a \"budget v1\"",
+                "    [Done] Soon Someday Leave",
+                "  Call the plumber · Soon",
+                "    carried 2 days",
+                "  Renew passport · needs you",
+                "REMINDERS",
+                "  Pay rent · Tomorrow 09:00",
+                "Already in your backlog: Fix the bike",
+                "3 set · 1 needs you",
+            ]
+        );
+        // The `sort` call itself is hidden, and no mechanics leak (G5).
+        let text = visible(&setup);
+        assert!(
+            text.starts_with("You started Wrap Today\nHere's what's still open.\nWhere should"),
+            "{text}"
+        );
+        for leak in ["sort", "t1", "r1", "call_1", "{", "pi-ui"] {
+            assert!(!text.contains(leak), "{leak:?} leaked into {text}");
+        }
+        assert_eq!(visible_chips(&setup), ["Done", "Soon", "Someday", "Leave"]);
+        assert!(generating(&setup), "nothing is answered on your behalf");
+        assert_eq!(presence(&setup), Presence::NeedsYou);
+    }
+
+    #[gpui::test]
+    async fn the_row_keys_move_rows_and_the_choice_keys_set_them(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        sort_question(&mut setup).await;
+        bind_vim(&mut setup);
+        let selected_row = |setup: &Setup| {
+            sheet_lines(setup)
+                .into_iter()
+                .find(|line| line.starts_with('▸'))
+                .unwrap_or_default()
+        };
+        setup.cx.simulate_keystrokes("ctrl-? down");
+        assert_eq!(selected_row(&setup), "▸ Call the plumber · Soon");
+        setup.cx.simulate_keystrokes("j");
+        assert_eq!(selected_row(&setup), "▸ Renew passport · needs you");
+        setup.cx.simulate_keystrokes("k up");
+        assert_eq!(selected_row(&setup), "▸ Draft Q4 budget · Done");
+
+        // `l`/`h` and `right`/`left` move the choice along the chips.
+        setup.cx.simulate_keystrokes("l l");
+        assert_eq!(selected_row(&setup), "▸ Draft Q4 budget · Someday");
+        setup.cx.simulate_keystrokes("h left left");
+        assert_eq!(selected_row(&setup), "▸ Draft Q4 budget · Done");
+
+        // A number sets the chip and moves on; the reminders' chips are
+        // their own.
+        setup.cx.simulate_keystrokes("down down 2");
+        assert_eq!(selected_row(&setup), "▸ Pay rent · Tomorrow 09:00");
+        assert!(sheet_lines(&setup).contains(&"  Renew passport · Soon".to_string()));
+        assert_eq!(
+            visible_chips(&setup),
+            ["Done", "Tomorrow 09:00", "Next week", "Drop", "Leave"]
+        );
+        setup.cx.simulate_keystrokes("4");
+        assert_eq!(
+            selected_row(&setup),
+            "▸ Pay rent · Drop",
+            "the last row stays"
+        );
+
+        // `g g` and `shift-g` go to the sheet's first and last rows.
+        setup.cx.simulate_keystrokes("g g");
+        assert_eq!(selected_row(&setup), "▸ Draft Q4 budget · Done");
+        setup.cx.simulate_keystrokes("shift-g");
+        assert_eq!(selected_row(&setup), "▸ Pay rent · Drop");
+        assert!(generating(&setup), "setting rows sends nothing");
+    }
+
+    #[gpui::test]
+    async fn enter_on_a_sheet_that_needs_you_selects_the_row_and_sends_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        let mut setup = setup(cx).await;
+        sort_question(&mut setup).await;
+        setup.cx.simulate_keystrokes("ctrl-? enter");
+        setup.cx.run_until_parked();
+        assert!(
+            sheet_lines(&setup).contains(&"▸ Renew passport · needs you".to_string()),
+            "{:?}",
+            sheet_lines(&setup)
+        );
+        assert!(generating(&setup));
+        assert!(!setup.fs.is_file(&answers_file(&setup)).await);
+    }
+
+    #[gpui::test]
+    async fn enter_writes_the_answers_then_applies_and_leaves_the_receipt(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let editor = open_note(&mut setup).await;
+        sort_question(&mut setup).await;
+        setup.cx.simulate_keystrokes("ctrl-? down down 3 enter");
+        setup.cx.run_until_parked();
+        assert_eq!(
+            setup.fs.load(&answers_file(&setup)).await.unwrap(),
+            r#"{"r1":"Tomorrow 09:00","t1":"Done","t2":"Soon","t3":"Someday"}"#
+        );
+        assert!(!generating(&setup), "Apply was picked and the turn ran on");
+        assert_eq!(
+            visible(&setup),
+            "You started Wrap Today\nHere's what's still open.\n\
+             Sorted 4: 1 Done, 1 Soon, 1 Someday, 1 Tomorrow 09:00"
+        );
+        assert!(visible_chips(&setup).is_empty());
+        assert!(
+            is_focused(&mut setup, &editor),
+            "focus goes back to the note"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_sheet_keeps_its_selection_through_a_vault_file_event(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        sort_question(&mut setup).await;
+        setup.cx.simulate_keystrokes("ctrl-? down down right");
+        let before = sheet_lines(&setup);
+        setup
+            .fs
+            .insert_file(
+                setup.root.join("daily/2026-10-20.md"),
+                b"- [ ] new\n".to_vec(),
+            )
+            .await;
+        setup.cx.run_until_parked();
+        setup.cx.update(|window, _| window.refresh());
+        setup.cx.run_until_parked();
+        assert_eq!(sheet_lines(&setup), before);
+        assert!(
+            before.contains(&"▸ Renew passport · Done".to_string()),
+            "{before:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn escape_folds_a_sheet_and_it_still_waits(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let editor = open_note(&mut setup).await;
+        sort_question(&mut setup).await;
+        setup.cx.simulate_keystrokes("ctrl-? down escape");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Working);
+        assert_eq!(waiting(&setup), Some(Waiting::Question));
+        assert!(is_focused(&mut setup, &editor));
+        assert!(generating(&setup));
+        setup.cx.simulate_keystrokes("ctrl-?");
+        setup.cx.run_until_parked();
+        assert!(
+            sheet_lines(&setup).contains(&"▸ Call the plumber · Soon".to_string()),
+            "the sheet comes back as you left it"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_sheet_waits_for_its_call_when_the_request_comes_first(cx: &mut TestAppContext) {
+        // R1b: pi-acp can send the request before the call's last update.
+        let mut setup = setup(cx).await;
+        let connection = Rc::new(StubAgentConnection::new().with_permission_requests(
+            HashMap::from_iter([(acp::ToolCallId::from("pi-ui-1"), choices(&["Apply"]))]),
+        ));
+        let updates = vec![
+            sort_call(
+                "call_1",
+                json!({ "question": "Where should today's loose ends go?" }),
+            ),
+            sort_request("pi-ui-1", "call_1"),
+        ];
+        let session_id = start_wrap_today(&mut setup, connection.clone(), None, updates).await;
+        assert!(sheet_lines(&setup).is_empty(), "{}", visible(&setup));
+        setup.cx.simulate_keystrokes("ctrl-? enter");
+        setup.cx.run_until_parked();
+        assert!(generating(&setup), "a half sheet can't be applied");
+
+        setup.cx.update(|_, cx| {
+            connection.send_update(
+                session_id,
+                acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                    "call_1",
+                    acp::ToolCallUpdateFields::new().raw_input(wrap_sheet()),
+                )),
+                cx,
+            );
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(
+            sheet_lines(&setup).first().map(String::as_str),
+            Some("Where should today's loose ends go?")
+        );
+    }
+
+    #[gpui::test]
+    async fn what_you_send_shows_at_once_while_the_agent_starts(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let start = |setup: &mut Setup, request: LaunchRequest| {
+            setup.panel.update(&mut setup.cx, |panel, cx| {
+                panel.start_session(request, "key".to_string(), "model".to_string(), cx);
+                panel.visible_text(cx)
+            })
+        };
+        let chat = LaunchRequest {
+            title: "Chat".to_string(),
+            kickoff: Some("What's on today?".to_string()),
+            tier: ModelTier::Default,
+        };
+        assert_eq!(
+            start(&mut setup, chat),
+            "What's on today?\nSetting up the Thock Agent…"
+        );
+
+        // No agent can start in a test: the message goes back to the
+        // composer instead of vanishing.
+        setup.cx.run_until_parked();
+        assert_eq!(visible(&setup), "");
+        let composer = setup.panel.read_with(&setup.cx, |panel, cx| {
+            panel.message_editor.read(cx).text(cx)
+        });
+        assert_eq!(composer, "What's on today?");
+
+        let ritual = LaunchRequest::run_skill(
+            "Wrap Today",
+            "routines/timeline/skills/wrap-today.md",
+            ModelTier::Default,
+        );
+        assert_eq!(
+            start(&mut setup, ritual),
+            "You started Wrap Today\nSetting up the Thock Agent…"
+        );
+        setup.cx.run_until_parked();
     }
 
     #[gpui::test]

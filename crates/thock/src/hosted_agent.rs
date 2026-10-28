@@ -46,8 +46,12 @@ pub const SYSTEM_PROMPT: &str = include_str!("../assets/hosted-agent/SYSTEM.md")
 /// when the model forgets the prompt.
 pub const VAULT_GUARD_EXTENSION: &str = include_str!("../assets/hosted-agent/vault-guard.ts");
 /// The `ask` tool (V44 §5.5): a question with a few short choices, carried
-/// to the chat as chips through pi-acp's extension UI bridge.
+/// to the chat as chips through pi-acp's extension UI bridge. It also holds
+/// `sort` (V47), whose answers come back through [`ANSWERS_DIR`].
 pub const ASK_EXTENSION: &str = include_str!("../assets/hosted-agent/ask.ts");
+/// The folder of Pi's config directory where the chat leaves a `sort`
+/// sheet's answers for the tool to read (V47 §5.2).
+pub const ANSWERS_DIR: &str = "answers";
 
 /// Where the npm packages land, beside Zed's own registry-installed agents.
 pub fn install_dir() -> PathBuf {
@@ -404,6 +408,21 @@ pub async fn write_pi_config(
     fs.atomic_write(extensions.join("ask.ts"), ASK_EXTENSION.to_string())
         .await
         .context("writing the Thock Agent ask tool")?;
+    // Answers a crashed session never read are stale; ids never repeat, so
+    // this is tidiness rather than safety.
+    let answers = dir.join(ANSWERS_DIR);
+    fs.remove_dir(
+        &answers,
+        RemoveOptions {
+            recursive: true,
+            ignore_if_not_exists: true,
+        },
+    )
+    .await
+    .context("clearing the Thock Agent answers")?;
+    fs.create_dir(&answers)
+        .await
+        .with_context(|| format!("creating {}", answers.display()))?;
     let context_path = dir.join("APPEND_SYSTEM.md");
     match vault_context {
         Some(context) => fs
@@ -469,6 +488,8 @@ pub fn launch_command(
 }
 
 /// Everything before the process starts: install, config, environment.
+/// Returns the command and the session's [`ANSWERS_DIR`], so the chat leaves
+/// a sheet's answers exactly where this launch's `sort` tool reads them.
 pub async fn prepare_launch(
     project: &Entity<Project>,
     vault: Option<Vault>,
@@ -476,7 +497,7 @@ pub async fn prepare_launch(
     model_id: &str,
     api_key: &str,
     cx: &mut AsyncApp,
-) -> Result<AgentServerCommand> {
+) -> Result<(AgentServerCommand, PathBuf)> {
     let (node, fs, environment) = project.read_with(cx, |project, cx| {
         (
             project.agent_server_store().read(cx).node_runtime(),
@@ -510,7 +531,8 @@ pub async fn prepare_launch(
         .into_iter()
         .collect();
     env.extend(cx.update(agent_servers::load_proxy_env));
-    launch_command(&harness, &pi_config_dir, api_key, env)
+    let command = launch_command(&harness, &pi_config_dir, api_key, env)?;
+    Ok((command, pi_config_dir.join(ANSWERS_DIR)))
 }
 
 /// Spawns the adapter and completes the ACP handshake. Dropping the returned
@@ -634,6 +656,14 @@ mod tests {
         assert!(ASK_EXTENSION.contains("ctx.ui.select("));
         assert!(!ASK_EXTENSION.contains("ctx.ui.input("));
         assert!(ASK_EXTENSION.contains("export default function"));
+        // V47 §5.2: `sort` holds the turn with a one-option `select` whose
+        // title ties it to the call, and reads its answers from the file the
+        // chat writes.
+        assert!(ASK_EXTENSION.contains("name: \"sort\""));
+        assert!(ASK_EXTENSION.contains("ctx.ui.select(`sort:${toolCallId}`, [SORT_APPLY])"));
+        assert!(ASK_EXTENSION.contains("join(getAgentDir(), \"answers\""));
+        assert!(ASK_EXTENSION.contains("pi.registerTool(sortTool)"));
+        assert!(SYSTEM_PROMPT.contains("`sort`"));
     }
 
     #[test]
@@ -657,17 +687,48 @@ mod tests {
     }
 
     #[test]
-    fn wrap_today_asks_its_choices_with_the_ask_tool() {
+    fn wrap_today_sorts_its_loose_ends_in_one_sheet() {
         let skill = include_str!("../assets/routines/timeline/skills/wrap-today.md");
         for expected in [
-            "`ask` tool",
-            "**Tick it** and **Not yet**",
-            "**All of them**",
-            "**Let me pick**",
-            "**Soon**, **Someday** and **Leave it**",
+            "`sort` tool",
+            "**Tasks**",
+            "**Done**, **Soon**, **Someday**, **Leave**",
+            "**Reminders**",
+            "**Done**, **Tomorrow 09:00**, **Next week**, **Drop**, **Leave**",
+            "**If you have no `sort` tool, skip this step**",
+            "Already in your backlog:",
         ] {
             assert!(skill.contains(expected), "Wrap Today must say {expected}");
         }
+        for gone in [
+            "**Let me pick**",
+            "**Tick it**",
+            "**All of them**",
+            "Pick a date",
+        ] {
+            assert!(
+                !skill.contains(gone),
+                "Wrap Today must no longer say {gone}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn writing_the_config_empties_the_answers_folder(cx: &mut gpui::TestAppContext) {
+        let fake_fs = fs::FakeFs::new(cx.background_executor.clone());
+        let fs: Arc<dyn Fs> = fake_fs.clone();
+        let dir = write_pi_config(&fs, ModelTier::Default, "model", None, None)
+            .await
+            .unwrap();
+        let stale = dir.join(ANSWERS_DIR).join("call_1.json");
+        fs.atomic_write(stale.clone(), "{}".to_string())
+            .await
+            .unwrap();
+        write_pi_config(&fs, ModelTier::Default, "model", None, None)
+            .await
+            .unwrap();
+        assert!(fs.is_dir(&dir.join(ANSWERS_DIR)).await);
+        assert!(!fs.is_file(&stale).await);
     }
 
     fn vault_at(root: &str) -> Vault {
