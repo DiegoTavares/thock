@@ -27,9 +27,9 @@ use editor::{
 };
 use gpui::{
     Action, AnyWindowHandle, App, Bounds, Context, Entity, EntityId, FocusHandle, Focusable,
-    FontFeatures, FontWeight, HighlightStyle, KeyContext, Pixels, PromptLevel, ScrollHandle,
-    SharedString, Subscription, Task, TextStyleRefinement, UnderlineStyle, WeakEntity, Window,
-    actions, div, point, px, relative, size,
+    FontFeatures, FontWeight, HighlightStyle, KeyContext, Pixels, ScrollHandle, SharedString,
+    Subscription, Task, TextStyleRefinement, UnderlineStyle, WeakEntity, Window, actions, div,
+    point, px, relative, size,
 };
 use language::language_settings::SoftWrap;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
@@ -47,7 +47,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use text::{Bias, Point};
 use ui::prelude::*;
-use ui::{KeyBinding, Label, ProgressBar, SpinnerLabel, Tooltip};
+use ui::{IconButton, KeyBinding, Label, ProgressBar, SpinnerLabel, Tooltip};
 use util::ResultExt as _;
 use workspace::{OpenOptions, OpenVisible, Workspace, WorkspaceSettings};
 
@@ -516,7 +516,10 @@ struct ChatSession {
     thread: Entity<AcpThread>,
     /// Kept alive for the session: dropping the last handle ends the agent
     /// process.
-    _connection: Rc<dyn AgentConnection>,
+    connection: Rc<dyn AgentConnection>,
+    /// The model tier the process was launched with; a new chat reuses the
+    /// process only when it runs the conversation tier.
+    tier: ModelTier,
     turns: u32,
     max_turns: u32,
     /// V26 §5.5: per-call failures are invisible, but a turn that could not
@@ -2395,7 +2398,8 @@ impl ChatPanel {
         self.session = Some(ChatSession {
             title: request.title.clone().into(),
             thread,
-            _connection: connection,
+            connection,
+            tier: request.tier,
             turns: 0,
             max_turns,
             turn_failure: None,
@@ -2757,35 +2761,77 @@ impl ChatPanel {
         }
     }
 
-    /// Asks before setting aside a conversation that has something in it.
+    /// Clears the conversation without folding the thread or ending the
+    /// agent: the running process starts a fresh session, so nothing said
+    /// before carries over.
     fn new_chat(&mut self, _: &NewChat, window: &mut Window, cx: &mut Context<Self>) {
-        let has_transcript = self
+        self.open_thread(window, cx);
+        let request = LaunchRequest::conversation();
+        let has_allowance = self
+            .entitlement()
+            .is_some_and(|entitlement| !entitlement.is_exhausted());
+        let connection = self
             .session
             .as_ref()
-            .is_some_and(|session| !session.thread.read(cx).entries().is_empty());
-        if !has_transcript {
-            self.start_new_chat(window, cx);
-            return;
+            .filter(|session| session.tier == request.tier && has_allowance)
+            .map(|session| session.connection.clone());
+        match connection {
+            Some(connection) => self.restart_session(request, connection, window, cx),
+            None => self.launch(request, window, cx),
         }
-        let answer = window.prompt(
-            PromptLevel::Info,
-            "Start a new chat?",
-            Some("This conversation closes and Thock starts fresh."),
-            &["Start New Chat", "Cancel"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await? == 0 {
-                this.update_in(cx, |this, window, cx| this.start_new_chat(window, cx))?;
-            }
-            anyhow::Ok(())
-        })
-        .detach_and_log_err(cx);
     }
 
-    fn start_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_thread(window, cx);
-        self.launch(LaunchRequest::conversation(), window, cx);
+    fn restart_session(
+        &mut self,
+        request: LaunchRequest,
+        connection: Rc<dyn AgentConnection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(previous) = self.session.take() {
+            let session_id = previous.thread.read(cx).session_id().clone();
+            previous
+                .thread
+                .update(cx, |thread, cx| thread.cancel(cx))
+                .detach();
+            if connection.supports_close_session() {
+                connection
+                    .clone()
+                    .close_session(&session_id, cx)
+                    .detach_and_log_err(cx);
+            }
+        }
+        self.reset_transcript_state();
+        crate::history::checkpoint_before_ai_write(&self.project, cx);
+        self.note_session_for_memory_nudge(cx);
+        self.starting = Some("Starting a new chat…".into());
+        self.view = PanelView::Chat;
+        cx.notify();
+
+        let max_turns = self
+            .entitlement()
+            .map(|entitlement| entitlement.limits.max_turns_per_session)
+            .unwrap_or(0);
+        let work_dirs = self.project.read(cx).default_path_list(cx);
+        let new_session = connection
+            .clone()
+            .new_session(self.project.clone(), work_dirs, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let started = new_session.await;
+            this.update_in(cx, |this, window, cx| {
+                this.starting = None;
+                match started {
+                    Ok(thread) => {
+                        this.attach_session(request, connection, thread, max_turns, window, cx)
+                    }
+                    Err(error) => {
+                        this.show_error(format!("Couldn't start a new chat: {error:#}"), cx)
+                    }
+                }
+                cx.notify();
+            })
+        })
+        .detach_and_log_err(cx);
     }
 
     fn focus_input(&mut self, _: &FocusChatInput, window: &mut Window, cx: &mut Context<Self>) {
@@ -4429,6 +4475,16 @@ impl ChatPanel {
                     gpui::linear_color_stop(page.opacity(0.), 1.),
                 ),
             ))
+            .child(
+                div().absolute().top_2().right_1().child(
+                    IconButton::new("thock-chat-new", IconName::Plus)
+                        .icon_size(IconSize::Small)
+                        .tooltip(Tooltip::for_action_title("New Chat", &NewChat))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.new_chat(&NewChat, window, cx)),
+                        ),
+                ),
+            )
             .into_any_element()
     }
 
@@ -5896,41 +5952,43 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_new_chat_key_asks_before_closing_a_conversation(cx: &mut TestAppContext) {
+    async fn the_new_chat_key_clears_the_conversation_on_the_running_agent(
+        cx: &mut TestAppContext,
+    ) {
         let mut setup = setup(cx).await;
+        connect(&mut setup);
         let connection = Rc::new(StubAgentConnection::new());
-        start_wrap_today(&mut setup, connection, None, vec![says("Seven of eleven.")]).await;
+        let first_session = start_wrap_today(
+            &mut setup,
+            connection.clone(),
+            None,
+            vec![says("Seven of eleven.")],
+        )
+        .await;
         setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
             panel.open_thread(window, cx);
             window.focus(&panel.message_editor.focus_handle(cx), cx);
         });
         setup.cx.run_until_parked();
-        let composer = setup
-            .panel
-            .read_with(&setup.cx, |panel, _| panel.message_editor.clone());
-        assert!(is_focused(&mut setup, &composer));
-
-        setup.cx.simulate_keystrokes("ctrl-n");
-        setup.cx.run_until_parked();
-        assert!(setup.cx.has_pending_prompt(), "it asks first");
-        setup.cx.simulate_prompt_answer("Cancel");
-        setup.cx.run_until_parked();
-        let pending_launch = |setup: &Setup| {
-            setup
-                .panel
-                .read_with(&setup.cx, |panel, _| panel.pending_launch.is_some())
-        };
-        assert!(!pending_launch(&setup), "cancel keeps the conversation");
         assert_eq!(visible(&setup), "You started Wrap Today\nSeven of eleven.");
 
         setup.cx.simulate_keystrokes("ctrl-n");
         setup.cx.run_until_parked();
-        setup.cx.simulate_prompt_answer("Start New Chat");
-        setup.cx.run_until_parked();
-        assert!(
-            pending_launch(&setup),
-            "a new chat launches, waiting on the connection"
-        );
+        assert!(!setup.cx.has_pending_prompt(), "it doesn't ask");
+        assert_eq!(presence(&setup), Presence::Talking, "the thread stays open");
+        assert_eq!(visible(&setup), "");
+        setup.panel.read_with(&setup.cx, |panel, cx| {
+            let session = panel.session.as_ref().expect("a fresh session");
+            assert_ne!(session.thread.read(cx).session_id(), &first_session);
+            assert!(
+                Rc::ptr_eq(
+                    &(session.connection.clone().into_any()),
+                    &(connection.clone().into_any())
+                ),
+                "the same agent process carries the new chat"
+            );
+            assert!(panel.pending_launch.is_none());
+        });
     }
 
     #[gpui::test]

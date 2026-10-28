@@ -363,7 +363,10 @@ first turn.
 - **Stop.** The typing bubble shows a stop button on hover and focus, and `cmd-.` / `ctrl-.` in the
   chat runs `thock::StopChatTurn`. `escape` no longer stops a turn, because it now means "back to the
   page".
-- **New chat.** `o` in the thread, or `thock::NewChat`, starts a fresh thread under a new day mark.
+- **New chat.** The **+** button at the top of the thread, `o` in the thread, or `thock::NewChat`
+  clears the conversation without asking: the thread stays open and the running agent starts a fresh
+  session, so nothing said before carries over. The process restarts only when none is running or it
+  was launched on another model tier.
 - **BYO mode.** When the workspace uses its own agent (`hosted_mode_active` is false), the pebble is
   hidden and nothing in this spec applies.
 
@@ -387,8 +390,8 @@ choice is pending and `choice_pair` when it has exactly two options.
 | `alt-enter`, `g space` | `OpenChatEntry` | chat | Opens the selected row's note, or the quoted line, at its line |
 | `cmd-.` / `ctrl-.` | `StopChatTurn` | chat, including the composer | new binding, under both `ThockChatPanel` and `ThockChatPanel > Editor`, where it shadows `editor::ToggleCodeActions` |
 | `r` | `RetryChatTurn` | chat, after a failure | new binding |
-| `cmd-n` / `ctrl-n` | `NewChat` | chat, including the composer | new binding, under both `ThockChatPanel` and `ThockChatPanel > Editor`, where Linux's context-free `menu::SelectNext` would shadow it. Asks before closing a conversation that has anything in it |
-| `o` | `NewChat` | thread, not editing | as V26, with the same question |
+| `cmd-n` / `ctrl-n` | `NewChat` | chat, including the composer | new binding, under both `ThockChatPanel` and `ThockChatPanel > Editor`, where Linux's context-free `menu::SelectNext` would shadow it. Clears the conversation without asking |
+| `o` | `NewChat` | thread, not editing | as V26 |
 
 Every new action has a doc comment written for a note-taker, so it reads well in the command
 palette. Keymap changes land in `default-macos.json`, `default-linux.json` and `vim.json` together.
