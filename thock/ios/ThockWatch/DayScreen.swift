@@ -14,13 +14,6 @@ struct DayScreen: View {
                 header
                     .listRowBackground(Color.clear)
                 content
-                Button {
-                    model.startCapture(voice: true)
-                } label: {
-                    Label("Capture", systemImage: "mic.fill")
-                        .foregroundStyle(WatchTheme.amber)
-                }
-                .accessibilityLabel("Capture by voice")
                 if model.outbox.waitingCount > 0 {
                     Button {
                         model.showingOutbox = true
@@ -35,6 +28,17 @@ struct DayScreen: View {
                 guard abs(value.translation.width) > abs(value.translation.height) * 2 else { return }
                 move(value.translation.width < 0 ? 1 : -1)
             })
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        model.startCapture(voice: true)
+                    } label: {
+                        Image(systemName: "mic.fill")
+                            .foregroundStyle(WatchTheme.amber)
+                    }
+                    .accessibilityLabel("Capture")
+                }
+            }
             .navigationDestination(isPresented: $model.showingOutbox) {
                 OutboxScreen()
             }

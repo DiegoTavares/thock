@@ -332,7 +332,8 @@ the user said is never lost and is written nowhere until saved.
 - **No note:** *Nothing planned*, above any reminders for that day. A vault with no planner heading
   or without the Timeline routine is the same empty state, never an error.
 - **Freshness:** *As of 13:04* under the title when the snapshot is more than ten minutes old.
-- **The mic:** a button at the bottom of the list starts capture with dictation (§8.1).
+- **The mic:** a mic glyph in the accent at the top left of the navigation bar (a `.topBarLeading`
+  toolbar item, labelled *Capture* for VoiceOver) starts capture with dictation (§8.1).
 - **Opening:** `thock://day/today` from the timeline, and the app's last screen otherwise.
 
 ## 10. Reminders on the wrist
