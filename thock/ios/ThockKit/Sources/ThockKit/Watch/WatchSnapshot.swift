@@ -159,7 +159,7 @@ enum WatchRequestError: Error {
 // MARK: The timeline (§7.3)
 
 /// What the Today complication draws at one moment.
-public struct TimelineEntry: Hashable, Sendable {
+public struct WatchTimelineEntry: Hashable, Sendable {
     public var date: Date
     /// Minutes after midnight where the five-hour track starts.
     public var windowStart: Int
@@ -185,16 +185,16 @@ public enum TimelineEntries {
 
     /// One entry now and one on every quarter hour after it to midnight, so
     /// the window and the header move without a reload.
-    public static func entries(rows: [WatchRow], today: VaultDay, now: Date, calendar: Calendar = .current) -> [TimelineEntry] {
+    public static func entries(rows: [WatchRow], today: VaultDay, now: Date, calendar: Calendar = .current) -> [WatchTimelineEntry] {
         guard let midnight = calendar.date(from: DateComponents(year: today.year, month: today.month, day: today.day)) else { return [] }
         let open = rows.filter { !$0.done && $0.kind != .calendar }
         let left = open.count
         let anytime = open.filter { $0.start == nil }.count
-        var entries: [TimelineEntry] = []
+        var entries: [WatchTimelineEntry] = []
         var minute = max(0, Int(now.timeIntervalSince(midnight) / 60))
         var date = now
         while minute < 24 * 60, entries.count < 96 {
-            entries.append(TimelineEntry(date: date, windowStart: minute / 30 * 30, next: next(rows, at: minute), left: left, anytime: anytime))
+            entries.append(WatchTimelineEntry(date: date, windowStart: minute / 30 * 30, next: next(rows, at: minute), left: left, anytime: anytime))
             minute = (minute / step + 1) * step
             date = midnight.addingTimeInterval(TimeInterval(minute * 60))
         }

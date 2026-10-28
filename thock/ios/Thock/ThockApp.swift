@@ -60,6 +60,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // Set before launch ends, so an answer that launched the app arrives.
         UNUserNotificationCenter.current().delegate = AppDelegate.notifier
         AppDelegate.notifier.registerCategories(ReminderSettings())
+        // So is a watch request that launched it (V48 §6.2).
+        WatchLink.shared.activate()
         return true
     }
 
