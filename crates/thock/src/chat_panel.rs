@@ -3033,13 +3033,15 @@ impl ChatPanel {
         let has_allowance = self
             .entitlement()
             .is_some_and(|entitlement| !entitlement.is_exhausted());
-        let connection = self
+        let running = self
             .session
             .as_ref()
             .filter(|session| session.tier == request.tier && has_allowance)
-            .map(|session| session.connection.clone());
-        match connection {
-            Some(connection) => self.restart_session(request, connection, window, cx),
+            .map(|session| (session.connection.clone(), session.answers_dir.clone()));
+        match running {
+            Some((connection, answers_dir)) => {
+                self.restart_session(request, connection, answers_dir, window, cx)
+            }
             None => self.launch(request, window, cx),
         }
     }
@@ -3048,6 +3050,7 @@ impl ChatPanel {
         &mut self,
         request: LaunchRequest,
         connection: Rc<dyn AgentConnection>,
+        answers_dir: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3084,9 +3087,15 @@ impl ChatPanel {
             this.update_in(cx, |this, window, cx| {
                 this.starting = None;
                 match started {
-                    Ok(thread) => {
-                        this.attach_session(request, connection, thread, max_turns, window, cx)
-                    }
+                    Ok(thread) => this.attach_session(
+                        request,
+                        connection,
+                        thread,
+                        answers_dir,
+                        max_turns,
+                        window,
+                        cx,
+                    ),
                     Err(error) => {
                         this.show_error(format!("Couldn't start a new chat: {error:#}"), cx)
                     }
