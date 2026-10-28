@@ -18,7 +18,8 @@ struct ThockWatchWidgetBundle: WidgetBundle {
 
 struct TodayEntry: TimelineEntry {
     enum Content {
-        /// No snapshot yet, or the phone is not connected.
+        /// No snapshot yet, the phone is not connected, or the snapshot is too
+        /// old to hold today: the phone has not been opened in over a week.
         case notConnected
         case day(VaultDay, rows: [WatchRow], moment: WatchTimelineEntry)
     }
@@ -36,7 +37,7 @@ struct TodayProvider: TimelineProvider {
             WatchRow(hash: "3", ordinal: 0, kind: .reminder, start: 14 * 60, label: "Dentist"),
         ]
         let moment = TimelineEntries.entries(rows: rows, today: .today(), now: now).first
-            ?? WatchTimelineEntry(date: now, windowStart: 0, next: nil, left: 0, anytime: 0)
+            ?? WatchTimelineEntry(date: now, minute: 0, windowStart: 0, next: nil, left: 0, anytime: 0)
         return TodayEntry(date: now, content: .day(.today(), rows: rows, moment: moment))
     }
 
@@ -56,11 +57,11 @@ struct TodayProvider: TimelineProvider {
     /// header move without a reload (§7.3).
     func entries(now: Date) -> [TodayEntry] {
         let snapshot = WatchFiles(folder: WatchEnvironment.container).snapshot()
-        guard let snapshot, snapshot.state != .notConnected else {
-            return [TodayEntry(date: now, content: .notConnected)]
-        }
         // The watch's date: a snapshot from before midnight still holds it.
         let today = VaultDay(now)
+        guard let snapshot, snapshot.state != .notConnected, snapshot.covers(today) else {
+            return [TodayEntry(date: now, content: .notConnected)]
+        }
         let rows = snapshot.day(today)?.rows ?? []
         return TimelineEntries.entries(rows: rows, today: today, now: now).map { moment in
             TodayEntry(date: moment.date, content: .day(today, rows: rows, moment: moment))
@@ -172,8 +173,7 @@ struct TimelineTrack: View {
             let start = moment.windowStart
             let span = CGFloat(TimelineEntries.windowMinutes)
             let x = { (minute: Int) in CGFloat(minute - start) / span * width }
-            let now = Calendar.current.dateComponents([.hour, .minute], from: moment.date)
-            let nowMinute = (now.hour ?? 0) * 60 + (now.minute ?? 0)
+            let nowMinute = moment.minute
             ZStack(alignment: .topLeading) {
                 Rectangle()
                     .fill(.secondary.opacity(0.3))

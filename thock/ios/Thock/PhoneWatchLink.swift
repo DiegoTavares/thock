@@ -6,8 +6,8 @@ import WatchConnectivity
 /// the watch's requests and answers them. The watch never sees the vault;
 /// every request runs through `AppModel.receive`, the phone's own calls.
 @MainActor
-final class WatchLink: NSObject {
-    static let shared = WatchLink()
+final class PhoneWatchLink: NSObject {
+    static let shared = PhoneWatchLink()
 
     /// The snapshot last handed over, without its instant, so a store change
     /// that changes nothing the watch draws sends nothing.
@@ -28,7 +28,9 @@ final class WatchLink: NSObject {
         session.activate()
     }
 
-    private var canSend: Bool {
+    /// Whether a watch with the app is there to send to; nothing is built
+    /// for it otherwise.
+    var canSend: Bool {
         guard let session, session.activationState == .activated else { return false }
         return session.isPaired && session.isWatchAppInstalled
     }
@@ -113,7 +115,7 @@ private struct ReplyHandler: @unchecked Sendable {
     let call: ([String: Any]) -> Void
 }
 
-extension WatchLink: WCSessionDelegate {
+extension PhoneWatchLink: WCSessionDelegate {
     nonisolated func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         if let error {
             NSLog("Thock could not reach the watch: \(error)")

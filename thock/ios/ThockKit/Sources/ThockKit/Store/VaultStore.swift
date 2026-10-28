@@ -612,9 +612,10 @@ public final class VaultStore: @unchecked Sendable {
     // MARK: The watch
 
     /// What the phone answered a watch request with, when it has handled it.
-    public func watchRequest(id: UUID) -> WatchAck? {
-        locked {
-            guard let row = (try? database.query("SELECT outcome, message FROM watch_requests WHERE id = ?", [.text(id.uuidString)]))?.first,
+    /// Throws when the store cannot say, which is not the same as "never".
+    public func watchRequest(id: UUID) throws -> WatchAck? {
+        try locked {
+            guard let row = try database.query("SELECT outcome, message FROM watch_requests WHERE id = ?", [.text(id.uuidString)]).first,
                   let outcome = row[0].string.flatMap(WatchAck.Outcome.init(rawValue:))
             else { return nil }
             return WatchAck(id: id, outcome: outcome, message: row[1].string)

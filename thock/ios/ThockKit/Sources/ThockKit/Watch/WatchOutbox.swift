@@ -137,6 +137,20 @@ public struct WatchOutbox: Codable, Equatable, Sendable {
         return items[position]
     }
 
+    /// Takes back the transferred mark of every waiting request the system
+    /// no longer holds for delivery: it was delivered and its answer is
+    /// late, or it was lost. Either way it may go again, since the phone
+    /// answers a repeat without writing. Returns whether anything changed.
+    @discardableResult
+    public mutating func reconcile(outstanding: Set<UUID>) -> Bool {
+        var changed = false
+        for position in items.indices where items[position].transferred && items[position].state == .waiting && !outstanding.contains(items[position].id) {
+            items[position].transferred = false
+            changed = true
+        }
+        return changed
+    }
+
     public mutating func delete(_ id: UUID) {
         items.removeAll { $0.id == id }
     }

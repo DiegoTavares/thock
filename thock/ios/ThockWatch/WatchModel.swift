@@ -137,6 +137,11 @@ final class WatchModel {
         outbox.items.first { $0.id == id }?.state
     }
 
+    func reconcileTransfers(outstanding: Set<UUID>) {
+        guard outbox.reconcile(outstanding: outstanding) else { return }
+        persist()
+    }
+
     func isWaiting(_ id: UUID) -> Bool {
         outbox.items.contains { $0.id == id && $0.state == .waiting }
     }
@@ -191,6 +196,13 @@ final class WatchModel {
 
     func asking(_ day: VaultDay) -> Bool {
         askingDays.contains(day.iso)
+    }
+
+    /// The phone is back in reach: what waited goes, and a day on screen
+    /// that only the phone can read is asked for.
+    func phoneInReach() {
+        resendWaiting()
+        ask(day)
     }
 
     func dayAskFailed(_ day: String) {
@@ -351,29 +363,13 @@ final class WatchModel {
 
     /// The phone's toast, word for word.
     func toast(for chip: CaptureDestination, due: ReminderDue?) -> String {
-        switch chip {
-        case .inbox: return "Saved to your inbox"
-        case .today: return "Added to today"
-        case .backlog: return "Added to Backlog · Soon"
-        case .reminder:
-            return due.map { $0.ringsSentence(today: today, now: .now(), dateOnlyAt: settings.dateOnlyAt) } ?? "Reminder saved"
-        }
+        chip.savedSentence(due: due, today: today, now: .now(), dateOnlyAt: settings.dateOnlyAt)
     }
 
-    /// The phone's hint under the chips (V48 §8.2).
+    /// The phone's hint under the chips (V48 §8.2). A watch capture is
+    /// always one paragraph.
     func hint(for draft: WatchOutbox.Draft) -> String {
-        switch draft.chip {
-        case .inbox: return "Lands in your inbox. Triage sorts it at the desk."
-        case .today: return "One line joins today's plan."
-        case .backlog: return "Goes under Soon in your backlog."
-        case .reminder:
-            let settings = settings
-            guard let due = draft.reminderDue else { return "Rings when you choose and waits in \(settings.index)." }
-            guard due.stillRings(today: today, now: .now(), dateOnlyAt: settings.dateOnlyAt) else {
-                return "Waits in Today, in \(settings.index)."
-            }
-            return "\(due.ringsSentence(today: today, now: .now(), dateOnlyAt: settings.dateOnlyAt)) and waits in \(settings.index)."
-        }
+        draft.chip.hint(due: draft.reminderDue, settings: settings, today: today, now: .now(), oneParagraph: true)
     }
 
     // MARK: Opening
@@ -535,6 +531,13 @@ extension WatchConnection: WCSessionDelegate {
             if !context.dictionary.isEmpty {
                 self.received(context.dictionary)
             }
+            // A transfer the system no longer holds (a re-pair, a
+            // reinstall) and the phone never answered goes again; the phone
+            // answers a request it already has without writing it twice.
+            let outstanding = Set(session.outstandingUserInfoTransfers.compactMap { transfer in
+                (try? WatchMessage(dictionary: transfer.userInfo))?.requestID
+            })
+            self.model.reconcileTransfers(outstanding: outstanding)
             self.model.resendWaiting()
             self.finishRefreshesIfIdle()
         }
@@ -542,7 +545,7 @@ extension WatchConnection: WCSessionDelegate {
 
     nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
         guard session.isReachable else { return }
-        Task { @MainActor in self.model.resendWaiting() }
+        Task { @MainActor in self.model.phoneInReach() }
     }
 
     nonisolated func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {

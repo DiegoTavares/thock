@@ -61,7 +61,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         UNUserNotificationCenter.current().delegate = AppDelegate.notifier
         AppDelegate.notifier.registerCategories(ReminderSettings())
         // So is a watch request that launched it (V48 §6.2).
-        WatchLink.shared.activate()
+        PhoneWatchLink.shared.activate()
         return true
     }
 

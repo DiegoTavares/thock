@@ -160,14 +160,3 @@ struct SavedView: View {
         }
     }
 }
-
-extension CaptureDestination {
-    var title: String {
-        switch self {
-        case .today: return "Today"
-        case .inbox: return "Inbox"
-        case .backlog: return "Backlog"
-        case .reminder: return "Reminder"
-        }
-    }
-}

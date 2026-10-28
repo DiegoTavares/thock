@@ -1,3 +1,4 @@
+import SQLite3
 import XCTest
 @testable import ThockKit
 
@@ -269,8 +270,8 @@ final class WatchTests: XCTestCase {
         try session.store.recordWatchRequest(old, at: now.addingTimeInterval(-31 * 24 * 3600))
         try session.store.recordWatchRequest(recent, at: now.addingTimeInterval(-29 * 24 * 3600))
         _ = session.receive(.capture(WatchCapture(at: now, text: "Buy stamps", destination: .inbox)), now: now)
-        XCTAssertNil(session.store.watchRequest(id: old.id))
-        XCTAssertEqual(session.store.watchRequest(id: recent.id), recent)
+        XCTAssertNil(try session.store.watchRequest(id: old.id))
+        XCTAssertEqual(try session.store.watchRequest(id: recent.id), recent)
     }
 
     // MARK: Ticks
@@ -427,6 +428,118 @@ final class WatchTests: XCTestCase {
         let snapshot = try vault(["daily/2026-10-21.md": todayNote]).watchSnapshot(now: now)
         try files.save(snapshot)
         XCTAssertEqual(files.snapshot(), snapshot)
+    }
+
+    // MARK: Review fixes
+
+    func testAReminderThatChangedIsRefusedAsAChangedLine() {
+        XCTAssertEqual(VaultSession.refusal(for: VaultSessionError.reminderChanged), "That line changed. Look again.")
+        XCTAssertEqual(VaultSession.refusal(for: VaultSessionError.lineChanged), "That line changed. Look again.")
+        XCTAssertEqual(VaultSession.refusal(for: VaultSessionError.readOnly), "Thock Plus has ended. Captures are paused.")
+        XCTAssertEqual(VaultSession.refusal(for: VaultSessionError.notConnected), "That didn't save. Try again.")
+    }
+
+    func testARequestTheStoreCannotLookUpIsRefusedAndNotWritten() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("vault.sqlite")
+        let store = try VaultStore(url: url)
+        store.setMeta("vault_id", "vault")
+        store.setMeta("device_id", "c41a9e0d7b2f4a61")
+        let session = VaultSession(store: store, calendar: calendar)
+        // Another connection breaks the table under the store.
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &handle), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(handle, "DROP TABLE watch_requests", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(handle)
+        XCTAssertThrowsError(try store.watchRequest(id: UUID()))
+        let request = WatchCapture(at: now, text: "Buy stamps", destination: .inbox)
+        let (reply, wrote) = session.handle(.capture(request), now: now)
+        XCTAssertEqual(reply, .ack(WatchAck(id: request.id, outcome: .refused, message: "That didn't save. Try again.")))
+        XCTAssertFalse(wrote)
+        XCTAssertTrue(store.pending().isEmpty)
+    }
+
+    func testHandleSaysWhetherADeliveryWrote() throws {
+        let session = try vault(["daily/2026-10-21.md": todayNote])
+        let request = WatchMessage.capture(WatchCapture(at: now, text: "Buy stamps", destination: .inbox))
+        XCTAssertTrue(session.handle(request, now: now).wrote)
+        XCTAssertFalse(session.handle(request, now: now).wrote, "a repeat writes nothing")
+        XCTAssertFalse(session.handle(.dayAsk(WatchDayAsk(day: today.iso)), now: now).wrote)
+    }
+
+    var newYork: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/New_York") ?? .gmt
+        return calendar
+    }
+
+    func testEntriesFollowTheWallClockWhenTheClocksGoForward() throws {
+        // Sunday 8 March 2026: 02:00 does not happen in New York.
+        let calendar = newYork
+        let day = VaultDay(year: 2026, month: 3, day: 8)
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 3, day: 8, hour: 1, minute: 20)))
+        let entries = TimelineEntries.entries(rows: [], today: day, now: now, calendar: calendar)
+        XCTAssertEqual(entries.first?.minute, 80)
+        XCTAssertEqual(entries.first?.windowStart, 60)
+        XCTAssertFalse(entries.contains { (120..<180).contains($0.minute) }, "no entry for an hour that does not exist")
+        for entry in entries {
+            let parts = calendar.dateComponents([.hour, .minute], from: entry.date)
+            if entry.date != now {
+                XCTAssertEqual((parts.hour ?? 0) * 60 + (parts.minute ?? 0), entry.minute, "the date is the minute's wall-clock time")
+            }
+        }
+        let afternoon = try XCTUnwrap(entries.first { $0.minute == 14 * 60 })
+        XCTAssertEqual(calendar.component(.hour, from: afternoon.date), 14)
+        XCTAssertEqual(entries.last?.minute, 23 * 60 + 45)
+        XCTAssertTrue(zip(entries, entries.dropFirst()).allSatisfy { $0.date < $1.date })
+    }
+
+    func testEntriesFollowTheWallClockWhenTheClocksGoBack() throws {
+        // Sunday 1 November 2026: 01:00 to 02:00 happens twice in New York.
+        let calendar = newYork
+        let day = VaultDay(year: 2026, month: 11, day: 1)
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 1, hour: 0, minute: 0)))
+        let entries = TimelineEntries.entries(rows: [], today: day, now: now, calendar: calendar)
+        XCTAssertEqual(entries.count, 96)
+        let afternoon = try XCTUnwrap(entries.first { $0.minute == 14 * 60 })
+        XCTAssertEqual(calendar.component(.hour, from: afternoon.date), 14)
+        XCTAssertEqual(afternoon.windowStart, 14 * 60)
+        XCTAssertTrue(zip(entries, entries.dropFirst()).allSatisfy { $0.date < $1.date })
+    }
+
+    func testReconcileLetsALostTransferGoAgain() {
+        var outbox = WatchOutbox()
+        let lost = WatchCapture(at: now, text: "Lost", destination: .inbox)
+        let held = WatchCapture(at: now, text: "Held", destination: .inbox)
+        let refused = WatchCapture(at: now, text: "Refused", destination: .inbox)
+        for capture in [lost, held, refused] {
+            outbox.add(.capture(capture))
+        }
+        for position in outbox.items.indices {
+            outbox.items[position].transferred = true
+        }
+        outbox.apply(WatchAck(id: refused.id, outcome: .refused, message: "No"))
+        XCTAssertTrue(outbox.reconcile(outstanding: [held.id]))
+        XCTAssertEqual(outbox.items.map(\.transferred), [false, true, true])
+        XCTAssertFalse(outbox.reconcile(outstanding: [held.id]), "nothing more to change")
+    }
+
+    func testThePhoneAndTheWatchSayTheSameWords() {
+        let settings = ReminderSettings()
+        let clock = ClockTime(clampingHour: 14, minute: 5)
+        XCTAssertEqual(CaptureDestination.today.hint(due: nil, settings: settings, today: today, now: clock), "One line joins today's plan. More than one lands in today's note as written.")
+        XCTAssertEqual(CaptureDestination.today.hint(due: nil, settings: settings, today: today, now: clock, oneParagraph: true), "One line joins today's plan.")
+        XCTAssertEqual(CaptureDestination.inbox.hint(due: nil, settings: settings, today: today, now: clock), "Lands in your inbox. Triage sorts it at the desk.")
+        XCTAssertEqual(CaptureDestination.backlog.hint(due: nil, settings: settings, today: today, now: clock), "Goes under Soon in your backlog.")
+        let tomorrow = ReminderDue(date: today.adding(days: 1), time: ClockTime(hour: 9, minute: 0))
+        XCTAssertEqual(CaptureDestination.reminder.hint(due: tomorrow, settings: settings, today: today, now: clock), "Rings tomorrow at 09:00 and waits in reminders.md.")
+        XCTAssertEqual(CaptureDestination.reminder.hint(due: nil, settings: settings, today: today, now: clock), "Rings when you choose and waits in reminders.md.")
+        XCTAssertEqual(CaptureDestination.reminder.hint(due: ReminderDue(date: today, time: nil), settings: settings, today: today, now: clock), "Waits in Today, in reminders.md.")
+        XCTAssertEqual(CaptureDestination.allCases.map { $0.savedSentence(due: tomorrow, today: today, now: clock, dateOnlyAt: settings.dateOnlyAt) },
+                       ["Added to today", "Saved to your inbox", "Added to Backlog · Soon", "Rings tomorrow at 09:00"])
+        XCTAssertEqual(CaptureDestination.allCases.map(\.title), ["Today", "Inbox", "Backlog", "Reminder"])
     }
 
     // MARK: Saying when

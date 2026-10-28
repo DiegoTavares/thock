@@ -295,10 +295,12 @@ final class AppModel {
         watchSnapshot?.cancel()
         watchSnapshot = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 1_500_000_000)
-            guard !Task.isCancelled else { return }
-            let snapshot = session?.watchSnapshot(chip: chip(for: Self.watchEntry))
-                ?? WatchSnapshot(madeAt: Date(), state: .notConnected, today: VaultDay.today().iso, days: [], reminders: WatchSnapshot.Reminders(ReminderSettings()), chip: .today)
-            WatchLink.shared.send(snapshot)
+            guard !Task.isCancelled, PhoneWatchLink.shared.canSend else { return }
+            // Before the notebook is open (launched in the background) there
+            // is nothing to say: the watch keeps what it has. A notebook that
+            // is open but unpaired says so through `watchSnapshot`.
+            guard let session else { return }
+            PhoneWatchLink.shared.send(session.watchSnapshot(chip: chip(for: Self.watchEntry)))
         }
     }
 
@@ -469,12 +471,11 @@ final class AppModel {
     /// `receive` once the notebook is open. The launch arguments run inside
     /// the opening, so the smoke script calls this directly.
     private func answer(watch request: WatchMessage) async -> WatchMessage? {
-        guard phase == .ready, let store, let session else {
+        guard phase == .ready, let session else {
             return request.requestID.map { .ack(WatchAck(id: $0, outcome: .refused, message: VaultSession.notReadyMessage)) }
         }
-        let isNew = request.requestID.map { store.watchRequest(id: $0) == nil } ?? false
-        let answer = session.receive(request)
-        guard isNew, case .ack(let ack)? = answer, ack.outcome == .saved else { return answer }
+        let (answer, wrote) = session.handle(request)
+        guard wrote else { return answer }
         if case .capture(let capture) = request {
             remember(chip: capture.destination, for: Self.watchEntry)
             if capture.destination == .reminder {
@@ -1181,7 +1182,7 @@ final class AppModel {
                 continue
             }
             for _ in 0..<2 {
-                guard let decoded = (try? request.dictionary()).flatMap(WatchLink.decode) else { continue }
+                guard let decoded = (try? request.dictionary()).flatMap(PhoneWatchLink.decode) else { continue }
                 if let reply = await answer(watch: decoded) {
                     NSLog("Thock watch script: \(reply)")
                 }
@@ -1343,17 +1344,16 @@ final class AppModel {
         guard ok, saved != nil else { return }
         remember(chip: destination, for: entry)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        switch destination {
-        case .inbox: show("Saved to your inbox")
-        case .today: show("Added to today")
-        case .backlog: show("Added to Backlog · Soon")
-        case .reminder:
-            // Scheduled from the phone's own copy at once, so it rings even
-            // if the phone never reaches the server.
-            scheduleReminderRefresh()
-            show(due.map { $0.ringsSentence(today: .today(), now: .now(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt) } ?? "Reminder saved", action: "Show") { [weak self] in
-                self?.openReminders()
-            }
+        let sentence = destination.savedSentence(due: due, today: .today(), now: .now(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt)
+        guard destination == .reminder else {
+            show(sentence)
+            return
+        }
+        // Scheduled from the phone's own copy at once, so it rings even if
+        // the phone never reaches the server.
+        scheduleReminderRefresh()
+        show(sentence, action: "Show") { [weak self] in
+            self?.openReminders()
         }
     }
 

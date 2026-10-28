@@ -88,24 +88,32 @@ extension VaultSession {
     /// and answers it. A request already handled is answered as it was then
     /// and writes nothing. A snapshot or an answer is not a request: `nil`.
     public func receive(_ message: WatchMessage, now: Date = Date()) -> WatchMessage? {
+        handle(message, now: now).reply
+    }
+
+    /// `receive`, also saying whether this delivery wrote to the vault: a
+    /// repeat or a refusal did not, so the phone has nothing to send on.
+    public func handle(_ message: WatchMessage, now: Date = Date()) -> (reply: WatchMessage?, wrote: Bool) {
         switch message {
         case .dayAsk(let ask):
-            guard let day = VaultDay(iso: ask.day) else { return nil }
-            return .dayReply(WatchDayReply(id: ask.id, day: watchDay(day, now: now)))
+            guard let day = VaultDay(iso: ask.day) else { return (nil, false) }
+            return (.dayReply(WatchDayReply(id: ask.id, day: watchDay(day, now: now))), false)
         case .capture, .tick:
-            guard let id = message.requestID else { return nil }
-            if let handled = store.watchRequest(id: id) { return .ack(handled) }
+            guard let id = message.requestID else { return (nil, false) }
+            do {
+                if let handled = try store.watchRequest(id: id) { return (.ack(handled), false) }
+            } catch {
+                // Not knowing whether it was handled, writing could write it
+                // twice: refused, unrecorded, so the watch's retry is answered.
+                NSLog("Thock could not look up a watch request: \(error)")
+                return (.ack(WatchAck(id: id, outcome: .refused, message: Self.failedMessage)), false)
+            }
             let ack: WatchAck
             do {
                 try perform(message)
                 ack = WatchAck(id: id, outcome: .saved)
-            } catch VaultSessionError.readOnly {
-                ack = WatchAck(id: id, outcome: .refused, message: Self.readOnlyMessage)
-            } catch VaultSessionError.lineChanged {
-                ack = WatchAck(id: id, outcome: .refused, message: Self.lineChangedMessage)
             } catch {
-                NSLog("Thock could not save a request from the watch: \(error)")
-                ack = WatchAck(id: id, outcome: .refused, message: Self.failedMessage)
+                ack = WatchAck(id: id, outcome: .refused, message: Self.refusal(for: error))
             }
             do {
                 try store.recordWatchRequest(ack, at: now)
@@ -115,9 +123,23 @@ extension VaultSession {
                 // which is better said than hidden.
                 NSLog("Thock could not remember a watch request: \(error)")
             }
-            return .ack(ack)
+            return (.ack(ack), ack.outcome == .saved)
         case .snapshot, .ack, .dayReply:
-            return nil
+            return (nil, false)
+        }
+    }
+
+    /// The words a watch shows for a write that failed.
+    static func refusal(for error: Error) -> String {
+        switch error {
+        case VaultSessionError.readOnly:
+            return readOnlyMessage
+        // A reminder's home line no longer reads as the watch drew it.
+        case VaultSessionError.lineChanged, VaultSessionError.reminderChanged:
+            return lineChangedMessage
+        default:
+            NSLog("Thock could not save a request from the watch: \(error)")
+            return failedMessage
         }
     }
 
@@ -161,6 +183,10 @@ enum WatchRequestError: Error {
 /// What the Today complication draws at one moment.
 public struct WatchTimelineEntry: Hashable, Sendable {
     public var date: Date
+    /// The wall-clock minute after midnight the entry stands for: where
+    /// "now" is drawn. Not `date` less midnight, which is an hour off on a
+    /// day the clocks change.
+    public var minute: Int
     /// Minutes after midnight where the five-hour track starts.
     public var windowStart: Int
     /// The next timed row: the header's *14:00 Dentist*.
@@ -170,8 +196,9 @@ public struct WatchTimelineEntry: Hashable, Sendable {
     /// Open tasks and reminders with no time: *2 anytime*.
     public var anytime: Int
 
-    public init(date: Date, windowStart: Int, next: WatchRow?, left: Int, anytime: Int) {
+    public init(date: Date, minute: Int, windowStart: Int, next: WatchRow?, left: Int, anytime: Int) {
         self.date = date
+        self.minute = minute
         self.windowStart = windowStart
         self.next = next
         self.left = left
@@ -184,19 +211,31 @@ public enum TimelineEntries {
     public static let step = 15
 
     /// One entry now and one on every quarter hour after it to midnight, so
-    /// the window and the header move without a reload.
+    /// the window and the header move without a reload. Quarter hours are
+    /// on the wall clock: a time the clocks skip has no entry, and one they
+    /// repeat has its first.
     public static func entries(rows: [WatchRow], today: VaultDay, now: Date, calendar: Calendar = .current) -> [WatchTimelineEntry] {
         guard let midnight = calendar.date(from: DateComponents(year: today.year, month: today.month, day: today.day)) else { return [] }
         let open = rows.filter { !$0.done && $0.kind != .calendar }
         let left = open.count
         let anytime = open.filter { $0.start == nil }.count
-        var entries: [WatchTimelineEntry] = []
-        var minute = max(0, Int(now.timeIntervalSince(midnight) / 60))
-        var date = now
+        func entry(_ date: Date, _ minute: Int) -> WatchTimelineEntry {
+            WatchTimelineEntry(date: date, minute: minute, windowStart: minute / 30 * 30, next: next(rows, at: minute), left: left, anytime: anytime)
+        }
+        var minute = 0
+        if now > midnight, VaultDay(now, calendar: calendar) == today {
+            let parts = calendar.dateComponents([.hour, .minute], from: now)
+            minute = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+        }
+        var entries = [entry(max(now, midnight), minute)]
+        minute = (minute / step + 1) * step
         while minute < 24 * 60, entries.count < 96 {
-            entries.append(WatchTimelineEntry(date: date, windowStart: minute / 30 * 30, next: next(rows, at: minute), left: left, anytime: anytime))
-            minute = (minute / step + 1) * step
-            date = midnight.addingTimeInterval(TimeInterval(minute * 60))
+            if let date = calendar.date(bySettingHour: minute / 60, minute: minute % 60, second: 0, of: midnight, matchingPolicy: .strict, repeatedTimePolicy: .first, direction: .forward),
+               VaultDay(date, calendar: calendar) == today, let last = entries.last, date > last.date
+            {
+                entries.append(entry(date, minute))
+            }
+            minute += step
         }
         return entries
     }

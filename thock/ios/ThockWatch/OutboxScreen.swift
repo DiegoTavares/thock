@@ -35,6 +35,9 @@ struct OutboxScreen: View {
                         Text("Waiting for your iPhone")
                             .font(.caption2)
                             .foregroundStyle(WatchTheme.muted)
+                        // A request that never arrives is not stuck for good.
+                        Button("Delete", role: .destructive) { model.delete(item.id) }
+                            .font(.footnote)
                     }
                 }
                 .padding(.vertical, 2)

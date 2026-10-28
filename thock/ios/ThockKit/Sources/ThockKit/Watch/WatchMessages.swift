@@ -3,7 +3,7 @@ import Foundation
 /// The private contract between the phone and its watch (V48 §6). It never
 /// crosses the network, so it is not part of V34; both apps compile these
 /// types from here.
-public enum WatchLink {
+public enum WatchProtocol {
     public static let version = 1
 }
 
@@ -110,7 +110,7 @@ public struct WatchSnapshot: Codable, Hashable, Sendable {
         }
     }
 
-    public var v = WatchLink.version
+    public var v = WatchProtocol.version
     public var madeAt: Date
     public var state: State
     /// The phone's today, not the watch's clock.
@@ -147,7 +147,7 @@ public struct WatchSnapshot: Codable, Hashable, Sendable {
 }
 
 public struct WatchCapture: Codable, Hashable, Sendable {
-    public var v = WatchLink.version
+    public var v = WatchProtocol.version
     public var id: UUID
     /// When it was saved on the watch: the capture's instant on the phone.
     public var at: Date
@@ -168,7 +168,7 @@ public struct WatchCapture: Codable, Hashable, Sendable {
 }
 
 public struct WatchTick: Codable, Hashable, Sendable {
-    public var v = WatchLink.version
+    public var v = WatchProtocol.version
     public var id: UUID
     public var day: String
     public var hash: String
@@ -184,7 +184,7 @@ public struct WatchTick: Codable, Hashable, Sendable {
 
 /// A day outside the snapshot's range.
 public struct WatchDayAsk: Codable, Hashable, Sendable {
-    public var v = WatchLink.version
+    public var v = WatchProtocol.version
     public var id: UUID
     public var day: String
 
@@ -200,7 +200,7 @@ public struct WatchAck: Codable, Hashable, Sendable {
         case refused
     }
 
-    public var v = WatchLink.version
+    public var v = WatchProtocol.version
     public var id: UUID
     public var outcome: Outcome
     /// Only when refused: the sentence the watch shows.
@@ -214,7 +214,7 @@ public struct WatchAck: Codable, Hashable, Sendable {
 }
 
 public struct WatchDayReply: Codable, Hashable, Sendable {
-    public var v = WatchLink.version
+    public var v = WatchProtocol.version
     public var id: UUID
     public var day: WatchDay
 
@@ -303,7 +303,7 @@ public enum WatchMessage: Hashable, Sendable {
     public init(data: Data) throws {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw WatchLinkError.malformed }
         let version = (object["v"] as? NSNumber)?.intValue
-        guard version == WatchLink.version else { throw WatchLinkError.unknownVersion(version) }
+        guard version == WatchProtocol.version else { throw WatchLinkError.unknownVersion(version) }
         let decoder = Self.decoder
         do {
             switch object[Self.typeKey] as? String {
