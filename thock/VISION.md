@@ -514,6 +514,16 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   canvas, the sheet, the entry and the cursor, through Face ID and termination; only today's
   canvas is home. A privacy cover keeps the vault out of the app switcher. Spec
   `specs/v46-phone-edit-in-place.md`. _(shipped on `main` with the V46 PR)_
+- [ ] **Thock on the wrist:** an Apple Watch app inside the iPhone app. The large complication draws
+  five hours of today's plan, with tasks, calendar events and reminders around a "now" that moves on
+  its own; tapping it opens the day's tasks, a day at a time, ticked with a tap. The small
+  complication opens capture already listening: system dictation, then *Today*, *Inbox*, *Backlog* or
+  *Reminder* with the phone's presets and a date picker, never parsed from speech. The watch is a
+  satellite of the phone over WatchConnectivity: the phone sends a reading of a week each way and
+  runs the watch's captures and ticks through its own writes, so there is no server or contract
+  change, the vault key stays on the phone, and reminders ring once, mirrored from the phone.
+  Design reference: https://claude.ai/artifact/86BQKftLcLJPpmBydT3x7s. Spec `specs/v48-watch.md`.
+  _(planned)_
 
 ---
 
