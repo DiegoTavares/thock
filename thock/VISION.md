@@ -530,6 +530,12 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   change, the vault key stays on the phone, and reminders ring once, mirrored from the phone.
   Design reference: https://claude.ai/artifact/86BQKftLcLJPpmBydT3x7s. Spec `specs/v48-watch.md`.
   _(planned)_
+- [ ] **Tick a box with a click, format with a slash:** a task's checkbox on the desk is a control:
+  a click ticks it in place without moving the cursor, and `cmd-enter` ticks the tasks under the
+  cursors. A task's box and a bullet's dot stay drawn while you type in the item, so its text never
+  jumps. Typing `/` at the start of a line or after a space offers headings, tasks, quotes,
+  emphasis, links, notes, images and reminders by name. A hint on empty lines points at it, then
+  retires after 3 picks or 10 sightings. Spec `specs/v49-friendly-editing.md`. _(planned)_
 
 ---
 
