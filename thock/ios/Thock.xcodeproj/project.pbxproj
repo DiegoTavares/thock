@@ -12,6 +12,8 @@
 		65674055E1ED6B1057406AA0 /* ThockKit in Frameworks */ = {isa = PBXBuildFile; productRef = 6D5C0E9EA85DFB1B7C4B5E9D /* ThockKit */; };
 		8EF91B659D9EC9B3714C1DA8 /* ThockShare.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 4151D505780578DD6324A808 /* ThockShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C9961232FF006692AAD89A4C /* ThockWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C7EE81D51BBE82857D712BEA /* ThockWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		7AFDC1DB9F59EF60E8BF8040 /* ThockKit in Frameworks */ = {isa = PBXBuildFile; productRef = 4FEEDD916918473B27961C22 /* ThockKit */; };
+		65CC34C25857055130A34D80 /* ThockWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = EAB2E772C0FFA725571BCE1D /* ThockWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -29,6 +31,13 @@
 			remoteGlobalIDString = A7524A33E613D440B6906363;
 			remoteInfo = ThockWidgets;
 		};
+		E44BA67714222FDD9266A50D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BC6689A62B0D526952520887 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8CEA6227A3B176B5C626E2D1;
+			remoteInfo = ThockWatch;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -44,12 +53,24 @@
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		695467D7DD6BA71FA6720911 /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				65CC34C25857055130A34D80 /* ThockWatch.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		4151D505780578DD6324A808 /* ThockShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ThockShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		527EC6526748E443176EC5AB /* Thock.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Thock.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C7EE81D51BBE82857D712BEA /* ThockWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ThockWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		EAB2E772C0FFA725571BCE1D /* ThockWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ThockWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -76,6 +97,16 @@
 		61643446B3B317183CFCB1D7 /* Thock */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Thock;
+			sourceTree = "<group>";
+		};
+		B8E8BD6A0420030D684A4293 /* ThockWatch */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ThockWatch;
+			sourceTree = "<group>";
+		};
+		1D9B160808B3C6093977C2DF /* WatchShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = WatchShared;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -105,6 +136,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		FE1AF29F640606A697240159 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7AFDC1DB9F59EF60E8BF8040 /* ThockKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -114,6 +153,7 @@
 				527EC6526748E443176EC5AB /* Thock.app */,
 				4151D505780578DD6324A808 /* ThockShare.appex */,
 				C7EE81D51BBE82857D712BEA /* ThockWidgets.appex */,
+				EAB2E772C0FFA725571BCE1D /* ThockWatch.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -127,6 +167,8 @@
 				004FA8806A1DA96425CCE82D /* Shared */,
 				528185D65739852B043231EA /* Config */,
 				63EE989CA4210C10164824EF /* Products */,
+				B8E8BD6A0420030D684A4293 /* ThockWatch */,
+				1D9B160808B3C6093977C2DF /* WatchShared */,
 			);
 			sourceTree = "<group>";
 		};
@@ -189,12 +231,14 @@
 				1A401B98E6AE49ACAEFBE177 /* Frameworks */,
 				1E85A1F10878F7D00310D031 /* Resources */,
 				3E7932A9B3AF7CEEFD1F6F30 /* Embed Foundation Extensions */,
+				695467D7DD6BA71FA6720911 /* Embed Watch Content */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				2AA2F42464A9F4A37056A834 /* PBXTargetDependency */,
 				B9EFDD84488FA3869697F348 /* PBXTargetDependency */,
+				31C85CD6F381BD77C7984B5E /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				004FA8806A1DA96425CCE82D /* Shared */,
@@ -208,6 +252,30 @@
 			productReference = 527EC6526748E443176EC5AB /* Thock.app */;
 			productType = "com.apple.product-type.application";
 		};
+		8CEA6227A3B176B5C626E2D1 /* ThockWatch */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5F9083C6BAC8453A4216D5E1 /* Build configuration list for PBXNativeTarget "ThockWatch" */;
+			buildPhases = (
+				18C8142E01A54D9AF0C63AC5 /* Sources */,
+				FE1AF29F640606A697240159 /* Frameworks */,
+				D1A406781D1E0EBFCD31EFB8 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				B8E8BD6A0420030D684A4293 /* ThockWatch */,
+				1D9B160808B3C6093977C2DF /* WatchShared */,
+			);
+			name = ThockWatch;
+			packageProductDependencies = (
+				4FEEDD916918473B27961C22 /* ThockKit */,
+			);
+			productName = ThockWatch;
+			productReference = EAB2E772C0FFA725571BCE1D /* ThockWatch.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -218,6 +286,9 @@
 				LastSwiftUpdateCheck = 2620;
 				LastUpgradeCheck = 2620;
 				TargetAttributes = {
+					8CEA6227A3B176B5C626E2D1 = {
+						CreatedOnToolsVersion = 26.2;
+					};
 					3C4EEB281A1E2CC541CAD32C = {
 						CreatedOnToolsVersion = 26.2;
 					};
@@ -249,6 +320,7 @@
 				CB422D5B3495893078013D54 /* Thock */,
 				3C4EEB281A1E2CC541CAD32C /* ThockShare */,
 				A7524A33E613D440B6906363 /* ThockWidgets */,
+				8CEA6227A3B176B5C626E2D1 /* ThockWatch */,
 			);
 		};
 /* End PBXProject section */
@@ -269,6 +341,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		6BCF2D8898769E130AAEABC0 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D1A406781D1E0EBFCD31EFB8 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -299,6 +378,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		18C8142E01A54D9AF0C63AC5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -311,6 +397,11 @@
 			isa = PBXTargetDependency;
 			target = A7524A33E613D440B6906363 /* ThockWidgets */;
 			targetProxy = 4FED66823EC7AADA9BD6E8A7 /* PBXContainerItemProxy */;
+		};
+		31C85CD6F381BD77C7984B5E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8CEA6227A3B176B5C626E2D1 /* ThockWatch */;
+			targetProxy = E44BA67714222FDD9266A50D /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -489,6 +580,60 @@
 			};
 			name = Debug;
 		};
+		02507467B4493C34D246DA5E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Config/ThockWatch.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = KY338LSPPB;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/ThockWatch-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Thock;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.thethock.ios;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.thethock.ios.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 11.0;
+			};
+			name = Debug;
+		};
+		E5D496A6B00FAD08D5794A45 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Config/ThockWatch.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = KY338LSPPB;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/ThockWatch-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Thock;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.thethock.ios;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.thethock.ios.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 11.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -528,6 +673,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		5F9083C6BAC8453A4216D5E1 /* Build configuration list for PBXNativeTarget "ThockWatch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				02507467B4493C34D246DA5E /* Debug */,
+				E5D496A6B00FAD08D5794A45 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -547,6 +701,10 @@
 			productName = ThockKit;
 		};
 		E451DDF61BD80C6C8285DE87 /* ThockKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ThockKit;
+		};
+		4FEEDD916918473B27961C22 /* ThockKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = ThockKit;
 		};

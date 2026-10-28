@@ -365,6 +365,70 @@ final class WatchTests: XCTestCase {
         XCTAssertThrowsError(try WatchMessage(dictionary: ["v": 1, "type": "fax"]))
     }
 
+    // MARK: The watch's outbox
+
+    func testTheOutboxKeepsARefusedCaptureAndDropsARefusedTick() {
+        var outbox = WatchOutbox()
+        let capture = WatchCapture(at: now, text: "Buy stamps", destination: .inbox)
+        let tick = WatchTick(day: today.iso, hash: "abc", ordinal: 0)
+        outbox.add(.capture(capture))
+        outbox.add(.tick(tick))
+        XCTAssertEqual(outbox.waitingCount, 2)
+        XCTAssertTrue(outbox.isTicked(day: today.iso, hash: "abc", ordinal: 0))
+        outbox.apply(WatchAck(id: tick.id, outcome: .refused, message: "That line changed. Look again."))
+        XCTAssertFalse(outbox.isTicked(day: today.iso, hash: "abc", ordinal: 0))
+        outbox.apply(WatchAck(id: capture.id, outcome: .refused, message: "Thock Plus has ended. Captures are paused."))
+        XCTAssertEqual(outbox.unsent.map(\.state), [.refused("Thock Plus has ended. Captures are paused.")])
+        let retried = outbox.retry(capture.id)
+        XCTAssertNotEqual(retried?.id, capture.id, "a retry is a new request")
+        XCTAssertEqual(retried?.state, .waiting)
+        guard case .capture(let again)? = retried?.request else { return XCTFail("not a capture") }
+        XCTAssertEqual(again.text, "Buy stamps")
+        XCTAssertEqual(again.at, capture.at, "the instant it was said")
+        outbox.delete(again.id)
+        XCTAssertTrue(outbox.items.isEmpty)
+    }
+
+    func testASavedRequestLeavesTheListAndIsForgottenOnceASnapshotShowsIt() {
+        var outbox = WatchOutbox()
+        let tick = WatchTick(day: today.iso, hash: "abc", ordinal: 0)
+        outbox.add(.tick(tick))
+        outbox.apply(WatchAck(id: tick.id, outcome: .saved), at: now)
+        XCTAssertEqual(outbox.waitingCount, 0)
+        XCTAssertTrue(outbox.isTicked(day: today.iso, hash: "abc", ordinal: 0), "drawn done until the snapshot says so")
+        outbox.forgetSaved(before: now.addingTimeInterval(-1))
+        XCTAssertEqual(outbox.items.count, 1)
+        outbox.forgetSaved(before: now.addingTimeInterval(1))
+        XCTAssertTrue(outbox.items.isEmpty)
+        XCTAssertNil(outbox.apply(WatchAck(id: tick.id, outcome: .saved)), "an answer to nothing changes nothing")
+    }
+
+    func testTheDraftNeverRemembersReminder() throws {
+        let draft = WatchOutbox.Draft(text: "Dentist", chip: .reminder, due: ReminderDue(date: today, time: nil))
+        XCTAssertEqual(draft.before, .today)
+        XCTAssertEqual(draft.reminderDue, ReminderDue(date: today, time: nil))
+        XCTAssertEqual(WatchOutbox.Draft(text: "x", chip: .backlog).before, .backlog)
+    }
+
+    func testTheWatchFilesSurviveARestart() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let files = WatchFiles(folder: folder)
+        XCTAssertNil(files.snapshot())
+        XCTAssertEqual(try files.outbox(), WatchOutbox())
+        var outbox = WatchOutbox()
+        outbox.add(.capture(WatchCapture(at: now, text: "Buy stamps", destination: .reminder, due: ReminderDue(date: today, time: nil))))
+        outbox.items[0].transferred = true
+        outbox.draft = WatchOutbox.Draft(text: "Call Ana", chip: .backlog)
+        outbox.chip = .inbox
+        try files.save(outbox)
+        XCTAssertEqual(try WatchFiles(folder: folder).outbox(), outbox)
+        let snapshot = try vault(["daily/2026-10-21.md": todayNote]).watchSnapshot(now: now)
+        try files.save(snapshot)
+        XCTAssertEqual(files.snapshot(), snapshot)
+    }
+
     // MARK: Saying when
 
     func testTheReminderChipAndSentence() {
