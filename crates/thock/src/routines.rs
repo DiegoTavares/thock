@@ -4011,14 +4011,17 @@ open = "weekly/site/index.html"
                 TIMELINE_WEEK_REVIEW_SKILL.contains(expected),
                 "Week Review must say {expected}"
             );
+        }
+        for expected in [
+            "**Done**, **Tomorrow 09:00**, **Next week**, **Drop**, **Leave**",
+            "`tomorrow_at` (09:00 by default)",
+            "These are the **only** edits this skill makes to your own text",
+        ] {
             assert!(
                 TIMELINE_WRAP_TODAY_SKILL.contains(expected),
                 "Wrap Today must say {expected}"
             );
         }
-        assert!(TIMELINE_WRAP_TODAY_SKILL.contains(
-            "**only** edit this skill makes to your own text besides the reminder answers in step 6"
-        ));
         let quote_rule = "without its `(@…)` reminder token and its `<!--rem:…-->` id";
         assert!(TIMELINE_WRAP_TODAY_SKILL.contains(quote_rule));
         assert!(TIMELINE_WEEK_REVIEW_SKILL.contains(quote_rule));
