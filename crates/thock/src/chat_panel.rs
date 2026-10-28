@@ -1198,11 +1198,12 @@ impl ChatPanel {
                 editor
             });
             let focus_handle = cx.focus_handle();
-            // Focus leaving for a note folds the thread (§5.2). Nothing is
-            // given back then: the note has the focus already.
+            // Focus leaving for a note folds a bubble into the dot (§5.2). The
+            // thread stays open so you can write beside it; only the summon
+            // key, the pebble or `escape` fold it.
             let focus_out =
                 cx.on_focus_out(&focus_handle, window, |this: &mut Self, _, window, cx| {
-                    if !this.focus_handle.contains_focused(window, cx) {
+                    if this.bubble_up && !this.focus_handle.contains_focused(window, cx) {
                         this.fold_quietly(cx);
                     }
                 });
@@ -1301,10 +1302,10 @@ impl ChatPanel {
     }
 
     /// You typed in the note (§5.2): a bubble that was up folds into the dot
-    /// and stays folded, the thread folds, and whatever waits floats up only
-    /// after two seconds without another edit.
+    /// and stays folded, and whatever waits floats up only after two seconds
+    /// without another edit. An open thread stays open beside the note.
     fn note_edited(&mut self, cx: &mut Context<Self>) {
-        if self.thread_open || self.bubble_up {
+        if self.bubble_up {
             self.fold_quietly(cx);
         }
         self.typing = Some(cx.spawn(async move |this, cx| {
@@ -1677,6 +1678,16 @@ impl ChatPanel {
                     self.open_thread(window, cx);
                 }
             }
+        }
+    }
+
+    /// Clicking the pebble folds an open thread even while you write in the
+    /// note beside it; otherwise it acts like `cmd-?`.
+    fn pebble_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread_open {
+            self.fold(window, cx);
+        } else {
+            self.toggle_focus(window, cx);
         }
     }
 
@@ -4674,7 +4685,7 @@ impl ChatPanel {
                         .bg(accent),
                 )
             })
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_focus(window, cx)))
+            .on_click(cx.listener(|this, _, window, cx| this.pebble_clicked(window, cx)))
             .into_any_element()
     }
 
@@ -5934,17 +5945,65 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn focus_leaving_for_a_note_folds_the_thread(cx: &mut TestAppContext) {
+    async fn the_thread_stays_open_while_you_write_in_the_note(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
         connect(&mut setup);
         let editor = open_note(&mut setup).await;
         setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
+
         setup.cx.focus(&editor);
         setup.cx.run_until_parked();
+        assert_eq!(
+            presence(&setup),
+            Presence::Talking,
+            "focus leaving keeps it"
+        );
+        assert_eq!(inset(&setup), Some(px(INSET)));
+        setup.cx.simulate_keystrokes("a b c");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking, "typing keeps it");
+
+        // From the note the summon key goes back to the thread, and a second
+        // press folds it.
+        setup.cx.simulate_keystrokes("ctrl-?");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
+        assert!(!is_focused(&mut setup, &editor));
+        setup.cx.simulate_keystrokes("ctrl-?");
+        setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Resting);
+        assert!(
+            is_focused(&mut setup, &editor),
+            "focus goes back to the note"
+        );
         assert_eq!(inset(&setup), None);
+    }
+
+    #[gpui::test]
+    async fn clicking_the_pebble_folds_the_thread_from_the_note(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        connect(&mut setup);
+        let editor = open_note(&mut setup).await;
+        setup.cx.simulate_keystrokes("ctrl-?");
+        setup.cx.run_until_parked();
+        setup.cx.focus(&editor);
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
+
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            panel.pebble_clicked(window, cx)
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Resting);
+        assert!(is_focused(&mut setup, &editor), "the note keeps the focus");
+
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            panel.pebble_clicked(window, cx)
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking, "and it opens again");
     }
 
     #[gpui::test]

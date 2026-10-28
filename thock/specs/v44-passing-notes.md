@@ -139,7 +139,7 @@ before the float:
 | **Resting** | The pebble at 70% opacity | wherever you are | the app opens; `escape`; focus goes to a note with nothing waiting | a turn starts (→ Working); `cmd-?` (→ Talking); something waits for you (→ Needs you) |
 | **Working** | The pebble with the typing bubble | unchanged | a turn starts: a ritual you launched, or a message you sent | the turn stops (→ Needs you if folded, or the reply appears in the thread if open) |
 | **Needs you** | A bubble floats up from the pebble, the lines it is about are underlined, and the pebble has a dot | unchanged until `cmd-?` focuses the bubble | Thock asks a question, starts a conversation, or replies while you were writing | you answer (→ Working, focus back where it was); `cmd-?` again (→ Talking); `escape` or typing (→ folds into the dot) |
-| **Talking** | The thread, the composer and the pebble. The editor narrows to make room | the composer | `cmd-?` from Resting or Working, or from a focused bubble | `escape`, or focus goes to a note (→ Resting, or the dot if something still waits) |
+| **Talking** | The thread, the composer and the pebble. The editor narrows to make room | the composer | `cmd-?` from Resting or Working, or from a focused bubble | `escape`, `cmd-?` while the chat has focus, or clicking the pebble (→ Resting, or the dot if something still waits). Focus going to a note, or typing there, keeps the thread open so you can write beside it |
 
 The pause rule keeps G2. Something that waits for you floats up only after **2 seconds without an
 edit** in any note, and an opener only after 8 (§5.8). An edit is something you typed (an editor
@@ -504,7 +504,7 @@ had it before, which is usually the active editor.
 
 Folding on typing subscribes to the active editor's `EditorEvent::Edited` while the chat is open:
 the editor's own transactions, not `BufferEdited`, which also fires when a note reloads after the
-agent wrote to it. An edit in a vault note folds Talking and Needs you as §5.2 says, and drives
+agent wrote to it. An edit in a vault note folds Needs you as §5.2 says (Talking stays open), and drives
 the pause timer.
 
 The Desk cascade (§5.3) closes the right dock through the workspace, deferred as the Panels rule
