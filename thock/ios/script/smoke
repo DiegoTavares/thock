@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Builds the app for an iOS simulator, installs it fresh, launches it into the
-# practice notebook and checks that scripted flows land where they should:
+# Builds the app for an iOS simulator (the watch app inside it), and the watch
+# scheme on its own for a generic watchOS simulator, installs the app fresh,
+# launches it into the practice notebook and checks that scripted flows land
+# where they should:
 #
 #   1. captures to today (a task and plain text), an inbox capture and a
 #      journal entry reach the phone's store and, through the in-process
@@ -163,6 +165,18 @@ if [[ -z "${THOCK_SMOKE_SKIP_BUILD:-}" ]]; then
 fi
 app="$derived/Build/Products/Debug-iphonesimulator/Thock.app"
 [[ -d "$app" ]] || fail "no app at $app"
+[[ -d "$app/Watch/ThockWatch.app/PlugIns/ThockWatchWidgets.appex" ]] || fail "the watch app and its complications are not inside the app"
+
+if [[ -z "${THOCK_SMOKE_SKIP_BUILD:-}" ]]; then
+    # Unsigned and in its own folder, so the signed copy inside the app is
+    # left as it was built.
+    step "building the watch scheme (log: $derived/watch/build.log)"
+    mkdir -p "$derived/watch"
+    xcodebuild -project "$ios/Thock.xcodeproj" -scheme ThockWatch -configuration Debug \
+        -destination "generic/platform=watchOS Simulator" -derivedDataPath "$derived/watch" \
+        CODE_SIGNING_ALLOWED=NO build >"$derived/watch/build.log" 2>&1 ||
+        { tail -40 "$derived/watch/build.log" >&2; fail "watch build failed"; }
+fi
 
 step "installing fresh"
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true

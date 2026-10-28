@@ -1,6 +1,7 @@
 # Thock V48 - Thock on the wrist: today's timeline, the day's tasks and a capture that listens
 
-**Status:** Designed (2026-10-28). Not built.
+**Status:** Built (2026-10-28) on `v48-watch`: §13 steps 1–4. Signing (step 5) and the by-hand
+checks of §12 are not done.
 **Owner:** Diego · **Date:** 2026-10-28
 **Design reference:** the clickable watch prototype, the complication families, the architecture
 diagram and the findings on what watchOS allows: <https://claude.ai/artifact/86BQKftLcLJPpmBydT3x7s>.

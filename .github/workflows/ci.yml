@@ -262,6 +262,11 @@ jobs:
       - name: ThockKit unit tests
         run: thock/ios/script/test
 
+      # The app embeds the watch app, so its build needs the watchOS
+      # platform; fetched only when the image does not have it.
+      - name: watchOS platform
+        run: xcrun simctl list runtimes | grep -q watchOS || xcodebuild -downloadPlatform watchOS
+
       - name: Build, launch and drive the app on a simulator
         run: thock/ios/script/smoke
 
