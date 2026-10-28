@@ -1087,6 +1087,8 @@ pub struct ChatPanel {
     suppressed: Option<u64>,
     /// Folds a reply's bubble into the dot once it has lingered (§5.2).
     reply_linger: Option<Task<()>>,
+    /// Whether the window is in front; a reply lingers only while it is.
+    window_active: bool,
     /// The Needs-you bubble's height from its last paint, to place it.
     bubble_height: Pixels,
     /// The bubble couldn't clear the caret's line and took the thread's
@@ -1209,6 +1211,16 @@ impl ChatPanel {
                         this.fold_quietly(cx);
                     }
                 });
+            // A reply that lands while you're in another app waits for you to
+            // come back before its seconds start (§5.2).
+            let activation = cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+                this.window_active = window.is_window_active();
+                if this.window_active {
+                    this.linger_reply(cx);
+                } else {
+                    this.reply_linger = None;
+                }
+            });
             let mut this = Self {
                 workspace: weak_workspace,
                 window_handle: window.window_handle(),
@@ -1225,6 +1237,7 @@ impl ChatPanel {
                 waiting_generation: 0,
                 suppressed: None,
                 reply_linger: None,
+                window_active: window.is_window_active(),
                 bubble_height: px(160.),
                 bubble_needs_room: false,
                 collapsed_desk: false,
@@ -1257,7 +1270,12 @@ impl ChatPanel {
                 opener: None,
                 opener_pause: None,
                 opener_linger: None,
-                _subscriptions: vec![project_subscription, workspace_subscription, focus_out],
+                _subscriptions: vec![
+                    project_subscription,
+                    workspace_subscription,
+                    focus_out,
+                    activation,
+                ],
             };
             this.refresh_vault_status(cx);
             this.load_connection(cx);
@@ -1334,19 +1352,26 @@ impl ChatPanel {
             return;
         }
         self.bubble_up = true;
-        if self.waiting == Some(Waiting::Reply) {
-            self.reply_linger = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(REPLY_LINGER).await;
-                this.update(cx, |this, cx| {
-                    if this.waiting == Some(Waiting::Reply) && this.bubble_up {
-                        this.bubble_up = false;
-                        cx.notify();
-                    }
-                })
-                .ok();
-            }));
-        }
+        self.linger_reply(cx);
         cx.notify();
+    }
+
+    /// Starts a floating reply's eight seconds, counted only while the
+    /// window is in front so the reply is never folded before you saw it.
+    fn linger_reply(&mut self, cx: &mut Context<Self>) {
+        if self.waiting != Some(Waiting::Reply) || !self.bubble_up || !self.window_active {
+            return;
+        }
+        self.reply_linger = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REPLY_LINGER).await;
+            this.update(cx, |this, cx| {
+                if this.waiting == Some(Waiting::Reply) && this.bubble_up {
+                    this.bubble_up = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
     }
 
     /// The caret's line in the active note, in window coordinates, for a
@@ -6138,6 +6163,34 @@ mod tests {
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
         assert_eq!(waiting(&setup), None);
+    }
+
+    #[gpui::test]
+    async fn a_reply_from_while_you_were_away_lingers_once_you_are_back(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        setup.cx.deactivate_window();
+        let connection = Rc::new(StubAgentConnection::new());
+        start_wrap_today(&mut setup, connection, None, vec![says("Done.")]).await;
+        assert_eq!(presence(&setup), Presence::NeedsYou);
+        advance(&mut setup, Duration::from_secs(20));
+        assert!(bubble_up(&setup), "away, the reply waits for you");
+
+        setup.cx.update(|window, _| window.activate_window());
+        setup.cx.run_until_parked();
+        advance(&mut setup, Duration::from_secs(5));
+        assert!(bubble_up(&setup), "back, it shows for a few seconds");
+
+        // Leaving mid-linger starts the seconds over on return.
+        setup.cx.deactivate_window();
+        advance(&mut setup, Duration::from_secs(10));
+        assert!(bubble_up(&setup), "the seconds stop while away");
+        setup.cx.update(|window, _| window.activate_window());
+        setup.cx.run_until_parked();
+        advance(&mut setup, Duration::from_secs(5));
+        assert!(bubble_up(&setup));
+        advance(&mut setup, Duration::from_secs(3));
+        assert!(!bubble_up(&setup));
+        assert_eq!(waiting(&setup), Some(Waiting::Reply), "then the dot");
     }
 
     #[gpui::test]
