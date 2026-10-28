@@ -7,8 +7,13 @@
 //! `- [ ]` draws as a checkbox alone, a plain list bullet as a `•`, a `___`
 //! line as a rule, and a journal entry's or a task's time takes its colour
 //! (V43 §7.3). Putting the cursor on a line restores that whole line's source
-//! (§4.2). Everything here is display-only: folds and highlights live in the
-//! `DisplayMap` and no code path writes to the buffer (§4.3).
+//! (§4.2), except a bullet's or task's prefix, which stays drawn until the
+//! cursor enters it (V49 §4.4). Folds and highlights live in the `DisplayMap`
+//! and are display-only (§4.3); the two writes are the ones the user asks
+//! for — ticking a task (by clicking its box or `thock::ToggleTask`) and
+//! backspace at an item's text start dropping the whole prefix (V49 §4).
+//! An empty line under the cursor carries a *Type / for formatting* hint
+//! until the `/` menu has been learned or ignored (V49 §5.6).
 //!
 //! With conceal on, the note is also set in the vault's body face (V43
 //! §7.1) through a text-style refinement, dropped again when the source is
@@ -26,26 +31,30 @@ use crate::reminders::{
 };
 use crate::thock_theme::on_accent_color;
 use crate::vault::{Vault, VaultStatus};
+use anyhow::Context as _;
 use chrono::NaiveDate;
 use collections::{HashMap, HashSet};
+use db::kvp::KeyValueStore;
 use editor::actions::GoToDefinition;
 use editor::display_map::{
     BlockContext, BlockId, BlockPlacement, BlockProperties, BlockStyle, Crease, CreaseId,
     CustomBlockId,
 };
-use editor::{Editor, EditorEvent, EditorMode, FoldPlaceholder, HighlightKey};
+use editor::{Editor, EditorEvent, EditorMode, FoldPlaceholder, HighlightKey, Inlay};
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Empty, Entity, FontFeatures, FontStyle,
-    FontWeight, HighlightStyle, Hsla, ImageSource, IntoElement as _, ParentElement as _, Resource,
-    RetainAllImageCache, SharedString, SharedUri, StrikethroughStyle, Styled as _, Subscription,
-    Task, TaskExt as _, TextStyleRefinement, WeakEntity, Window, div, img, px,
+    FontWeight, HighlightStyle, Hsla, ImageSource, InteractiveElement as _, IntoElement as _,
+    MouseButton, ParentElement as _, Resource, RetainAllImageCache, SharedString, SharedUri,
+    StatefulInteractiveElement as _, StrikethroughStyle, Styled as _, Subscription, Task,
+    TaskExt as _, TextStyleRefinement, WeakEntity, Window, div, img, px,
 };
 use language::language_settings;
 use multi_buffer::{
     Anchor, MultiBufferOffset, MultiBufferPoint, MultiBufferRow, MultiBufferSnapshot,
     ToOffset as _, ToPoint as _,
 };
-use project::{Project, ProjectPath};
+use project::{InlayId, Project, ProjectPath};
+use serde::{Deserialize, Serialize};
 use settings::{Settings as _, SettingsStore};
 use std::any::TypeId;
 use std::borrow::Cow;
@@ -66,6 +75,8 @@ gpui::actions!(
     [
         /// Shows or hides the Markdown markup in the current note.
         ToggleMarkdownSource,
+        /// Ticks or unticks the task on this line.
+        ToggleTask,
         /// Shows or hides the email view on a synced email note.
         ToggleEmailView,
         /// Collapses or expands the email reply under the cursor.
@@ -207,6 +218,11 @@ pub struct MarkdownConcealAddon {
     /// switches on or off, so a soft-wrap toggle survives a theme change.
     wrap_set_for_body_face: Option<bool>,
     reparse: Task<()>,
+    /// The row the formatting hint is drawn on, if any.
+    hint_row: Option<u32>,
+    /// The row the hint was last drawn on, so coming back to it — or typing
+    /// on it and deleting again — is not a new sighting.
+    last_hint_row: Option<u32>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -237,6 +253,7 @@ impl editor::Addon for MarkdownConcealAddon {
 pub fn init(cx: &mut App) {
     cx.observe_new(|editor: &mut Editor, _, cx| register(editor, cx))
         .detach();
+    load_slash_hint(cx);
 }
 
 /// Installs the addon on editors where conceal applies: a full, writable,
@@ -321,10 +338,14 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
     subscriptions.push(cx.subscribe(
         &cx.entity(),
         |editor, _, event: &EditorEvent, cx| match event {
-            EditorEvent::BufferEdited => schedule_reparse(editor, cx),
+            EditorEvent::BufferEdited => {
+                schedule_reparse(editor, cx);
+                update_hint(editor, cx);
+            }
             EditorEvent::SelectionsChanged { .. } => {
                 apply_folds(editor, cx);
                 apply_heading_blocks(editor, cx);
+                update_hint(editor, cx);
             }
             _ => {}
         },
@@ -373,6 +394,29 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
                 .ok();
         }),
     );
+    let editor_handle = cx.weak_entity();
+    subscriptions.push(editor.register_action::<ToggleTask>(move |_, window, cx| {
+        let toggled = editor_handle
+            .update(cx, |editor, cx| {
+                toggle_tasks_under_selections(editor, window, cx)
+            })
+            .unwrap_or(false);
+        // `cmd-enter` stays `NewlineBelow` off a task line.
+        if !toggled {
+            cx.propagate();
+        }
+    }));
+    let editor_handle = cx.weak_entity();
+    subscriptions.push(editor.register_action::<editor::actions::Backspace>(
+        move |_, window, cx| {
+            let removed = editor_handle
+                .update(cx, |editor, cx| remove_list_prefix(editor, window, cx))
+                .unwrap_or(false);
+            if !removed {
+                cx.propagate();
+            }
+        },
+    ));
     // Registered before the built-in `go_to_definition` (custom editor
     // actions are installed first at paint), so this listener sees the
     // action first and propagates it when the cursor isn't on a wikilink.
@@ -427,6 +471,8 @@ fn install(editor: &mut Editor, settings: ConcealSettings, cx: &mut Context<Edit
         chip_states: HashMap::default(),
         wrap_set_for_body_face: None,
         reparse: Task::ready(()),
+        hint_row: None,
+        last_hint_row: None,
         _subscriptions: subscriptions,
     });
     apply_body_font(editor, cx);
@@ -1592,6 +1638,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
     let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
 
     let revealed = revealed_rows(editor, &buffer_snapshot);
+    let selections = selection_offsets(editor, &buffer_snapshot);
     let mut desired: Vec<(Range<MultiBufferOffset>, SpanKind)> = Vec::new();
     if enabled {
         for span in &addon.spans {
@@ -1615,7 +1662,15 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
             };
             let is_revealed = revealed
                 .iter()
-                .any(|&(first, last)| start_row <= last && end_row >= first);
+                .any(|&(first, last)| start_row <= last && end_row >= first)
+                && !(start_row == end_row
+                    && list_prefix_kept(
+                        &span.kind,
+                        start..end,
+                        start_row,
+                        &selections,
+                        &buffer_snapshot,
+                    ));
             if !is_revealed {
                 desired.push((start..end, span.kind.clone()));
             }
@@ -1720,7 +1775,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
         .map(|(range, kind)| {
             let placeholder = match kind {
                 SpanKind::Rule => rule_placeholder(editor_handle.clone()),
-                SpanKind::Checkbox(checked) => checkbox_placeholder(checked),
+                SpanKind::Checkbox(checked) => checkbox_placeholder(editor_handle.clone(), checked),
                 SpanKind::Bullet => bullet_placeholder(),
                 SpanKind::EmailMarker(own) => sender_dot_placeholder(own),
                 SpanKind::EmailLink => email_link_placeholder(),
@@ -1997,6 +2052,289 @@ fn revealed_rows(editor: &Editor, buffer_snapshot: &MultiBufferSnapshot) -> Vec<
         .collect()
 }
 
+/// Every selection as a buffer offset range, the pending one included.
+fn selection_offsets(
+    editor: &Editor,
+    buffer_snapshot: &MultiBufferSnapshot,
+) -> Vec<Range<MultiBufferOffset>> {
+    editor
+        .selections
+        .disjoint_anchors()
+        .iter()
+        .chain(editor.selections.pending_anchor())
+        .map(|selection| {
+            selection.start.to_offset(buffer_snapshot)..selection.end.to_offset(buffer_snapshot)
+        })
+        .collect()
+}
+
+/// Whether a span on a revealed `row` stays folded because it is part of the
+/// row's list prefix and no selection is inside that prefix (V49 §4.4). A
+/// cursor right at the prefix's end is in the text, not the prefix.
+fn list_prefix_kept(
+    kind: &SpanKind,
+    span: Range<MultiBufferOffset>,
+    row: u32,
+    selections: &[Range<MultiBufferOffset>],
+    buffer_snapshot: &MultiBufferSnapshot,
+) -> bool {
+    if !matches!(
+        kind,
+        SpanKind::Marker | SpanKind::Bullet | SpanKind::Checkbox(_)
+    ) {
+        return false;
+    }
+    let Some(prefix) = markdown_syntax::list_prefix(&row_text(row, buffer_snapshot)) else {
+        return false;
+    };
+    let line_start = MultiBufferPoint::new(row, 0).to_offset(buffer_snapshot);
+    let prefix_end = line_start + prefix.end;
+    if span.end > prefix_end {
+        return false;
+    }
+    !selections
+        .iter()
+        .any(|selection| selection.start < prefix_end && selection.end >= line_start)
+}
+
+/// The text of buffer `row`, without its newline.
+fn row_text(row: u32, buffer_snapshot: &MultiBufferSnapshot) -> String {
+    let start = MultiBufferPoint::new(row, 0);
+    let end = MultiBufferPoint::new(row, buffer_snapshot.line_len(MultiBufferRow(row)));
+    buffer_snapshot.text_for_range(start..end).collect()
+}
+
+/// Ticks or unticks every task on the given rows as one undoable edit,
+/// leaving the selections where they are. Rows inside code are skipped.
+/// Returns whether any task was toggled.
+fn toggle_tasks_on_rows(
+    editor: &mut Editor,
+    rows: impl IntoIterator<Item = u32>,
+    window: &mut Window,
+    cx: &mut Context<Editor>,
+) -> bool {
+    if editor.read_only(cx) {
+        return false;
+    }
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let text = buffer_snapshot.text();
+    let mut rows: Vec<u32> = rows.into_iter().collect();
+    rows.sort_unstable();
+    rows.dedup();
+    let edits: Vec<(Range<MultiBufferOffset>, &'static str)> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let (mark, replacement) =
+                markdown_syntax::toggle_task_edit(&row_text(row, &buffer_snapshot))?;
+            let line_start = MultiBufferPoint::new(row, 0).to_offset(&buffer_snapshot);
+            markdown_syntax::is_prose_at(&text, line_start.0)
+                .then(|| (line_start + mark.start..line_start + mark.end, replacement))
+        })
+        .collect();
+    if edits.is_empty() {
+        return false;
+    }
+    editor.transact(window, cx, |editor, _, cx| {
+        editor
+            .buffer()
+            .update(cx, |buffer, cx| buffer.edit(edits, None, cx));
+    });
+    true
+}
+
+/// `thock::ToggleTask`: every task line any selection covers. A selection
+/// that ends at the start of a row doesn't take that row.
+fn toggle_tasks_under_selections(
+    editor: &mut Editor,
+    window: &mut Window,
+    cx: &mut Context<Editor>,
+) -> bool {
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let rows: Vec<u32> = editor
+        .selections
+        .disjoint_anchors()
+        .iter()
+        .flat_map(|selection| {
+            let start = selection.start.to_point(&buffer_snapshot);
+            let end = selection.end.to_point(&buffer_snapshot);
+            let last = if end.column == 0 && end.row > start.row {
+                end.row - 1
+            } else {
+                end.row
+            };
+            start.row..=last
+        })
+        .collect();
+    toggle_tasks_on_rows(editor, rows, window, cx)
+}
+
+/// Backspace with a lone cursor right after a bullet's or task's prefix
+/// deletes the whole prefix, indentation included (V49 §4.5). Returns
+/// whether it did; anywhere else backspace is the editor's own.
+fn remove_list_prefix(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor>) -> bool {
+    if !editor
+        .addon::<MarkdownConcealAddon>()
+        .is_some_and(|addon| addon.enabled)
+        || editor.read_only(cx)
+        || editor.selections.count() != 1
+    {
+        return false;
+    }
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let selection = editor.selections.newest_anchor();
+    let cursor = selection.head().to_offset(&buffer_snapshot);
+    if selection.tail().to_offset(&buffer_snapshot) != cursor {
+        return false;
+    }
+    let point = cursor.to_point(&buffer_snapshot);
+    let Some(prefix) = markdown_syntax::list_prefix(&row_text(point.row, &buffer_snapshot)) else {
+        return false;
+    };
+    if point.column as usize != prefix.end {
+        return false;
+    }
+    let line_start = MultiBufferPoint::new(point.row, 0).to_offset(&buffer_snapshot);
+    if !markdown_syntax::is_prose_at(&buffer_snapshot.text(), line_start.0) {
+        return false;
+    }
+    editor.transact(window, cx, |editor, _, cx| {
+        editor.buffer().update(cx, |buffer, cx| {
+            buffer.edit([(line_start..cursor, "")], None, cx)
+        });
+    });
+    true
+}
+
+/// The key-value store record of the formatting hint's counters (V49 §5.6).
+const SLASH_HINT_KEY: &str = "thock_slash_hint";
+const SLASH_HINT_TEXT: &str = "Type / for formatting";
+/// Picks after which the menu counts as learned.
+const SLASH_HINT_PICKS: u32 = 3;
+/// Sightings after which the hint counts as ignored.
+const SLASH_HINT_SIGHTINGS: u32 = 10;
+/// Inlay ids are per editor and the hint is the only inlay Thock draws, so a
+/// fixed id at the far end of the range can't meet a counted one.
+const SLASH_HINT_INLAY: usize = usize::MAX;
+
+/// How often the formatting hint has been followed and seen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlashHintCounts {
+    pub picks: u32,
+    pub sightings: u32,
+}
+
+impl SlashHintCounts {
+    fn retired(&self) -> bool {
+        self.picks >= SLASH_HINT_PICKS || self.sightings >= SLASH_HINT_SIGHTINGS
+    }
+}
+
+/// The hint's counters once read from the store. Until then there is no
+/// global and no hint, so a retired hint never flashes at startup.
+struct SlashHint {
+    counts: SlashHintCounts,
+    /// The newest write; replacing it drops a superseded one, so the store
+    /// ends on the latest counts.
+    write: Option<Task<()>>,
+}
+
+impl gpui::Global for SlashHint {}
+
+/// Reads the hint's counters from the app's key-value store. A failed read
+/// is logged and counts as a fresh start.
+pub(crate) fn load_slash_hint(cx: &mut App) {
+    let store = KeyValueStore::global(cx);
+    cx.spawn(async move |cx| {
+        let counts = cx
+            .background_spawn(async move { store.read_kvp(SLASH_HINT_KEY) })
+            .await
+            .context("reading the formatting hint's counters")
+            .log_err()
+            .flatten()
+            .and_then(|value| serde_json::from_str::<SlashHintCounts>(&value).log_err())
+            .unwrap_or_default();
+        cx.update(|cx| {
+            cx.set_global(SlashHint {
+                counts,
+                write: None,
+            })
+        });
+    })
+    .detach();
+}
+
+/// The hint's counters, or `None` before they're loaded.
+#[cfg(test)]
+pub(crate) fn slash_hint_counts(cx: &App) -> Option<SlashHintCounts> {
+    cx.try_global::<SlashHint>().map(|hint| hint.counts)
+}
+
+/// Counts one pick from the `/` menu.
+pub(crate) fn record_slash_pick(cx: &mut App) {
+    bump_slash_hint(cx, |counts| counts.picks += 1);
+}
+
+fn bump_slash_hint(cx: &mut App, bump: impl FnOnce(&mut SlashHintCounts)) {
+    if !cx.has_global::<SlashHint>() {
+        return;
+    }
+    let store = KeyValueStore::global(cx);
+    let hint = cx.global_mut::<SlashHint>();
+    bump(&mut hint.counts);
+    let Some(payload) = serde_json::to_string(&hint.counts).log_err() else {
+        return;
+    };
+    let write = cx.background_spawn(async move {
+        if let Err(error) = store.write_kvp(SLASH_HINT_KEY.to_string(), payload).await {
+            log::error!("couldn't save the formatting hint's counters: {error}");
+        }
+    });
+    cx.global_mut::<SlashHint>().write = Some(write);
+}
+
+/// Draws the formatting hint on the newest cursor's line when that line is
+/// empty, conceal is on and the hint hasn't retired; removes it otherwise.
+/// Each arrival on a new row counts as a sighting.
+fn update_hint(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let Some(addon) = editor.addon::<MarkdownConcealAddon>() else {
+        return;
+    };
+    let shown = addon.hint_row;
+    let last_shown = addon.last_hint_row;
+    let active = addon.enabled
+        && cx
+            .try_global::<SlashHint>()
+            .is_some_and(|hint| !hint.counts.retired());
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let selection = editor.selections.newest_anchor();
+    let head = selection.head().to_point(&buffer_snapshot);
+    let empty_line = selection.start.to_offset(&buffer_snapshot)
+        == selection.end.to_offset(&buffer_snapshot)
+        && buffer_snapshot.line_len(MultiBufferRow(head.row)) == 0;
+    let wanted = (active && empty_line && !editor.read_only(cx)).then_some(head.row);
+    if wanted == shown {
+        return;
+    }
+    let inlay = wanted.map(|row| {
+        let position = buffer_snapshot.anchor_after(MultiBufferPoint::new(row, 0));
+        Inlay::edit_prediction(SLASH_HINT_INLAY, position, SLASH_HINT_TEXT)
+    });
+    editor.splice_inlays(
+        &[InlayId::EditPrediction(SLASH_HINT_INLAY)],
+        inlay.into_iter().collect(),
+        cx,
+    );
+    if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
+        addon.hint_row = wanted;
+        if wanted.is_some() {
+            addon.last_hint_row = wanted;
+        }
+    }
+    if wanted.is_some() && wanted != last_shown {
+        bump_slash_hint(cx, |counts| counts.sightings += 1);
+    }
+}
+
 /// Placeholder for hidden markup: a single-character collapsed text rendered
 /// by a zero-width element, so nothing is drawn where the markers were.
 ///
@@ -2016,11 +2354,12 @@ fn marker_placeholder() -> FoldPlaceholder {
 }
 
 /// Placeholder for a task list's `[ ]` / `[x]`: the checkbox it stands for,
-/// a checked one filled with the accent (V43 §7.3). Display-only — the box
-/// is not clickable, since ticking it would write to the buffer.
-fn checkbox_placeholder(checked: bool) -> FoldPlaceholder {
+/// a checked one filled with the accent (V43 §7.3). A click ticks or unticks
+/// the task without moving the cursor, which would reveal the line and pull
+/// the box out from under the pointer (V49 §4.1).
+fn checkbox_placeholder(editor: WeakEntity<Editor>, checked: bool) -> FoldPlaceholder {
     FoldPlaceholder {
-        render: Arc::new(move |_, _, cx| {
+        render: Arc::new(move |fold_id, fold_range, cx| {
             let colors = cx.theme().colors();
             let mut checkbox = div()
                 .size(px(13.))
@@ -2041,11 +2380,26 @@ fn checkbox_placeholder(checked: bool) -> FoldPlaceholder {
                         .color(Color::Custom(on_accent_color(cx))),
                 );
             }
+            let editor = editor.clone();
             div()
+                .id(fold_id)
                 .h_full()
                 .flex()
                 .items_center()
+                .cursor_pointer()
                 .child(checkbox)
+                // The editor would otherwise put the cursor under the click.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    editor
+                        .update(cx, |editor, cx| {
+                            let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+                            let row = fold_range.start.to_point(&buffer_snapshot).row;
+                            toggle_tasks_on_rows(editor, [row], window, cx);
+                        })
+                        .ok();
+                })
                 .into_any_element()
         }),
         constrain_width: false,
@@ -4153,5 +4507,403 @@ mod tests {
         let (editor, mut cx) = setup(cx, note).await;
         move_cursor_to(&editor, 2, &mut cx);
         assert_eq!(chip_states(&editor, &mut cx), []);
+    }
+
+    /// `setup`, focused and with the shipped Linux keymap bound, so a
+    /// keystroke resolves the way it does in the app.
+    async fn setup_keyboard(
+        cx: &mut TestAppContext,
+        text: &str,
+    ) -> (Entity<Editor>, VisualTestContext) {
+        let (editor, mut cx) = setup(cx, text).await;
+        cx.update(|_, cx| {
+            let key_bindings = match settings::KeymapFile::load(
+                include_str!("../../../assets/keymaps/default-linux.json"),
+                cx,
+            ) {
+                settings::KeymapFileLoadResult::Success { key_bindings }
+                | settings::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => {
+                    key_bindings
+                }
+                settings::KeymapFileLoadResult::JsonParseFailure { error } => {
+                    panic!("bad keymap: {error}")
+                }
+            };
+            cx.bind_keys(key_bindings);
+        });
+        cx.focus(&editor);
+        settle(&mut cx);
+        (editor, cx)
+    }
+
+    fn place_cursor(editor: &Entity<Editor>, row: u32, column: u32, cx: &mut VisualTestContext) {
+        editor.update_in(cx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                let point = MultiBufferPoint::new(row, column);
+                selections.select_ranges([point..point]);
+            });
+        });
+        settle(cx);
+    }
+
+    fn buffer_text(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> String {
+        editor.update(cx, |editor, cx| editor.text(cx))
+    }
+
+    fn cursor_point(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> MultiBufferPoint {
+        editor.update(cx, |editor, cx| {
+            let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+            editor
+                .selections
+                .newest_anchor()
+                .head()
+                .to_point(&buffer_snapshot)
+        })
+    }
+
+    #[gpui::test]
+    async fn clicking_the_box_ticks_the_task_in_place(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "- [ ] buy milk\nother\n").await;
+        place_cursor(&editor, 1, 2, &mut cx);
+        assert_eq!(display_text(&editor, &mut cx), " ☐ buy milk\nother\n");
+        let mut test_cx = EditorTestContext::for_editor_in(editor.clone(), &mut cx).await;
+        test_cx.run_until_parked();
+
+        // Display column 1 is where the folded `- ` ends and the box begins.
+        let box_position = test_cx.pixel_position_for(DisplayPoint::new(DisplayRow(0), 1))
+            + gpui::point(px(4.), px(4.));
+        test_cx.simulate_mouse_down(box_position, MouseButton::Left, Modifiers::none());
+        test_cx.simulate_mouse_up(box_position, MouseButton::Left, Modifiers::none());
+        settle(&mut cx);
+
+        assert_eq!(buffer_text(&editor, &mut cx), "- [x] buy milk\nother\n");
+        assert_eq!(cursor_point(&editor, &mut cx), MultiBufferPoint::new(1, 2));
+        assert_eq!(display_text(&editor, &mut cx), " ☑ buy milk\nother\n");
+
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.undo(&Default::default(), window, cx)
+        });
+        settle(&mut cx);
+        assert_eq!(buffer_text(&editor, &mut cx), "- [ ] buy milk\nother\n");
+    }
+
+    #[gpui::test]
+    async fn ctrl_enter_ticks_the_task_under_the_cursor(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup_keyboard(cx, "- [ ] buy milk\n- [X] bread\n").await;
+        place_cursor(&editor, 0, 9, &mut cx);
+        cx.simulate_keystrokes("ctrl-enter");
+        settle(&mut cx);
+        assert_eq!(
+            buffer_text(&editor, &mut cx),
+            "- [x] buy milk\n- [X] bread\n"
+        );
+        assert_eq!(cursor_point(&editor, &mut cx), MultiBufferPoint::new(0, 9));
+
+        place_cursor(&editor, 1, 8, &mut cx);
+        cx.simulate_keystrokes("ctrl-enter");
+        settle(&mut cx);
+        assert_eq!(
+            buffer_text(&editor, &mut cx),
+            "- [x] buy milk\n- [ ] bread\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn ctrl_enter_ticks_every_task_a_selection_covers(cx: &mut TestAppContext) {
+        let note = "- [ ] one\nnot a task\n- [x] two\n```\n- [ ] code\n```\n- [ ] after\n";
+        let (editor, mut cx) = setup_keyboard(cx, note).await;
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                selections
+                    .select_ranges([MultiBufferPoint::new(0, 3)..MultiBufferPoint::new(6, 0)]);
+            });
+        });
+        cx.simulate_keystrokes("ctrl-enter");
+        settle(&mut cx);
+        assert_eq!(
+            buffer_text(&editor, &mut cx),
+            "- [x] one\nnot a task\n- [ ] two\n```\n- [ ] code\n```\n- [ ] after\n",
+            "tasks in code and on the row a selection ends at the start of stay put"
+        );
+
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.undo(&Default::default(), window, cx)
+        });
+        settle(&mut cx);
+        assert_eq!(
+            buffer_text(&editor, &mut cx),
+            note,
+            "one undo restores both"
+        );
+    }
+
+    #[gpui::test]
+    async fn ctrl_enter_off_a_task_opens_a_line_below(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup_keyboard(cx, "plain line\nnext\n").await;
+        place_cursor(&editor, 0, 3, &mut cx);
+        cx.simulate_keystrokes("ctrl-enter");
+        settle(&mut cx);
+        assert_eq!(buffer_text(&editor, &mut cx), "plain line\n\nnext\n");
+        assert_eq!(cursor_point(&editor, &mut cx), MultiBufferPoint::new(1, 0));
+    }
+
+    #[gpui::test]
+    async fn the_prefix_stays_drawn_while_the_cursor_is_in_the_text(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup_keyboard(cx, "- [x] buy **milk**\n- bread\nother\n").await;
+        place_cursor(&editor, 0, 9, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            " ☑ buy **milk**\n• bread\nother\n",
+            "the rest of the line reveals as before"
+        );
+
+        place_cursor(&editor, 0, 6, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            " ☑ buy **milk**\n• bread\nother\n",
+            "the text's start is not inside the prefix"
+        );
+
+        place_cursor(&editor, 1, 7, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            " ☑ buy  milk \n• bread\nother\n"
+        );
+
+        cx.simulate_keystrokes("home");
+        settle(&mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            " ☑ buy  milk \n- bread\nother\n",
+            "home enters the prefix"
+        );
+
+        place_cursor(&editor, 0, 6, &mut cx);
+        cx.simulate_keystrokes("left");
+        settle(&mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "- [x] buy **milk**\n• bread\nother\n",
+            "left from the text's start enters the prefix"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_selection_over_the_prefix_reveals_it(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "- [ ] buy milk\nother\n").await;
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                selections
+                    .select_ranges([MultiBufferPoint::new(0, 4)..MultiBufferPoint::new(0, 9)]);
+            });
+        });
+        settle(&mut cx);
+        assert_eq!(display_text(&editor, &mut cx), "- [ ] buy milk\nother\n");
+    }
+
+    #[gpui::test]
+    async fn a_fresh_task_line_keeps_its_box_drawn(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup_keyboard(cx, "- [ ] buy milk").await;
+        place_cursor(&editor, 0, 14, &mut cx);
+        cx.simulate_keystrokes("enter");
+        // The Markdown language continues the list on Enter; the test buffer
+        // has no language, so type the continuation it would have written.
+        cx.simulate_input("- [ ] ");
+        settle(&mut cx);
+        assert_eq!(buffer_text(&editor, &mut cx), "- [ ] buy milk\n- [ ] ");
+        assert_eq!(display_text(&editor, &mut cx), " ☐ buy milk\n ☐ ");
+    }
+
+    #[gpui::test]
+    async fn backspace_at_the_text_start_drops_the_prefix(cx: &mut TestAppContext) {
+        let note = "- [ ] buy milk\n  - note\nplain\n";
+        let (editor, mut cx) = setup_keyboard(cx, note).await;
+        place_cursor(&editor, 0, 6, &mut cx);
+        cx.simulate_keystrokes("backspace");
+        settle(&mut cx);
+        assert_eq!(buffer_text(&editor, &mut cx), "buy milk\n  - note\nplain\n");
+        assert_eq!(cursor_point(&editor, &mut cx), MultiBufferPoint::new(0, 0));
+
+        cx.simulate_keystrokes("backspace");
+        settle(&mut cx);
+        assert_eq!(
+            buffer_text(&editor, &mut cx),
+            "buy milk\n  - note\nplain\n",
+            "at the start of the note there is nothing left to join"
+        );
+
+        place_cursor(&editor, 1, 4, &mut cx);
+        cx.simulate_keystrokes("backspace");
+        settle(&mut cx);
+        assert_eq!(buffer_text(&editor, &mut cx), "buy milk\nnote\nplain\n");
+
+        cx.simulate_keystrokes("backspace");
+        settle(&mut cx);
+        assert_eq!(
+            buffer_text(&editor, &mut cx),
+            "buy milknote\nplain\n",
+            "the next backspace joins the lines"
+        );
+    }
+
+    #[gpui::test]
+    async fn backspace_elsewhere_is_unchanged(cx: &mut TestAppContext) {
+        let note = "- [ ] buy milk\n```\n- code\n```\n";
+        let (editor, mut cx) = setup_keyboard(cx, note).await;
+        place_cursor(&editor, 0, 9, &mut cx);
+        cx.simulate_keystrokes("backspace");
+        settle(&mut cx);
+        assert_eq!(
+            buffer_text(&editor, &mut cx),
+            "- [ ] bu milk\n```\n- code\n```\n"
+        );
+
+        place_cursor(&editor, 2, 2, &mut cx);
+        cx.simulate_keystrokes("backspace");
+        settle(&mut cx);
+        assert_eq!(
+            buffer_text(&editor, &mut cx),
+            "- [ ] bu milk\n```\n-code\n```\n",
+            "a list in code is text"
+        );
+
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                selections
+                    .select_ranges([MultiBufferPoint::new(0, 5)..MultiBufferPoint::new(0, 6)]);
+            });
+        });
+        cx.simulate_keystrokes("backspace");
+        settle(&mut cx);
+        assert_eq!(
+            buffer_text(&editor, &mut cx),
+            "- [ ]bu milk\n```\n-code\n```\n",
+            "a selection deletes just itself"
+        );
+    }
+
+    /// Installs a fresh key-value store and loads the formatting hint's
+    /// counters from it, after writing `stored` there when given.
+    fn load_hint(stored: Option<SlashHintCounts>, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| cx.set_global(db::AppDatabase::test_new()));
+        if let Some(stored) = stored {
+            let store = cx.update(|_, cx| KeyValueStore::global(cx));
+            let payload = serde_json::to_string(&stored).unwrap();
+            gpui::block_on(store.write_kvp(SLASH_HINT_KEY.to_string(), payload)).unwrap();
+        }
+        cx.update(|_, cx| load_slash_hint(cx));
+        cx.run_until_parked();
+    }
+
+    fn stored_hint(cx: &mut VisualTestContext) -> Option<SlashHintCounts> {
+        cx.run_until_parked();
+        let store = cx.update(|_, cx| KeyValueStore::global(cx));
+        store
+            .read_kvp(SLASH_HINT_KEY)
+            .unwrap()
+            .map(|value| serde_json::from_str(&value).unwrap())
+    }
+
+    #[gpui::test]
+    async fn the_hint_draws_on_an_empty_line(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "first\n\nthird\n").await;
+        load_hint(None, &mut cx);
+        place_cursor(&editor, 1, 0, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "first\nType / for formatting\nthird\n"
+        );
+        assert_eq!(buffer_text(&editor, &mut cx), "first\n\nthird\n");
+        assert_eq!(
+            stored_hint(&mut cx),
+            Some(SlashHintCounts {
+                picks: 0,
+                sightings: 1
+            })
+        );
+
+        editor.update_in(&mut cx, |editor, window, cx| editor.insert("x", window, cx));
+        settle(&mut cx);
+        assert_eq!(display_text(&editor, &mut cx), "first\nx\nthird\n");
+
+        editor.update_in(&mut cx, |editor, window, cx| {
+            editor.backspace(&Default::default(), window, cx)
+        });
+        settle(&mut cx);
+        place_cursor(&editor, 0, 0, &mut cx);
+        place_cursor(&editor, 1, 0, &mut cx);
+        assert_eq!(
+            stored_hint(&mut cx).map(|counts| counts.sightings),
+            Some(1),
+            "coming back to the same line is not a new sighting"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_hint_retires_after_ten_sightings(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "\nmiddle\n\n").await;
+        load_hint(
+            Some(SlashHintCounts {
+                picks: 0,
+                sightings: 8,
+            }),
+            &mut cx,
+        );
+        place_cursor(&editor, 2, 0, &mut cx);
+        place_cursor(&editor, 0, 0, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "Type / for formatting\nmiddle\n\n",
+            "the tenth sighting still draws"
+        );
+        place_cursor(&editor, 2, 0, &mut cx);
+        assert_eq!(display_text(&editor, &mut cx), "\nmiddle\n\n");
+        assert_eq!(
+            stored_hint(&mut cx),
+            Some(SlashHintCounts {
+                picks: 0,
+                sightings: 10
+            })
+        );
+    }
+
+    #[gpui::test]
+    async fn the_hint_retires_after_three_picks(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "\nmiddle\n").await;
+        load_hint(
+            Some(SlashHintCounts {
+                picks: 2,
+                sightings: 0,
+            }),
+            &mut cx,
+        );
+        place_cursor(&editor, 0, 0, &mut cx);
+        assert_eq!(
+            display_text(&editor, &mut cx),
+            "Type / for formatting\nmiddle\n"
+        );
+        cx.update(|_, cx| record_slash_pick(cx));
+        place_cursor(&editor, 1, 0, &mut cx);
+        place_cursor(&editor, 0, 0, &mut cx);
+        assert_eq!(display_text(&editor, &mut cx), "\nmiddle\n");
+        assert_eq!(
+            stored_hint(&mut cx),
+            Some(SlashHintCounts {
+                picks: 3,
+                sightings: 1
+            })
+        );
+    }
+
+    #[gpui::test]
+    async fn no_hint_with_conceal_off(cx: &mut TestAppContext) {
+        let settings = ConcealSettings {
+            conceal: false,
+            ..test_settings()
+        };
+        let (editor, mut cx) = setup_with(cx, "first\n\n", settings).await;
+        load_hint(None, &mut cx);
+        place_cursor(&editor, 1, 0, &mut cx);
+        assert_eq!(display_text(&editor, &mut cx), "first\n\n");
     }
 }

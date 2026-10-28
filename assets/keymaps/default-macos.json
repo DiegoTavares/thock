@@ -1240,6 +1240,7 @@
     "use_key_equivalents": true,
     "bindings": {
       "cmd-alt-m": "thock::ToggleMarkdownSource",
+      "cmd-enter": "thock::ToggleTask",
     },
   },
   {

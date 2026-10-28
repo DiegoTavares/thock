@@ -1,6 +1,8 @@
 # Thock V49 - Tick a box with a click, format with a slash
 
-**Status:** Draft (2026-10-28).
+**Status:** Implemented (2026-10-28). No `editor` change was needed (R1): the checkbox placeholder
+takes the click the way the stock fold placeholder does. Backspace drops the prefix only while
+conceal is on (§4.5); with the source showing, it deletes one character as usual.
 **Owner:** Diego · **Date:** 2026-10-28
 **Companion docs:** `v10-markdown-conceal.md`, `v24-inline-markdown-conceal.md` (conceal and the reveal rule),
 `v43-almanac.md` §7.3 (the task checkbox and bullet), `crates/thock/src/wikilink_completion.rs`

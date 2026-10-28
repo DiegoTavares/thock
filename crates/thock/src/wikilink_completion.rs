@@ -5,28 +5,33 @@
 //! resolves — the vault-relative path without its `.md` extension. Typing
 //! `![` offers the vault's images folder the same way and writes the whole
 //! `![alt](/images/…)` link (V39 §5.4). Typing `(@` offers the reminder
-//! readings of what follows and writes the canonical token (V45 §8.1). The
-//! provider delegates everything else to the editor's regular project-backed
-//! completions.
+//! readings of what follows and writes the canonical token (V45 §8.1).
+//! Typing `/` at the start of a line or after a space offers formatting by
+//! name — headings, lists, quotes, emphasis, links — so a note can be shaped
+//! without knowing Markdown (V49 §5). The provider delegates everything else
+//! to the editor's regular project-backed completions.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use chrono::NaiveTime;
+use chrono::{NaiveDateTime, NaiveTime};
 use editor::actions::ShowCompletions;
 use editor::{CompletionProvider, Editor, EditorEvent, EditorMode};
-use gpui::{App, Context, Entity, Task, Window};
+use gpui::{App, Context, Entity, Task, WeakEntity, Window};
 use language::{Buffer, CodeLabel};
+use multi_buffer::{MultiBufferOffset, ToOffset as _};
 use project::{
-    Completion, CompletionDisplayOptions, CompletionResponse, CompletionSource, Project,
+    Completion, CompletionDisplayOptions, CompletionGroup, CompletionResponse, CompletionSource,
+    Project,
 };
 use text::{Point, ToOffset as _, ToPoint as _};
 use thock_sync_core::{DailyNotes, Due, token_text};
 use util::ResultExt as _;
 
-use crate::markdown_syntax;
+use crate::markdown_conceal::record_slash_pick;
+use crate::markdown_syntax::{self, Block};
 use crate::reminder_calendar::PickReminderDate;
 use crate::reminder_reading;
 use crate::reminders::{ReminderClock, ReminderSettings, due_label, load_reminder_settings};
@@ -36,7 +41,9 @@ gpui::actions!(
     thock,
     [
         /// Inserts a picture from the vault's images folder at the cursor.
-        InsertImage
+        InsertImage,
+        /// Chooses a heading, list, quote or style to insert at the cursor.
+        InsertFormatting
     ]
 );
 
@@ -134,6 +141,30 @@ fn install_provider(
                 .ok();
         })
         .detach();
+    let editor_handle = cx.weak_entity();
+    editor
+        .register_action::<InsertFormatting>(move |_, window, cx| {
+            editor_handle
+                .update(cx, |editor, cx| insert_formatting(editor, window, cx))
+                .ok();
+        })
+        .detach();
+}
+
+/// Types the `/` that opens the formatting menu, with a space before it when
+/// the cursor follows a word, and opens the menu (V49 §5.5).
+fn insert_formatting(editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor>) {
+    if editor.read_only(cx) {
+        return;
+    }
+    let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+    let head = editor.selections.newest_anchor().head();
+    let follows_word = buffer_snapshot
+        .reversed_chars_at(head.to_offset(&buffer_snapshot))
+        .next()
+        .is_some_and(|character| !character.is_whitespace());
+    editor.handle_input(if follows_word { " /" } else { "/" }, window, cx);
+    editor.show_completions(&ShowCompletions, window, cx);
 }
 
 /// Starts an image link at the cursor and opens its completions: the person
@@ -209,6 +240,9 @@ impl CompletionProvider for WikilinkCompletionProvider {
         {
             return Task::ready(Ok(vec![response]));
         }
+        if let Some(response) = slash_response(buffer, buffer_position, cx) {
+            return Task::ready(Ok(vec![response]));
+        }
         match &self.project {
             Some(project) => project.completions(buffer, buffer_position, trigger, window, cx),
             None => Task::ready(Ok(Vec::new())),
@@ -264,6 +298,7 @@ impl CompletionProvider for WikilinkCompletionProvider {
         if wikilink_query_offset(snapshot, position).is_some()
             || image_query_offset(snapshot, position).is_some()
             || reminder_query_offset(snapshot, position).is_some()
+            || slash_query_offset(snapshot, position).is_some()
         {
             return true;
         }
@@ -512,6 +547,347 @@ fn reminder_response(
         display_options,
         is_incomplete: true,
     })
+}
+
+/// What a `/` menu entry does (V49 §5.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Format {
+    /// Rewrites the line's block prefix.
+    Block(Block),
+    Divider,
+    CodeBlock,
+    Table,
+    /// Inserts a pair of the same delimiter with the cursor between.
+    Wrap(&'static str),
+    Link,
+    /// Types the opening of another completion, which then takes over.
+    Trigger(&'static str),
+    Date,
+    Time,
+}
+
+struct FormatEntry {
+    label: &'static str,
+    aliases: &'static [&'static str],
+    group: &'static str,
+    format: Format,
+}
+
+const fn entry(
+    label: &'static str,
+    aliases: &'static [&'static str],
+    group: &'static str,
+    format: Format,
+) -> FormatEntry {
+    FormatEntry {
+        label,
+        aliases,
+        group,
+        format,
+    }
+}
+
+const BLOCKS: &str = "Blocks";
+const INLINE: &str = "Inline";
+const THOCK: &str = "Thock";
+
+const FORMAT_ENTRIES: &[FormatEntry] = &[
+    entry(
+        "Task",
+        &["todo", "checkbox"],
+        BLOCKS,
+        Format::Block(Block::Task),
+    ),
+    entry("Bullet", &["list"], BLOCKS, Format::Block(Block::Bullet)),
+    entry("Numbered", &["ol"], BLOCKS, Format::Block(Block::Numbered)),
+    entry(
+        "Heading 1",
+        &["h1", "title"],
+        BLOCKS,
+        Format::Block(Block::Heading(1)),
+    ),
+    entry(
+        "Heading 2",
+        &["h2"],
+        BLOCKS,
+        Format::Block(Block::Heading(2)),
+    ),
+    entry(
+        "Heading 3",
+        &["h3"],
+        BLOCKS,
+        Format::Block(Block::Heading(3)),
+    ),
+    entry(
+        "Quote",
+        &["blockquote"],
+        BLOCKS,
+        Format::Block(Block::Quote),
+    ),
+    entry("Divider", &["hr", "rule", "line"], BLOCKS, Format::Divider),
+    entry("Code block", &["fence"], BLOCKS, Format::CodeBlock),
+    entry("Table", &[], BLOCKS, Format::Table),
+    entry("Bold", &["b"], INLINE, Format::Wrap("**")),
+    entry("Italic", &["i"], INLINE, Format::Wrap("_")),
+    entry("Strikethrough", &["s"], INLINE, Format::Wrap("~~")),
+    entry("Code", &[], INLINE, Format::Wrap("`")),
+    entry("Link", &["url"], INLINE, Format::Link),
+    entry(
+        "Link to note",
+        &["wiki", "page"],
+        THOCK,
+        Format::Trigger("[["),
+    ),
+    entry("Image", &["picture"], THOCK, Format::Trigger("![")),
+    entry("Reminder", &["remind"], THOCK, Format::Trigger(TOKEN_OPEN)),
+    entry("Today's date", &["date"], THOCK, Format::Date),
+    entry("Time now", &["time"], THOCK, Format::Time),
+];
+
+/// The entries `query` picks out, best first: an exact label or alias, then
+/// one it starts, then a word of a label it starts, then any label or alias
+/// it is a subsequence of. Catalog order breaks ties.
+fn matching_entries(query: &str) -> Vec<&'static FormatEntry> {
+    let query = query.to_lowercase();
+    let rank = |candidate: &str| -> Option<u8> {
+        let candidate = candidate.to_lowercase();
+        if candidate == query {
+            Some(0)
+        } else if candidate.starts_with(&query) {
+            Some(1)
+        } else if candidate.split(' ').any(|word| word.starts_with(&query)) {
+            Some(2)
+        } else {
+            let mut characters = candidate.chars();
+            query
+                .chars()
+                .all(|wanted| characters.any(|character| character == wanted))
+                .then_some(3)
+        }
+    };
+    let mut ranked: Vec<(u8, &FormatEntry)> = FORMAT_ENTRIES
+        .iter()
+        .filter_map(|entry| {
+            std::iter::once(entry.label)
+                .chain(entry.aliases.iter().copied())
+                .filter_map(rank)
+                .min()
+                .map(|rank| (rank, entry))
+        })
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    ranked.into_iter().map(|(_, entry)| entry).collect()
+}
+
+/// A pick's edit, line-relative: the range it replaces, the text it puts
+/// there, and where in that text the cursor lands.
+#[derive(Debug, PartialEq, Eq)]
+struct FormatEdit {
+    range: std::ops::Range<usize>,
+    text: String,
+    cursor: usize,
+}
+
+/// What picking `format` does to `line`, whose `/query` runs from byte
+/// `slash` to the cursor at byte `cursor` (V49 §5.4). The `/query` goes
+/// first; a block entry also takes the space it was typed after, so
+/// `- buy milk /h2` becomes `## buy milk`.
+fn format_edit(
+    line: &str,
+    slash: usize,
+    cursor: usize,
+    format: Format,
+    now: NaiveDateTime,
+) -> FormatEdit {
+    let query = slash..cursor;
+    let inline = |text: String, at: usize| FormatEdit {
+        range: query.clone(),
+        cursor: at,
+        text,
+    };
+    match format {
+        Format::Wrap(delimiter) => inline(delimiter.repeat(2), delimiter.len()),
+        Format::Link => inline("[]()".to_string(), 1),
+        Format::Trigger(open) => inline(open.to_string(), open.len()),
+        Format::Date => {
+            let date = now.format("%Y-%m-%d").to_string();
+            let at = date.len();
+            inline(date, at)
+        }
+        Format::Time => {
+            let time = now.format("%H:%M").to_string();
+            let at = time.len();
+            inline(time, at)
+        }
+        Format::Block(block) => {
+            let (base, at) = without_query(line, slash, cursor);
+            let (text, cursor) = markdown_syntax::apply_block(&base, block, at);
+            FormatEdit {
+                range: 0..line.len(),
+                text,
+                cursor,
+            }
+        }
+        Format::Divider | Format::CodeBlock | Format::Table => {
+            let (base, _) = without_query(line, slash, cursor);
+            let indent = &base[..base.len() - base.trim_start_matches([' ', '\t']).len()];
+            let (lines, cursor_line, cursor_column): (&[&str], usize, usize) = match format {
+                Format::Divider => (&["___"], 0, 3),
+                Format::CodeBlock => (&["```", "", "```"], 1, 0),
+                _ => (&["|  |  |", "| --- | --- |", "|  |  |"], 0, 2),
+            };
+            let mut text = String::new();
+            let mut cursor = 0;
+            if !base.trim().is_empty() {
+                text.push_str(&base);
+                text.push('\n');
+            }
+            for (index, block_line) in lines.iter().enumerate() {
+                if index > 0 {
+                    text.push('\n');
+                }
+                if index == cursor_line {
+                    cursor = text.len() + indent.len() + cursor_column;
+                }
+                text.push_str(indent);
+                text.push_str(block_line);
+            }
+            FormatEdit {
+                range: 0..line.len(),
+                text,
+                cursor,
+            }
+        }
+    }
+}
+
+/// `line` with its `/query` removed, and the space before it when that space
+/// would be left dangling, with the cursor's place in what remains.
+fn without_query(line: &str, slash: usize, cursor: usize) -> (String, usize) {
+    let before = &line[..slash];
+    let after = &line[cursor..];
+    let dangling = before.ends_with([' ', '\t'])
+        && !before.trim().is_empty()
+        && (after.is_empty() || after.starts_with([' ', '\t']));
+    let before = if dangling {
+        &before[..before.len() - 1]
+    } else {
+        before
+    };
+    (format!("{before}{after}"), before.len())
+}
+
+/// The buffer offset of the `/` opening the formatting query under
+/// `position`, when one is being typed there.
+fn slash_query_offset(buffer: &Buffer, position: text::Anchor) -> Option<usize> {
+    let cursor = position.to_offset(buffer);
+    let row = position.to_point(buffer).row;
+    // Fences and front matter depend only on the lines above, so the text up
+    // to the end of this line is enough.
+    let line_end = Point::new(row, buffer.line_len(row));
+    let above: String = buffer.text_for_range(Point::zero()..line_end).collect();
+    markdown_syntax::slash_trigger(&above, cursor)
+}
+
+/// The formatting menu for the `/query` under `buffer_position` (V49 §5),
+/// or `None` when no query is being typed. A query nothing matches gets an
+/// empty answer, which closes the menu and leaves the text as typed.
+fn slash_response(
+    buffer: &Entity<Buffer>,
+    buffer_position: text::Anchor,
+    cx: &Context<Editor>,
+) -> Option<CompletionResponse> {
+    let editor = cx.weak_entity();
+    let buffer = buffer.read(cx);
+    let slash = slash_query_offset(buffer, buffer_position)?;
+    let cursor = buffer_position.to_offset(buffer);
+    let row = buffer_position.to_point(buffer).row;
+    let line_start = buffer.point_to_offset(Point::new(row, 0));
+    let line: String = buffer
+        .text_for_range(Point::new(row, 0)..Point::new(row, buffer.line_len(row)))
+        .collect();
+    let query: String = buffer.text_for_range(slash + 1..cursor).collect();
+    let now = ReminderClock::global(cx).now();
+    let entries = matching_entries(&query);
+    // Matching from the cursor hands the menu an empty query, so it doesn't
+    // refilter what the aliases already matched.
+    let cursor_anchor = buffer.anchor_after(cursor);
+    // Group headers only make sense in catalog order.
+    let grouped = query.is_empty();
+    let completions = entries
+        .into_iter()
+        .map(|entry| {
+            let edit = format_edit(
+                &line,
+                slash - line_start,
+                cursor - line_start,
+                entry.format,
+                now,
+            );
+            let start = buffer.anchor_before(line_start + edit.range.start);
+            let replace_range = start..buffer.anchor_after(line_start + edit.range.end);
+            let reopen = matches!(entry.format, Format::Trigger(_));
+            let cursor_in_text = (edit.cursor < edit.text.len()).then_some(edit.cursor);
+            let editor = editor.clone();
+            Completion {
+                replace_range,
+                new_text: edit.text,
+                // No filter text, so the menu keeps the ranking rather than
+                // sorting by label.
+                label: CodeLabel::new(entry.label.to_string(), 0..0, Vec::new()),
+                documentation: None,
+                source: CompletionSource::Custom,
+                icon_path: None,
+                icon_color: None,
+                match_start: Some(cursor_anchor),
+                snippet_deduplication_key: None,
+                insert_text_mode: None,
+                confirm: Some(Arc::new(move |_, window, cx| {
+                    record_slash_pick(cx);
+                    if let Some(offset) = cursor_in_text {
+                        place_cursor(editor.clone(), start, offset, window, cx);
+                    }
+                    reopen
+                })),
+                group: grouped.then(|| CompletionGroup {
+                    key: entry.group.into(),
+                    label: Some(entry.group.into()),
+                }),
+            }
+        })
+        .collect();
+    Some(CompletionResponse {
+        completions,
+        display_options: CompletionDisplayOptions {
+            dynamic_width: true,
+        },
+        is_incomplete: true,
+    })
+}
+
+/// Puts the cursor `offset` bytes past `start` once the pick's edit has
+/// landed. The editor is mid-update while a completion confirms, so this
+/// waits for the next turn.
+fn place_cursor(
+    editor: WeakEntity<Editor>,
+    start: text::Anchor,
+    offset: usize,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window.defer(cx, move |window, cx| {
+        editor
+            .update(cx, |editor, cx| {
+                let Some(buffer) = editor.buffer().read(cx).as_singleton() else {
+                    return;
+                };
+                let position = MultiBufferOffset(start.to_offset(buffer.read(cx)) + offset);
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections.select_ranges([position..position])
+                });
+            })
+            .log_err();
+    });
 }
 
 const TOKEN_OPEN: &str = "(@";
@@ -1021,5 +1397,231 @@ mod tests {
         });
         assert!(calendar.is_some(), "Pick a date… opens the calendar");
         assert_eq!(text(&mut setup), "Renew passport (@dec 2)");
+    }
+
+    fn matching_labels(query: &str) -> Vec<&'static str> {
+        matching_entries(query)
+            .into_iter()
+            .map(|entry| entry.label)
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_query_offers_the_whole_catalog_in_order() {
+        let labels = matching_labels("");
+        assert_eq!(labels.len(), FORMAT_ENTRIES.len());
+        assert_eq!(labels.first(), Some(&"Task"));
+        assert_eq!(labels.last(), Some(&"Time now"));
+    }
+
+    #[test]
+    fn exact_aliases_and_prefixes_rank_first() {
+        assert_eq!(matching_labels("h2"), ["Heading 2"]);
+        assert_eq!(matching_labels("todo").first(), Some(&"Task"));
+        assert_eq!(matching_labels("quo").first(), Some(&"Quote"));
+        assert_eq!(matching_labels("b").first(), Some(&"Bold"));
+        assert_eq!(matching_labels("I").first(), Some(&"Italic"));
+        assert_eq!(matching_labels("block").first(), Some(&"Quote"));
+        assert_eq!(matching_labels("wiki"), ["Link to note"]);
+        assert!(matching_labels("zzz").is_empty());
+    }
+
+    fn noon() -> NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 10, 28)
+            .unwrap()
+            .and_time(NaiveTime::from_hms_opt(14, 5, 0).unwrap())
+    }
+
+    /// Applies the pick of `format` to `line`, whose `/query` ends the
+    /// line, returning the line with `‸` where the cursor lands.
+    fn pick(line: &str, format: Format) -> String {
+        let slash = line.rfind('/').unwrap();
+        let edit = format_edit(line, slash, line.len(), format, noon());
+        let mut result = line.to_string();
+        let cursor = edit.range.start + edit.cursor;
+        result.replace_range(edit.range, &edit.text);
+        result.insert(cursor, '‸');
+        result
+    }
+
+    #[test]
+    fn a_block_pick_rewrites_the_prefix() {
+        assert_eq!(
+            pick("- buy milk /h2", Format::Block(Block::Heading(2))),
+            "## buy milk‸"
+        );
+        assert_eq!(
+            pick("## Notes /quote", Format::Block(Block::Quote)),
+            "> Notes‸"
+        );
+        assert_eq!(pick("/todo", Format::Block(Block::Task)), "- [ ] ‸");
+        assert_eq!(pick("  /list", Format::Block(Block::Bullet)), "  - ‸");
+        assert_eq!(
+            pick("- [x] done /ol", Format::Block(Block::Numbered)),
+            "1. done‸"
+        );
+    }
+
+    #[test]
+    fn a_block_pick_mid_line_keeps_the_text_around_it() {
+        let line = "- buy /h1 milk";
+        let edit = format_edit(line, 6, 9, Format::Block(Block::Heading(1)), noon());
+        assert_eq!(edit.range, 0..line.len());
+        assert_eq!(edit.text, "# buy milk");
+        assert_eq!(edit.cursor, "# buy".len());
+    }
+
+    #[test]
+    fn block_inserts_take_an_empty_line_or_go_below() {
+        assert_eq!(pick("/hr", Format::Divider), "___‸");
+        assert_eq!(pick("/fence", Format::CodeBlock), "```\n‸\n```");
+        assert_eq!(
+            pick("/table", Format::Table),
+            "| ‸ |  |\n| --- | --- |\n|  |  |"
+        );
+        assert_eq!(pick("notes /hr", Format::Divider), "notes\n___‸");
+        assert_eq!(
+            pick("  code /fence", Format::CodeBlock),
+            "  code\n  ```\n  ‸\n  ```"
+        );
+    }
+
+    #[test]
+    fn inline_picks_insert_at_the_slash() {
+        assert_eq!(pick("Call /b", Format::Wrap("**")), "Call **‸**");
+        assert_eq!(pick("Call /i", Format::Wrap("_")), "Call _‸_");
+        assert_eq!(pick("Call /s", Format::Wrap("~~")), "Call ~~‸~~");
+        assert_eq!(pick("Call /code", Format::Wrap("`")), "Call `‸`");
+        assert_eq!(pick("Call /url", Format::Link), "Call [‸]()");
+        assert_eq!(pick("see /wiki", Format::Trigger("[[")), "see [[‸");
+        assert_eq!(pick("On /date", Format::Date), "On 2026-10-28‸");
+        assert_eq!(pick("At /time", Format::Time), "At 14:05‸");
+    }
+
+    #[gpui::test]
+    async fn slash_h2_and_enter_rewrites_the_line(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "- buy milk ").await;
+        type_text(&mut setup, "/h2");
+        assert_eq!(labels(&mut setup), ["Heading 2"]);
+        setup.cx.simulate_keystrokes("enter");
+        setup.cx.run_until_parked();
+        assert_eq!(text(&mut setup), "## buy milk");
+        type_text(&mut setup, "!");
+        assert_eq!(text(&mut setup), "## buy milk!");
+    }
+
+    #[gpui::test]
+    async fn a_slash_offers_the_catalog_with_its_groups(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "").await;
+        type_text(&mut setup, "/");
+        let offered = labels(&mut setup);
+        assert_eq!(offered.len(), FORMAT_ENTRIES.len());
+        assert_eq!(offered.first().map(String::as_str), Some("Task"));
+    }
+
+    #[gpui::test]
+    async fn a_space_or_a_slash_in_prose_leaves_no_menu(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "Call ").await;
+        type_text(&mut setup, "/");
+        assert!(!labels(&mut setup).is_empty());
+        type_text(&mut setup, " ");
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
+        type_text(&mut setup, "and/or");
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
+        assert_eq!(text(&mut setup), "Call / and/or");
+    }
+
+    #[gpui::test]
+    async fn a_query_nothing_matches_closes_the_menu(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "").await;
+        type_text(&mut setup, "/usr");
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
+        setup.cx.simulate_keystrokes("enter");
+        setup.cx.run_until_parked();
+        assert_eq!(text(&mut setup), "/usr\n");
+    }
+
+    #[gpui::test]
+    async fn escape_keeps_the_slash(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "Call ").await;
+        type_text(&mut setup, "/");
+        setup.cx.simulate_keystrokes("escape");
+        setup.cx.run_until_parked();
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
+        assert_eq!(text(&mut setup), "Call /");
+    }
+
+    #[gpui::test]
+    async fn an_inline_pick_puts_the_cursor_inside_the_pair(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "Call ").await;
+        type_text(&mut setup, "/bold");
+        setup.cx.simulate_keystrokes("enter");
+        setup.cx.run_until_parked();
+        type_text(&mut setup, "now");
+        assert_eq!(text(&mut setup), "Call **now**");
+    }
+
+    #[gpui::test]
+    async fn a_code_block_pick_puts_the_cursor_inside_the_fence(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "").await;
+        type_text(&mut setup, "/fence");
+        setup.cx.simulate_keystrokes("enter");
+        setup.cx.run_until_parked();
+        type_text(&mut setup, "x");
+        assert_eq!(text(&mut setup), "```\nx\n```");
+    }
+
+    #[gpui::test]
+    async fn link_to_note_opens_the_wikilink_completion(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "see ").await;
+        let (fs, root) = setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            let project = workspace.project().read(cx);
+            let root = project.worktrees(cx).next().unwrap().read(cx).abs_path();
+            (project.fs().clone(), root)
+        });
+        fs.create_file(&root.join("projects/garden.md"), Default::default())
+            .await
+            .unwrap();
+        setup.cx.run_until_parked();
+        type_text(&mut setup, "/wiki");
+        setup.cx.simulate_keystrokes("enter");
+        setup.cx.run_until_parked();
+        assert_eq!(text(&mut setup), "see [[");
+        assert_eq!(labels(&mut setup), ["projects/garden"]);
+    }
+
+    #[gpui::test]
+    async fn nothing_opens_in_code(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "```\n").await;
+        type_text(&mut setup, "/");
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn insert_formatting_types_the_slash_and_opens_the_menu(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "Call").await;
+        setup.cx.dispatch_action(InsertFormatting);
+        setup.cx.run_until_parked();
+        assert_eq!(text(&mut setup), "Call /");
+        assert!(!labels(&mut setup).is_empty());
+    }
+
+    #[gpui::test]
+    async fn a_pick_counts_toward_retiring_the_hint(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "").await;
+        setup
+            .cx
+            .update(|_, cx| cx.set_global(db::AppDatabase::test_new()));
+        setup
+            .cx
+            .update(|_, cx| crate::markdown_conceal::load_slash_hint(cx));
+        setup.cx.run_until_parked();
+        type_text(&mut setup, "/h1");
+        setup.cx.simulate_keystrokes("enter");
+        setup.cx.run_until_parked();
+        let counts = setup
+            .cx
+            .update(|_, cx| crate::markdown_conceal::slash_hint_counts(cx));
+        assert_eq!(counts.map(|counts| counts.picks), Some(1));
     }
 }
