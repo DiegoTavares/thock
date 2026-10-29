@@ -33,10 +33,13 @@ struct DayScreen: View {
                     Button {
                         model.startCapture(voice: true)
                     } label: {
-                        Image(systemName: "mic.fill")
+                        Label("Capture", systemImage: "mic.fill")
+                            .labelStyle(.iconOnly)
                             .foregroundStyle(WatchTheme.amber)
                     }
-                    .accessibilityLabel("Capture")
+                    // The app's amber tint would fill the button's glass on
+                    // watchOS 26 and hide an amber icon inside it.
+                    .tint(nil)
                 }
             }
             .navigationDestination(isPresented: $model.showingOutbox) {
