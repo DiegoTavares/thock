@@ -531,6 +531,13 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   Design reference: https://claude.ai/artifact/86BQKftLcLJPpmBydT3x7s. Spec `specs/v48-watch.md`.
   _(built on `main` with the V48 PR; the watch's two App IDs and app group (§13 step 5) and the
   by-hand checks on a real phone and watch (§12) come before it reaches TestFlight)_
+- [x] **Tick a box with a click, format with a slash:** a task's checkbox on the desk is a control:
+  a click ticks it in place without moving the cursor, and `cmd-enter` ticks the tasks under the
+  cursors. A task's box and a bullet's dot stay drawn while you type in the item, so its text never
+  jumps. Typing `/` at the start of a line or after a space offers headings, tasks, quotes,
+  emphasis, links, notes, images and reminders by name. A hint on empty lines points at it, then
+  retires after 3 picks or 10 sightings. Spec `specs/v49-friendly-editing.md`. _(shipped on `main`
+  with the V49 PR)_
 
 ---
 

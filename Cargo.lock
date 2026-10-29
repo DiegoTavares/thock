@@ -12554,6 +12554,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "clock",
  "collections",
  "command_palette_hooks",
  "db",

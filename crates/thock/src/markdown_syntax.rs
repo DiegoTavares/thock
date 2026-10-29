@@ -196,39 +196,206 @@ pub fn is_prose_at(text: &str, offset: usize) -> bool {
     prose
 }
 
+/// A bullet or task line's list prefix (V49 §4.4): from its indentation to
+/// where its text starts, so `- ` on a bullet and `- [ ] ` on a task, with
+/// any extra whitespace after them. `None` for every other line.
+pub fn list_prefix(line: &str) -> Option<Range<usize>> {
+    let bullet = bullet_marker(line)?;
+    let marker_end = task_checkbox(line).map_or(bullet.end, |(checkbox, _)| checkbox.end);
+    let rest = &line[marker_end..];
+    let text_start = line.len() - rest.trim_start_matches([' ', '\t']).len();
+    Some(bullet.start..text_start)
+}
+
+/// The edit that ticks or unticks a task line: the one character between its
+/// brackets and what replaces it. `None` when `line` is not a task.
+pub fn toggle_task_edit(line: &str) -> Option<(Range<usize>, &'static str)> {
+    bullet_marker(line)?;
+    let (checkbox, checked) = task_checkbox(line)?;
+    let mark = checkbox.start + 1..checkbox.start + 2;
+    Some((mark, if checked { " " } else { "x" }))
+}
+
+/// A block prefix the `/` menu can give a line (V49 §5.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Block {
+    Task,
+    Bullet,
+    Numbered,
+    Heading(u8),
+    Quote,
+}
+
+impl Block {
+    fn prefix(self) -> String {
+        match self {
+            Block::Task => "- [ ] ".to_string(),
+            Block::Bullet => "- ".to_string(),
+            Block::Numbered => "1. ".to_string(),
+            Block::Heading(level) => format!("{} ", "#".repeat(usize::from(level.clamp(1, 6)))),
+            Block::Quote => "> ".to_string(),
+        }
+    }
+}
+
+/// Rewrites `line` as a `block` line: whatever list, task, numbered, heading
+/// or quote prefix it had is replaced and its indentation kept. Returns the
+/// new line and where byte `cursor` of the old one lands — on the same
+/// character of text, or at the text's start when it was inside the old
+/// prefix.
+pub fn apply_block(line: &str, block: Block, cursor: usize) -> (String, usize) {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let text_start = block_text_start(line, indent);
+    let new_text_start = indent + block.prefix().len();
+    let new_line = format!(
+        "{}{}{}",
+        &line[..indent],
+        block.prefix(),
+        &line[text_start..]
+    );
+    let new_cursor = new_text_start + cursor.min(line.len()).saturating_sub(text_start);
+    (new_line, new_cursor)
+}
+
+/// Where the text of `line` starts once its block prefix — if any — is
+/// skipped. `indent` is the length of its leading whitespace.
+fn block_text_start(line: &str, indent: usize) -> usize {
+    if let Some(prefix) = list_prefix(line) {
+        return prefix.end;
+    }
+    let rest = &line[indent..];
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let hashes = rest.bytes().take_while(|&byte| byte == b'#').count();
+    let marker = if (1..=9).contains(&digits) && rest[digits..].starts_with(['.', ')']) {
+        digits + 1
+    } else if (1..=6).contains(&hashes) {
+        hashes
+    } else if rest.starts_with('>') {
+        1
+    } else {
+        return indent;
+    };
+    let after = &rest[marker..];
+    let spaced = after.trim_start_matches([' ', '\t']);
+    // `#tag` and `1.5` are text: a marker needs whitespace after it, or
+    // nothing at all.
+    if spaced.len() == after.len() && !after.is_empty() && !rest.starts_with('>') {
+        return indent;
+    }
+    line.len() - spaced.len()
+}
+
+/// Where the `/` menu's query starts when the cursor at byte `column` of
+/// `line` is typing one (V49 §5.1): the column of the `/`, which must open
+/// the line or follow whitespace, with only letters and digits between it
+/// and the cursor. `None` in inline code, comments, link destinations and
+/// wikilinks, where a `/` is text. Only looks at the line: whether the line
+/// itself is in a fence or the front matter is `BlockState`'s to say.
+pub fn slash_query_start(line: &str, column: usize) -> Option<usize> {
+    let line_prefix = line.get(..column)?;
+    let slash = line_prefix.rfind('/')?;
+    let query = &line_prefix[slash + 1..];
+    if !query.chars().all(char::is_alphanumeric) {
+        return None;
+    }
+    let before = &line_prefix[..slash];
+    if !(before.trim().is_empty() || before.ends_with(char::is_whitespace)) {
+        return None;
+    }
+    if in_open_link(before) {
+        return None;
+    }
+    let excluded = inline_exclusions(line)
+        .into_iter()
+        .chain(inline_links(line).into_iter().map(|link| link.range))
+        .any(|range| range.start <= slash && slash < range.end);
+    (!excluded).then_some(slash)
+}
+
+/// Whether the end of `before` sits inside a wikilink or a link destination
+/// that hasn't closed yet.
+fn in_open_link(before: &str) -> bool {
+    let open_wikilink = before
+        .rfind("[[")
+        .is_some_and(|open| !before[open..].contains("]]"));
+    let open_destination = before
+        .rfind("](")
+        .is_some_and(|open| !before[open..].contains(')'));
+    open_wikilink || open_destination
+}
+
+/// The fence and front-matter state between two lines — the shared exclusion
+/// state machine (C1/C2) behind `conceal_spans`, `wikilink_at` and the `/`
+/// menu. Fed one line at a time, it says which lines are content.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlockState {
+    fence: Option<(u8, usize)>,
+    front_matter: bool,
+    lines_seen: usize,
+}
+
+impl BlockState {
+    /// The state after `above`, a run of whole lines each ended by `\n`.
+    pub fn after(above: &str) -> Self {
+        let mut state = Self::default();
+        let mut lines = above.split('\n');
+        // The piece after the last newline is the next line, not one of these.
+        lines.next_back();
+        for line in lines {
+            state.advance(line);
+        }
+        state
+    }
+
+    /// Takes `line` (a trailing `\r` is ignored) and returns whether it is
+    /// content: outside fences and front matter, and not a fence or
+    /// front-matter delimiter itself.
+    pub fn advance(&mut self, line: &str) -> bool {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let first = self.lines_seen == 0;
+        self.lines_seen += 1;
+        if first && line.trim_end() == "---" {
+            self.front_matter = true;
+            return false;
+        }
+        if self.front_matter {
+            let trimmed = line.trim_end();
+            if trimmed == "---" || trimmed == "..." {
+                self.front_matter = false;
+            }
+            return false;
+        }
+        if let Some((marker, length)) = self.fence {
+            if closes_fence(line, marker, length) {
+                self.fence = None;
+            }
+            return false;
+        }
+        if let Some(opened) = opens_fence(line) {
+            self.fence = Some(opened);
+            return false;
+        }
+        true
+    }
+
+    /// Whether `line`, coming next, is content — `advance` without the move.
+    pub fn is_content(&self, line: &str) -> bool {
+        self.clone().advance(line)
+    }
+}
+
 /// Calls `f` with `(line_start, line)` for every line outside fenced code
-/// blocks and YAML front matter — the shared exclusion state machine (C1/C2)
-/// behind `conceal_spans` and `wikilink_at`. `line` excludes any trailing
-/// carriage return.
+/// blocks and YAML front matter. `line` excludes any trailing carriage
+/// return.
 fn each_content_line(text: &str, mut f: impl FnMut(usize, &str)) {
-    let mut fence: Option<(u8, usize)> = None;
-    let mut front_matter = false;
+    let mut state = BlockState::default();
     let mut offset = 0;
 
-    for (index, raw_line) in text.split('\n').enumerate() {
+    for raw_line in text.split('\n') {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
         let line_start = offset;
         offset += raw_line.len() + 1;
-
-        if index == 0 && line.trim_end() == "---" {
-            front_matter = true;
-            continue;
-        }
-        if front_matter {
-            let trimmed = line.trim_end();
-            if trimmed == "---" || trimmed == "..." {
-                front_matter = false;
-            }
-            continue;
-        }
-        if let Some((marker, length)) = fence {
-            if closes_fence(line, marker, length) {
-                fence = None;
-            }
-            continue;
-        }
-        if let Some(opened) = opens_fence(line) {
-            fence = Some(opened);
+        if !state.advance(line) {
             continue;
         }
         f(line_start, line);
@@ -2421,5 +2588,176 @@ mod tests {
         assert!(!is_prose_at(text, offset("(@", offset("`code", plain))));
         assert!(!is_prose_at(text, offset("(@", offset("<!--", plain))));
         assert!(!is_prose_at(text, offset("(@", offset("```", plain))));
+    }
+
+    #[test]
+    fn list_prefix_runs_from_the_indent_to_the_text() {
+        assert_eq!(list_prefix("- buy milk"), Some(0..2));
+        assert_eq!(list_prefix("- [ ] buy milk"), Some(0..6));
+        assert_eq!(list_prefix("- [x] done"), Some(0..6));
+        assert_eq!(list_prefix("  * [ ]  nested"), Some(2..9));
+        assert_eq!(list_prefix("\t+ tabbed"), Some(1..3));
+        assert_eq!(list_prefix("- [ ] "), Some(0..6));
+        assert_eq!(list_prefix("- [ ]"), Some(0..5));
+        assert_eq!(list_prefix("- "), Some(0..2));
+        assert_eq!(list_prefix("- [ ]x not a task"), Some(0..2));
+    }
+
+    #[test]
+    fn look_alikes_have_no_list_prefix() {
+        assert_eq!(list_prefix("plain text"), None);
+        assert_eq!(list_prefix("-not a bullet"), None);
+        assert_eq!(list_prefix("*emphasis*"), None);
+        assert_eq!(list_prefix("- - -"), None);
+        assert_eq!(list_prefix("1. numbered"), None);
+        assert_eq!(list_prefix("> - quoted"), None);
+        assert_eq!(list_prefix(""), None);
+    }
+
+    #[test]
+    fn toggling_a_task_flips_the_mark_alone() {
+        assert_eq!(toggle_task_edit("- [ ] buy"), Some((3..4, "x")));
+        assert_eq!(toggle_task_edit("- [x] buy"), Some((3..4, " ")));
+        assert_eq!(toggle_task_edit("  - [X] nested"), Some((5..6, " ")));
+        assert_eq!(toggle_task_edit("- [ ]"), Some((3..4, "x")));
+    }
+
+    #[test]
+    fn non_tasks_have_nothing_to_toggle() {
+        assert_eq!(toggle_task_edit("- buy"), None);
+        assert_eq!(toggle_task_edit("[ ] no bullet"), None);
+        assert_eq!(toggle_task_edit("- [y] other"), None);
+        assert_eq!(toggle_task_edit("- [ ]x"), None);
+        assert_eq!(toggle_task_edit(""), None);
+    }
+
+    #[test]
+    fn every_block_replaces_every_prefix() {
+        let blocks = [
+            (Block::Task, "- [ ] "),
+            (Block::Bullet, "- "),
+            (Block::Numbered, "1. "),
+            (Block::Heading(1), "# "),
+            (Block::Heading(2), "## "),
+            (Block::Heading(3), "### "),
+            (Block::Quote, "> "),
+        ];
+        let existing = [
+            "", "- ", "* ", "- [ ] ", "- [x] ", "1. ", "12) ", "# ", "### ", "> ", ">",
+        ];
+        for (block, prefix) in blocks {
+            for old in existing {
+                let line = format!("{old}buy milk");
+                let cursor = line.len();
+                let (new_line, new_cursor) = apply_block(&line, block, cursor);
+                assert_eq!(
+                    new_line,
+                    format!("{prefix}buy milk"),
+                    "{old:?} as {block:?}"
+                );
+                assert_eq!(new_cursor, new_line.len(), "{old:?} as {block:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_block_keeps_the_indent_and_the_cursor_on_its_character() {
+        assert_eq!(
+            apply_block("  - buy milk", Block::Task, 6),
+            ("  - [ ] buy milk".to_string(), 10)
+        );
+        assert_eq!(
+            apply_block("## Notes", Block::Quote, 3),
+            ("> Notes".to_string(), 2)
+        );
+        assert_eq!(
+            apply_block("- [ ] buy", Block::Heading(2), 1),
+            ("## buy".to_string(), 3)
+        );
+        assert_eq!(
+            apply_block("", Block::Heading(2), 0),
+            ("## ".to_string(), 3)
+        );
+        assert_eq!(apply_block("\t", Block::Bullet, 1), ("\t- ".to_string(), 3));
+    }
+
+    #[test]
+    fn text_that_looks_like_a_prefix_stays_text() {
+        assert_eq!(
+            apply_block("#tag here", Block::Bullet, 0),
+            ("- #tag here".to_string(), 2)
+        );
+        assert_eq!(
+            apply_block("1.5 litres", Block::Bullet, 0),
+            ("- 1.5 litres".to_string(), 2)
+        );
+    }
+
+    /// The `/` query's offset in `text` for a cursor at `offset`, combined
+    /// the way the completion provider combines it.
+    fn slash_trigger(text: &str, offset: usize) -> Option<usize> {
+        let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
+        let line_end = text[offset..]
+            .find('\n')
+            .map_or(text.len(), |index| offset + index);
+        let line = &text[line_start..line_end];
+        let slash = slash_query_start(line, offset - line_start)?;
+        BlockState::after(&text[..line_start])
+            .is_content(line)
+            .then_some(line_start + slash)
+    }
+
+    #[test]
+    fn block_state_tracks_fences_and_front_matter() {
+        assert!(BlockState::after("").is_content("text"));
+        assert!(!BlockState::after("").is_content("```"));
+        assert!(!BlockState::after("```\n").is_content("code"));
+        assert!(!BlockState::after("```\n").is_content("```"));
+        assert!(BlockState::after("```\ncode\n```\n").is_content("text"));
+        assert!(!BlockState::after("~~~~\n```\n").is_content("text"));
+        assert!(!BlockState::after("---\ntitle: x\n").is_content("text"));
+        assert!(BlockState::after("---\ntitle: x\n---\n").is_content("text"));
+        assert!(!BlockState::after("").is_content("---"));
+        assert!(BlockState::after("text\n").is_content("---"));
+        assert!(BlockState::after("```\r\ncode\r\n```\r\n").is_content("text"));
+    }
+
+    #[test]
+    fn block_state_ignores_the_unfinished_last_line() {
+        assert_eq!(BlockState::after("```"), BlockState::default());
+        assert_eq!(BlockState::after("a\n```"), BlockState::after("a\n"));
+    }
+
+    #[test]
+    fn a_slash_opens_a_query_at_the_line_start_or_after_a_space() {
+        assert_eq!(slash_trigger("/", 1), Some(0));
+        assert_eq!(slash_trigger("/h2", 3), Some(0));
+        assert_eq!(slash_trigger("  /todo", 7), Some(2));
+        assert_eq!(slash_trigger("- buy milk /h2", 14), Some(11));
+        assert_eq!(slash_trigger("first\n/quo", 10), Some(6));
+        assert_eq!(slash_trigger("1 / 2", 3), Some(2));
+    }
+
+    #[test]
+    fn a_slash_in_prose_is_text() {
+        assert_eq!(slash_trigger("and/or", 6), None);
+        assert_eq!(slash_trigger("and/", 4), None);
+        assert_eq!(slash_trigger("1 / 2", 5), None);
+        assert_eq!(slash_trigger("1 / ", 4), None);
+        assert_eq!(slash_trigger("/usr/bin", 8), None);
+        assert_eq!(slash_trigger("see https://x.com/", 18), None);
+        assert_eq!(slash_trigger("/h2.", 4), None);
+    }
+
+    #[test]
+    fn a_slash_in_code_or_a_link_is_text() {
+        assert_eq!(slash_trigger("```\n/", 5), None);
+        assert_eq!(slash_trigger("a `b /c` d", 7), None);
+        assert_eq!(slash_trigger("see [[notes /", 13), None);
+        assert_eq!(slash_trigger("see [[notes /h]]", 14), None);
+        assert_eq!(slash_trigger("[a](b /c)", 8), None);
+        assert_eq!(slash_trigger("[a](b /", 7), None);
+        assert_eq!(slash_trigger("---\ntitle: /\n---", 12), None);
+        assert_eq!(slash_trigger("[[a]] /b", 8), Some(6));
     }
 }
