@@ -45,7 +45,9 @@ V48 adds an Apple Watch app that ships inside the iPhone app:
 - At 14:00 on a day whose plan has a 14:00 dentist reminder, the timeline's first row reads
   *14:00 Dentist* from the moment the previous item ends, with no phone contact that day.
 - A desk edit to today's planner shows on the timeline within a minute of the phone syncing it,
-  while the phone is awake.
+  while the phone is awake. V50 (`v50-background-sync.md`) extends this to a phone in a pocket:
+  the service's silent push wakes the phone to sync and send the snapshot, and opening the watch
+  app asks the phone to refresh.
 - Ticking a planner line on the watch changes exactly one line of the vault, the same line a tick
   from the iPhone widget changes. A tick on a line the desk has since changed is refused, and the
   watch says so.
@@ -149,6 +151,7 @@ WatchCapture { v, id: UUID, at, text, destination: "today"|"inbox"|"backlog"|"re
                due: "2026-10-29 09:00" | "2026-10-29" | null }   // ReminderDue.description
 WatchTick    { v, id: UUID, day, hash, ordinal }
 WatchDayAsk  { v, id: UUID, day }                                   // outside the snapshot's range
+WatchRefresh { v, id: UUID, at }                                    // V50 §6.3: sync now, never queued
 
 // phone → watch
 WatchAck     { id, outcome: "saved" | "refused", message }          // message only when refused

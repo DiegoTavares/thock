@@ -505,7 +505,7 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   on any card, and a Reminders screen. Nothing expires: Week Review sweeps what is still open.
   Design reference: https://claude.ai/artifact/XkxotTy8NuxSNtx9Xk7e6M. Spec
   `specs/v45-reminders.md`. _(shipped on `main` with the V45 PR; desk ringing on macOS waits for V35's
-  bundle identity, and silent push (§10.6) is its own change on `v45-push`)_
+  bundle identity, and silent push (§10.6) came with V50)_
 - [x] **Edit in place on the phone, and come back to where you were:** a tap on any block of the
   user's own prose opens it live: a journal entry with the bullets under it, a section with a
   level-1 heading of the user's (no longer mistaken for the agent's voice), the text above the
@@ -538,6 +538,15 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   emphasis, links, notes, images and reminders by name. A hint on empty lines points at it, then
   retires after 3 picks or 10 sightings. Spec `specs/v49-friendly-editing.md`. _(shipped on `main`
   with the V49 PR)_
+- [x] **Desk changes reach a pocketed phone and the wrist:** the service sends the phone a silent
+  push when the desk changes the vault, at once after a quiet spell and at most every ten minutes
+  during a writing session, each time with the latest state. iOS wakes the app briefly; it syncs,
+  hands iOS the new reminders and sends the watch a fresh reading before it is suspended. Opening the
+  watch app on a reading over a minute old asks the phone to sync, which wakes the iPhone app too,
+  so the watch catches up within seconds even when Apple holds a push back. No note content ever
+  travels in a push. Spec `specs/v50-background-sync.md`. _(built on `main` with the V50 PR; pushes
+  are only logged until the APNs key is deployed (§9 steps 4–5), and the by-hand checks on a real
+  phone and watch (§8) come with the next TestFlight build)_
 
 ---
 

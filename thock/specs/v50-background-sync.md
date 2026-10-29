@@ -1,7 +1,8 @@
 # Thock V50 - Desk changes reach a pocketed phone and the wrist
 
-**Status:** Spec (2026-10-29). The push half was built on `v45-push` (2026-10-22) and never merged;
-§4 reviews it and §5 lists what it is missing.
+**Status:** Built (2026-10-29) on `v50-background-sync`. The push half was first built on
+`v45-push` (2026-10-22); §4 reviews it and §5 lists what it is missing. §11 lists where the build
+corrected this spec.
 **Owner:** Diego · **Date:** 2026-10-29
 **Companion docs:** `v34-vault-sync.md` §7.6 and `v34-vault-sync-api.md` §6.5 (the feed and the
 silent push), `v45-reminders.md` §10.6 (how fast the phone hears about desk changes),
@@ -126,12 +127,17 @@ waits for activation for up to two seconds (§6.2) and logs if it gives up.
 The coalescer keeps, per vault, `lastSent` and a `held` flag in place of the timer:
 
 - `nudge(vaultID)` is called inside the request that changed the vault (the desk's commit, its
-  ack), as now. If no push has gone out within the spacing interval, it sends one synchronously,
-  bounded by a 5 s timeout, before the request answers. Otherwise it marks the vault `held`.
-- **Every authenticated vault request** (desk or phone) checks `held` once the request is done:
-  if the spacing has passed and no phone listens, it sends the push synchronously before answering.
-  A phone request clears `held` instead, since the phone is syncing anyway.
-- A push skipped because a phone listens leaves the vault `held` (F6).
+  ack), for every `file` or `ack` event the desk causes, whether or not a phone holds the feed,
+  and before the event fans out. It marks the vault `held`, and if no push has gone out within
+  the spacing interval it sends one synchronously, bounded by a 5 s timeout, before the request
+  answers.
+- **Every authenticated desk request** checks `held` once the request is done: if the spacing has
+  passed and no phone listens, it sends the push synchronously before answering.
+- **A phone request clears `held`** when it starts, since the phone is syncing anyway. Clearing at
+  the start, not the end, keeps a change made during a long phone request (a feed stream) held.
+- A push skipped because a phone listens leaves the vault `held` (F6). It is not counted as sent,
+  so it goes out on the first desk request after the feed closes. Any other failure (no token,
+  APNs unreachable) is logged and not retried: refresh on open is the backstop.
 - **Spacing: 10 minutes** (D1). The first desk change after a quiet spell reaches the phone in
   seconds. A long session wakes it at most six times an hour, each time with the latest state.
 - `max-instances 1` keeps this in-memory state consistent. A cold instance starts with nothing
@@ -144,7 +150,7 @@ The payload, headers and token forgetting are `beb681031c`'s, unchanged.
 - **Token.** `registerForRemoteNotifications` in `didFinishLaunching`, beside the notifier and the
   watch link. The token goes along at pairing, and `updatePushToken` sends it once per engine
   instance and again if iOS hands over a different one (F1). Practice vaults send nothing.
-  `diagnostics.pushTokenError` shows in the sync details sheet (`Sheets.swift`) as *Desk changes
+  `diagnostics.pushTokenError` shows in the You sheet (`Sheets.swift`), under *Last checked*, as *Desk changes
   arrive when you open Thock*, with the reason under it.
 - **One background tail**, `syncInBackground() async`, which replaces `sendInBackground` and
   `syncForPush`:
@@ -166,16 +172,19 @@ The payload, headers and token forgetting are `beb681031c`'s, unchanged.
 
 - A new message, `WatchRefresh { id, at }`, type `refresh`, watch → phone. It is never put in the
   outbox and never sent by `transferUserInfo`, because a refresh delivered late is worthless.
-- `WatchModel.becameActive()` sends it by `sendMessage` when the phone is reachable, the
-  snapshot's `madeAt` is more than 60 s old and no refresh is in flight. It sends at most one a
-  minute.
+- `WatchModel.becameActive()` sends it by `sendMessage` when the app is active, the phone is
+  reachable, the snapshot's `madeAt` is more than 60 s old and no refresh is in flight. It sends at
+  most one a minute. The same check runs when the phone comes into reach and when the watch's
+  session finishes activating, because a cold launch is not reachable yet when it becomes active.
 - The phone runs `syncInBackground()`, then replies with an empty `ack` for the refresh's id. The
   new snapshot reaches the watch by application context, as every snapshot does. Nothing is
   recorded in `watch_requests`, because a refresh is idempotent.
 - The watch draws nothing new. If the snapshot changes, the screen redraws. No spinner, since an
   unanswered refresh leaves things as they were.
-- **Versions.** An older phone cannot decode `refresh` and answers with an empty dictionary, which
-  the watch already reads as "not understood". The snapshot's `v` is unchanged.
+- **Versions.** An older phone cannot decode `refresh` and answers with an empty dictionary. For a
+  refresh the watch takes any answer as the end of the wait: it does not read an empty one as "not
+  understood", which would ask for an update and block captures an older phone still handles. The
+  snapshot's `v` is unchanged.
 
 ### 6.4 Cost
 
@@ -221,8 +230,10 @@ The payload, headers and token forgetting are `beb681031c`'s, unchanged.
     (a slow fake transport).
   - `refresh` round-trips through the dictionary form, and an older reader rejects it as an
     unknown type.
-- **Smoke** (`script/smoke`): `-thock-watch-script "refresh"` changes the practice desk, sends a
-  refresh, and asserts that a snapshot holding the change is sent before the tail ends.
+- **Smoke** (`script/smoke`): `-thock-watch-script "refresh:<line>"` has the practice desk add the
+  line to today, sends a refresh, and asserts that the snapshot the tail flushed holds it. A
+  simulator has no watch to send to, so a DEBUG build running a watch script writes each flushed
+  snapshot to `tmp/watch-snapshot.json`.
 - **By hand, on a real phone and watch:**
   - With the phone locked and the iPhone app terminated, a desk planner edit reaches the
     complication.
@@ -250,3 +261,19 @@ The payload, headers and token forgetting are `beb681031c`'s, unchanged.
 2. **D2. No scheduled background refresh in V50** (§3). Revisit only with evidence of stale faces.
 3. **D3. A refresh is not a request.** It is never queued, never recorded and never retried, so
    the outbox stays the record of what the wrist wrote.
+
+## 11. Corrections made while building (2026-10-29)
+
+1. **The nudge runs for every desk change, not only when no phone hears it.** `beb681031c` called
+   the coalescer only when an event found no phone subscriber, so a stream a killed app left
+   behind swallowed the push before `sendPush` could hold it, and F6's fix had nothing to hold.
+   §6.1 now nudges on every desk `file` and `ack` event, before the fan-out, so the held flag is
+   set before the phone's own requests can clear it.
+2. **A phone request clears `held` when it starts** (§6.1), so a change during a feed stream stays
+   held for the next desk request.
+3. **The APNs test's second push** advances the clock by the spacing instead of a minute; the rest of
+   `beb681031c`'s tests are unchanged.
+4. **The watch also refreshes when the phone comes into reach and when its session activates**, and
+   ignores an empty answer to a refresh (§6.3).
+5. **`syncInBackground` opens the notebook only while it is still loading.** The launch arguments
+   run inside the opening, so awaiting it from a smoke step would wait on itself.
