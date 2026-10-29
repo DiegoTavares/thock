@@ -2097,6 +2097,17 @@ fn list_prefix_kept(
         .any(|selection| selection.start < prefix_end && selection.end >= line_start)
 }
 
+/// For each row from the first through `last_row`, whether it is content —
+/// outside fences and front matter — in one pass over just those rows.
+fn content_rows(last_row: u32, buffer_snapshot: &MultiBufferSnapshot) -> Vec<bool> {
+    let end = MultiBufferPoint::new(last_row, buffer_snapshot.line_len(MultiBufferRow(last_row)));
+    let text: String = buffer_snapshot
+        .text_for_range(MultiBufferPoint::new(0, 0)..end)
+        .collect();
+    let mut state = markdown_syntax::BlockState::default();
+    text.split('\n').map(|line| state.advance(line)).collect()
+}
+
 /// The text of buffer `row`, without its newline.
 fn row_text(row: u32, buffer_snapshot: &MultiBufferSnapshot) -> String {
     let start = MultiBufferPoint::new(row, 0);
@@ -2117,18 +2128,29 @@ fn toggle_tasks_on_rows(
         return false;
     }
     let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
-    let text = buffer_snapshot.text();
     let mut rows: Vec<u32> = rows.into_iter().collect();
     rows.sort_unstable();
     rows.dedup();
-    let edits: Vec<(Range<MultiBufferOffset>, &'static str)> = rows
+    // Task lines first, so `cmd-enter` off a task falls through without
+    // reading the note; then one fence pass decides which are in code.
+    let tasks: Vec<(u32, Range<usize>, &'static str)> = rows
         .into_iter()
         .filter_map(|row| {
             let (mark, replacement) =
                 markdown_syntax::toggle_task_edit(&row_text(row, &buffer_snapshot))?;
+            Some((row, mark, replacement))
+        })
+        .collect();
+    let Some(&(last_row, ..)) = tasks.last() else {
+        return false;
+    };
+    let content = content_rows(last_row, &buffer_snapshot);
+    let edits: Vec<(Range<MultiBufferOffset>, &'static str)> = tasks
+        .into_iter()
+        .filter(|(row, ..)| content.get(*row as usize).copied().unwrap_or(false))
+        .map(|(row, mark, replacement)| {
             let line_start = MultiBufferPoint::new(row, 0).to_offset(&buffer_snapshot);
-            markdown_syntax::is_prose_at(&text, line_start.0)
-                .then(|| (line_start + mark.start..line_start + mark.end, replacement))
+            (line_start + mark.start..line_start + mark.end, replacement)
         })
         .collect();
     if edits.is_empty() {
@@ -2193,10 +2215,14 @@ fn remove_list_prefix(editor: &mut Editor, window: &mut Window, cx: &mut Context
     if point.column as usize != prefix.end {
         return false;
     }
-    let line_start = MultiBufferPoint::new(point.row, 0).to_offset(&buffer_snapshot);
-    if !markdown_syntax::is_prose_at(&buffer_snapshot.text(), line_start.0) {
+    if !content_rows(point.row, &buffer_snapshot)
+        .last()
+        .copied()
+        .unwrap_or(false)
+    {
         return false;
     }
+    let line_start = MultiBufferPoint::new(point.row, 0).to_offset(&buffer_snapshot);
     editor.transact(window, cx, |editor, _, cx| {
         editor.buffer().update(cx, |buffer, cx| {
             buffer.edit([(line_start..cursor, "")], None, cx)

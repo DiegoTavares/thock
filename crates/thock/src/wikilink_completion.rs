@@ -31,7 +31,7 @@ use thock_sync_core::{DailyNotes, Due, token_text};
 use util::ResultExt as _;
 
 use crate::markdown_conceal::record_slash_pick;
-use crate::markdown_syntax::{self, Block};
+use crate::markdown_syntax::{self, Block, BlockState};
 use crate::reminder_calendar::PickReminderDate;
 use crate::reminder_reading;
 use crate::reminders::{ReminderClock, ReminderSettings, due_label, load_reminder_settings};
@@ -131,6 +131,7 @@ fn install_provider(
         images_dir,
         daily,
         reminder_settings,
+        block_cache: RefCell::new(None),
     };
     editor.set_completion_provider(Some(Rc::new(provider)));
     let editor_handle = cx.weak_entity();
@@ -217,6 +218,18 @@ struct WikilinkCompletionProvider {
     daily: DailyNotes,
     /// The vault's `.thock/reminders.toml`, once loaded.
     reminder_settings: Rc<RefCell<ReminderSettings>>,
+    /// The fence state above the line a `/` query was last typed on.
+    block_cache: RefCell<Option<CachedBlockState>>,
+}
+
+/// The fence and front-matter state above `row` as of `version`. Typing a
+/// `/query` never edits above its line, so the menu reuses this instead of
+/// rescanning the note on every keystroke.
+struct CachedBlockState {
+    buffer_id: text::BufferId,
+    row: u32,
+    version: clock::Global,
+    state: BlockState,
 }
 
 impl CompletionProvider for WikilinkCompletionProvider {
@@ -240,7 +253,7 @@ impl CompletionProvider for WikilinkCompletionProvider {
         {
             return Task::ready(Ok(vec![response]));
         }
-        if let Some(response) = slash_response(buffer, buffer_position, cx) {
+        if let Some(response) = slash_response(buffer, buffer_position, &self.block_cache, cx) {
             return Task::ready(Ok(vec![response]));
         }
         match &self.project {
@@ -298,7 +311,7 @@ impl CompletionProvider for WikilinkCompletionProvider {
         if wikilink_query_offset(snapshot, position).is_some()
             || image_query_offset(snapshot, position).is_some()
             || reminder_query_offset(snapshot, position).is_some()
-            || slash_query_offset(snapshot, position).is_some()
+            || slash_query_offset(snapshot, position, &self.block_cache).is_some()
         {
             return true;
         }
@@ -778,15 +791,45 @@ fn without_query(line: &str, slash: usize, cursor: usize) -> (String, usize) {
 }
 
 /// The buffer offset of the `/` opening the formatting query under
-/// `position`, when one is being typed there.
-fn slash_query_offset(buffer: &Buffer, position: text::Anchor) -> Option<usize> {
-    let cursor = position.to_offset(buffer);
-    let row = position.to_point(buffer).row;
-    // Fences and front matter depend only on the lines above, so the text up
-    // to the end of this line is enough.
-    let line_end = Point::new(row, buffer.line_len(row));
-    let above: String = buffer.text_for_range(Point::zero()..line_end).collect();
-    markdown_syntax::slash_trigger(&above, cursor)
+/// `position`, when one is being typed there. This runs on every keystroke
+/// in a note, so the line is checked first and the note above it is only
+/// scanned for fences once a query is actually being typed — and then only
+/// when it changed since the last scan.
+fn slash_query_offset(
+    buffer: &Buffer,
+    position: text::Anchor,
+    block_cache: &RefCell<Option<CachedBlockState>>,
+) -> Option<usize> {
+    let point = position.to_point(buffer);
+    let line_start = Point::new(point.row, 0);
+    let line: String = buffer
+        .text_for_range(line_start..Point::new(point.row, buffer.line_len(point.row)))
+        .collect();
+    let slash = markdown_syntax::slash_query_start(&line, point.column as usize)?;
+    let line_start_offset = buffer.point_to_offset(line_start);
+
+    let mut cache = block_cache.borrow_mut();
+    let fresh = cache.as_ref().is_some_and(|cached| {
+        cached.buffer_id == buffer.remote_id()
+            && cached.row == point.row
+            && !buffer.has_edits_since_in_range(
+                &cached.version,
+                buffer.anchor_before(0)..buffer.anchor_before(line_start_offset),
+            )
+    });
+    if !fresh {
+        let above: String = buffer.text_for_range(0..line_start_offset).collect();
+        *cache = Some(CachedBlockState {
+            buffer_id: buffer.remote_id(),
+            row: point.row,
+            version: buffer.version(),
+            state: BlockState::after(&above),
+        });
+    }
+    let content = cache
+        .as_ref()
+        .is_some_and(|cached| cached.state.is_content(&line));
+    content.then_some(line_start_offset + slash)
 }
 
 /// The formatting menu for the `/query` under `buffer_position` (V49 §5),
@@ -795,11 +838,12 @@ fn slash_query_offset(buffer: &Buffer, position: text::Anchor) -> Option<usize> 
 fn slash_response(
     buffer: &Entity<Buffer>,
     buffer_position: text::Anchor,
+    block_cache: &RefCell<Option<CachedBlockState>>,
     cx: &Context<Editor>,
 ) -> Option<CompletionResponse> {
     let editor = cx.weak_entity();
     let buffer = buffer.read(cx);
-    let slash = slash_query_offset(buffer, buffer_position)?;
+    let slash = slash_query_offset(buffer, buffer_position, block_cache)?;
     let cursor = buffer_position.to_offset(buffer);
     let row = buffer_position.to_point(buffer).row;
     let line_start = buffer.point_to_offset(Point::new(row, 0));
@@ -1594,6 +1638,26 @@ mod tests {
     async fn nothing_opens_in_code(cx: &mut TestAppContext) {
         let mut setup = setup(cx, "projects/house.md", "```\n").await;
         type_text(&mut setup, "/");
+        assert_eq!(labels(&mut setup), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn a_fence_opened_above_closes_the_menu_on_that_line(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, "projects/house.md", "a\nCall ").await;
+        type_text(&mut setup, "/");
+        assert!(!labels(&mut setup).is_empty());
+        setup.cx.simulate_keystrokes("escape backspace");
+        // Same rows, but the line above now opens a fence.
+        setup.editor.update_in(&mut setup.cx, |editor, window, cx| {
+            editor.change_selections(Default::default(), window, cx, |selections| {
+                selections.select_ranges([Point::new(0, 0)..Point::new(0, 1)])
+            });
+            editor.insert("```", window, cx);
+            editor.move_to_end(&Default::default(), window, cx);
+        });
+        setup.cx.run_until_parked();
+        type_text(&mut setup, "/");
+        assert_eq!(text(&mut setup), "```\nCall /");
         assert_eq!(labels(&mut setup), Vec::<String>::new());
     }
 

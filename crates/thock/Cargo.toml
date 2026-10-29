@@ -20,6 +20,7 @@ agent_servers.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true
+clock.workspace = true
 collections.workspace = true
 command_palette_hooks.workspace = true
 db.workspace = true

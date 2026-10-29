@@ -285,14 +285,14 @@ fn block_text_start(line: &str, indent: usize) -> usize {
     line.len() - spaced.len()
 }
 
-/// Where the `/` menu's query starts when the cursor at byte `offset` of
-/// `text` is typing one (V49 §5.1): the offset of the `/`, which must open
+/// Where the `/` menu's query starts when the cursor at byte `column` of
+/// `line` is typing one (V49 §5.1): the column of the `/`, which must open
 /// the line or follow whitespace, with only letters and digits between it
-/// and the cursor. `None` in code, comments, front matter, link
-/// destinations and wikilinks, where a `/` is text.
-pub fn slash_trigger(text: &str, offset: usize) -> Option<usize> {
-    let line_start = text.get(..offset)?.rfind('\n').map_or(0, |index| index + 1);
-    let line_prefix = &text[line_start..offset];
+/// and the cursor. `None` in inline code, comments, link destinations and
+/// wikilinks, where a `/` is text. Only looks at the line: whether the line
+/// itself is in a fence or the front matter is `BlockState`'s to say.
+pub fn slash_query_start(line: &str, column: usize) -> Option<usize> {
+    let line_prefix = line.get(..column)?;
     let slash = line_prefix.rfind('/')?;
     let query = &line_prefix[slash + 1..];
     if !query.chars().all(char::is_alphanumeric) {
@@ -305,18 +305,11 @@ pub fn slash_trigger(text: &str, offset: usize) -> Option<usize> {
     if in_open_link(before) {
         return None;
     }
-    let slash_offset = line_start + slash;
-    if !is_prose_at(text, slash_offset) {
-        return None;
-    }
-    let line_end = text[line_start..]
-        .find('\n')
-        .map_or(text.len(), |index| line_start + index);
-    let line = &text[line_start..line_end];
-    let in_link = inline_links(line)
-        .iter()
-        .any(|link| link.range.start <= slash && slash < link.range.end);
-    (!in_link).then_some(slash_offset)
+    let excluded = inline_exclusions(line)
+        .into_iter()
+        .chain(inline_links(line).into_iter().map(|link| link.range))
+        .any(|range| range.start <= slash && slash < range.end);
+    (!excluded).then_some(slash)
 }
 
 /// Whether the end of `before` sits inside a wikilink or a link destination
@@ -331,39 +324,78 @@ fn in_open_link(before: &str) -> bool {
     open_wikilink || open_destination
 }
 
+/// The fence and front-matter state between two lines — the shared exclusion
+/// state machine (C1/C2) behind `conceal_spans`, `wikilink_at` and the `/`
+/// menu. Fed one line at a time, it says which lines are content.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlockState {
+    fence: Option<(u8, usize)>,
+    front_matter: bool,
+    lines_seen: usize,
+}
+
+impl BlockState {
+    /// The state after `above`, a run of whole lines each ended by `\n`.
+    pub fn after(above: &str) -> Self {
+        let mut state = Self::default();
+        let mut lines = above.split('\n');
+        // The piece after the last newline is the next line, not one of these.
+        lines.next_back();
+        for line in lines {
+            state.advance(line);
+        }
+        state
+    }
+
+    /// Takes `line` (a trailing `\r` is ignored) and returns whether it is
+    /// content: outside fences and front matter, and not a fence or
+    /// front-matter delimiter itself.
+    pub fn advance(&mut self, line: &str) -> bool {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let first = self.lines_seen == 0;
+        self.lines_seen += 1;
+        if first && line.trim_end() == "---" {
+            self.front_matter = true;
+            return false;
+        }
+        if self.front_matter {
+            let trimmed = line.trim_end();
+            if trimmed == "---" || trimmed == "..." {
+                self.front_matter = false;
+            }
+            return false;
+        }
+        if let Some((marker, length)) = self.fence {
+            if closes_fence(line, marker, length) {
+                self.fence = None;
+            }
+            return false;
+        }
+        if let Some(opened) = opens_fence(line) {
+            self.fence = Some(opened);
+            return false;
+        }
+        true
+    }
+
+    /// Whether `line`, coming next, is content — `advance` without the move.
+    pub fn is_content(&self, line: &str) -> bool {
+        self.clone().advance(line)
+    }
+}
+
 /// Calls `f` with `(line_start, line)` for every line outside fenced code
-/// blocks and YAML front matter — the shared exclusion state machine (C1/C2)
-/// behind `conceal_spans` and `wikilink_at`. `line` excludes any trailing
-/// carriage return.
+/// blocks and YAML front matter. `line` excludes any trailing carriage
+/// return.
 fn each_content_line(text: &str, mut f: impl FnMut(usize, &str)) {
-    let mut fence: Option<(u8, usize)> = None;
-    let mut front_matter = false;
+    let mut state = BlockState::default();
     let mut offset = 0;
 
-    for (index, raw_line) in text.split('\n').enumerate() {
+    for raw_line in text.split('\n') {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
         let line_start = offset;
         offset += raw_line.len() + 1;
-
-        if index == 0 && line.trim_end() == "---" {
-            front_matter = true;
-            continue;
-        }
-        if front_matter {
-            let trimmed = line.trim_end();
-            if trimmed == "---" || trimmed == "..." {
-                front_matter = false;
-            }
-            continue;
-        }
-        if let Some((marker, length)) = fence {
-            if closes_fence(line, marker, length) {
-                fence = None;
-            }
-            continue;
-        }
-        if let Some(opened) = opens_fence(line) {
-            fence = Some(opened);
+        if !state.advance(line) {
             continue;
         }
         f(line_start, line);
@@ -2659,6 +2691,41 @@ mod tests {
             apply_block("1.5 litres", Block::Bullet, 0),
             ("- 1.5 litres".to_string(), 2)
         );
+    }
+
+    /// The `/` query's offset in `text` for a cursor at `offset`, combined
+    /// the way the completion provider combines it.
+    fn slash_trigger(text: &str, offset: usize) -> Option<usize> {
+        let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
+        let line_end = text[offset..]
+            .find('\n')
+            .map_or(text.len(), |index| offset + index);
+        let line = &text[line_start..line_end];
+        let slash = slash_query_start(line, offset - line_start)?;
+        BlockState::after(&text[..line_start])
+            .is_content(line)
+            .then_some(line_start + slash)
+    }
+
+    #[test]
+    fn block_state_tracks_fences_and_front_matter() {
+        assert!(BlockState::after("").is_content("text"));
+        assert!(!BlockState::after("").is_content("```"));
+        assert!(!BlockState::after("```\n").is_content("code"));
+        assert!(!BlockState::after("```\n").is_content("```"));
+        assert!(BlockState::after("```\ncode\n```\n").is_content("text"));
+        assert!(!BlockState::after("~~~~\n```\n").is_content("text"));
+        assert!(!BlockState::after("---\ntitle: x\n").is_content("text"));
+        assert!(BlockState::after("---\ntitle: x\n---\n").is_content("text"));
+        assert!(!BlockState::after("").is_content("---"));
+        assert!(BlockState::after("text\n").is_content("---"));
+        assert!(BlockState::after("```\r\ncode\r\n```\r\n").is_content("text"));
+    }
+
+    #[test]
+    fn block_state_ignores_the_unfinished_last_line() {
+        assert_eq!(BlockState::after("```"), BlockState::default());
+        assert_eq!(BlockState::after("a\n```"), BlockState::after("a\n"));
     }
 
     #[test]
