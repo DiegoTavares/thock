@@ -499,14 +499,31 @@ five-minute end bounds what a stream the phone could not close costs.
 The desk does not hold the feed; a desk credential gets `403 role_forbidden`. A desk left open all
 day would hold an instance around the clock. The desk polls instead (§10.4).
 
-**APNs** (server internal, shape frozen for the phone). When a `file` or `ack` event has no phone
-feed to go to, the server sends one silent push per thirty-second burst:
+**APNs** (server internal, shape frozen for the phone). When the desk causes a `file` or `ack` event,
+the server sends the phone a silent push, spaced per vault (V50 §6.1):
+
+- The first change after a quiet spell is pushed at once, before the desk's request answers.
+- A change within ten minutes of the last push is **held**. Every authenticated desk request checks
+  the held push once it is done and sends it, with the latest counters, when the ten minutes have
+  passed. The desk's one-minute poll means a held push leaves within a minute of becoming due.
+- Any phone request clears the held push, since the phone is syncing anyway.
+- While a phone holds the feed nothing is sent and the push stays held, because a stream a killed
+  app left behind looks open until the five-minute cut.
+
+Nothing is sent from a timer: Cloud Run allocates CPU only while a request is being served. The
+payload:
 
 ```json
 {"aps": {"content-available": 1}, "thock": {"vault_id": "3a9c…", "latest_version": 1842, "acked_through_seq": 58}}
 ```
 
 The phone treats it exactly like a reconnect: pull, then read `GET /v1/vault`.
+
+The push goes out with `apns-push-type: background` and `apns-priority: 5` to the app's bundle id. When
+APNs answers 410 or `BadDeviceToken` the server forgets the token, so the phone sends its token with
+`PATCH /v1/vault/devices/me` once per launch and whenever iOS hands it a different one, even when it
+sent the same token before. The secrets the
+service needs are in `thock/services/plus/README.md`, *Silent push*.
 
 ### 6.6 Entitlement
 

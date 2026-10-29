@@ -367,6 +367,13 @@ func (s *store) patchDevice(ctx context.Context, id string, patch devicePatch) e
 	})
 }
 
+// forgetAPNSToken clears the device's push token only if it is still the one
+// that failed, so a token the phone registered meanwhile survives.
+func (s *store) forgetAPNSToken(ctx context.Context, id, token string) error {
+	_, err := s.pool.Exec(ctx, "update devices set apns_token = null where id = $1 and apns_token = $2", id, token)
+	return err
+}
+
 func (s *store) deleteDevice(ctx context.Context, vaultID, id string) error {
 	tag, err := s.pool.Exec(ctx, "delete from devices where vault_id = $1 and id = $2 and role = 'phone'", vaultID, id)
 	if err != nil {

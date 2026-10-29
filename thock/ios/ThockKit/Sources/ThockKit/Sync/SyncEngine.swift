@@ -31,6 +31,9 @@ public struct SyncDiagnostics: Equatable, Sendable {
     /// Path and reason for every snapshot that could not be taken in the
     /// last pull.
     public var failures: [String] = []
+    /// Why the service last refused this phone's push token, until it takes
+    /// one; while it is set, desk changes wait for the app to open.
+    public var pushTokenError: String?
 
     public init() {}
 }
@@ -55,6 +58,13 @@ public actor SyncEngine {
     private var feedTask: Task<Void, Never>?
     private var running = false
     private var again = false
+    /// Callers that asked for a round while one was running, resumed when
+    /// the loop that took their request ends.
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    /// The push token the service last took from this instance. Kept in
+    /// memory only, so every launch offers it once: the service may have
+    /// forgotten a token the phone still holds (V50 F1).
+    private var acceptedPushToken: String?
 
     public private(set) var state: SyncState
     public private(set) var diagnostics = SyncDiagnostics()
@@ -138,6 +148,7 @@ public actor SyncEngine {
         store.setMeta("device_name", response.device.name ?? deviceName)
         store.setMeta("backend", link.backend)
         store.setMeta("status", response.vault.status)
+        acceptedPushToken = apnsToken
         set(.working)
         await sync()
     }
@@ -162,9 +173,18 @@ public actor SyncEngine {
         set(.notConnected)
     }
 
-    public func updatePushToken(_ token: String?) async {
-        guard let credential else { return }
-        _ = try? await call("PATCH", "/v1/vault/devices/me", body: ["apns_token": token], credential: credential, as: DeviceInfo.self)
+    /// Tells the service where to send the silent push that wakes the phone
+    /// to sync (V34 API §6.5). Offered once per instance and again for a
+    /// different token; a refused offer is retried on the next call.
+    public func updatePushToken(_ token: String) async {
+        guard let credential, acceptedPushToken != token else { return }
+        do {
+            _ = try await call("PATCH", "/v1/vault/devices/me", body: ["apns_token": token], credential: credential, as: DeviceInfo.self)
+            acceptedPushToken = token
+            diagnostics.pushTokenError = nil
+        } catch {
+            diagnostics.pushTokenError = (error as? APIError)?.error ?? error.localizedDescription
+        }
     }
 
     // MARK: The loop
@@ -226,19 +246,27 @@ public actor SyncEngine {
     }
 
     /// One round: send what is queued, pull what changed, drop what the desk
-    /// has applied. Safe to call from anywhere, any number of times.
+    /// has applied. Safe to call from anywhere, any number of times. Called
+    /// while a round runs, it returns once a round that started after the
+    /// call has finished, so a background caller waits for the data.
     public func sync() async {
         guard store.isConnected else { return }
         if running {
             again = true
+            await withCheckedContinuation { waiting.append($0) }
             return
         }
         running = true
-        defer { running = false }
         repeat {
             again = false
             await round()
         } while again
+        running = false
+        let finished = waiting
+        waiting = []
+        for continuation in finished {
+            continuation.resume()
+        }
     }
 
     private func round() async {

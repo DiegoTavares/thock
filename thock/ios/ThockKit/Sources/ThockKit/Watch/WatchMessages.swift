@@ -210,6 +210,21 @@ public struct WatchDayAsk: Codable, Hashable, Sendable {
     }
 }
 
+/// The watch app opened on a reading over a minute old: the phone syncs and
+/// sends a fresh snapshot (V50 §6.3). Never queued, never recorded, never
+/// retried, because a refresh delivered late is worthless.
+public struct WatchRefresh: Codable, Hashable, Sendable {
+    public var v = WatchProtocol.version
+    public var id: UUID
+    /// When the watch asked.
+    public var at: Date
+
+    public init(id: UUID = UUID(), at: Date) {
+        self.id = id
+        self.at = at
+    }
+}
+
 public struct WatchAck: Codable, Hashable, Sendable {
     public enum Outcome: String, Codable, Sendable {
         case saved
@@ -247,6 +262,7 @@ public enum WatchMessage: Hashable, Sendable {
     case capture(WatchCapture)
     case tick(WatchTick)
     case dayAsk(WatchDayAsk)
+    case refresh(WatchRefresh)
     case ack(WatchAck)
     case dayReply(WatchDayReply)
 
@@ -258,6 +274,7 @@ public enum WatchMessage: Hashable, Sendable {
         case .capture: return "capture"
         case .tick: return "tick"
         case .dayAsk: return "day_ask"
+        case .refresh: return "refresh"
         case .ack: return "ack"
         case .dayReply: return "day_reply"
         }
@@ -270,6 +287,7 @@ public enum WatchMessage: Hashable, Sendable {
         case .capture(let capture): return capture.id
         case .tick(let tick): return tick.id
         case .dayAsk(let ask): return ask.id
+        case .refresh(let refresh): return refresh.id
         case .ack(let ack): return ack.id
         case .dayReply(let reply): return reply.id
         }
@@ -295,6 +313,7 @@ public enum WatchMessage: Hashable, Sendable {
         case .capture(let value): body = try Self.encoder.encode(value)
         case .tick(let value): body = try Self.encoder.encode(value)
         case .dayAsk(let value): body = try Self.encoder.encode(value)
+        case .refresh(let value): body = try Self.encoder.encode(value)
         case .ack(let value): body = try Self.encoder.encode(value)
         case .dayReply(let value): body = try Self.encoder.encode(value)
         }
@@ -327,6 +346,7 @@ public enum WatchMessage: Hashable, Sendable {
             case "capture": self = .capture(try decoder.decode(WatchCapture.self, from: data))
             case "tick": self = .tick(try decoder.decode(WatchTick.self, from: data))
             case "day_ask": self = .dayAsk(try decoder.decode(WatchDayAsk.self, from: data))
+            case "refresh": self = .refresh(try decoder.decode(WatchRefresh.self, from: data))
             case "ack": self = .ack(try decoder.decode(WatchAck.self, from: data))
             case "day_reply": self = .dayReply(try decoder.decode(WatchDayReply.self, from: data))
             default: throw WatchLinkError.malformed

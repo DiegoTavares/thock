@@ -233,9 +233,11 @@ whenever the desk changed something, plus vault-level `vault` and `device` event
 The phone holds it open only while in the foreground, closing it on the way out, and reconnects on
 drop; the server ends every stream after five minutes. Both bound the cost: an open stream keeps a
 Cloud Run instance billed, and iOS suspends an app without closing its connections. When the phone
-is not connected and a snapshot arrives, the backend sends one **APNs silent push** per burst; iOS
-wakes the app briefly to pull. This is the "seconds in the foreground, Apple's schedule in the
-background" promise of §2.
+is not connected and a snapshot arrives, the backend sends an **APNs silent push**; iOS wakes the
+app briefly to pull. The first change after a quiet spell is pushed at once and later ones at most
+once every ten minutes, each push carrying the latest state, and every push is sent inside a request
+because Cloud Run gives the instance CPU only then (V50 §6.1). This is the "seconds in the
+foreground, Apple's schedule in the background" promise of §2.
 
 The desk is never pushed and does not hold the feed: an open stream keeps a Cloud Run instance
 billed for its whole length, so a desk left open all day would cost an instance around the clock. It

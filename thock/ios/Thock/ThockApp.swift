@@ -46,12 +46,12 @@ struct ThockApp: App {
     }
 }
 
-/// The app icon's quick actions arrive through the scene delegate and a
-/// reminder's answers through the notification center's; SwiftUI has no
-/// hook of its own for either.
+/// The app icon's quick actions arrive through the scene delegate, a
+/// reminder's answers through the notification center's and the silent push
+/// through this one; SwiftUI has no hook of its own for any of them.
 final class AppDelegate: NSObject, UIApplicationDelegate {
-    /// Owned here rather than by the scene: a notification's answer can
-    /// launch the app in the background with no scene at all.
+    /// Owned here rather than by the scene: a notification's answer or a
+    /// silent push can launch the app in the background with no scene at all.
     @MainActor static let model = AppModel()
     @MainActor static var launchShortcut: String?
     @MainActor static let notifier = ReminderNotifier()
@@ -62,7 +62,20 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         AppDelegate.notifier.registerCategories(ReminderSettings())
         // So is a watch request that launched it (V48 §6.2).
         PhoneWatchLink.shared.activate()
+        // A silent push needs no permission from the person, only the token.
+        application.registerForRemoteNotifications()
         return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        let token = deviceToken.map { String(format: "%02x", $0) }.joined()
+        Task { @MainActor in AppDelegate.model.received(pushToken: token) }
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        // A build signed without push, or a simulator, lands here. Without a
+        // token the phone hears about desk changes when it is next opened.
+        NSLog("Thock has no push token: \(error)")
     }
 
     func application(_ application: UIApplication, configurationForConnecting session: UISceneSession, options: UIScene.ConnectionOptions) -> UISceneConfiguration {
@@ -77,9 +90,32 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
         // The server's silent push is a nudge to pull (V34 API §6.5).
         Task { @MainActor in
-            AppDelegate.model.becameActive()
-            completionHandler(.newData)
+            let answer = PushAnswer(completionHandler)
+            // iOS gives a silent push thirty seconds and may stop waking an
+            // app that runs over; a round on a slow network can take longer.
+            let deadline = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 25_000_000_000)
+                guard !Task.isCancelled else { return }
+                answer.finish(.failed)
+            }
+            answer.finish(await AppDelegate.model.syncInBackground() ? .newData : .noData)
+            deadline.cancel()
         }
+    }
+}
+
+/// A push's completion handler, called once: by the round or by the deadline.
+@MainActor
+private final class PushAnswer {
+    private var completion: ((UIBackgroundFetchResult) -> Void)?
+
+    init(_ completion: @escaping (UIBackgroundFetchResult) -> Void) {
+        self.completion = completion
+    }
+
+    func finish(_ result: UIBackgroundFetchResult) {
+        completion?(result)
+        completion = nil
     }
 }
 

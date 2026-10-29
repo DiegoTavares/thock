@@ -21,8 +21,11 @@ const (
 	// suspends mid-stream never closes it: the kernel still acknowledges the
 	// pings. Ending every stream after a few minutes bounds what one costs;
 	// a phone still in the foreground reconnects.
-	feedMaxAge      = 5 * time.Minute
-	pushBurstWindow = 30 * time.Second
+	feedMaxAge = 5 * time.Minute
+	// Apple rations background pushes per app and advises two or three an
+	// hour, so a desk writing session wakes the phone at most once per
+	// spacing (V50 §6.1).
+	pushSpacing = 10 * time.Minute
 )
 
 type feedEvent struct {
@@ -41,8 +44,10 @@ type feedSubscriber struct {
 type feedHub struct {
 	mu          sync.Mutex
 	subscribers map[string]map[*feedSubscriber]struct{}
-	// Called when a file or ack event finds no phone listening.
-	onPhoneAbsent func(vaultID string)
+	// Called with every file or ack event the desk causes, before the event
+	// fans out, so a push held for a listening phone is recorded before the
+	// phone's own requests can clear it.
+	onDeskChange func(vaultID string)
 	// How long one stream lives; feedMaxAge outside tests.
 	maxAge time.Duration
 }
@@ -87,23 +92,21 @@ func (h *feedHub) phoneListening(vaultID string) bool {
 // loses the event; it will catch up by polling on its next reconnect.
 func (h *feedHub) publish(vaultID string, event feedEvent) {
 	h.mu.Lock()
-	phoneHeard := false
+	notify := h.onDeskChange
+	h.mu.Unlock()
+	if notify != nil && event.From == roleDesk && (event.Kind == "file" || event.Kind == "ack") {
+		notify(vaultID)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	for sub := range h.subscribers[vaultID] {
 		if event.From != "" && sub.role == event.From {
 			continue
-		}
-		if sub.role == rolePhone {
-			phoneHeard = true
 		}
 		select {
 		case sub.events <- event:
 		default:
 		}
-	}
-	notify := h.onPhoneAbsent
-	h.mu.Unlock()
-	if !phoneHeard && notify != nil && event.From == roleDesk && (event.Kind == "file" || event.Kind == "ack") {
-		notify(vaultID)
 	}
 }
 
@@ -166,9 +169,9 @@ func (h *feedHub) serve(w http.ResponseWriter, r *http.Request, vaultID string, 
 
 // --- push ---
 
-// pusher delivers a silent push to the phone. The real client (APNs over
-// HTTP/2 with a token-based key) is configuration away; the logging fake is
-// what runs without one and what the tests inspect.
+// pusher delivers a silent push to the phone: apnsPusher (apns.go) when an
+// APNs key is configured, the logging fake otherwise. An error wrapping
+// errPushTokenGone tells the caller to forget the token.
 type pusher interface {
 	push(ctx context.Context, apnsToken string, payload []byte) error
 }
@@ -197,62 +200,80 @@ func (p *loggingPusher) records() []pushRecord {
 	return append([]pushRecord(nil), p.sent...)
 }
 
-// pushCoalescer sends at most one push per vault per burst window: the
-// first change goes out at once, later ones in the same window collapse
-// into a single push at the window's end.
+// pushCoalescer spaces the silent pushes to each vault's phone. The first
+// desk change after a quiet spell is pushed at once; later ones are held and
+// go out on a later request once the spacing has passed, carrying the latest
+// state. Sends happen inside a request, never on a timer, because Cloud Run
+// only gives the instance CPU while it serves one.
 type pushCoalescer struct {
 	mu       sync.Mutex
 	lastSent map[string]time.Time
-	pending  map[string]*time.Timer
+	held     map[string]bool
 	now      func() time.Time
-	send     func(vaultID string)
-	window   time.Duration
+	// send pushes to the vault's phone and reports whether the push must
+	// stay held because a phone holds the feed. A stream a killed app left
+	// behind looks like a listening phone until the server cuts it.
+	send    func(vaultID string) (stillHeld bool)
+	spacing time.Duration
 }
 
-func newPushCoalescer(send func(vaultID string), now func() time.Time) *pushCoalescer {
+func newPushCoalescer(send func(vaultID string) bool, now func() time.Time) *pushCoalescer {
 	return &pushCoalescer{
 		lastSent: map[string]time.Time{},
-		pending:  map[string]*time.Timer{},
+		held:     map[string]bool{},
 		now:      now,
 		send:     send,
-		window:   pushBurstWindow,
+		spacing:  pushSpacing,
 	}
 }
 
+// nudge records a desk change and pushes at once if the spacing allows.
 func (c *pushCoalescer) nudge(vaultID string) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := c.now()
-	wait := c.window - now.Sub(c.lastSent[vaultID])
-	if timer := c.pending[vaultID]; timer != nil {
-		if wait > 0 {
-			return
-		}
-		// The window closed while a timer was still waiting on it (the
-		// clock moved faster than the timer): send now instead.
-		timer.Stop()
-		delete(c.pending, vaultID)
-	}
-	if wait <= 0 {
-		c.lastSent[vaultID] = now
-		go c.send(vaultID)
-		return
-	}
-	c.pending[vaultID] = time.AfterFunc(wait, func() {
-		c.mu.Lock()
-		delete(c.pending, vaultID)
-		c.lastSent[vaultID] = c.now()
-		c.mu.Unlock()
-		c.send(vaultID)
-	})
+	c.held[vaultID] = true
+	c.mu.Unlock()
+	c.flush(vaultID)
 }
 
-// stop cancels every pending timer; for tests and shutdown.
-func (c *pushCoalescer) stop() {
+// flush sends the vault's held push if the spacing has passed. Called after
+// every authenticated desk request.
+func (c *pushCoalescer) flush(vaultID string) {
+	c.mu.Lock()
+	previous, sentBefore := c.lastSent[vaultID]
+	now := c.now()
+	if !c.held[vaultID] || (sentBefore && now.Sub(previous) < c.spacing) {
+		c.mu.Unlock()
+		return
+	}
+	// Claim the slot before sending, so a concurrent request doesn't push too.
+	delete(c.held, vaultID)
+	c.lastSent[vaultID] = now
+	c.mu.Unlock()
+
+	if !c.send(vaultID) {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for id, timer := range c.pending {
-		timer.Stop()
-		delete(c.pending, id)
+	c.held[vaultID] = true
+	if c.lastSent[vaultID].Equal(now) {
+		if sentBefore {
+			c.lastSent[vaultID] = previous
+		} else {
+			delete(c.lastSent, vaultID)
+		}
 	}
+}
+
+// clear drops the vault's held push: the phone is syncing anyway.
+func (c *pushCoalescer) clear(vaultID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.held, vaultID)
+}
+
+func (c *pushCoalescer) isHeld(vaultID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.held[vaultID]
 }

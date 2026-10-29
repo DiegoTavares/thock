@@ -124,7 +124,8 @@ extension VaultSession {
                 NSLog("Thock could not remember a watch request: \(error)")
             }
             return (.ack(ack), ack.outcome == .saved)
-        case .snapshot, .ack, .dayReply:
+        // A refresh is the app's to run: a sync, not a vault write.
+        case .snapshot, .refresh, .ack, .dayReply:
             return (nil, false)
         }
     }

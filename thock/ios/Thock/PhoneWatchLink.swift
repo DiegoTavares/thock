@@ -35,13 +35,29 @@ final class PhoneWatchLink: NSObject {
         return session.isPaired && session.isWatchAppInstalled
     }
 
-    func send(_ snapshot: WatchSnapshot) {
+    /// Waits up to `seconds` for the session to finish activating, which a
+    /// cold launch does asynchronously. True once it is active, or when this
+    /// phone has no session to wait for.
+    func waitForActivation(seconds: Double) async -> Bool {
+        guard let session else { return true }
+        let deadline = Date().addingTimeInterval(seconds)
+        while session.activationState != .activated {
+            guard Date() < deadline else { return false }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return true
+    }
+
+    /// `restamp` sends an unchanged reading anyway, so the watch learns it
+    /// is current: after a sync, its instant is what the watch counts its
+    /// age from.
+    func send(_ snapshot: WatchSnapshot, restamp: Bool = false) {
         guard canSend, let session else { return }
         do {
             var unstamped = snapshot
             unstamped.madeAt = .distantPast
             let comparable = try WatchMessage.snapshot(unstamped).encoded()
-            guard comparable != lastSent else { return }
+            guard restamp || comparable != lastSent else { return }
             let dictionary = try WatchMessage.snapshot(snapshot).dictionary()
             try session.updateApplicationContext(dictionary)
             lastSent = comparable

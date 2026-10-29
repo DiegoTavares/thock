@@ -575,6 +575,10 @@ registers a token. Until push lands, a 15:00 reminder typed at the desk at 14:00
 phone that stays in a pocket. Wiring push is §15 step 7, and it is the only fix: no periodic
 background refresh in V45.
 
+V50 (`v50-background-sync.md`) wires it: the service's silent push wakes the phone, which syncs and
+hands iOS the new alerts before it is suspended. The first desk change after a quiet spell reaches
+the phone in seconds, later ones within ten minutes, as long as iOS delivers the push.
+
 ## 11. Sync
 
 **No new write kinds.** Every phone gesture is an `append` or a `replace_line`, kinds the phone

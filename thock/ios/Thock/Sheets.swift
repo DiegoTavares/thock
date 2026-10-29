@@ -382,6 +382,16 @@ struct YouSheet: View {
                             .foregroundStyle(Theme.amber)
                             .disabled(model.syncState == .working || model.syncState == .notConnected)
                         }
+                        if !model.isPractice, let reason = model.diagnostics.pushTokenError {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Desk changes arrive when you open Thock")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(Theme.ink)
+                                Text(reason)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Theme.dim)
+                            }
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 10) {

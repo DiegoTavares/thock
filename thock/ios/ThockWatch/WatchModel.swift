@@ -30,6 +30,10 @@ final class WatchModel {
     /// Set once Save is tapped: what the confirmation reads.
     private(set) var saved: Saved?
     var showingOutbox = false
+    /// A refresh is out and unanswered, and when the last one went: the
+    /// watch asks at most once a minute.
+    @ObservationIgnored private var refreshing = false
+    @ObservationIgnored private var lastRefresh: Date?
 
     struct Saved: Equatable {
         var id: UUID
@@ -64,7 +68,7 @@ final class WatchModel {
             asks[reply.id] = nil
             askingDays.remove(reply.day.day)
             askedDays[reply.day.day] = reply.day
-        case .capture, .tick, .dayAsk:
+        case .capture, .tick, .dayAsk, .refresh:
             break
         }
     }
@@ -203,6 +207,26 @@ final class WatchModel {
     func phoneInReach() {
         resendWaiting()
         ask(day)
+        refreshIfStale()
+    }
+
+    // MARK: Refresh (V50 §6.3)
+
+    /// On screen, a reading over a minute old asks the phone to sync, which
+    /// wakes its app if it has to. The new snapshot arrives as every one does; nothing
+    /// is drawn while waiting, and an unanswered ask leaves things as they
+    /// were. Never queued: a refresh delivered late is worthless.
+    func refreshIfStale(now: Date = Date()) {
+        guard !refreshing, connection.isReachable, WKApplication.shared().applicationState == .active else { return }
+        if let snapshot, now.timeIntervalSince(snapshot.madeAt) <= 60 { return }
+        if let lastRefresh, now.timeIntervalSince(lastRefresh) < 60 { return }
+        refreshing = true
+        lastRefresh = now
+        connection.refresh(WatchRefresh(at: now))
+    }
+
+    func refreshEnded() {
+        refreshing = false
     }
 
     func dayAskFailed(_ day: String) {
@@ -404,6 +428,7 @@ final class WatchModel {
             showingCapture = true
         }
         resendWaiting()
+        refreshIfStale()
     }
 }
 
@@ -485,6 +510,30 @@ final class WatchConnection: NSObject {
         })
     }
 
+    /// Any answer ends the wait. A phone from before V50 answers with an
+    /// empty dictionary, which here is no reason to ask for an update: its
+    /// snapshots and requests still work.
+    func refresh(_ refresh: WatchRefresh) {
+        guard let session else {
+            model.refreshEnded()
+            return
+        }
+        let dictionary: [String: Any]
+        do {
+            dictionary = try WatchMessage.refresh(refresh).dictionary()
+        } catch {
+            NSLog("Thock could not write a refresh for the phone: \(error)")
+            model.refreshEnded()
+            return
+        }
+        session.sendMessage(dictionary, replyHandler: { _ in
+            Task { @MainActor in self.model.refreshEnded() }
+        }, errorHandler: { error in
+            NSLog("Thock's refresh did not reach the phone: \(error)")
+            Task { @MainActor in self.model.refreshEnded() }
+        })
+    }
+
     private func answered(_ dictionary: [String: Any], to id: UUID) {
         guard !dictionary.isEmpty, let message = try? WatchMessage(dictionary: dictionary) else {
             model.unreadableAnswer(to: id)
@@ -543,6 +592,8 @@ extension WatchConnection: WCSessionDelegate {
             })
             self.model.reconcileTransfers(outstanding: outstanding)
             self.model.resendWaiting()
+            // A cold launch is reachable only once activation completes.
+            self.model.refreshIfStale()
             self.finishRefreshesIfIdle()
         }
     }
