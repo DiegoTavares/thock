@@ -166,6 +166,9 @@ final class AppModel {
     /// What a restored editor starts from, taken once by the sheet.
     @ObservationIgnored private var restoredCursor: Int?
     @ObservationIgnored private var restoredDraft: ResumePoint.Draft?
+    /// The address iOS gave this launch for the service's silent push, kept
+    /// so a connection made later carries it.
+    @ObservationIgnored private var pushToken: String?
 
     init() {
         appearance = ThockEnvironment.defaults.string(forKey: "appearance").flatMap(Appearance.init(rawValue:)) ?? .dark
@@ -252,7 +255,11 @@ final class AppModel {
         } else {
             throw PairingError.badLink
         }
-        await install(SyncEngine(store: store, transport: transport, secrets: secrets))
+        let engine = SyncEngine(store: store, transport: transport, secrets: secrets)
+        await install(engine)
+        if !isPractice, let pushToken {
+            await engine.updatePushToken(pushToken)
+        }
         await refreshSyncState()
     }
 
@@ -284,6 +291,7 @@ final class AppModel {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             guard !Task.isCancelled else { return }
             WidgetCenter.shared.reloadAllTimelines()
+            widgetReload = nil
         }
     }
 
@@ -302,6 +310,26 @@ final class AppModel {
             guard let session else { return }
             PhoneWatchLink.shared.send(session.watchSnapshot(chip: chip(for: Self.watchEntry)))
         }
+    }
+
+    /// Sends the watch its snapshot and reloads the widgets now, rather than
+    /// after the debounce: a background wake can be suspended before that
+    /// fires (V50 F4). A cold launch's watch session may still be
+    /// activating, so it is given two seconds.
+    private func flushWatchSnapshot() async {
+        watchSnapshot?.cancel()
+        if let pending = widgetReload {
+            pending.cancel()
+            widgetReload = nil
+            WidgetCenter.shared.reloadAllTimelines()
+        }
+        guard let session else { return }
+        let snapshot = session.watchSnapshot(chip: chip(for: Self.watchEntry))
+        guard await PhoneWatchLink.shared.waitForActivation(seconds: 2) else {
+            NSLog("Thock gave up waiting for the watch session; the watch gets its snapshot on the next change")
+            return
+        }
+        PhoneWatchLink.shared.send(snapshot)
     }
 
     private func refreshSyncState() async {
@@ -337,7 +365,7 @@ final class AppModel {
             guard let base = URL(string: link.backend), base.scheme != nil else { throw PairingError.badLink }
             let transport = HTTPTransport(base: base)
             let engine = SyncEngine(store: store, transport: transport, secrets: secrets)
-            try await engine.pair(link: link, deviceName: UIDevice.current.name)
+            try await engine.pair(link: link, deviceName: UIDevice.current.name, apnsToken: pushToken)
             await install(engine)
             await finishConnecting()
         } catch {
@@ -430,25 +458,56 @@ final class AppModel {
         // The answered ring and the reminder's other alerts change now, not
         // after the round below, which may never finish in the background.
         await refreshAlerts()
-        await sendInBackground()
+        await syncInBackground()
     }
 
-    /// A write made while the app may be in the background, by a
-    /// notification's answer or the watch: one round to send it under a
-    /// background task, then the feed is let go if the app is still there.
-    private func sendInBackground() async {
+    /// Every wake that may come while the app is in the background ends
+    /// here: a silent push, a watch request or refresh, a notification's
+    /// answer (V50 §6.2). One round under a background task, then the feed
+    /// is let go if the app is still there, and the alerts, the watch and
+    /// the widgets hear of what landed before iOS suspends the app. Returns
+    /// whether the round pulled anything.
+    @discardableResult
+    func syncInBackground() async -> Bool {
         var grace = UIBackgroundTaskIdentifier.invalid
         grace = UIApplication.shared.beginBackgroundTask {
             UIApplication.shared.endBackgroundTask(grace)
             grace = .invalid
         }
-        await engine?.sync()
+        defer {
+            if grace != .invalid {
+                UIApplication.shared.endBackgroundTask(grace)
+            }
+        }
+        // Not awaited once open: the launch arguments run inside the opening.
+        if phase == .loading {
+            await boot()
+        }
+        guard phase == .ready, let engine, let store else { return false }
+        let cursor = store.cursor
+        // Joins a round the opening already started, and waits for it.
+        await engine.sync()
+        let pulled = store.cursor != cursor
+        // Opening the notebook took the feed, which only the foreground
+        // holds (SyncEngine.start).
         if UIApplication.shared.applicationState == .background {
-            await engine?.stop()
+            await engine.stop()
         }
         await refreshAlerts()
-        if grace != .invalid {
-            UIApplication.shared.endBackgroundTask(grace)
+        await flushWatchSnapshot()
+        return pulled
+    }
+
+    // MARK: Push (V50 §6.2)
+
+    /// iOS handed this launch its push token. Practice notebooks have no
+    /// service to give it to.
+    func received(pushToken token: String) {
+        pushToken = token
+        guard !isPractice, let engine else { return }
+        Task {
+            await engine.updatePushToken(token)
+            await refreshSyncState()
         }
     }
 
@@ -483,7 +542,7 @@ final class AppModel {
                 await refreshAlerts()
             }
         }
-        Task { await sendInBackground() }
+        Task { await syncInBackground() }
         return answer
     }
 

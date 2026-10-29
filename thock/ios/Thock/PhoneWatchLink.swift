@@ -35,6 +35,19 @@ final class PhoneWatchLink: NSObject {
         return session.isPaired && session.isWatchAppInstalled
     }
 
+    /// Waits up to `seconds` for the session to finish activating, which a
+    /// cold launch does asynchronously. True once it is active, or when this
+    /// phone has no session to wait for.
+    func waitForActivation(seconds: Double) async -> Bool {
+        guard let session else { return true }
+        let deadline = Date().addingTimeInterval(seconds)
+        while session.activationState != .activated {
+            guard Date() < deadline else { return false }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return true
+    }
+
     func send(_ snapshot: WatchSnapshot) {
         guard canSend, let session else { return }
         do {

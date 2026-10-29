@@ -157,6 +157,39 @@ final class FeedCountingTransport: SyncTransport, @unchecked Sendable {
     }
 }
 
+/// Counts requests by method and path, and holds every file listing for
+/// `listingDelay` so a round can be caught while it runs.
+final class RecordingTransport: SyncTransport, @unchecked Sendable {
+    let inner: LocalBackend
+    var listingDelay: UInt64 = 0
+    private let lock = NSLock()
+    private var counts: [String: Int] = [:]
+
+    init(_ inner: LocalBackend) {
+        self.inner = inner
+    }
+
+    func count(_ method: String, _ path: String) -> Int {
+        lock.withLock { counts["\(method) \(path)", default: 0] }
+    }
+
+    /// Rounds begun (each pulls a listing) and ended (each reads the vault).
+    var roundsStarted: Int { count("GET", "/v1/vault/files") }
+    var roundsEnded: Int { count("GET", "/v1/vault") }
+
+    func send(method: String, path: String, query: [String: String], body: Data?, credential: String?) async throws -> HTTPResult {
+        lock.withLock { counts["\(method) \(path)", default: 0] += 1 }
+        if method == "GET", path == "/v1/vault/files", listingDelay > 0 {
+            try await Task.sleep(nanoseconds: listingDelay)
+        }
+        return try await inner.send(method: method, path: path, query: query, body: body, credential: credential)
+    }
+
+    func download(_ url: String) async throws -> Data { try await inner.download(url) }
+    func upload(_ url: String, body: Data, headers: [String: String]) async throws { try await inner.upload(url, body: body, headers: headers) }
+    func feed(credential: String) -> AsyncThrowingStream<FeedEvent, Error> { inner.feed(credential: credential) }
+}
+
 /// Polls `condition` for up to two seconds.
 func waitUntil(_ what: String, file: StaticString = #filePath, line: UInt = #line, _ condition: () async -> Bool) async throws {
     for _ in 0..<200 {
@@ -210,6 +243,88 @@ final class SyncTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? PairingError, .refused("That code didn't work. Try again."))
         }
+    }
+
+    // MARK: Push token (V50 F1)
+
+    func testThePushTokenTravelsWithThePairing() async throws {
+        let harness = try Harness()
+        try await harness.desk.open()
+        try await harness.engine.pair(link: try await harness.desk.pairingLink(), deviceName: "Test iPhone", apnsToken: "aa11")
+        let token = await harness.backend.state.devices.first { $0.role == "phone" }?.apnsToken
+        XCTAssertEqual(token, "aa11")
+    }
+
+    func testEachEngineOffersAnUnchangedTokenOnce() async throws {
+        var recording: RecordingTransport?
+        let harness = try Harness { backend in
+            let transport = RecordingTransport(backend)
+            recording = transport
+            return transport
+        }
+        let transport = try XCTUnwrap(recording)
+        try await harness.desk.open()
+        try await harness.engine.pair(link: try await harness.desk.pairingLink(), deviceName: "Test iPhone", apnsToken: "aa11")
+
+        // The instance that paired already handed this token over.
+        await harness.engine.updatePushToken("aa11")
+        XCTAssertEqual(transport.count("PATCH", "/v1/vault/devices/me"), 0)
+
+        // The next launch's engine offers it once even though it is unchanged:
+        // the service may have forgotten it.
+        let relaunched = SyncEngine(store: harness.store, transport: transport, secrets: harness.secrets)
+        await relaunched.updatePushToken("aa11")
+        await relaunched.updatePushToken("aa11")
+        XCTAssertEqual(transport.count("PATCH", "/v1/vault/devices/me"), 1)
+
+        // A different one goes at once.
+        await relaunched.updatePushToken("bb22")
+        XCTAssertEqual(transport.count("PATCH", "/v1/vault/devices/me"), 2)
+    }
+
+    func testARefusedTokenIsOfferedAgainAndSaysWhy() async throws {
+        let harness = try Harness()
+        try await harness.pair()
+        await harness.backend.setOffline(true)
+        await harness.engine.updatePushToken("bb22")
+        var diagnostics = await harness.engine.diagnostics
+        XCTAssertNotNil(diagnostics.pushTokenError)
+        var token = await harness.backend.state.devices.first { $0.role == "phone" }?.apnsToken
+        XCTAssertNil(token)
+
+        await harness.backend.setOffline(false)
+        await harness.engine.updatePushToken("bb22")
+        diagnostics = await harness.engine.diagnostics
+        XCTAssertNil(diagnostics.pushTokenError)
+        token = await harness.backend.state.devices.first { $0.role == "phone" }?.apnsToken
+        XCTAssertEqual(token, "bb22")
+    }
+
+    // MARK: Waiting for a round (V50 F5)
+
+    func testSyncDuringARunningRoundWaitsForARoundThatStartsAfterIt() async throws {
+        var recording: RecordingTransport?
+        let harness = try Harness { backend in
+            let transport = RecordingTransport(backend)
+            recording = transport
+            return transport
+        }
+        let transport = try XCTUnwrap(recording)
+        try await harness.pair()
+        transport.listingDelay = 200_000_000
+        let started = transport.roundsStarted
+        let running = Task { await harness.engine.sync() }
+        try await waitUntil("a round is running") { transport.roundsStarted > started }
+
+        try await harness.desk.edit { disk in
+            disk["notes/late.md"] = "# Late\n"
+        }
+        let startedBeforeTheCall = transport.roundsStarted
+        await harness.engine.sync()
+        XCTAssertGreaterThan(transport.roundsStarted, startedBeforeTheCall, "a round started after the call")
+        XCTAssertEqual(transport.roundsEnded, transport.roundsStarted, "no round is left running")
+        XCTAssertEqual(harness.store.content("notes/late.md"), "# Late\n")
+        await running.value
     }
 
     // MARK: Pull
