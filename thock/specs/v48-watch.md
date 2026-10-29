@@ -1,6 +1,7 @@
 # Thock V48 - Thock on the wrist: today's timeline, the day's tasks and a capture that listens
 
-**Status:** Designed (2026-10-28). Not built.
+**Status:** Built (2026-10-28) on `v48-watch`: §13 steps 1–4. Signing (step 5) and the by-hand
+checks of §12 are not done.
 **Owner:** Diego · **Date:** 2026-10-28
 **Design reference:** the clickable watch prototype, the complication families, the architecture
 diagram and the findings on what watchOS allows: <https://claude.ai/artifact/86BQKftLcLJPpmBydT3x7s>.
@@ -17,9 +18,9 @@ The phone is the pen for moments away from the desk, but it still has to come ou
 V48 adds an Apple Watch app that ships inside the iPhone app:
 
 - **A Today timeline complication.** The large (`accessoryRectangular`) complication draws a
-  five-hour window of today's plan, like the Calendar complication. It shows tasks as blocks,
-  calendar events outlined, reminders as ticks and a "now" marker that moves on its own. The
-  header names the next thing. Tapping it opens the day.
+  the next two things on today's plan above a four-hour window of it, like the Calendar
+  complication. The window shows tasks as blocks, calendar events outlined, reminders as ticks and
+  a "now" marker that moves on its own. Tapping it opens the day.
 - **The day's tasks.** A list of the day's planner lines, calendar events and reminders. The
   Digital Crown scrolls it, the chevrons or a swipe move a day back or forward, and a tap on a box
   ticks the line.
@@ -41,7 +42,7 @@ V48 adds an Apple Watch app that ships inside the iPhone app:
   rules, the same `reminders.md` line and id, and the same immediate local alert for a reminder.
 - A capture saved with the phone out of reach waits on the watch, survives the watch app being
   terminated, and is delivered once when the phone is back. It is never delivered twice.
-- At 14:00 on a day whose plan has a 14:00 dentist reminder, the timeline's header reads
+- At 14:00 on a day whose plan has a 14:00 dentist reminder, the timeline's first row reads
   *14:00 Dentist* from the moment the previous item ends, with no phone contact that day.
 - A desk edit to today's planner shows on the timeline within a minute of the phone syncing it,
   while the phone is awake.
@@ -209,23 +210,31 @@ One widget extension, `ThockWatchWidgets`, with two widgets.
 
 ### 7.1 Today (`accessoryRectangular`, `accessoryInline`)
 
-- **Rectangular:** a header with the day (*WED 28*, in the accent) and the next timed item to its
-  right (*14:00 Dentist*), or *3 left* when nothing timed remains. Under the header, *3 left ·
-  2 anytime* in muted text. Then a track spanning five hours from the half hour before now, with
-  hour labels under it:
-  - tasks are filled blocks from `start` to `end`, and 30 minutes when untimed at the end;
-  - calendar events are outlined blocks in the calendar colour;
-  - reminders are a tick above the track and a line through it;
-  - done items fade to a quarter of their strength;
-  - "now" is an accent line with a dot.
+- **Rectangular:** three rows filling the complication, with no date (other complications show
+  it) and no counts.
+  - **Row 1, the next item:** a glyph for its kind (a bell for a reminder, a filled rounded bar for
+    a task, an outlined one for a calendar event), its time in mono, semibold, in the accent, then
+    its label, semibold, truncated. *Next* is the first timed row not done and not a calendar event
+    already started; a task or reminder stays next until it ends.
+  - **Row 2, the item after it:** the same shape, muted. Empty when there is no second item.
+  - **Row 3, the track:** a thin track spanning four hours from the half hour before now, with the
+    hour numbers under it (*14*, *15*, no minutes):
+    - tasks are filled blocks from `start` to `end`, and 30 minutes when untimed at the end;
+    - calendar events are outlined blocks in the calendar colour;
+    - reminders are a tick above the track and a line through it;
+    - done items fade to a quarter of their strength;
+    - "now" is an accent line with a dot.
 - **Tinted and monochrome faces:** every distinction above is also made by shape or opacity, not
   only colour, and the accent parts are `widgetAccentable()`.
+- **No SF Symbols:** the glyphs are drawn shapes, because with `Image(systemName:)` in its entry
+  views the complication showed only its redacted placeholder on a real watch.
 - **Inline:** *3 left · 14:00 Dentist*.
 - **Tap:** `thock://day/today`.
 - **Wrist down:** labels are `privacySensitive()`, as in the iPhone widget, so a locked watch shows
   blocks without words.
 - **Empty states:** *Open Thock on your iPhone* (never received a snapshot or `not_connected`),
-  *Nothing planned today* (no rows), and the header alone for a day with only done items.
+  *Nothing planned today* (no rows, and no track), and *All done*, muted, in row 1 above
+  the track when no timed item is ahead.
 
 ### 7.2 Capture (`accessoryCircular`, `accessoryCorner`)
 
@@ -234,9 +243,11 @@ so it never goes stale and spends no refreshes. Tap: `thock://capture?voice=1`.
 
 ### 7.3 The timeline provider
 
-- `entries(rows:today:now:)` is a pure function in ThockKit: one entry every 15 minutes from now
-  to midnight (at most 96), each with its window start, its "next" row and its counts. The window
-  moves without a reload.
+- `entries(rows:today:now:)` is a pure function in ThockKit: one entry now, one every 15 minutes
+  for the next four hours, then one every 30 minutes to midnight (23 entries at 16:48; WidgetKit
+  keeps a rendering of each, so the far hours get fewer), each with its four-hour window's start,
+  its "next" row, the row after it and the open count the inline face shows. The window moves
+  without a reload.
 - The policy is `.after(midnight)`. The snapshot already holds tomorrow, so the new day draws
   without the phone.
 - The widget reloads when the watch app writes a new snapshot (`reloadTimelines(ofKind:)`) and
@@ -325,7 +336,9 @@ the user said is never lost and is written nowhere until saved.
 - **No note:** *Nothing planned*, above any reminders for that day. A vault with no planner heading
   or without the Timeline routine is the same empty state, never an error.
 - **Freshness:** *As of 13:04* under the title when the snapshot is more than ten minutes old.
-- **The mic:** a button at the bottom of the list starts capture with dictation (§8.1).
+- **The mic:** the stock toolbar button at the top left of the navigation bar (a `.topBarLeading`
+  item, an icon-only *Capture* label with the mic in the accent on plain glass) starts capture
+  with dictation (§8.1).
 - **Opening:** `thock://day/today` from the timeline, and the app's last screen otherwise.
 
 ## 10. Reminders on the wrist
@@ -351,7 +364,7 @@ delegate when a companion watch app is installed, rather than being offered to t
 | `ThockKit/Sources/ThockKit/Watch/WatchSnapshot.swift` | New. `VaultSession.watchSnapshot(days:now:)`, the builder from the phone's readings, and `TimelineEntries.entries(rows:today:now:)` (§7.3). |
 | `ThockKit/Sources/ThockKit/Store/Database.swift` | The `watch_requests` table (§6.3), with prune. |
 | `ThockKit/Sources/ThockKit/Vault/VaultSession.swift` | `tick(hash:ordinal:day:)` returns silently today when the line is gone. It gains `VaultSessionError.lineChanged` for that case, which `TickLineIntent` ignores as before and the watch reports (§6.4). A watch capture calls the existing `capture(blocks:destination:due:now:)` with `Blocks.parse(text)` and `now` set to the request's `at`. |
-| `thock/ios/Thock/WatchLink.swift` | New. The `WCSessionDelegate`: activation, coalesced snapshot sends, the complication budget, request decoding, replies and acks by `transferUserInfo`. |
+| `thock/ios/Thock/PhoneWatchLink.swift` | New. The `WCSessionDelegate`: activation, coalesced snapshot sends, the complication budget, request decoding, replies and acks by `transferUserInfo`. |
 | `thock/ios/Thock/AppModel.swift` | `receive(_:)` (§6.4), the snapshot send beside `scheduleWidgetReload()`, and the background tail shared with `answer`. |
 | `thock/ios/Thock/ThockApp.swift` | Activate `WatchLink` in `didFinishLaunching`. |
 | `thock/ios/ThockWatch/` | New watchOS app target: `ThockWatchApp.swift`, `WatchModel.swift` (snapshot, outbox, draft), `CaptureScreen.swift`, `RemindMeScreen.swift`, `DayScreen.swift`, `OutboxScreen.swift`, `WatchTheme.swift`. `Shared/Theme.swift` uses UIKit's dynamic colours, which watchOS lacks, so the watch has a dark-only palette from the phone's dark tokens, with Petrona for dates. |
@@ -371,9 +384,10 @@ No inherited crate, desk or service change.
     label; a carried reminder has `carried_from`; a day with no note has `exists: false` and its
     reminders from the index; a note with no planner heading has no rows and no error; a
     read-only session yields `read_only`.
-  - Timeline entries: entries every 15 minutes to midnight; the window starts on the half hour
-    before now; "next" skips done rows and calendar rows already started; an empty day; now
-    after the last item.
+  - Timeline entries: every 15 minutes for four hours, then every 30 to midnight, on the wall
+    clock on the days the clocks change; the window is four hours and starts
+    on the half hour before now; "next" and the row after it skip done rows and calendar rows
+    already started; one item left has no second row; an empty day; now after the last item.
   - **A watch capture is a phone capture:** for each destination, and for a reminder with and
     without a time, the `PlannedWrite`s from a `WatchCapture` equal those from `capture(blocks:…)`
     with the same text, due and instant.

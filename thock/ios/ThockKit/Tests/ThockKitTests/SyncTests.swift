@@ -669,9 +669,12 @@ final class SessionTests: XCTestCase {
         let first = try XCTUnwrap(next.first)
         try session.tick(hash: first.hash, ordinal: first.ordinal, day: harness.day)
         XCTAssertTrue(harness.store.content(harness.todayPath)?.contains("- [x] 09:30 - 11:00 Deep work") ?? false)
-        // A calendar line is the desk's; a widget tap leaves it alone.
+        // A calendar line is the desk's; a widget tap leaves it alone, and
+        // the watch is told the line is not one it can tick (V48 §6.4).
         let lunch = next[1]
-        try session.tick(hash: lunch.hash, ordinal: lunch.ordinal, day: harness.day)
+        XCTAssertThrowsError(try session.tick(hash: lunch.hash, ordinal: lunch.ordinal, day: harness.day)) { error in
+            XCTAssertEqual(error as? VaultSessionError, .lineChanged)
+        }
         XCTAssertTrue(harness.store.content(harness.todayPath)?.contains("- [ ] 12:30 - 13:30 Lunch with Ana") ?? false)
         XCTAssertEqual(harness.store.waitingForDeskCount, 1)
     }

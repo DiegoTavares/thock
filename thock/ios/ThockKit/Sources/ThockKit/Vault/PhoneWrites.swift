@@ -45,6 +45,48 @@ public enum CaptureDestination: String, Codable, CaseIterable, Sendable {
     }
 }
 
+// MARK: What a capture says (V33 §6, V45 §10.2, V48 §8.2)
+
+/// The phone's and the watch's words for a capture, kept in one place so the
+/// wrist says exactly what the phone does.
+extension CaptureDestination {
+    public var title: String {
+        switch self {
+        case .inbox: return "Inbox"
+        case .today: return "Today"
+        case .backlog: return "Backlog"
+        case .reminder: return "Reminder"
+        }
+    }
+
+    /// The confirmation once saved; a reminder says when it rings.
+    public func savedSentence(due: ReminderDue?, today: VaultDay, now: ClockTime, dateOnlyAt: ClockTime) -> String {
+        switch self {
+        case .inbox: return "Saved to your inbox"
+        case .today: return "Added to today"
+        case .backlog: return "Added to Backlog · Soon"
+        case .reminder: return due.map { $0.ringsSentence(today: today, now: now, dateOnlyAt: dateOnlyAt) } ?? "Reminder saved"
+        }
+    }
+
+    /// The hint under the chips. `oneParagraph` is a capture that can only
+    /// be one paragraph, as a watch's is: Today then needs only its first
+    /// sentence.
+    public func hint(due: ReminderDue?, settings: ReminderSettings, today: VaultDay, now: ClockTime, oneParagraph: Bool = false) -> String {
+        switch self {
+        case .inbox: return "Lands in your inbox. Triage sorts it at the desk."
+        case .today: return oneParagraph ? "One line joins today's plan." : "One line joins today's plan. More than one lands in today's note as written."
+        case .backlog: return "Goes under Soon in your backlog."
+        case .reminder:
+            guard let due else { return "Rings when you choose and waits in \(settings.index)." }
+            guard due.stillRings(today: today, now: now, dateOnlyAt: settings.dateOnlyAt) else {
+                return "Waits in Today, in \(settings.index)."
+            }
+            return "\(due.ringsSentence(today: today, now: now, dateOnlyAt: settings.dateOnlyAt)) and waits in \(settings.index)."
+        }
+    }
+}
+
 /// When a reminder capture rings, and the id its line gets.
 public struct ReminderCapture: Equatable, Sendable {
     public var due: ReminderDue
