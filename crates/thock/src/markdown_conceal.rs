@@ -1680,6 +1680,8 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
     let display_snapshot = editor.display_map.update(cx, |map, cx| map.snapshot(cx));
     let mut existing: Vec<(Range<MultiBufferOffset>, Option<SharedString>)> = Vec::new();
     let mut restored_impostors: Vec<Range<MultiBufferOffset>> = Vec::new();
+    // Built only when a fold that isn't tagged as ours turns up, which is rare.
+    let mut concealable: Option<HashSet<Range<MultiBufferOffset>>> = None;
     for fold in display_snapshot.folds_in_range(MultiBufferOffset(0)..buffer_snapshot.len()) {
         let range = fold.range.start.to_offset(&buffer_snapshot)
             ..fold.range.end.to_offset(&buffer_snapshot);
@@ -1687,18 +1689,10 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
             existing.push((range, fold.placeholder.collapsed_text.clone()));
         } else if fold.placeholder.type_tag == Some(email_fold_type_tag()) {
             continue;
-        } else if addon.spans.iter().any(|span| {
-            is_folded(&span.kind)
-                && span.range.start.to_offset(&buffer_snapshot) == range.start
-                && span.range.end.to_offset(&buffer_snapshot) == range.end
-        }) || addon.email.as_ref().is_some_and(|email| {
-            let matches = |anchors: &Range<Anchor>| {
-                anchors.start.to_offset(&buffer_snapshot) == range.start
-                    && anchors.end.to_offset(&buffer_snapshot) == range.end
-            };
-            email.messages.iter().any(|message| matches(&message.body))
-                || email.quotes.iter().any(matches)
-        }) {
+        } else if concealable
+            .get_or_insert_with(|| concealable_ranges(addon, &buffer_snapshot))
+            .contains(&range)
+        {
             // A fold restored from the workspace database that exactly
             // matches a conceal span — or an email reply or quote crease
             // (V16 §7) — is one of ours that got swept into fold
@@ -1708,29 +1702,11 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
         }
     }
 
-    // The diff compares placeholder text as well as range: toggling the
-    // email view gives the same `## ` range a different placeholder (marker
-    // space vs sender dot), and a range-only diff would keep the stale one.
     let chip_states = editor
         .addon::<MarkdownConcealAddon>()
         .map(|addon| addon.chip_states.clone())
         .unwrap_or_default();
-    let matches = |fold: &(Range<MultiBufferOffset>, Option<SharedString>),
-                   want: &(Range<MultiBufferOffset>, SpanKind)| {
-        fold_matches(fold, want, &chip_states)
-    };
-    let stale: Vec<Range<MultiBufferOffset>> = existing
-        .iter()
-        .filter(|fold| !desired.iter().any(|want| matches(fold, want)))
-        .map(|(range, _)| range.clone())
-        .collect();
-    let mut new: Vec<(Range<MultiBufferOffset>, SpanKind)> = desired
-        .iter()
-        .filter(|want| {
-            !existing.iter().any(|fold| matches(fold, want)) || restored_impostors.contains(&want.0)
-        })
-        .cloned()
-        .collect();
+    let (stale, mut new) = diff_folds(&existing, &desired, &chip_states, &restored_impostors);
 
     // A mouse drag converts its pixel position against the display snapshot of
     // the last paint, and several drag events can be handled between two
@@ -1816,20 +1792,25 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
             )
         })
         .collect();
+    // A deferred pass drew none of the folds it held back.
+    let existing_keys = deferred.then(|| fold_keys(&existing));
     let drawn_states: HashMap<Range<MultiBufferOffset>, ChipState> = desired
         .iter()
-        .filter(|want| !(deferred && !existing.iter().any(|fold| matches(fold, want))))
+        .filter(|want| {
+            existing_keys
+                .as_ref()
+                .is_none_or(|keys| has_fold(keys, want, &chip_states))
+        })
         .filter_map(|(range, kind)| match kind {
             SpanKind::Reminder { state, .. } => Some((range.clone(), *state)),
             _ => None,
         })
         .collect();
+    let applied_keys = fold_keys(&applied);
     let converged = applied.len() == desired.len()
-        && desired.iter().all(|want| {
-            applied
-                .iter()
-                .any(|fold| fold_matches(fold, want, &drawn_states))
-        });
+        && desired
+            .iter()
+            .all(|want| has_fold(&applied_keys, want, &drawn_states));
 
     if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
         addon.chip_states = drawn_states;
@@ -1843,20 +1824,103 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
     cx.notify();
 }
 
-/// Whether a fold in the display map is the one `want` asks for: the same
-/// range and placeholder text, and for a reminder chip the state it was
-/// drawn with.
-fn fold_matches(
-    (range, text): &(Range<MultiBufferOffset>, Option<SharedString>),
-    (desired, kind): &(Range<MultiBufferOffset>, SpanKind),
+/// Splits the folds in the display map from the ones wanted into the stale
+/// folds to remove and the wanted folds to add. Restored impostors are purged
+/// before the add, so a wanted fold on one of their ranges is added again.
+///
+/// The diff compares placeholder text as well as range: toggling the email
+/// view gives the same `## ` range a different placeholder (marker space vs
+/// sender dot), and a range-only diff would keep the stale one. Both sides
+/// are hashed because a long note carries thousands of concealed markers and
+/// this runs on every cursor move.
+fn diff_folds(
+    existing: &[(Range<MultiBufferOffset>, Option<SharedString>)],
+    desired: &[(Range<MultiBufferOffset>, SpanKind)],
+    chip_states: &HashMap<Range<MultiBufferOffset>, ChipState>,
+    restored_impostors: &[Range<MultiBufferOffset>],
+) -> (
+    Vec<Range<MultiBufferOffset>>,
+    Vec<(Range<MultiBufferOffset>, SpanKind)>,
+) {
+    let desired_keys: HashSet<FoldKey> = desired
+        .iter()
+        .filter_map(|want| wanted_key(want, chip_states))
+        .collect();
+    let stale = existing
+        .iter()
+        .filter(|(range, text)| {
+            !text
+                .as_deref()
+                .is_some_and(|text| desired_keys.contains(&(range.clone(), text)))
+        })
+        .map(|(range, _)| range.clone())
+        .collect();
+    let existing_keys = fold_keys(existing);
+    let impostors: HashSet<&Range<MultiBufferOffset>> = restored_impostors.iter().collect();
+    let new = desired
+        .iter()
+        .filter(|want| !has_fold(&existing_keys, want, chip_states) || impostors.contains(&want.0))
+        .cloned()
+        .collect();
+    (stale, new)
+}
+
+/// A fold as the diff sees it: its range and placeholder text.
+type FoldKey<'a> = (Range<MultiBufferOffset>, &'a str);
+
+fn fold_keys(folds: &[(Range<MultiBufferOffset>, Option<SharedString>)]) -> HashSet<FoldKey<'_>> {
+    folds
+        .iter()
+        .filter_map(|(range, text)| Some((range.clone(), text.as_deref()?)))
+        .collect()
+}
+
+/// The key of the fold `want` asks for: the same range and placeholder text.
+/// `None` when `want` is a reminder chip whose drawn state isn't the one
+/// wanted, since no fold in the map can be that chip then.
+fn wanted_key<'a>(
+    (range, kind): &'a (Range<MultiBufferOffset>, SpanKind),
+    chip_states: &HashMap<Range<MultiBufferOffset>, ChipState>,
+) -> Option<FoldKey<'a>> {
+    if let SpanKind::Reminder { state, .. } = kind
+        && chip_states.get(range) != Some(state)
+    {
+        return None;
+    }
+    Some((range.clone(), collapsed_text_for(kind)))
+}
+
+/// Whether `folds` holds the fold `want` asks for.
+fn has_fold(
+    folds: &HashSet<FoldKey>,
+    want: &(Range<MultiBufferOffset>, SpanKind),
     chip_states: &HashMap<Range<MultiBufferOffset>, ChipState>,
 ) -> bool {
-    range == desired
-        && text.as_deref() == Some(collapsed_text_for(kind))
-        && match kind {
-            SpanKind::Reminder { state, .. } => chip_states.get(range) == Some(state),
-            _ => true,
-        }
+    wanted_key(want, chip_states).is_some_and(|key| folds.contains(&key))
+}
+
+/// Every range this addon folds or has folded by default: the concealed
+/// spans and the email reply and quote creases.
+fn concealable_ranges(
+    addon: &MarkdownConcealAddon,
+    buffer_snapshot: &MultiBufferSnapshot,
+) -> HashSet<Range<MultiBufferOffset>> {
+    let offsets = |anchors: &Range<Anchor>| {
+        anchors.start.to_offset(buffer_snapshot)..anchors.end.to_offset(buffer_snapshot)
+    };
+    let spans = addon
+        .spans
+        .iter()
+        .filter(|span| is_folded(&span.kind))
+        .map(|span| offsets(&span.range));
+    let email = addon.email.iter().flat_map(|email| {
+        email
+            .messages
+            .iter()
+            .map(|message| offsets(&message.body))
+            .chain(email.quotes.iter().map(offsets))
+    });
+    spans.chain(email).collect()
 }
 
 /// The collapsed text each folded kind's placeholder carries — the fold
@@ -2779,7 +2843,7 @@ mod tests {
     use super::*;
     use crate::{BODY_FONT_BUFFER, HEADING_FONT_BODY};
     use editor::DisplayPoint;
-    use editor::display_map::DisplayRow;
+    use editor::display_map::{DisplayRow, FoldId};
     use editor::test::editor_test_context::EditorTestContext;
     use fs::FakeFs;
     use gpui::BorrowAppContext as _;
@@ -3625,6 +3689,110 @@ mod tests {
                 .count();
             assert_eq!(untagged, 0);
         });
+    }
+
+    fn long_note(lines: usize) -> String {
+        (0..lines)
+            .map(|row| format!("- [ ] **item {row}** and `code`\n"))
+            .collect()
+    }
+
+    fn fold_ids(editor: &Entity<Editor>, cx: &mut VisualTestContext) -> HashSet<FoldId> {
+        editor.update(cx, |editor, cx| {
+            let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+            editor
+                .display_map
+                .update(cx, |map, cx| map.snapshot(cx))
+                .folds_in_range(MultiBufferOffset(0)..buffer_snapshot.len())
+                .map(|fold| fold.id)
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn a_long_note_reveals_only_the_cursor_line(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, &long_note(2000)).await;
+        for row in [0, 1999, 1000] {
+            move_cursor_to(&editor, row, &mut cx);
+            let text = display_text(&editor, &mut cx);
+            let raw_rows: Vec<usize> = text
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| line.contains("**"))
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(raw_rows, [row as usize], "cursor on row {row}");
+        }
+    }
+
+    /// Rebuilding folds the cursor didn't touch costs the fold map work on
+    /// every cursor move in proportion to the note, not to the move.
+    #[gpui::test]
+    async fn a_cursor_move_refolds_only_the_lines_it_leaves_and_enters(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, &long_note(2000)).await;
+        move_cursor_to(&editor, 0, &mut cx);
+        let before = fold_ids(&editor, &mut cx);
+        // Each line folds its bullet, checkbox, and two pairs of delimiters.
+        const FOLDS_PER_LINE: usize = 6;
+        assert_eq!(before.len(), 1999 * FOLDS_PER_LINE);
+
+        move_cursor_to(&editor, 1000, &mut cx);
+        let after = fold_ids(&editor, &mut cx);
+        let removed = before.difference(&after).count();
+        let added = after.difference(&before).count();
+        assert_eq!(removed, FOLDS_PER_LINE, "only row 1000's folds should go");
+        assert_eq!(added, FOLDS_PER_LINE, "only row 0's folds should come back");
+
+        editor.update(&mut cx, |editor, cx| apply_folds(editor, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            fold_ids(&editor, &mut cx),
+            after,
+            "a pass with nothing to change touches no fold"
+        );
+    }
+
+    /// The fold diff runs at least twice per cursor move, so it has to stay
+    /// linear in the number of concealed markers. A ratio of two sizes is
+    /// measured rather than a duration, so the bound holds on any machine:
+    /// 8x the markers costs about 8x when linear and 64x when quadratic.
+    #[test]
+    fn the_fold_diff_scales_linearly_with_the_markers() {
+        fn fastest_diff(markers: usize) -> std::time::Duration {
+            let desired: Vec<(Range<MultiBufferOffset>, SpanKind)> = (0..markers)
+                .map(|index| {
+                    let start = MultiBufferOffset(index * 10);
+                    (start..MultiBufferOffset(index * 10 + 2), SpanKind::Marker)
+                })
+                .collect();
+            // One marker revealed and one stale, so both sides have work.
+            let existing: Vec<(Range<MultiBufferOffset>, Option<SharedString>)> = desired
+                .iter()
+                .skip(1)
+                .map(|(range, _)| (range.clone(), Some(" ".into())))
+                .chain([(MultiBufferOffset(3)..MultiBufferOffset(5), Some(" ".into()))])
+                .collect();
+            (0..5)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    let (stale, new) = diff_folds(&existing, &desired, &HashMap::default(), &[]);
+                    let elapsed = start.elapsed();
+                    assert_eq!((stale.len(), new.len()), (1, 1));
+                    elapsed
+                })
+                .min()
+                .unwrap_or_default()
+        }
+
+        const SMALL: usize = 2_000;
+        const LARGE: usize = SMALL * 8;
+        let small = fastest_diff(SMALL);
+        let large = fastest_diff(LARGE);
+        let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-6);
+        assert!(
+            ratio < 24.0,
+            "{LARGE} markers took {large:?}, {ratio:.1}x the {small:?} of {SMALL}"
+        );
     }
 
     #[gpui::test]
