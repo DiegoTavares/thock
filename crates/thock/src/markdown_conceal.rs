@@ -3795,6 +3795,60 @@ mod tests {
         );
     }
 
+    /// Untagged folds, the user's own or ones restored from the workspace
+    /// database, stay in the fold map when they match no span. Every cursor
+    /// move checks each of them against the spans, so that check has to stay
+    /// linear in the note too.
+    #[gpui::test]
+    async fn restored_folds_keep_a_cursor_move_linear(cx: &mut TestAppContext) {
+        const SMALL: usize = 25;
+        const LARGE: usize = SMALL * 8;
+        let (editor, mut cx) = setup(cx, "").await;
+        let mut fastest_pass = |lines: usize| {
+            editor.update_in(&mut cx, |editor, window, cx| {
+                editor.set_text(long_note(lines), window, cx);
+                let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
+                let placeholder = editor.default_fold_placeholder(cx);
+                let restored = buffer_snapshot
+                    .text()
+                    .match_indices(" and ")
+                    .map(|(offset, _)| {
+                        let range = MultiBufferOffset(offset + 1)..MultiBufferOffset(offset + 4);
+                        Crease::simple(range, placeholder.clone())
+                    })
+                    .collect();
+                editor
+                    .display_map
+                    .update(cx, |map, cx| map.fold(restored, cx));
+            });
+            settle(&mut cx);
+            move_cursor_to(&editor, 0, &mut cx);
+            (0..5)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    editor.update(&mut cx, |editor, cx| apply_folds(editor, cx));
+                    start.elapsed()
+                })
+                .min()
+                .unwrap_or_default()
+        };
+        let small = fastest_pass(SMALL);
+        let large = fastest_pass(LARGE);
+        let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-6);
+        assert!(
+            ratio < 24.0,
+            "{LARGE} lines took {large:?}, {ratio:.1}x the {small:?} of {SMALL}"
+        );
+        let untouched = display_text(&editor, &mut cx)
+            .lines()
+            .skip(1)
+            .all(|line| line.contains("⋯") && !line.contains("**"));
+        assert!(
+            untouched,
+            "restored folds stay and every other line conceals"
+        );
+    }
+
     #[gpui::test]
     async fn a_wiped_fold_set_heals_on_the_next_cursor_move(cx: &mut TestAppContext) {
         let (editor, mut cx) = setup(cx, NOTE).await;

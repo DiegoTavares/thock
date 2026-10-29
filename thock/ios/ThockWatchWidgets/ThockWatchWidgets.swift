@@ -46,14 +46,18 @@ struct TodayProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<TodayEntry>) -> Void) {
         let now = Date()
+        let entries = entries(now: now)
         // The snapshot already holds tomorrow, so the new day draws without
-        // the phone; the watch app reloads this when a snapshot arrives.
-        let midnight = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: now)) ?? now.addingTimeInterval(3600)
-        completion(Timeline(entries: entries(now: now), policy: .after(midnight)))
+        // the phone; the watch app also reloads this when a snapshot arrives.
+        let moments = entries.compactMap { entry -> WatchTimelineEntry? in
+            if case .day(_, let moment) = entry.content { return moment }
+            return nil
+        }
+        let reload = TimelineEntries.reloadDate(after: moments, today: VaultDay(now)) ?? now.addingTimeInterval(3600)
+        completion(Timeline(entries: entries, policy: .after(reload)))
     }
 
-    /// One entry every quarter hour to midnight, so the window and the
-    /// next lines move without a reload (§7.3).
+    /// One entry every quarter hour for the next four hours (§7.3).
     func entries(now: Date) -> [TodayEntry] {
         let snapshot = WatchFiles(folder: WatchEnvironment.container).snapshot()
         // The watch's date: a snapshot from before midnight still holds it.

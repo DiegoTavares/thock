@@ -36791,6 +36791,82 @@ println!("5");
     });
 }
 
+#[gpui::test]
+async fn test_editor_does_not_restore_type_tagged_folds(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/a"),
+        json!({ "main.rs": "fn main() {\none\ntwo\nthree\n}" }),
+    )
+    .await;
+    let project = Project::test(fs, [path!("/a").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let worktree_id = workspace.update(cx, |workspace, cx| {
+        workspace.project().update(cx, |project, cx| {
+            project.worktrees(cx).next().unwrap().read(cx).id()
+        })
+    });
+    let pane = workspace.update(cx, |workspace, _| workspace.active_pane().clone());
+    let open_main = |cx: &mut VisualTestContext| {
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_path(
+                (worktree_id, rel_path("main.rs")),
+                Some(pane.downgrade()),
+                true,
+                window,
+                cx,
+            )
+        })
+    };
+    let fold_ranges = |editor: &Entity<Editor>, cx: &mut VisualTestContext| {
+        editor.update(cx, |editor, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            snapshot
+                .folds_in_range(MultiBufferOffset(0)..snapshot.buffer_snapshot().len())
+                .map(|fold| fold.range.to_point(snapshot.buffer_snapshot()))
+                .collect::<Vec<_>>()
+        })
+    };
+
+    let editor = open_main(cx).unwrap().await.downcast::<Editor>().unwrap();
+    struct DecorationTag;
+    editor.update(cx, |editor, cx| {
+        let placeholder = FoldPlaceholder {
+            type_tag: Some(TypeId::of::<DecorationTag>()),
+            ..FoldPlaceholder::test()
+        };
+        editor.display_map.update(cx, |map, cx| {
+            map.fold(
+                vec![Crease::simple(
+                    Point::new(1, 0)..Point::new(1, 3),
+                    placeholder,
+                )],
+                cx,
+            )
+        });
+    });
+    editor.update_in(cx, |editor, window, cx| {
+        editor.fold_ranges(vec![Point::new(3, 0)..Point::new(3, 5)], false, window, cx);
+    });
+    assert_eq!(fold_ranges(&editor, cx).len(), 2);
+
+    pane.update_in(cx, |pane, window, cx| {
+        pane.close_all_items(&CloseAllItems::default(), window, cx)
+    })
+    .await
+    .unwrap();
+    let reopened = open_main(cx).unwrap().await.downcast::<Editor>().unwrap();
+    assert_eq!(
+        fold_ranges(&reopened, cx),
+        vec![Point::new(3, 0)..Point::new(3, 5)],
+        "only the user's fold comes back; the tagged one belongs to its owner"
+    );
+}
+
 struct EmptyModalView {
     focus_handle: gpui::FocusHandle,
 }

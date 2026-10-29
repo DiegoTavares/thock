@@ -293,14 +293,14 @@ public struct VaultSession: Sendable {
         return Array((timed + untimed).prefix(limit))
     }
 
-    /// Ticks a line named by its hash, as a widget button or the watch does.
-    /// A line already done stays done: neither offers an untick, so a tick
-    /// that arrives twice must not undo the first.
-    public func tick(hash: String, ordinal: Int, day: VaultDay) throws {
+    /// Ticks or unticks a line named by its hash, as a widget button or the
+    /// watch does. A line already in that state is left alone, so a request
+    /// that arrives twice never undoes the first.
+    public func tick(hash: String, ordinal: Int, day: VaultDay, done: Bool = true) throws {
         guard let item = planner(.day(day))?.items.first(where: { $0.hash == hash && $0.ordinal == ordinal && !$0.isCalendar }) else {
             throw VaultSessionError.lineChanged
         }
-        guard !item.done else { return }
+        guard item.done != done else { return }
         try tick(item, note: .day(day))
     }
 

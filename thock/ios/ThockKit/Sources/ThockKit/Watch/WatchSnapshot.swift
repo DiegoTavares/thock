@@ -155,9 +155,9 @@ extension VaultSession {
         case .tick(let tick):
             guard let day = VaultDay(iso: tick.day) else { throw VaultSessionError.lineChanged }
             do {
-                try self.tick(hash: tick.hash, ordinal: tick.ordinal, day: day)
+                try self.tick(hash: tick.hash, ordinal: tick.ordinal, day: day, done: tick.done)
             } catch VaultSessionError.lineChanged {
-                try tickIndexedReminder(hash: tick.hash, day: day)
+                try tickIndexedReminder(hash: tick.hash, day: day, done: tick.done)
             }
         default:
             break
@@ -165,13 +165,16 @@ extension VaultSession {
     }
 
     /// A reminder row on a day with no note is its home line: a tick closes
-    /// the reminder, as a tick on that line does on the phone.
-    private func tickIndexedReminder(hash: String, day: VaultDay) throws {
+    /// the reminder and an untick reopens it, as on that line on the phone.
+    private func tickIndexedReminder(hash: String, day: VaultDay, done: Bool) throws {
         guard noteText(day) == nil,
               let reminder = reminderIndex().reminders.first(where: { $0.raw.map(SyncCore.lineHash) == hash && $0.status != .missing && $0.due != nil })
         else { throw VaultSessionError.lineChanged }
-        guard reminder.status == .open else { return }
-        try closeReminder(reminder)
+        switch (reminder.status, done) {
+        case (.open, true): try closeReminder(reminder)
+        case (.closed, false): try reopenReminder(reminder)
+        default: return
+        }
     }
 }
 
@@ -210,14 +213,14 @@ public struct WatchTimelineEntry: Hashable, Sendable {
 public enum TimelineEntries {
     public static let windowMinutes = 4 * 60
     public static let step = 15
-    public static let laterStep = 30
 
-    /// One entry now, one on every quarter hour for the window's length
-    /// after it, then one every half hour to midnight, so the window and the
-    /// next lines move without a reload. WidgetKit keeps a rendering of
-    /// every entry, so the far hours, which only matter if the watch app is
-    /// not opened all day, get half as many. Times are on the wall clock: a
-    /// time the clocks skip has no entry, and one they repeat has its first.
+    /// One entry now and one on every quarter hour for the window's length
+    /// after it, never past midnight, so the window and the next lines move
+    /// without a reload. WidgetKit renders every entry when the timeline
+    /// arrives, so the rest of the day waits for `reloadDate` rather than
+    /// making that work large.
+    /// Times are on the wall clock: a time the clocks skip has no entry, and
+    /// one they repeat has its first.
     public static func entries(rows: [WatchRow], today: VaultDay, now: Date, calendar: Calendar = .current) -> [WatchTimelineEntry] {
         guard let midnight = calendar.date(from: DateComponents(year: today.year, month: today.month, day: today.day)) else { return [] }
         let left = rows.filter { !$0.done && $0.kind != .calendar }.count
@@ -231,17 +234,27 @@ public enum TimelineEntries {
             minute = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
         }
         var entries = [entry(max(now, midnight), minute)]
-        let dense = minute + windowMinutes
+        let end = min(minute + windowMinutes, 24 * 60 - 1)
         minute = (minute / step + 1) * step
-        while minute < 24 * 60, entries.count < 96 {
+        while minute <= end {
             if let date = calendar.date(bySettingHour: minute / 60, minute: minute % 60, second: 0, of: midnight, matchingPolicy: .strict, repeatedTimePolicy: .first, direction: .forward),
                VaultDay(date, calendar: calendar) == today, let last = entries.last, date > last.date
             {
                 entries.append(entry(date, minute))
             }
-            minute = minute < dense ? minute + step : (minute / laterStep + 1) * laterStep
+            minute += step
         }
         return entries
+    }
+
+    /// When the complication asks for its next timeline: at its last entry,
+    /// or at the next midnight when the day has no entry after the first.
+    public static func reloadDate(after entries: [WatchTimelineEntry], today: VaultDay, calendar: Calendar = .current) -> Date? {
+        if entries.count > 1, let last = entries.last {
+            return last.date
+        }
+        let tomorrow = today.adding(days: 1)
+        return calendar.date(from: DateComponents(year: tomorrow.year, month: tomorrow.month, day: tomorrow.day))
     }
 
     /// The first timed row still ahead at `minute`: not done, and not a

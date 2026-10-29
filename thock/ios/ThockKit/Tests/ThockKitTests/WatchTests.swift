@@ -143,28 +143,34 @@ final class WatchTests: XCTestCase {
         calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: hour, minute: minute)) ?? now
     }
 
-    func testEntriesEveryFifteenMinutesForFourHoursThenEveryHalfHour() {
+    func testEntriesEveryFifteenMinutesForFourHours() {
         let entries = TimelineEntries.entries(rows: [], today: today, now: now, calendar: calendar)
         XCTAssertEqual(entries.first?.date, now)
         XCTAssertEqual(entries.dropFirst().first?.date, at(14, 15))
-        XCTAssertEqual(entries.last?.date, at(23, 30))
-        // Now, 14:15 to 18:15 by quarter hours, 18:30 to 23:30 by half hours.
-        XCTAssertEqual(entries.count, 1 + 17 + 11)
-        let quarters = entries.dropFirst().filter { $0.date <= at(18, 15) }
-        let gaps = { (entries: [WatchTimelineEntry]) in zip(entries.dropFirst(), entries).map { $0.date.timeIntervalSince($1.date) } }
-        XCTAssertEqual(quarters.count, 17)
-        XCTAssertTrue(gaps(quarters).allSatisfy { $0 == 15 * 60 })
-        let halves = entries.filter { $0.date >= at(18, 30) }
-        XCTAssertTrue(gaps(halves).allSatisfy { $0 == 30 * 60 })
-        XCTAssertEqual(TimelineEntries.entries(rows: [], today: today, now: at(0, 0), calendar: calendar).count, 1 + 16 + 39)
+        XCTAssertEqual(entries.last?.date, at(18, 0))
+        XCTAssertEqual(entries.count, 1 + 16)
+        let gaps = zip(entries.dropFirst(2), entries.dropFirst()).map { $0.date.timeIntervalSince($1.date) }
+        XCTAssertTrue(gaps.allSatisfy { $0 == 15 * 60 })
+        XCTAssertEqual(TimelineEntries.entries(rows: [], today: today, now: at(0, 0), calendar: calendar).count, 1 + 16, "midnight's reload is no larger")
     }
 
     func testTheEntryCountAtTwelveToFive() {
-        // Now, 17:00 to 20:45 by quarter hours, 21:00 to 23:30 by half hours.
         let entries = TimelineEntries.entries(rows: [], today: today, now: at(16, 48), calendar: calendar)
-        XCTAssertEqual(entries.count, 1 + 16 + 6)
-        let lastMinutes: [Int] = [1245, 1260, 1290, 1320, 1350, 1380, 1410]
-        XCTAssertEqual(Array(entries.map(\.minute).suffix(7)), lastMinutes)
+        XCTAssertEqual(entries.count, 1 + 16)
+        XCTAssertEqual(entries.dropFirst().first?.minute, 17 * 60)
+        XCTAssertEqual(entries.last?.minute, 20 * 60 + 45)
+    }
+
+    func testTheNextTimelineIsAskedForAtTheLastEntryOrAtMidnight() {
+        let entries = TimelineEntries.entries(rows: [], today: today, now: now, calendar: calendar)
+        XCTAssertEqual(TimelineEntries.reloadDate(after: entries, today: today, calendar: calendar), at(18, 0))
+        let late = TimelineEntries.entries(rows: [], today: today, now: at(23, 50), calendar: calendar)
+        XCTAssertEqual(late.count, 1)
+        let midnight = calendar.date(from: DateComponents(year: 2026, month: 10, day: 22))
+        XCTAssertEqual(TimelineEntries.reloadDate(after: late, today: today, calendar: calendar), midnight, "never a reload at the moment just drawn")
+        XCTAssertEqual(TimelineEntries.reloadDate(after: [], today: today, calendar: calendar), midnight)
+        let lastOfOctober = VaultDay(year: 2026, month: 10, day: 31)
+        XCTAssertEqual(TimelineEntries.reloadDate(after: [], today: lastOfOctober, calendar: calendar), calendar.date(from: DateComponents(year: 2026, month: 11, day: 1)))
     }
 
     func testTheWindowStartsOnTheHalfHourBeforeNow() {
@@ -330,6 +336,36 @@ final class WatchTests: XCTestCase {
         XCTAssertEqual(session.store.pending().count, 1, "a done line stays done")
     }
 
+    func testAnUntickOpensADoneLineAndIsNotATick() throws {
+        let session = try vault(["daily/2026-10-21.md": todayNote])
+        let row = try XCTUnwrap(session.watchSnapshot(now: now).day(today)?.rows.first { $0.label == "Pay the rent" })
+        XCTAssertTrue(row.done)
+        let untick = WatchTick(day: today.iso, hash: row.hash, ordinal: row.ordinal, done: false)
+        XCTAssertEqual(session.receive(.tick(untick), now: now), .ack(WatchAck(id: untick.id, outcome: .saved)))
+        XCTAssertEqual(session.store.content("daily/2026-10-21.md"), todayNote.replacingOccurrences(of: "- [x] Pay the rent", with: "- [ ] Pay the rent"))
+        let again = WatchTick(day: today.iso, hash: row.hash, ordinal: row.ordinal, done: false)
+        XCTAssertEqual(session.receive(.tick(again), now: now), .ack(WatchAck(id: again.id, outcome: .saved)))
+        XCTAssertEqual(session.store.pending().count, 1, "an open line stays open")
+    }
+
+    func testAnUntickOnAClosedReminderOfADayWithNoNoteReopensIt() throws {
+        let session = try vault([
+            "reminders.md": "## Open\n- [[projects/house]] <!--rem:7d3e55a1c0f2-->\n",
+            "projects/house.md": "# House\n\n- [x] Call the plumber (@2026-10-22 18:30) <!--rem:7d3e55a1c0f2-->\n",
+        ])
+        let row = try XCTUnwrap(session.watchSnapshot(now: now).day(today.adding(days: 1))?.rows.first)
+        XCTAssertTrue(row.done)
+        let untick = WatchTick(day: today.adding(days: 1).iso, hash: row.hash, ordinal: row.ordinal, done: false)
+        XCTAssertEqual(session.receive(.tick(untick), now: now), .ack(WatchAck(id: untick.id, outcome: .saved)))
+        XCTAssertEqual(session.reminderIndex(now: now).reminder(id: "7d3e55a1c0f2")?.status, .open)
+    }
+
+    func testATickFromAnOlderWatchHasNoDoneAndTicks() throws {
+        let id = UUID()
+        let dictionary: [String: Any] = ["v": 1, "type": "tick", "id": id.uuidString, "day": "2026-10-21", "hash": "abc", "ordinal": 0]
+        XCTAssertEqual(try WatchMessage(dictionary: dictionary), .tick(WatchTick(id: id, day: "2026-10-21", hash: "abc", ordinal: 0, done: true)))
+    }
+
     func testATickOnALineTheDeskChangedIsRefused() throws {
         let session = try vault(["daily/2026-10-21.md": todayNote])
         let row = try XCTUnwrap(session.watchSnapshot(now: now).day(today)?.rows.first)
@@ -377,6 +413,7 @@ final class WatchTests: XCTestCase {
             .capture(WatchCapture(id: id, at: at, text: "Buy stamps", destination: .reminder, due: ReminderDue(date: today, time: nil))),
             .capture(WatchCapture(id: id, at: at, text: "Buy stamps", destination: .today)),
             .tick(WatchTick(id: id, day: today.iso, hash: "abc", ordinal: 1)),
+            .tick(WatchTick(id: id, day: today.iso, hash: "abc", ordinal: 1, done: false)),
             .dayAsk(WatchDayAsk(id: id, day: today.iso)),
             .refresh(WatchRefresh(id: id, at: at)),
             .ack(WatchAck(id: id, outcome: .saved)),
@@ -440,9 +477,9 @@ final class WatchTests: XCTestCase {
         outbox.add(.capture(capture))
         outbox.add(.tick(tick))
         XCTAssertEqual(outbox.waitingCount, 2)
-        XCTAssertTrue(outbox.isTicked(day: today.iso, hash: "abc", ordinal: 0))
+        XCTAssertEqual(outbox.tickedState(day: today.iso, hash: "abc", ordinal: 0), true)
         outbox.apply(WatchAck(id: tick.id, outcome: .refused, message: "That line changed. Look again."))
-        XCTAssertFalse(outbox.isTicked(day: today.iso, hash: "abc", ordinal: 0))
+        XCTAssertNil(outbox.tickedState(day: today.iso, hash: "abc", ordinal: 0))
         outbox.apply(WatchAck(id: capture.id, outcome: .refused, message: "Thock Plus has ended. Captures are paused."))
         XCTAssertEqual(outbox.unsent.map(\.state), [.refused("Thock Plus has ended. Captures are paused.")])
         let retried = outbox.retry(capture.id)
@@ -461,12 +498,24 @@ final class WatchTests: XCTestCase {
         outbox.add(.tick(tick))
         outbox.apply(WatchAck(id: tick.id, outcome: .saved), at: now)
         XCTAssertEqual(outbox.waitingCount, 0)
-        XCTAssertTrue(outbox.isTicked(day: today.iso, hash: "abc", ordinal: 0), "drawn done until the snapshot says so")
+        XCTAssertEqual(outbox.tickedState(day: today.iso, hash: "abc", ordinal: 0), true, "drawn done until the snapshot says so")
         outbox.forgetSaved(before: now.addingTimeInterval(-1))
         XCTAssertEqual(outbox.items.count, 1)
         outbox.forgetSaved(before: now.addingTimeInterval(1))
         XCTAssertTrue(outbox.items.isEmpty)
         XCTAssertNil(outbox.apply(WatchAck(id: tick.id, outcome: .saved)), "an answer to nothing changes nothing")
+    }
+
+    func testTheLastTickOrUntickSentForALineIsWhatTheWatchDraws() {
+        var outbox = WatchOutbox()
+        let tick = WatchTick(day: today.iso, hash: "abc", ordinal: 0)
+        let untick = WatchTick(day: today.iso, hash: "abc", ordinal: 0, done: false)
+        outbox.add(.tick(tick))
+        outbox.add(.tick(untick))
+        XCTAssertEqual(outbox.tickedState(day: today.iso, hash: "abc", ordinal: 0), false)
+        XCTAssertNil(outbox.tickedState(day: today.iso, hash: "abc", ordinal: 1), "another line")
+        outbox.apply(WatchAck(id: untick.id, outcome: .refused, message: "That line changed. Look again."))
+        XCTAssertEqual(outbox.tickedState(day: today.iso, hash: "abc", ordinal: 0), true, "a refused untick leaves the tick before it")
     }
 
     func testTheDraftNeverRemembersReminder() throws {
@@ -555,10 +604,7 @@ final class WatchTests: XCTestCase {
                 XCTAssertEqual((parts.hour ?? 0) * 60 + (parts.minute ?? 0), entry.minute, "the date is the minute's wall-clock time")
             }
         }
-        let afternoon = try XCTUnwrap(entries.first { $0.minute == 14 * 60 })
-        XCTAssertEqual(calendar.component(.hour, from: afternoon.date), 14)
-        XCTAssertEqual(entries.last?.minute, 23 * 60 + 30)
-        XCTAssertEqual(entries.first { $0.minute > 5 * 60 + 20 }?.minute, 5 * 60 + 30, "half hours once the window has passed")
+        XCTAssertEqual(entries.last?.minute, 5 * 60 + 15, "the window ends four wall-clock hours after now")
         XCTAssertTrue(zip(entries, entries.dropFirst()).allSatisfy { $0.date < $1.date })
     }
 
@@ -568,10 +614,10 @@ final class WatchTests: XCTestCase {
         let day = VaultDay(year: 2026, month: 11, day: 1)
         let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 1, hour: 0, minute: 0)))
         let entries = TimelineEntries.entries(rows: [], today: day, now: now, calendar: calendar)
-        XCTAssertEqual(entries.count, 1 + 16 + 39, "the repeated hour has one set of entries")
-        let afternoon = try XCTUnwrap(entries.first { $0.minute == 14 * 60 })
-        XCTAssertEqual(calendar.component(.hour, from: afternoon.date), 14)
-        XCTAssertEqual(afternoon.windowStart, 14 * 60)
+        XCTAssertEqual(entries.count, 1 + 16, "the repeated hour has one set of entries")
+        let four = try XCTUnwrap(entries.last)
+        XCTAssertEqual(four.minute, 4 * 60)
+        XCTAssertEqual(calendar.component(.hour, from: four.date), 4)
         XCTAssertTrue(zip(entries, entries.dropFirst()).allSatisfy { $0.date < $1.date })
     }
 
