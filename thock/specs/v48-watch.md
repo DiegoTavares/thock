@@ -226,6 +226,8 @@ One widget extension, `ThockWatchWidgets`, with two widgets.
     - "now" is an accent line with a dot.
 - **Tinted and monochrome faces:** every distinction above is also made by shape or opacity, not
   only colour, and the accent parts are `widgetAccentable()`.
+- **No SF Symbols:** the glyphs are drawn shapes, because with `Image(systemName:)` in its entry
+  views the complication showed only its redacted placeholder on a real watch.
 - **Inline:** *3 left · 14:00 Dentist*.
 - **Tap:** `thock://day/today`.
 - **Wrist down:** labels are `privacySensitive()`, as in the iPhone widget, so a locked watch shows

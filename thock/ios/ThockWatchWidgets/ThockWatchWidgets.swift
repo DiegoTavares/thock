@@ -197,9 +197,11 @@ struct NextLine: View {
     }
 }
 
-/// A row's kind drawn as the track draws it, never as a symbol: a filled
-/// bar for a task, an outlined one for an event, a bell for a reminder.
-/// Told apart by shape on a tinted face.
+/// A row's kind drawn as the track draws it: a filled bar for a task, an
+/// outlined one for an event, a bell for a reminder. Told apart by shape on
+/// a tinted face. Never an SF Symbol: with `Image(systemName:)` in its
+/// entries the complication drew only its redacted placeholder on a real
+/// watch (builds 19 and 20), though it rendered in the simulator.
 struct KindGlyph: View {
     var kind: WatchRow.Kind
     var color: Color
