@@ -592,35 +592,120 @@ func TestFeedEndsAtItsMaximumAge(t *testing.T) {
 	}
 }
 
-func TestPushCoalescesWhenThePhoneIsAbsent(t *testing.T) {
+// The push goes out inside the request that changed the vault, so the
+// desk's commit answers only after it was sent.
+func TestPushGoesOutBeforeTheChangingRequestAnswers(t *testing.T) {
 	h := newSyncHarness(t)
 	pusher := h.server.pusher.(*loggingPusher)
 	h.mustUpload("a.md", 0, "a")
-	h.mustUpload("b.md", 0, "b")
-	deadline := time.Now().Add(2 * time.Second)
-	for len(pusher.records()) == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
 	records := pusher.records()
 	if len(records) != 1 || records[0].Token != "aa11" {
-		t.Fatalf("one push per burst to the phone's token: %v", records)
+		t.Fatalf("one push to the phone's token: %v", records)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(records[0].Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["aps"].(map[string]any)["content-available"].(float64) != 1 || payload["thock"].(map[string]any)["vault_id"] != h.vault {
+	thock := payload["thock"].(map[string]any)
+	if payload["aps"].(map[string]any)["content-available"].(float64) != 1 || thock["vault_id"] != h.vault || thock["latest_version"].(float64) != 1 {
 		t.Fatalf("push payload: %s", records[0].Payload)
 	}
-	// Past the window a new change pushes again.
+}
+
+func TestPushesInsideTheSpacingAreHeldForALaterDeskRequest(t *testing.T) {
+	h := newSyncHarness(t)
+	pusher := h.server.pusher.(*loggingPusher)
+	h.mustUpload("a.md", 0, "a")
 	h.clock = h.clock.Add(time.Minute)
+	h.mustUpload("b.md", 0, "b")
 	h.mustUpload("c.md", 0, "c")
-	deadline = time.Now().Add(2 * time.Second)
-	for len(pusher.records()) < 2 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	if records := pusher.records(); len(records) != 1 {
+		t.Fatalf("changes inside the spacing are held: %d pushes", len(records))
 	}
-	if len(pusher.records()) != 2 {
-		t.Fatalf("a change in a new window should push: %d", len(pusher.records()))
+	if !h.server.coalescer.isHeld(h.vault) {
+		t.Fatal("the later changes should leave a push held")
+	}
+
+	// A desk poll before the spacing has passed sends nothing.
+	h.clock = h.clock.Add(pushSpacing - 2*time.Minute)
+	if status, body := h.call("GET", "/v1/vault/writes", h.desk, nil); status != 200 {
+		t.Fatalf("desk poll: %d %v", status, body)
+	}
+	if records := pusher.records(); len(records) != 1 {
+		t.Fatalf("a poll inside the spacing pushed: %d pushes", len(records))
+	}
+
+	// One after it sends the held push, with the latest state.
+	h.clock = h.clock.Add(2 * time.Minute)
+	if status, body := h.call("GET", "/v1/vault/writes", h.desk, nil); status != 200 {
+		t.Fatalf("desk poll: %d %v", status, body)
+	}
+	records := pusher.records()
+	if len(records) != 2 {
+		t.Fatalf("a poll past the spacing should send the held push: %d pushes", len(records))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(records[1].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["thock"].(map[string]any)["latest_version"].(float64) != 3 {
+		t.Fatalf("the held push carries the latest version: %s", records[1].Payload)
+	}
+	if h.server.coalescer.isHeld(h.vault) {
+		t.Fatal("a sent push is no longer held")
+	}
+
+	// Nothing held, nothing sent.
+	h.clock = h.clock.Add(pushSpacing)
+	h.call("GET", "/v1/vault/writes", h.desk, nil)
+	if records := pusher.records(); len(records) != 2 {
+		t.Fatalf("a poll with nothing held pushed: %d pushes", len(records))
+	}
+}
+
+func TestAPhoneRequestClearsAHeldPush(t *testing.T) {
+	h := newSyncHarness(t)
+	pusher := h.server.pusher.(*loggingPusher)
+	h.mustUpload("a.md", 0, "a")
+	h.mustUpload("b.md", 0, "b")
+	if !h.server.coalescer.isHeld(h.vault) {
+		t.Fatal("the second change should be held")
+	}
+	h.files(h.phone, "")
+	if h.server.coalescer.isHeld(h.vault) {
+		t.Fatal("the phone syncing should clear the held push")
+	}
+	h.clock = h.clock.Add(pushSpacing)
+	h.call("GET", "/v1/vault/writes", h.desk, nil)
+	if records := pusher.records(); len(records) != 1 {
+		t.Fatalf("a cleared push was sent: %d pushes", len(records))
+	}
+}
+
+// A stream a killed app left behind looks like a listening phone until the
+// server cuts it, so a push skipped for it must not be lost.
+func TestAPushSkippedForAListeningPhoneGoesOutOnceTheFeedCloses(t *testing.T) {
+	h := newSyncHarness(t)
+	pusher := h.server.pusher.(*loggingPusher)
+	phoneEvents, closePhone := h.feed(h.phone)
+	h.mustUpload("a.md", 0, "a")
+	expectEvent(t, phoneEvents, `file:`)
+	if records := pusher.records(); len(records) != 0 {
+		t.Fatalf("no push while the phone holds the feed: %v", records)
+	}
+	if !h.server.coalescer.isHeld(h.vault) {
+		t.Fatal("a push skipped for a listening phone stays held")
+	}
+	h.call("GET", "/v1/vault/writes", h.desk, nil)
+	if records := pusher.records(); len(records) != 0 {
+		t.Fatalf("still no push while the feed is open: %v", records)
+	}
+
+	closePhone()
+	waitFor(t, func() bool { return !h.server.feed.phoneListening(h.vault) })
+	h.call("GET", "/v1/vault/writes", h.desk, nil)
+	if records := pusher.records(); len(records) != 1 {
+		t.Fatalf("the held push goes out once the feed closes: %d pushes", len(records))
 	}
 }
 

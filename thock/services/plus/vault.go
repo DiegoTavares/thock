@@ -160,7 +160,14 @@ func (s *server) withVault(access routeAccess, next func(http.ResponseWriter, *h
 				logf("warning: recording a device's last call: %v", err)
 			}
 		}
+		if p.vault != nil && p.role == rolePhone {
+			s.coalescer.clear(p.vault.ID)
+		}
 		next(w, r, p)
+		// Before the response completes, while Cloud Run still allocates CPU.
+		if p.vault != nil && p.role == roleDesk {
+			s.coalescer.flush(p.vault.ID)
+		}
 	}
 }
 
@@ -1121,28 +1128,35 @@ func (s *server) handleFeed(w http.ResponseWriter, r *http.Request, p principal)
 	})
 }
 
-// sendPush is what the coalescer calls once per burst: one silent push with
-// the counters the phone needs to decide what to pull.
-func (s *server) sendPush(vaultID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+// sendPush is what the coalescer calls when a push is due: one silent push
+// with the counters the phone needs to decide what to pull. It reports true
+// when a phone holds the feed, so the push stays held until the feed closes.
+// It runs inside the request that made it due, bounded so a slow APNs can't
+// hold that request for long.
+func (s *server) sendPush(vaultID string) bool {
 	if s.feed.phoneListening(vaultID) {
-		return
+		return true
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	v, err := s.store.vaultByID(ctx, vaultID)
 	if err != nil {
-		return
+		if !errors.Is(err, errNotFound) {
+			logf("warning: reading vault %s for a push: %v", vaultID, err)
+		}
+		return false
 	}
 	phone, err := s.store.phoneDevice(ctx, vaultID)
 	if err != nil || phone.APNSToken == "" {
-		return
+		return false
 	}
 	payload, err := json.Marshal(map[string]any{
 		"aps":   map[string]any{"content-available": 1},
 		"thock": map[string]any{"vault_id": v.ID, "latest_version": v.LatestVersion, "acked_through_seq": v.AckedThroughSeq},
 	})
 	if err != nil {
-		return
+		logf("error: encoding a push: %v", err)
+		return false
 	}
 	err = s.pusher.push(ctx, phone.APNSToken, payload)
 	switch {
@@ -1153,7 +1167,10 @@ func (s *server) sendPush(vaultID string) {
 		}
 	case err != nil:
 		logf("warning: pushing to the phone of vault %s: %v", vaultID, err)
+	default:
+		logf("pushed to the phone of vault %s at version %d", vaultID, v.LatestVersion)
 	}
+	return false
 }
 
 // --- §6.6 entitlement ---

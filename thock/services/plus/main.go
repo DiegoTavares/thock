@@ -185,7 +185,7 @@ func newServer(store *store, gw gateway, adminToken string) *server {
 		feedbackLimiter: newFeedbackLimiter(feedbackPerHour),
 	}
 	s.coalescer = newPushCoalescer(s.sendPush, func() time.Time { return s.now() })
-	s.feed.onPhoneAbsent = s.coalescer.nudge
+	s.feed.onDeskChange = s.coalescer.nudge
 	return s
 }
 

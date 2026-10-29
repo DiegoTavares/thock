@@ -51,7 +51,6 @@ func newHarness(t *testing.T) *harness {
 	h.http = httptest.NewServer(s.routes())
 	s.publicURL = h.http.URL
 	t.Cleanup(h.http.Close)
-	t.Cleanup(s.coalescer.stop)
 	return h
 }
 

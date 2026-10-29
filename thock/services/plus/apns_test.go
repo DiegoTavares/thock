@@ -335,7 +335,7 @@ func TestPushToARegisteredTokenAndForgetItWhenGone(t *testing.T) {
 	goneMu.Lock()
 	gone = true
 	goneMu.Unlock()
-	h.clock = h.clock.Add(time.Minute)
+	h.clock = h.clock.Add(pushSpacing)
 	h.mustUpload("b.md", 0, "b")
 	waitFor(t, func() bool { return h.phoneDevice().APNSToken == "" })
 	if len(fake.requests()) != 2 {
