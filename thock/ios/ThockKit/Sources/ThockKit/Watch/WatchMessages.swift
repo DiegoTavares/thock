@@ -167,18 +167,34 @@ public struct WatchCapture: Codable, Hashable, Sendable {
     public var reminderDue: ReminderDue? { due.flatMap(ReminderDue.init) }
 }
 
+/// Ticks or unticks a line. It names the state the line should end in, not
+/// a toggle, so a tick delivered twice never undoes itself.
 public struct WatchTick: Codable, Hashable, Sendable {
     public var v = WatchProtocol.version
     public var id: UUID
     public var day: String
     public var hash: String
     public var ordinal: Int
+    /// `false` for an untick.
+    public var done: Bool
 
-    public init(id: UUID = UUID(), day: String, hash: String, ordinal: Int) {
+    public init(id: UUID = UUID(), day: String, hash: String, ordinal: Int, done: Bool = true) {
         self.id = id
         self.day = day
         self.hash = hash
         self.ordinal = ordinal
+        self.done = done
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        v = try container.decode(Int.self, forKey: .v)
+        id = try container.decode(UUID.self, forKey: .id)
+        day = try container.decode(String.self, forKey: .day)
+        hash = try container.decode(String.self, forKey: .hash)
+        ordinal = try container.decode(Int.self, forKey: .ordinal)
+        // A tick from a watch app older than unticking, or kept in its outbox.
+        done = try container.decodeIfPresent(Bool.self, forKey: .done) ?? true
     }
 }
 

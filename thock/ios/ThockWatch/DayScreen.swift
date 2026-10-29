@@ -3,7 +3,7 @@ import ThockKit
 
 /// The day's planner lines, calendar events and reminders (V48 §9). The
 /// Digital Crown scrolls, the chevrons or a swipe move a day, and a tap on a
-/// box ticks the line.
+/// box ticks the line or unticks it.
 struct DayScreen: View {
     @Environment(WatchModel.self) private var model
 
@@ -188,14 +188,13 @@ struct DayRow: View {
                     .frame(width: 3, height: 14)
             } else {
                 Button {
-                    model.tick(row, on: day)
+                    model.toggle(row, on: day)
                 } label: {
                     Image(systemName: done ? "checkmark.square.fill" : "square")
                         .foregroundStyle(done ? WatchTheme.dim : WatchTheme.muted)
                 }
                 .buttonStyle(.plain)
-                .disabled(done)
-                .accessibilityLabel(done ? "Done" : "Tick \(row.label)")
+                .accessibilityLabel(done ? "Untick \(row.label)" : "Tick \(row.label)")
             }
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
