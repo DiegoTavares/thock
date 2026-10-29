@@ -131,7 +131,7 @@ struct TodayView: View {
                 if let next = moment.next {
                     NextLine(row: next, primary: true)
                 } else {
-                    Text("Nothing more today")
+                    Text("All done")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .frame(height: NextLine.primaryHeight)

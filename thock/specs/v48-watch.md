@@ -233,7 +233,7 @@ One widget extension, `ThockWatchWidgets`, with two widgets.
 - **Wrist down:** labels are `privacySensitive()`, as in the iPhone widget, so a locked watch shows
   blocks without words.
 - **Empty states:** *Open Thock on your iPhone* (never received a snapshot or `not_connected`),
-  *Nothing planned today* (no rows, and no track), and *Nothing more today*, muted, in row 1 above
+  *Nothing planned today* (no rows, and no track), and *All done*, muted, in row 1 above
   the track when no timed item is ahead.
 
 ### 7.2 Capture (`accessoryCircular`, `accessoryCorner`)
