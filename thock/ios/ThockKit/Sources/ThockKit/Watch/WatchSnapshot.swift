@@ -209,11 +209,14 @@ public struct WatchTimelineEntry: Hashable, Sendable {
 public enum TimelineEntries {
     public static let windowMinutes = 4 * 60
     public static let step = 15
+    public static let laterStep = 30
 
-    /// One entry now and one on every quarter hour after it to midnight, so
-    /// the window and the header move without a reload. Quarter hours are
-    /// on the wall clock: a time the clocks skip has no entry, and one they
-    /// repeat has its first.
+    /// One entry now, one on every quarter hour for the window's length
+    /// after it, then one every half hour to midnight, so the window and the
+    /// next lines move without a reload. WidgetKit keeps a rendering of
+    /// every entry, so the far hours, which only matter if the watch app is
+    /// not opened all day, get half as many. Times are on the wall clock: a
+    /// time the clocks skip has no entry, and one they repeat has its first.
     public static func entries(rows: [WatchRow], today: VaultDay, now: Date, calendar: Calendar = .current) -> [WatchTimelineEntry] {
         guard let midnight = calendar.date(from: DateComponents(year: today.year, month: today.month, day: today.day)) else { return [] }
         let left = rows.filter { !$0.done && $0.kind != .calendar }.count
@@ -227,6 +230,7 @@ public enum TimelineEntries {
             minute = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
         }
         var entries = [entry(max(now, midnight), minute)]
+        let dense = minute + windowMinutes
         minute = (minute / step + 1) * step
         while minute < 24 * 60, entries.count < 96 {
             if let date = calendar.date(bySettingHour: minute / 60, minute: minute % 60, second: 0, of: midnight, matchingPolicy: .strict, repeatedTimePolicy: .first, direction: .forward),
@@ -234,7 +238,7 @@ public enum TimelineEntries {
             {
                 entries.append(entry(date, minute))
             }
-            minute += step
+            minute = minute < dense ? minute + step : (minute / laterStep + 1) * laterStep
         }
         return entries
     }

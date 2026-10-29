@@ -143,15 +143,27 @@ final class WatchTests: XCTestCase {
         calendar.date(from: DateComponents(year: 2026, month: 10, day: 21, hour: hour, minute: minute)) ?? now
     }
 
-    func testEntriesEveryFifteenMinutesToMidnight() {
+    func testEntriesEveryFifteenMinutesForFourHoursThenEveryHalfHour() {
         let entries = TimelineEntries.entries(rows: [], today: today, now: now, calendar: calendar)
         XCTAssertEqual(entries.first?.date, now)
         XCTAssertEqual(entries.dropFirst().first?.date, at(14, 15))
-        XCTAssertEqual(entries.last?.date, at(23, 45))
-        XCTAssertEqual(entries.count, 40)
-        XCTAssertEqual(TimelineEntries.entries(rows: [], today: today, now: at(0, 0), calendar: calendar).count, 96)
-        let gaps = zip(entries.dropFirst(2), entries.dropFirst()).map { $0.date.timeIntervalSince($1.date) }
-        XCTAssertTrue(gaps.allSatisfy { $0 == 15 * 60 })
+        XCTAssertEqual(entries.last?.date, at(23, 30))
+        // Now, 14:15 to 18:15 by quarter hours, 18:30 to 23:30 by half hours.
+        XCTAssertEqual(entries.count, 1 + 17 + 11)
+        let quarters = entries.dropFirst().filter { $0.date <= at(18, 15) }
+        let gaps = { (entries: [WatchTimelineEntry]) in zip(entries.dropFirst(), entries).map { $0.date.timeIntervalSince($1.date) } }
+        XCTAssertEqual(quarters.count, 17)
+        XCTAssertTrue(gaps(quarters).allSatisfy { $0 == 15 * 60 })
+        let halves = entries.filter { $0.date >= at(18, 30) }
+        XCTAssertTrue(gaps(halves).allSatisfy { $0 == 30 * 60 })
+        XCTAssertEqual(TimelineEntries.entries(rows: [], today: today, now: at(0, 0), calendar: calendar).count, 1 + 16 + 39)
+    }
+
+    func testTheEntryCountAtTwelveToFive() {
+        // Now, 17:00 to 20:45 by quarter hours, 21:00 to 23:30 by half hours.
+        let entries = TimelineEntries.entries(rows: [], today: today, now: at(16, 48), calendar: calendar)
+        XCTAssertEqual(entries.count, 1 + 16 + 6)
+        XCTAssertEqual(entries.map(\.minute).suffix(7), [20 * 60 + 45, 21 * 60, 21 * 60 + 30, 22 * 60, 22 * 60 + 30, 23 * 60, 23 * 60 + 30])
     }
 
     func testTheWindowStartsOnTheHalfHourBeforeNow() {
@@ -522,7 +534,8 @@ final class WatchTests: XCTestCase {
         }
         let afternoon = try XCTUnwrap(entries.first { $0.minute == 14 * 60 })
         XCTAssertEqual(calendar.component(.hour, from: afternoon.date), 14)
-        XCTAssertEqual(entries.last?.minute, 23 * 60 + 45)
+        XCTAssertEqual(entries.last?.minute, 23 * 60 + 30)
+        XCTAssertEqual(entries.first { $0.minute > 5 * 60 + 20 }?.minute, 5 * 60 + 30, "half hours once the window has passed")
         XCTAssertTrue(zip(entries, entries.dropFirst()).allSatisfy { $0.date < $1.date })
     }
 
@@ -532,7 +545,7 @@ final class WatchTests: XCTestCase {
         let day = VaultDay(year: 2026, month: 11, day: 1)
         let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 1, hour: 0, minute: 0)))
         let entries = TimelineEntries.entries(rows: [], today: day, now: now, calendar: calendar)
-        XCTAssertEqual(entries.count, 96)
+        XCTAssertEqual(entries.count, 1 + 16 + 39, "the repeated hour has one set of entries")
         let afternoon = try XCTUnwrap(entries.first { $0.minute == 14 * 60 })
         XCTAssertEqual(calendar.component(.hour, from: afternoon.date), 14)
         XCTAssertEqual(afternoon.windowStart, 14 * 60)

@@ -241,9 +241,11 @@ so it never goes stale and spends no refreshes. Tap: `thock://capture?voice=1`.
 
 ### 7.3 The timeline provider
 
-- `entries(rows:today:now:)` is a pure function in ThockKit: one entry every 15 minutes from now
-  to midnight (at most 96), each with its four-hour window's start, its "next" row, the row after
-  it and the open count the inline face shows. The window moves without a reload.
+- `entries(rows:today:now:)` is a pure function in ThockKit: one entry now, one every 15 minutes
+  for the next four hours, then one every 30 minutes to midnight (23 entries at 16:48; WidgetKit
+  keeps a rendering of each, so the far hours get fewer), each with its four-hour window's start,
+  its "next" row, the row after it and the open count the inline face shows. The window moves
+  without a reload.
 - The policy is `.after(midnight)`. The snapshot already holds tomorrow, so the new day draws
   without the phone.
 - The widget reloads when the watch app writes a new snapshot (`reloadTimelines(ofKind:)`) and
@@ -379,7 +381,8 @@ No inherited crate, desk or service change.
     label; a carried reminder has `carried_from`; a day with no note has `exists: false` and its
     reminders from the index; a note with no planner heading has no rows and no error; a
     read-only session yields `read_only`.
-  - Timeline entries: entries every 15 minutes to midnight; the window is four hours and starts
+  - Timeline entries: every 15 minutes for four hours, then every 30 to midnight, on the wall
+    clock on the days the clocks change; the window is four hours and starts
     on the half hour before now; "next" and the row after it skip done rows and calendar rows
     already started; one item left has no second row; an empty day; now after the last item.
   - **A watch capture is a phone capture:** for each destination, and for a reminder with and
