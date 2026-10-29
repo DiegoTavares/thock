@@ -325,6 +325,16 @@ final class AppModel {
         }
         guard let session else { return }
         let snapshot = session.watchSnapshot(chip: chip(for: Self.watchEntry))
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-thock-watch-script") {
+            // What the smoke script reads: a simulator has no watch to send to.
+            do {
+                try WatchMessage.snapshot(snapshot).encoded().write(to: URL(fileURLWithPath: NSTemporaryDirectory() + "watch-snapshot.json"), options: .atomic)
+            } catch {
+                NSLog("Thock could not dump the watch snapshot: \(error)")
+            }
+        }
+        #endif
         guard await PhoneWatchLink.shared.waitForActivation(seconds: 2) else {
             NSLog("Thock gave up waiting for the watch session; the watch gets its snapshot on the next change")
             return
@@ -530,6 +540,12 @@ final class AppModel {
     /// `receive` once the notebook is open. The launch arguments run inside
     /// the opening, so the smoke script calls this directly.
     private func answer(watch request: WatchMessage) async -> WatchMessage? {
+        if case .refresh(let refresh) = request {
+            // The fresh snapshot travels by application context, as every
+            // one does; the answer only ends the watch's wait (V50 §6.3).
+            await syncInBackground()
+            return .ack(WatchAck(id: refresh.id, outcome: .saved))
+        }
         guard phase == .ready, let session else {
             return request.requestID.map { .ack(WatchAck(id: $0, outcome: .refused, message: VaultSession.notReadyMessage)) }
         }
@@ -1237,6 +1253,11 @@ final class AppModel {
             case "tick" where parts.count >= 2:
                 guard let row = session?.watchSnapshot().day(today)?.rows.first(where: { $0.label.hasPrefix(parts[1]) }) else { continue }
                 request = .tick(WatchTick(day: today.iso, hash: row.hash, ordinal: row.ordinal))
+            case "refresh" where parts.count >= 2:
+                // `refresh:<line>`: the desk adds a task to today, then the
+                // watch opens and asks for a fresh reading (V50 §6.3).
+                await planAtTheDesk(line: "- [ ] " + parts[1], sync: false)
+                request = .refresh(WatchRefresh(at: Date()))
             default:
                 continue
             }
@@ -1630,7 +1651,9 @@ final class AppModel {
         }
     }
 
-    func planAtTheDesk() async {
+    /// `sync` false leaves the change for the next round to find, as a
+    /// desk edit made while the phone is away would be.
+    func planAtTheDesk(line: String = "- [ ] 16:00 - 16:30 Review the week's goals", sync: Bool = true) async {
         guard let world, let store else { return }
         let path = store.config.dailyPath(.today())
         do {
@@ -1638,10 +1661,11 @@ final class AppModel {
                 guard let note = disk[path] else { return }
                 var write = WriteDocument(clientID: UUID().uuidString.lowercased(), kind: .append, path: path, madeAt: "", deviceID: "desk")
                 write.heading = HeadingRef(text: "Day planner")
-                write.lines = ["- [ ] 16:00 - 16:30 Review the week's goals"]
+                write.lines = [line]
                 write.placement = .beforeChildren
                 disk[path] = SyncCore.apply(existing: note, write: write).text
             }
+            guard sync else { return }
             await engine?.sync()
             show("The desk added a line to today")
         } catch {

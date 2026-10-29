@@ -378,6 +378,7 @@ final class WatchTests: XCTestCase {
             .capture(WatchCapture(id: id, at: at, text: "Buy stamps", destination: .today)),
             .tick(WatchTick(id: id, day: today.iso, hash: "abc", ordinal: 1)),
             .dayAsk(WatchDayAsk(id: id, day: today.iso)),
+            .refresh(WatchRefresh(id: id, at: at)),
             .ack(WatchAck(id: id, outcome: .saved)),
             .ack(WatchAck(id: id, outcome: .refused, message: "That line changed. Look again.")),
             .dayReply(WatchDayReply(id: id, day: try XCTUnwrap(session.watchSnapshot(now: now).day(today)))),
@@ -407,6 +408,27 @@ final class WatchTests: XCTestCase {
             XCTAssertEqual(error as? WatchLinkError, .unknownVersion(nil))
         }
         XCTAssertThrowsError(try WatchMessage(dictionary: ["v": 1, "type": "fax"]))
+    }
+
+    func testARefreshIsNotARequestTheVaultRecords() throws {
+        let session = try vault(["daily/2026-10-21.md": todayNote])
+        let refresh = WatchRefresh(at: now)
+        let handled = session.handle(.refresh(refresh), now: now)
+        XCTAssertNil(handled.reply)
+        XCTAssertFalse(handled.wrote)
+        XCTAssertNil(try session.store.watchRequest(id: refresh.id))
+        XCTAssertTrue(session.store.pending().isEmpty)
+    }
+
+    /// A phone from before V50 reads `refresh` as a type it does not know,
+    /// which it refuses like any other, so the watch's ask is dropped.
+    func testAReaderWithoutRefreshRejectsItAsAnUnknownType() throws {
+        var dictionary = try WatchMessage.refresh(WatchRefresh(at: now)).dictionary()
+        XCTAssertEqual(dictionary["type"] as? String, "refresh")
+        dictionary["type"] = "refresh_v2"
+        XCTAssertThrowsError(try WatchMessage(dictionary: dictionary)) { error in
+            XCTAssertEqual(error as? WatchLinkError, .malformed)
+        }
     }
 
     // MARK: The watch's outbox

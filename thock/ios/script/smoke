@@ -17,7 +17,9 @@
 #      way out and open again, on that entry, when the app comes back;
 #   6. the watch's requests (captures to today, the inbox and a reminder, and
 #      a tick), fed through the link's decoder and each sent twice, land once
-#      on the phone and at the practice desk.
+#      on the phone and at the practice desk;
+#   7. a watch refresh after a desk change sends the watch a snapshot that
+#      holds the change before the background tail ends.
 #
 # Exits non-zero on the first failure.
 #
@@ -143,6 +145,12 @@ watch_requests_saved() {
     [[ -f "$database" ]] && [[ "$(sqlite3 -readonly "$database" "SELECT count(*) FROM watch_requests WHERE outcome = 'saved'")" == "$1" ]]
 }
 
+# The snapshot the background tail last flushed to the watch: a simulator has
+# no watch, so a DEBUG build writes it out when a watch script runs.
+watch_snapshot_has() {
+    grep -qF -- "$1" "$(xcrun simctl get_app_container "$udid" "$bundle" data)/tmp/watch-snapshot.json"
+}
+
 resume_kept() {
     grep -q '"journal"' "$(shared_container)/resume.json"
 }
@@ -256,6 +264,11 @@ wait_for "the watch's today capture at the practice desk" desk_has "$token wrist
 wait_for "the watch's inbox capture at the practice desk" desk_has "# $token wrist idea"
 wait_for "the watch's reminder at the practice desk" desk_has "$token wrist reminder (@$tomorrow "
 wait_for "the watch's tick at the practice desk" desk_has "- [x] Buy a birthday card for Dad"
+
+step "watch: a refresh after a desk change"
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+xcrun simctl launch "$udid" "$bundle" -thock-watch-script "refresh:$token from the desk" >/dev/null
+wait_for "the desk's line in the snapshot the refresh flushed" watch_snapshot_has "$token from the desk"
 
 step "pictures: a capture with a photo"
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
