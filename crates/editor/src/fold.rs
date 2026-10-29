@@ -834,8 +834,15 @@ impl Editor {
         let Some(buffer_snapshot) = display_snapshot.buffer_snapshot().as_singleton() else {
             return;
         };
-        let inmemory_folds = display_snapshot
-            .folds_in_range(MultiBufferOffset(0)..display_snapshot.buffer_snapshot().len())
+        // A fold with a type tag was placed by code that owns it and puts it
+        // back itself; restoring it would bring it back untagged, as a fold
+        // the user made.
+        let user_folds = || {
+            display_snapshot
+                .folds_in_range(MultiBufferOffset(0)..display_snapshot.buffer_snapshot().len())
+                .filter(|fold| fold.placeholder.type_tag.is_none())
+        };
+        let inmemory_folds = user_folds()
             .map(|fold| {
                 let start = fold.range.start.text_anchor_in(buffer_snapshot);
                 let end = fold.range.end.text_anchor_in(buffer_snapshot);
@@ -860,8 +867,7 @@ impl Editor {
 
         let background_executor = cx.background_executor().clone();
         const FINGERPRINT_LEN: usize = 32;
-        let db_folds = display_snapshot
-            .folds_in_range(MultiBufferOffset(0)..display_snapshot.buffer_snapshot().len())
+        let db_folds = user_folds()
             .map(|fold| {
                 let start = fold
                     .range
