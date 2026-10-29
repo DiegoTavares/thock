@@ -163,7 +163,8 @@ final class WatchTests: XCTestCase {
         // Now, 17:00 to 20:45 by quarter hours, 21:00 to 23:30 by half hours.
         let entries = TimelineEntries.entries(rows: [], today: today, now: at(16, 48), calendar: calendar)
         XCTAssertEqual(entries.count, 1 + 16 + 6)
-        XCTAssertEqual(entries.map(\.minute).suffix(7), [20 * 60 + 45, 21 * 60, 21 * 60 + 30, 22 * 60, 22 * 60 + 30, 23 * 60, 23 * 60 + 30])
+        let lastMinutes: [Int] = [1245, 1260, 1290, 1320, 1350, 1380, 1410]
+        XCTAssertEqual(Array(entries.map(\.minute).suffix(7)), lastMinutes)
     }
 
     func testTheWindowStartsOnTheHalfHourBeforeNow() {
