@@ -160,11 +160,12 @@ The payload, headers and token forgetting are `beb681031c`'s, unchanged.
   4. Stop the feed if the app is in the background.
   5. `await refreshAlerts()`.
   6. `flushWatchSnapshot()`: cancel the debounce, wait for `WCSession` activation for up to 2 s,
-     send now. Reload the widgets the same way.
+     send now, restamped even if nothing the watch draws changed. Reload the widgets the same way.
   7. End the background task.
 
   The silent push handler, watch writes, watch refreshes (§6.3) and notification answers all go
-  through it. The push answers `.newData` when step 3 pulled anything and `.noData` otherwise.
+  through it. The push answers `.newData` when step 3 pulled anything and `.noData` otherwise, or
+  `.failed` if the tail is still running at 25 s, inside iOS's thirty.
 - `aps-environment` stays on the app target only. Archives for TestFlight get `production` from
   automatic signing.
 
@@ -277,3 +278,11 @@ The payload, headers and token forgetting are `beb681031c`'s, unchanged.
    ignores an empty answer to a refresh (§6.3).
 5. **`syncInBackground` opens the notebook only while it is still loading.** The launch arguments
    run inside the opening, so awaiting it from a smoke step would wait on itself.
+6. **The background tail restamps the watch's snapshot even when nothing changed.** The phone's
+   link skips a snapshot that draws the same as the last one, so a refresh that found nothing new
+   left the watch on its old instant: it still read as stale, said when it was read, and asked again
+   a minute later. A snapshot sent after a sync goes out regardless.
+7. **The silent push answers iOS within 25 seconds.** iOS gives a push thirty seconds and may stop
+   waking an app that runs over, and a round on a slow network can take longer, so the handler
+   answers `.failed` at 25 seconds if the round is still going. The round keeps running under its
+   background task.

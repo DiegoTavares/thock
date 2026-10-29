@@ -48,13 +48,16 @@ final class PhoneWatchLink: NSObject {
         return true
     }
 
-    func send(_ snapshot: WatchSnapshot) {
+    /// `restamp` sends an unchanged reading anyway, so the watch learns it
+    /// is current: after a sync, its instant is what the watch counts its
+    /// age from.
+    func send(_ snapshot: WatchSnapshot, restamp: Bool = false) {
         guard canSend, let session else { return }
         do {
             var unstamped = snapshot
             unstamped.madeAt = .distantPast
             let comparable = try WatchMessage.snapshot(unstamped).encoded()
-            guard comparable != lastSent else { return }
+            guard restamp || comparable != lastSent else { return }
             let dictionary = try WatchMessage.snapshot(snapshot).dictionary()
             try session.updateApplicationContext(dictionary)
             lastSent = comparable

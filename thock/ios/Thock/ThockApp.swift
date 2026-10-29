@@ -90,8 +90,32 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any], fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
         // The server's silent push is a nudge to pull (V34 API §6.5).
         Task { @MainActor in
-            completionHandler(await AppDelegate.model.syncInBackground() ? .newData : .noData)
+            let answer = PushAnswer(completionHandler)
+            // iOS gives a silent push thirty seconds and may stop waking an
+            // app that runs over; a round on a slow network can take longer.
+            let deadline = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 25_000_000_000)
+                guard !Task.isCancelled else { return }
+                answer.finish(.failed)
+            }
+            answer.finish(await AppDelegate.model.syncInBackground() ? .newData : .noData)
+            deadline.cancel()
         }
+    }
+}
+
+/// A push's completion handler, called once: by the round or by the deadline.
+@MainActor
+private final class PushAnswer {
+    private var completion: ((UIBackgroundFetchResult) -> Void)?
+
+    init(_ completion: @escaping (UIBackgroundFetchResult) -> Void) {
+        self.completion = completion
+    }
+
+    func finish(_ result: UIBackgroundFetchResult) {
+        completion?(result)
+        completion = nil
     }
 }
 

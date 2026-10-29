@@ -339,7 +339,9 @@ final class AppModel {
             NSLog("Thock gave up waiting for the watch session; the watch gets its snapshot on the next change")
             return
         }
-        PhoneWatchLink.shared.send(snapshot)
+        // Restamped even when nothing changed, or a watch that asked for a
+        // refresh keeps a reading it thinks is stale and asks again.
+        PhoneWatchLink.shared.send(snapshot, restamp: true)
     }
 
     private func refreshSyncState() async {
