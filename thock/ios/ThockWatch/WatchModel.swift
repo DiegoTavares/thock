@@ -210,17 +210,18 @@ final class WatchModel {
     }
 
     func isDone(_ row: WatchRow, on day: VaultDay) -> Bool {
-        row.done || outbox.isTicked(day: day.iso, hash: row.hash, ordinal: row.ordinal)
+        outbox.tickedState(day: day.iso, hash: row.hash, ordinal: row.ordinal) ?? row.done
     }
 
-    func tick(_ row: WatchRow, on day: VaultDay) {
-        guard row.kind != .calendar, !isDone(row, on: day) else { return }
+    /// Ticks an open row and unticks a done one.
+    func toggle(_ row: WatchRow, on day: VaultDay) {
+        guard row.kind != .calendar else { return }
         if let blocked = writeBlocked {
             notice = blocked
             return
         }
         WKInterfaceDevice.current().play(.click)
-        enqueue(.tick(WatchTick(day: day.iso, hash: row.hash, ordinal: row.ordinal)))
+        enqueue(.tick(WatchTick(day: day.iso, hash: row.hash, ordinal: row.ordinal, done: !isDone(row, on: day))))
     }
 
     /// Older than ten minutes: the day screen says when it was read.

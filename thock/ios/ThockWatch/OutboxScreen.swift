@@ -52,7 +52,7 @@ struct OutboxScreen: View {
             return capture.text
         case .tick(let tick):
             let row = VaultDay(iso: tick.day).flatMap(model.reading)?.rows.first { $0.hash == tick.hash && $0.ordinal == tick.ordinal }
-            return "Tick: " + (row?.label ?? tick.day)
+            return (tick.done ? "Tick: " : "Untick: ") + (row?.label ?? tick.day)
         }
     }
 }

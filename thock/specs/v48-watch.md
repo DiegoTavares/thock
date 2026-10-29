@@ -46,9 +46,9 @@ V48 adds an Apple Watch app that ships inside the iPhone app:
   *14:00 Dentist* from the moment the previous item ends, with no phone contact that day.
 - A desk edit to today's planner shows on the timeline within a minute of the phone syncing it,
   while the phone is awake.
-- Ticking a planner line on the watch changes exactly one line of the vault, the same line a tick
-  from the iPhone widget changes. A tick on a line the desk has since changed is refused, and the
-  watch says so.
+- Ticking or unticking a planner line on the watch changes exactly one line of the vault, the same
+  line a tick from the iPhone widget changes. A tick on a line the desk has since changed is
+  refused, and the watch says so.
 - A reminder rings once on the wrist (the phone's alert, mirrored), and its *Done*, *In 1 hour* and
   *Tomorrow 09:00* answers work from the watch.
 - Every failure the watch can see is said in words on the watch: not paired, Thock Plus ended,
@@ -80,7 +80,7 @@ Checked against Apple's API availability on 2026-10-28.
 | Opening the app with the mic on | Yes. A complication opens its `widgetURL`, and the app can present dictation on appear. | `thock://capture?voice=1` (§8.1). |
 | Large complication | Yes. `accessoryRectangular` (watchOS 9+), also used by the Smart Stack. | The timeline (§7.1). It must read in the tinted and monochrome face modes. |
 | Small complications | Yes. `accessoryCircular`, `accessoryCorner`, `accessoryInline`. | Capture (circular, corner) and a one-line summary (inline). |
-| A moving "now" | Timeline reloads are rationed (about 50 a day). Entries written ahead are free. | One entry every 15 minutes to midnight (§7.3). |
+| A moving "now" | Timeline reloads are rationed (about 50 a day). Entries written ahead are free. | One entry every 15 minutes for four hours, then a reload (§7.3). |
 | Fresh data from the phone | `transferCurrentComplicationUserInfo` wakes the watch, about 50 a day. `updateApplicationContext` is unlimited and latest-wins. | Context for every change, the complication transfer only when today's rows change (§6.2). |
 | Controls, Action button | `ControlWidget` on watchOS 26. | An optional Capture control, behind `#available(watchOS 26, *)`. |
 | Mirrored notifications | Yes, while the phone is locked, with their actions. | No watch schedule (§10). |
@@ -102,7 +102,7 @@ desk ⇄ Thock Plus ⇄ iPhone (ThockKit store, SyncEngine, ReminderNotifier, Wa
   never sees Markdown, the vault config, templates or the reminder index.
 - **The phone writes.** A watch request is decoded on the phone and run through the call a phone
   screen makes: `VaultSession.capture` for a capture (the same `PhoneWrites.capture`), and
-  `VaultSession.tick(hash:ordinal:day:)` for a tick, the call `TickLineIntent` makes. The append
+  `VaultSession.tick(hash:ordinal:day:done:)` for a tick or an untick, the call `TickLineIntent` makes. The append
   contract, heading resolution, digests, reminder ids and the immediate alert are the phone's by
   construction, not a second implementation.
 - **The watch keeps two files** in its own app group container, shared by the watch app and its
@@ -147,7 +147,7 @@ WatchRow {
 // watch → phone
 WatchCapture { v, id: UUID, at, text, destination: "today"|"inbox"|"backlog"|"reminder",
                due: "2026-10-29 09:00" | "2026-10-29" | null }   // ReminderDue.description
-WatchTick    { v, id: UUID, day, hash, ordinal }
+WatchTick    { v, id: UUID, day, hash, ordinal, done }              // done: false unticks; absent = true
 WatchDayAsk  { v, id: UUID, day }                                   // outside the snapshot's range
 
 // phone → watch
@@ -243,13 +243,15 @@ so it never goes stale and spends no refreshes. Tap: `thock://capture?voice=1`.
 
 ### 7.3 The timeline provider
 
-- `entries(rows:today:now:)` is a pure function in ThockKit: one entry now, one every 15 minutes
-  for the next four hours, then one every 30 minutes to midnight (23 entries at 16:48; WidgetKit
-  keeps a rendering of each, so the far hours get fewer), each with its four-hour window's start,
-  its "next" row, the row after it and the open count the inline face shows. The window moves
-  without a reload.
-- The policy is `.after(midnight)`. The snapshot already holds tomorrow, so the new day draws
-  without the phone.
+- `entries(rows:today:now:)` is a pure function in ThockKit: one entry now and one every 15
+  minutes for the next four hours, never past midnight (17 entries), each with its four-hour
+  window's start, its "next" row, the row after it and the open count the inline face shows. The
+  window moves without a reload. WidgetKit renders every entry when a timeline arrives, so the
+  timeline stays short: a whole day of entries, built at midnight, is the suspected cause of the
+  complication showing its redacted placeholder on build 22.
+- The policy is `.after(reloadDate)`: the last entry, or the next midnight when there is no entry
+  after the first. About six reloads a day, well inside the ration. The snapshot already holds
+  tomorrow, so the new day draws without the phone.
 - The widget reloads when the watch app writes a new snapshot (`reloadTimelines(ofKind:)`) and
   when a complication transfer arrives.
 - A snapshot older than its `today` (the phone has been away over midnight) still draws: the
@@ -326,10 +328,11 @@ the user said is never lost and is written nowhere until saved.
 - **Rows:** timed rows in order (the time in mono, then the label), calendar rows with the calendar
   edge, reminders with a bell and *from Tue* when carried. Then *Anytime* with the untimed rows.
   Done rows are struck through. A planner with notes ends with *+2 notes* in muted text.
-- **Ticking:** a tap on a task's or reminder's box sends a `WatchTick` and draws the row done at
-  once. A `refused` ack puts it back with the phone's message. Untick is not offered, as on the
-  iPhone widget. A tick on a reminder's home line closes the reminder, which is what a tick does on
-  the phone.
+- **Ticking:** a tap on a task's or reminder's box sends a `WatchTick` with the state it should end
+  in and draws the row that way at once; a tap on a done row unticks it. A `refused` ack puts it
+  back with the phone's message. The tick names a state, not a toggle, so a request delivered
+  twice never undoes itself. A tick on a reminder's home line closes the reminder and an untick
+  reopens a closed one, as on the phone.
 - **Range:** the snapshot covers seven days back and seven ahead. Past that, the watch sends a
   `WatchDayAsk` when the phone is reachable and shows *Open Thock on your iPhone to see this day*
   when it is not.
@@ -384,8 +387,8 @@ No inherited crate, desk or service change.
     label; a carried reminder has `carried_from`; a day with no note has `exists: false` and its
     reminders from the index; a note with no planner heading has no rows and no error; a
     read-only session yields `read_only`.
-  - Timeline entries: every 15 minutes for four hours, then every 30 to midnight, on the wall
-    clock on the days the clocks change; the window is four hours and starts
+  - Timeline entries: every 15 minutes for four hours, on the wall clock on the days the clocks
+    change; the next reload at the last entry, or at midnight; the window is four hours and starts
     on the half hour before now; "next" and the row after it skip done rows and calendar rows
     already started; one item left has no second row; an empty day; now after the last item.
   - **A watch capture is a phone capture:** for each destination, and for a reminder with and

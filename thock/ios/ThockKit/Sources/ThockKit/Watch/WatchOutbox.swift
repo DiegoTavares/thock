@@ -163,13 +163,17 @@ public struct WatchOutbox: Codable, Equatable, Sendable {
         }
     }
 
-    /// Whether a tick sent from here, not refused, still stands for a row
-    /// the snapshot may not show done yet.
-    public func isTicked(day: String, hash: String, ordinal: Int) -> Bool {
-        items.contains { item in
+    /// The state the last tick or untick sent from here, not refused, gives
+    /// a row the snapshot may not show yet; `nil` when none stands.
+    public func tickedState(day: String, hash: String, ordinal: Int) -> Bool? {
+        items.last { item in
             guard case .tick(let tick) = item.request, tick.day == day, tick.hash == hash, tick.ordinal == ordinal else { return false }
             if case .refused = item.state { return false }
             return true
+        }
+        .flatMap { item in
+            guard case .tick(let tick) = item.request else { return nil }
+            return tick.done
         }
     }
 }
