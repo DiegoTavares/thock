@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Builds the app for an iOS simulator, installs it fresh, launches it into the
-# practice notebook and checks that scripted flows land where they should:
+# Builds the app for an iOS simulator (the watch app inside it), and the watch
+# scheme on its own for a generic watchOS simulator, installs the app fresh,
+# launches it into the practice notebook and checks that scripted flows land
+# where they should:
 #
 #   1. captures to today (a task and plain text), an inbox capture and a
 #      journal entry reach the phone's store and, through the in-process
@@ -12,7 +14,10 @@
 #      the reminder;
 #   4. text typed into the capture editor is saved as the expected Markdown;
 #   5. a journal entry typed, then left for another app, is written on the
-#      way out and open again, on that entry, when the app comes back.
+#      way out and open again, on that entry, when the app comes back;
+#   6. the watch's requests (captures to today, the inbox and a reminder, and
+#      a tick), fed through the link's decoder and each sent twice, land once
+#      on the phone and at the practice desk.
 #
 # Exits non-zero on the first failure.
 #
@@ -125,6 +130,19 @@ dump_exists() {
     [[ -s "$(xcrun simctl get_app_container "$udid" "$bundle" data)/tmp/editor-dump.md" ]]
 }
 
+# How many lines of a phone file hold the text.
+count_in() {
+    local database
+    database="$(shared_container)/vault.sqlite"
+    sqlite3 -readonly "$database" "SELECT content FROM files WHERE path = '$1'" | grep -cF -- "$2" || true
+}
+
+watch_requests_saved() {
+    local database
+    database="$(shared_container)/vault.sqlite"
+    [[ -f "$database" ]] && [[ "$(sqlite3 -readonly "$database" "SELECT count(*) FROM watch_requests WHERE outcome = 'saved'")" == "$1" ]]
+}
+
 resume_kept() {
     grep -q '"journal"' "$(shared_container)/resume.json"
 }
@@ -147,6 +165,18 @@ if [[ -z "${THOCK_SMOKE_SKIP_BUILD:-}" ]]; then
 fi
 app="$derived/Build/Products/Debug-iphonesimulator/Thock.app"
 [[ -d "$app" ]] || fail "no app at $app"
+[[ -d "$app/Watch/ThockWatch.app/PlugIns/ThockWatchWidgets.appex" ]] || fail "the watch app and its complications are not inside the app"
+
+if [[ -z "${THOCK_SMOKE_SKIP_BUILD:-}" ]]; then
+    # Unsigned and in its own folder, so the signed copy inside the app is
+    # left as it was built.
+    step "building the watch scheme (log: $derived/watch/build.log)"
+    mkdir -p "$derived/watch"
+    xcodebuild -project "$ios/Thock.xcodeproj" -scheme ThockWatch -configuration Debug \
+        -destination "generic/platform=watchOS Simulator" -derivedDataPath "$derived/watch" \
+        CODE_SIGNING_ALLOWED=NO build >"$derived/watch/build.log" 2>&1 ||
+        { tail -40 "$derived/watch/build.log" >&2; fail "watch build failed"; }
+fi
 
 step "installing fresh"
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
@@ -208,6 +238,24 @@ wait_for "the token and id on the backlog task" file_has backlog.md "- [ ] Renew
 wait_for "the backlog task's link in the index" file_has reminders.md "- [[backlog]] <!--rem:"
 wait_for "the ticked reminder at the practice desk" desk_has "- [x] $token reminder (@$tomorrow 10:00) <!--rem:"
 wait_for "the backlog reminder at the practice desk" desk_has "- [ ] Renew the passport (@$tomorrow 09:00) <!--rem:"
+
+step "watch: captures and a tick through the link, each sent twice"
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+xcrun simctl launch "$udid" "$bundle" \
+    -thock-watch-script "capture:today:$token wrist;capture:inbox:$token wrist idea;capture:reminder:$token wrist reminder;tick:Buy a birthday card" >/dev/null
+wait_for "the four requests answered saved" watch_requests_saved 4
+wait_for "the watch's today capture on the phone" file_has "daily/$today.md" "$token wrist"
+wait_for "the watch's inbox capture on the phone" store_has "# $token wrist idea"
+wait_for "the watch's reminder on the phone" section_has reminders.md "## Open" "$token wrist reminder (@$tomorrow "
+wait_for "the watch's tick on the phone" file_has "daily/$today.md" "- [x] Buy a birthday card for Dad"
+[[ "$(count_in "daily/$today.md" "$token wrist")" == 1 ]] || fail "a resent watch capture was written twice"
+[[ "$(count_in reminders.md "$token wrist reminder")" == 1 ]] || fail "a resent watch reminder was written twice"
+[[ "$(sqlite3 -readonly "$(shared_container)/vault.sqlite" "SELECT count(*) FROM captures WHERE title LIKE '$token wrist%'")" == 3 ]] ||
+    fail "the watch's captures were not recorded once each"
+wait_for "the watch's today capture at the practice desk" desk_has "$token wrist"
+wait_for "the watch's inbox capture at the practice desk" desk_has "# $token wrist idea"
+wait_for "the watch's reminder at the practice desk" desk_has "$token wrist reminder (@$tomorrow "
+wait_for "the watch's tick at the practice desk" desk_has "- [x] Buy a birthday card for Dad"
 
 step "pictures: a capture with a photo"
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true

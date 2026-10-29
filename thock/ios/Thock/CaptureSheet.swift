@@ -27,18 +27,7 @@ struct CaptureSheet: View {
     }
 
     private var hint: String {
-        switch destination {
-        case .inbox: return "Lands in your inbox. Triage sorts it at the desk."
-        case .today: return "One line joins today's plan. More than one lands in today's note as written."
-        case .backlog: return "Goes under Soon in your backlog."
-        case .reminder:
-            let settings = model.session?.config.reminders ?? ReminderSettings()
-            guard let due else { return "Rings when you choose and waits in \(settings.index)." }
-            guard due.stillRings(today: .today(), now: .now(), dateOnlyAt: settings.dateOnlyAt) else {
-                return "Waits in Today, in \(settings.index)."
-            }
-            return "\(due.ringsSentence(today: .today(), now: .now(), dateOnlyAt: settings.dateOnlyAt)) and waits in \(settings.index)."
-        }
+        destination.hint(due: due, settings: model.session?.config.reminders ?? ReminderSettings(), today: .today(), now: .now())
     }
 
     private func choose(_ option: CaptureDestination) {
@@ -153,13 +142,3 @@ struct CaptureSheet: View {
     }
 }
 
-extension CaptureDestination {
-    var title: String {
-        switch self {
-        case .inbox: return "Inbox"
-        case .today: return "Today"
-        case .backlog: return "Backlog"
-        case .reminder: return "Reminder"
-        }
-    }
-}

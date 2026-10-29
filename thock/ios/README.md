@@ -20,11 +20,15 @@ the same client code it uses against the real service.
 | `ThockKit/Sources/ThockKit/Sync/` | Wire models, the HTTP transport, pairing, the sync engine. |
 | `ThockKit/Sources/ThockKit/Ask/` | Ask (`thock/specs/v35-phone-ask.md`): the agent's loop, its four tools over the local store, and the prompt. `Prompts/SYSTEM.md` is a copy of the desk's `crates/thock/assets/hosted-agent/SYSTEM.md`; a test fails when they differ. |
 | `ThockKit/Sources/ThockKit/Local/` | `LocalBackend` (the contract's routes, in memory), `SimulatedDesk`, the sample vault. |
+| `ThockKit/Sources/ThockKit/Watch/` | The watch link (`thock/specs/v48-watch.md` §6): the messages and their dictionary form, the snapshot the phone reads for the watch, the handler that runs a watch request through the phone's own calls, the complication's timeline entries, and the watch's outbox and files. |
 | `Thock/` | The SwiftUI app. |
 | `ThockShare/` | Share Sheet extension: the clip sheet. |
 | `ThockWidgets/` | Today widget (Home and Lock Screen) and the Idea and Journal controls. |
 | `Shared/` | Theme, fonts, and code compiled into all three targets. |
-| `Config/` | Info.plists and the app group entitlement. |
+| `ThockWatch/` | The Apple Watch app (V48), embedded in the iPhone app: the day screen, capture with dictation, *Remind me*, the outbox. A satellite of the phone: it never holds the vault. |
+| `ThockWatchWidgets/` | The watch's complications (Today, Capture) and the watchOS 26 Capture control. |
+| `WatchShared/` | The watch's dark palette, its app group container, Petrona and the Capture intent, compiled into the watch app and its complications. |
+| `Config/` | Info.plists and the app group entitlements (`group.com.thethock.ios` for the phone, `group.com.thethock.ios.watch` for the watch). |
 
 `Thock.xcodeproj` uses synchronized folders, so adding a file to a folder adds it to the target.
 
@@ -44,6 +48,16 @@ xcrun simctl install booted build/Build/Products/Debug-iphonesimulator/Thock.app
 xcrun simctl launch booted com.thethock.ios -thock-practice
 ```
 
+The watch app builds with the iPhone app (it is embedded), or on its own:
+
+```sh
+xcodebuild -project Thock.xcodeproj -scheme ThockWatch -destination 'generic/platform=watchOS Simulator' -derivedDataPath build/watch CODE_SIGNING_ALLOWED=NO build
+```
+
+To run it, pick the `ThockWatch` scheme and a watch simulator paired with an iPhone simulator in Xcode.
+The watch needs Xcode's watchOS platform (`xcodebuild -downloadPlatform watchOS`), and the iPhone app's
+build needs it too now that it embeds the watch app.
+
 `-thock-practice` opens the practice notebook on a fresh install. In the app, the `…` button at the
 top right has the practice desk's controls: close the desk (writes wait on the phone), sort the inbox
 at the desk (receipts turn to *filed*), add a line from the desk, end Thock Plus (read-only).
@@ -59,6 +73,7 @@ tapping:
 | `-thock-gate` | ask for Face ID in the practice notebook too |
 | `-thock-type "<keys>"` | type into the first editor (`\n` return, `\b` backspace, `{B}` `{I}` `{List}` `{Task}` `{Pick}`), and write the Markdown it would save to the app's `tmp/editor-dump.md` |
 | `-thock-script "<steps>"` | run steps separated by `;`: `capture:<inbox\|today\|backlog>:<text>`, `journal:<text>`, `tick:<label prefix>`, `soon:<label prefix>`, `backlog-move:<label prefix>:<soon\|someday\|today\|top>`, `backlog-tick:<label prefix>`, `backlog-remove:<label prefix>`, `inbox-<today\|backlog\|archive>:<title prefix>`, `capture-photo:<inbox\|today\|backlog>:<text>` (a capture with a drawn picture), `asked:<question>:<answer>` (a finished turn in the Ask thread), `asleep`, `awake`, `triage`, `plan`, `lapse`, `renew` |
+| `-thock-watch-script "<steps>"` | send what the watch would, through the watch link's decoder, each request twice with one id: `capture:<today\|inbox\|backlog\|reminder>:<text>` (a reminder rings tomorrow at `tomorrow_at`), `tick:<label prefix>` |
 
 ## Testing
 
@@ -70,7 +85,7 @@ thock/ios/script/smoke    # the app on a simulator (~45 s cold, ~11 s with THOCK
 | Layer | Covers |
 | --- | --- |
 | `script/test` (`swift test` in `ThockKit/`) | The contract fixtures, hashes and envelope vectors; pairing links, path rules, envelope tampering; the store's queue, rebase, prune and captures; the editor's block and inline round-trips; the phone's writes; sync against the in-process server and over loopback HTTP. |
-| `script/smoke` | Builds the `Thock` scheme for an available iPhone simulator, installs it fresh and launches it with `-thock-practice -thock-script …`: a today capture, an inbox capture and a journal entry must reach the phone's store and the practice desk; then the backlog's moves (to Someday, a tick, to today) must land in `backlog.md` and today's note on both. Then the inbox swipes (to today, archive) must move the notes to `archives/inbox/` with their triage-log lines on both. Then a capture with a picture must keep the bytes in the phone's `blobs`, link them from the note on both, and be acked. Then `-thock-open idea -thock-type …` must save the expected Markdown. |
+| `script/smoke` | Builds the `Thock` scheme for an available iPhone simulator, installs it fresh and launches it with `-thock-practice -thock-script …`: a today capture, an inbox capture and a journal entry must reach the phone's store and the practice desk; then the backlog's moves (to Someday, a tick, to today) must land in `backlog.md` and today's note on both. Then the inbox swipes (to today, archive) must move the notes to `archives/inbox/` with their triage-log lines on both. Then the watch's requests (`-thock-watch-script`), each sent twice, must land once on both. Then a capture with a picture must keep the bytes in the phone's `blobs`, link them from the note on both, and be acked. The `ThockWatch` scheme is built for a generic watchOS simulator in the same run. Then `-thock-open idea -thock-type …` must save the expected Markdown. |
 
 `script/smoke` picks a booted iPhone, else the one on the newest iOS runtime; `THOCK_SIMULATOR=<udid or
 name>` chooses. It needs Xcode and a simulator runtime but no signing identity: simulator builds sign to

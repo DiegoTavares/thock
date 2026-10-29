@@ -268,6 +268,7 @@ final class AppModel {
     private func storeChanged() {
         revision += 1
         scheduleWidgetReload()
+        scheduleWatchSnapshot()
         scheduleReminderRefresh()
         // A write just landed locally; send it on without waiting for the feed.
         Task { await engine?.sync() }
@@ -286,7 +287,26 @@ final class AppModel {
         }
     }
 
+    @ObservationIgnored private var watchSnapshot: Task<Void, Never>?
+
+    /// The watch's reading of the days (V48 §6.2), coalesced like the
+    /// widgets' reload: a first pull is one send, not hundreds.
+    func scheduleWatchSnapshot() {
+        watchSnapshot?.cancel()
+        watchSnapshot = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled, PhoneWatchLink.shared.canSend else { return }
+            // Before the notebook is open (launched in the background) there
+            // is nothing to say: the watch keeps what it has. A notebook that
+            // is open but unpaired says so through `watchSnapshot`.
+            guard let session else { return }
+            PhoneWatchLink.shared.send(session.watchSnapshot(chip: chip(for: Self.watchEntry)))
+        }
+    }
+
     private func refreshSyncState() async {
+        // Going read-only, or back, changes what the watch offers too.
+        scheduleWatchSnapshot()
         guard let engine else {
             syncState = .notConnected
             return
@@ -410,6 +430,13 @@ final class AppModel {
         // The answered ring and the reminder's other alerts change now, not
         // after the round below, which may never finish in the background.
         await refreshAlerts()
+        await sendInBackground()
+    }
+
+    /// A write made while the app may be in the background, by a
+    /// notification's answer or the watch: one round to send it under a
+    /// background task, then the feed is let go if the app is still there.
+    private func sendInBackground() async {
         var grace = UIBackgroundTaskIdentifier.invalid
         grace = UIApplication.shared.beginBackgroundTask {
             UIApplication.shared.endBackgroundTask(grace)
@@ -423,6 +450,41 @@ final class AppModel {
         if grace != .invalid {
             UIApplication.shared.endBackgroundTask(grace)
         }
+    }
+
+    // MARK: The watch (V48 §6.4)
+
+    /// The entry a watch capture remembers its chip under, apart from the
+    /// phone's own.
+    static let watchEntry = "watch"
+
+    /// A request from the watch, which may have launched the app in the
+    /// background. The write runs on the session directly rather than
+    /// through `perform`, so a failure becomes the answer's words instead
+    /// of a toast nobody sees. The round that sends it starts after the
+    /// answer, which the watch waits for.
+    func receive(_ request: WatchMessage) async -> WatchMessage? {
+        await boot()
+        return await answer(watch: request)
+    }
+
+    /// `receive` once the notebook is open. The launch arguments run inside
+    /// the opening, so the smoke script calls this directly.
+    private func answer(watch request: WatchMessage) async -> WatchMessage? {
+        guard phase == .ready, let session else {
+            return request.requestID.map { .ack(WatchAck(id: $0, outcome: .refused, message: VaultSession.notReadyMessage)) }
+        }
+        let (answer, wrote) = session.handle(request)
+        guard wrote else { return answer }
+        if case .capture(let capture) = request {
+            remember(chip: capture.destination, for: Self.watchEntry)
+            if capture.destination == .reminder {
+                // Rings even if the round below never finishes.
+                await refreshAlerts()
+            }
+        }
+        Task { await sendInBackground() }
+        return answer
     }
 
     private func finishConnecting() async {
@@ -487,6 +549,8 @@ final class AppModel {
         guard phase == .ready else { return }
         revision += 1
         scheduleReminderRefresh()
+        // A new day draws without a store change.
+        scheduleWatchSnapshot()
         // Reopens the feed the background let go of, starting with a round;
         // back from inactive with the feed still held, the round alone.
         Task { await engine?.start() }
@@ -981,6 +1045,9 @@ final class AppModel {
         if let script = value(after: "-thock-script") {
             await run(script: script)
         }
+        if let script = value(after: "-thock-watch-script") {
+            await run(watchScript: script)
+        }
         #endif
         switch value(after: "-thock-open") {
         case "receipts"?: sheet = .receipts
@@ -1089,6 +1156,36 @@ final class AppModel {
             case "lapse": await setPracticeLapsed(true)
             case "renew": await setPracticeLapsed(false)
             default: break
+            }
+            await engine?.sync()
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+    }
+
+    /// `-thock-watch-script "capture:today:Call the notary;tick:Read 20"`
+    /// sends what the watch would, through the link's decoder, each request
+    /// twice with one id: the second must write nothing (V48 §6.3, §12).
+    private func run(watchScript script: String) async {
+        for step in script.split(separator: ";") {
+            let parts = step.split(separator: ":", maxSplits: 2).map(String.init)
+            let today = VaultDay.today()
+            let request: WatchMessage
+            switch parts.first {
+            case "capture" where parts.count == 3:
+                guard let destination = CaptureDestination(rawValue: parts[1]) else { continue }
+                let due = destination == .reminder ? session?.config.reminders.tomorrowDue(today: today) : nil
+                request = .capture(WatchCapture(at: Date(), text: parts[2], destination: destination, due: due))
+            case "tick" where parts.count >= 2:
+                guard let row = session?.watchSnapshot().day(today)?.rows.first(where: { $0.label.hasPrefix(parts[1]) }) else { continue }
+                request = .tick(WatchTick(day: today.iso, hash: row.hash, ordinal: row.ordinal))
+            default:
+                continue
+            }
+            for _ in 0..<2 {
+                guard let decoded = (try? request.dictionary()).flatMap(PhoneWatchLink.decode) else { continue }
+                if let reply = await answer(watch: decoded) {
+                    NSLog("Thock watch script: \(reply)")
+                }
             }
             await engine?.sync()
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -1247,17 +1344,16 @@ final class AppModel {
         guard ok, saved != nil else { return }
         remember(chip: destination, for: entry)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        switch destination {
-        case .inbox: show("Saved to your inbox")
-        case .today: show("Added to today")
-        case .backlog: show("Added to Backlog · Soon")
-        case .reminder:
-            // Scheduled from the phone's own copy at once, so it rings even
-            // if the phone never reaches the server.
-            scheduleReminderRefresh()
-            show(due.map { $0.ringsSentence(today: .today(), now: .now(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt) } ?? "Reminder saved", action: "Show") { [weak self] in
-                self?.openReminders()
-            }
+        let sentence = destination.savedSentence(due: due, today: .today(), now: .now(), dateOnlyAt: session?.config.reminders.dateOnlyAt ?? ReminderSettings().dateOnlyAt)
+        guard destination == .reminder else {
+            show(sentence)
+            return
+        }
+        // Scheduled from the phone's own copy at once, so it rings even if
+        // the phone never reaches the server.
+        scheduleReminderRefresh()
+        show(sentence, action: "Show") { [weak self] in
+            self?.openReminders()
         }
     }
 

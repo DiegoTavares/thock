@@ -302,6 +302,58 @@ public struct ReminderChip: Hashable, Sendable {
     }
 }
 
+// MARK: Saying when (V45 §10.2)
+
+extension ClockTime {
+    /// The local wall-clock minute now.
+    public static func now() -> ClockTime {
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: Date())
+        return ClockTime(clampingHour: parts.hour ?? 0, minute: parts.minute ?? 0)
+    }
+}
+
+extension ReminderDue {
+    /// *⏰ Thu 10:00*: what the capture chip reads once a time is set.
+    public func chipText(today: VaultDay) -> String {
+        "⏰ " + shortLabel(today: today)
+    }
+
+    /// The day as a week reads it, then the time.
+    public func shortLabel(today: VaultDay) -> String {
+        let distance = today.days(until: date)
+        let day: String
+        switch distance {
+        case 0: day = "Today"
+        case 1...6: day = date.formatted("ddd")
+        default: day = date.formatted(date.year == today.year ? "ddd D MMM" : "ddd D MMM YYYY")
+        }
+        return time.map { "\(day) \($0)" } ?? day
+    }
+
+    /// Whether it still rings on this phone: a date-only reminder for today
+    /// rings at `dateOnlyAt` only while that is ahead of `now`, as the
+    /// scheduler hands iOS only what is still to come.
+    public func stillRings(today: VaultDay, now: ClockTime, dateOnlyAt: ClockTime) -> Bool {
+        guard date == today, time == nil else { return true }
+        return dateOnlyAt > now
+    }
+
+    /// *Rings Thursday at 10:00*, or *Waits in Today* for a date-only
+    /// reminder for today whose hour has passed.
+    public func ringsSentence(today: VaultDay, now: ClockTime, dateOnlyAt: ClockTime) -> String {
+        guard stillRings(today: today, now: now, dateOnlyAt: dateOnlyAt) else { return "Waits in Today" }
+        let distance = today.days(until: date)
+        let day: String
+        switch distance {
+        case 0: day = "today"
+        case 1: day = "tomorrow"
+        case 2...6: day = date.weekdayName
+        default: day = date.formatted(date.year == today.year ? "dddd D MMMM" : "dddd D MMMM YYYY")
+        }
+        return "Rings \(day) at \(time ?? dateOnlyAt)"
+    }
+}
+
 // MARK: Writes (V45 §10.2–§10.4)
 
 extension ReminderSettings {

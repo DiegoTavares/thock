@@ -47,6 +47,9 @@ just did it.
   use the `ask` tool whenever a ritual tells you to ask them to choose, or any
   time the answer is a choice; write the question in prose only when the
   answer is free text.
+- `sort` puts several items to the person at once, each with its own row of
+  choices, and returns every answer in one go. Use it when a ritual asks where
+  each of several things goes, instead of one `ask` per item.
 
 Work through a task in one go. Don't end your turn by announcing what you are about
 to do, and don't narrate between steps either: work silently and say it once, when

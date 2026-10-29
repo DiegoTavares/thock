@@ -7,6 +7,9 @@ public enum VaultSessionError: Error, Equatable {
     /// A reminder's line no longer reads as the list drawn it, so the edit
     /// had nothing to change.
     case reminderChanged
+    /// A line named by its hash is gone, or no longer one the phone may
+    /// tick: the desk changed it since it was drawn.
+    case lineChanged
 }
 
 /// Everything the app, the share sheet and the widgets do to the vault, in
@@ -290,9 +293,14 @@ public struct VaultSession: Sendable {
         return Array((timed + untimed).prefix(limit))
     }
 
-    /// Ticks a line named by its hash, as a widget button does.
+    /// Ticks a line named by its hash, as a widget button or the watch does.
+    /// A line already done stays done: neither offers an untick, so a tick
+    /// that arrives twice must not undo the first.
     public func tick(hash: String, ordinal: Int, day: VaultDay) throws {
-        guard let item = planner(.day(day))?.items.first(where: { $0.hash == hash && $0.ordinal == ordinal && !$0.isCalendar }) else { return }
+        guard let item = planner(.day(day))?.items.first(where: { $0.hash == hash && $0.ordinal == ordinal && !$0.isCalendar }) else {
+            throw VaultSessionError.lineChanged
+        }
+        guard !item.done else { return }
         try tick(item, note: .day(day))
     }
 
