@@ -29,16 +29,15 @@ struct TodayEntry: TimelineEntry {
 }
 
 struct TodayProvider: TimelineProvider {
+    /// A fixed morning, built without reading a file or making a timeline.
     func placeholder(in context: Context) -> TodayEntry {
-        let now = Date()
         let rows = [
             WatchRow(hash: "1", ordinal: 0, kind: .task, start: 9 * 60, end: 10 * 60, label: "Write the brief"),
             WatchRow(hash: "2", ordinal: 0, kind: .calendar, start: 11 * 60, end: 12 * 60, label: "Standup"),
-            WatchRow(hash: "3", ordinal: 0, kind: .reminder, start: 14 * 60, label: "Dentist"),
+            WatchRow(hash: "3", ordinal: 0, kind: .reminder, start: 12 * 60, label: "Dentist"),
         ]
-        let moment = TimelineEntries.entries(rows: rows, today: .today(), now: now).first
-            ?? WatchTimelineEntry(date: now, minute: 0, windowStart: 0, next: nil, left: 0)
-        return TodayEntry(date: now, content: .day(rows: rows, moment: moment))
+        let moment = WatchTimelineEntry(date: Date(), minute: 8 * 60 + 40, windowStart: 8 * 60 + 30, next: rows[0], following: rows[1], left: 2)
+        return TodayEntry(date: moment.date, content: .day(rows: rows, moment: moment))
     }
 
     func getSnapshot(in context: Context, completion: @escaping (TodayEntry) -> Void) {
@@ -150,7 +149,7 @@ struct TodayView: View {
     }
 }
 
-/// One coming item: its kind as a symbol, its time, its words. The first is
+/// One coming item: its kind as a shape, its time, its words. The first is
 /// semibold with its time in the accent, the second muted.
 struct NextLine: View {
     static let primaryHeight: CGFloat = 19
@@ -159,13 +158,15 @@ struct NextLine: View {
     var row: WatchRow
     var primary: Bool
 
+    private var time: String? {
+        row.start.map { ClockTime(clampingHour: $0 / 60 % 24, minute: $0 % 60).description }
+    }
+
     var body: some View {
+        let color = primary ? Color.primary : Color.secondary
         HStack(spacing: 4) {
-            Image(systemName: symbol)
-                .font(.system(size: primary ? 10 : 9, weight: .semibold))
-                .accessibilityLabel(kindName)
-            if let start = row.start {
-                let time = ClockTime(clampingHour: start / 60 % 24, minute: start % 60).description
+            KindGlyph(kind: row.kind, color: color, height: primary ? 11 : 9)
+            if let time {
                 if primary {
                     Text(time)
                         .fontDesign(.monospaced)
@@ -181,18 +182,10 @@ struct NextLine: View {
                 .privacySensitive()
         }
         .font(.system(size: primary ? 15 : 13, weight: primary ? .semibold : .regular))
-        .foregroundStyle(primary ? Color.primary : Color.secondary)
+        .foregroundStyle(color)
         .frame(height: primary ? Self.primaryHeight : Self.secondaryHeight)
-    }
-
-    /// A bell, a filled bar or an outlined one: told apart by shape on a
-    /// tinted face.
-    private var symbol: String {
-        switch row.kind {
-        case .reminder: return "bell.fill"
-        case .task: return "capsule.portrait.fill"
-        case .calendar: return "capsule.portrait"
-        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel([kindName, time, row.label].compactMap { $0 }.joined(separator: " "))
     }
 
     private var kindName: String {
@@ -201,6 +194,43 @@ struct NextLine: View {
         case .task: return "Task"
         case .calendar: return "Event"
         }
+    }
+}
+
+/// A row's kind drawn as the track draws it, never as a symbol: a filled
+/// bar for a task, an outlined one for an event, a bell for a reminder.
+/// Told apart by shape on a tinted face.
+struct KindGlyph: View {
+    var kind: WatchRow.Kind
+    var color: Color
+    var height: CGFloat
+
+    var body: some View {
+        Group {
+            switch kind {
+            case .task:
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(color)
+                    .frame(width: 4, height: height)
+            case .calendar:
+                RoundedRectangle(cornerRadius: 1.5)
+                    .strokeBorder(color, lineWidth: 1.2)
+                    .frame(width: 5, height: height)
+            case .reminder:
+                VStack(spacing: 0) {
+                    UnevenRoundedRectangle(topLeadingRadius: 3.5, topTrailingRadius: 3.5)
+                        .fill(color)
+                        .frame(width: 7, height: height - 4)
+                    Rectangle()
+                        .fill(color)
+                        .frame(width: 9, height: 1.5)
+                    Circle()
+                        .fill(color)
+                        .frame(width: 2.5, height: 2.5)
+                }
+            }
+        }
+        .frame(width: 9)
     }
 }
 
