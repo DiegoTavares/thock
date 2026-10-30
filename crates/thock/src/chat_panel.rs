@@ -8335,7 +8335,9 @@ mod tests {
         let mut setup = setup(cx).await;
         open_note(&mut setup).await;
         install_timeline(&mut setup, json!({})).await;
-        open_nudges(&mut setup, "2026-11-03 10:12");
+        // Just before the hour: simulating a whole one steps the executor
+        // through every blink and poll timer and takes a minute of real time.
+        open_nudges(&mut setup, "2026-11-03 10:59");
         advance(&mut setup, Duration::from_secs(8));
         assert_eq!(nudge_id(&setup), None, "nothing to wrap");
 
@@ -8347,10 +8349,10 @@ mod tests {
                 "# 2026-11-02\n\n## Day Planner\n- [ ] Call\n".into(),
             )
             .await;
-        advance(&mut setup, Duration::from_secs(30 * 60));
+        advance(&mut setup, Duration::from_secs(30));
         assert_eq!(nudge_id(&setup), None, "a file event never evaluates");
         // The top of the hour does.
-        advance(&mut setup, Duration::from_secs(30 * 60));
+        advance(&mut setup, Duration::from_secs(40));
         assert_eq!(nudge_id(&setup), Some("wrap-yesterday"));
     }
 
