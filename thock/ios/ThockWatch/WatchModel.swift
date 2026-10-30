@@ -442,8 +442,12 @@ final class WatchConnection: NSObject {
     }
 
     /// Background refreshes the system woke the app for, finished once
-    /// nothing more is pending.
+    /// nothing more is pending, or at `refreshAllowance` regardless.
     private var refreshTasks: [WKWatchConnectivityRefreshBackgroundTask] = []
+    /// The system kills the app after 15 s with a refresh still open, and
+    /// `hasContentPending` can stay true past that for content that never
+    /// comes, so a held refresh ends on time either way.
+    static let refreshAllowance: UInt64 = 8_000_000_000
 
     private var model: WatchModel { WatchModel.shared }
 
@@ -557,10 +561,18 @@ final class WatchConnection: NSObject {
     func hold(_ task: WKWatchConnectivityRefreshBackgroundTask) {
         refreshTasks.append(task)
         finishRefreshesIfIdle()
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: Self.refreshAllowance)
+            self.finishRefreshes()
+        }
     }
 
     private func finishRefreshesIfIdle() {
         guard session?.hasContentPending != true else { return }
+        finishRefreshes()
+    }
+
+    private func finishRefreshes() {
         for task in refreshTasks {
             task.setTaskCompletedWithSnapshot(false)
         }
