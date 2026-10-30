@@ -5,7 +5,9 @@
 //! and snoozes across restarts.
 
 use anyhow::{Context as _, Result};
-use chrono::{Datelike as _, Days, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike as _, Weekday};
+use chrono::{
+    Datelike as _, Days, Local, NaiveDate, NaiveDateTime, NaiveTime, Timelike as _, Weekday,
+};
 use db::kvp::KeyValueStore;
 use fs::Fs;
 use gpui::SharedString;
@@ -57,7 +59,8 @@ impl Moment {
 
 const QUIET_UNTIL: NaiveTime = NaiveTime::from_hms_opt(6, 0, 0).expect("a valid time");
 const WEEK_REVIEW_FROM: NaiveTime = NaiveTime::from_hms_opt(15, 0, 0).expect("a valid time");
-const WEEK_REVIEW_UNTIL_MONDAY: NaiveTime = NaiveTime::from_hms_opt(12, 0, 0).expect("a valid time");
+const WEEK_REVIEW_UNTIL_MONDAY: NaiveTime =
+    NaiveTime::from_hms_opt(12, 0, 0).expect("a valid time");
 /// How many days back the Wrap nudge looks for the last day (§5.1).
 const WRAP_LOOKBACK_DAYS: u64 = 3;
 /// How many nudges may be offered in a day (§4.2).
@@ -131,7 +134,8 @@ impl VaultSnapshot {
                 continue;
             };
             let mut facts = NoteFacts::from_text(&text);
-            facts.template_only = is_template_only(&text, &template, day, &note_title(&path));
+            facts.template_only =
+                crate::notes::is_template_only(&text, &template, day, &note_title(&path));
             daily.insert(day, facts);
         }
         let monday = reviewed_week(today);
@@ -165,25 +169,6 @@ fn note_title(path: &Path) -> String {
     path.file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default()
-}
-
-// Stands in for V51's `notes::is_template_only` until that lands on `main`:
-// line-by-line equality with the template expanded for the day, `{{time}}`
-// lines skipped, trailing whitespace ignored.
-fn is_template_only(note: &str, template: &str, date: NaiveDate, title: &str) -> bool {
-    let expanded = crate::notes::expand_template(template, date, NaiveTime::MIN, title);
-    let note_lines: Vec<&str> = note.trim_end().lines().map(str::trim_end).collect();
-    let template_lines: Vec<&str> = template.trim_end().lines().collect();
-    let expanded_lines: Vec<&str> = expanded.trim_end().lines().map(str::trim_end).collect();
-    if note_lines.len() != template_lines.len() || template_lines.len() != expanded_lines.len() {
-        return false;
-    }
-    note_lines
-        .iter()
-        .zip(template_lines.iter().zip(expanded_lines.iter()))
-        .all(|(note_line, (template_line, expanded_line))| {
-            template_line.contains("{{time}}") || note_line == expanded_line
-        })
 }
 
 /// An offer the chat shows (§6.1).
@@ -491,19 +476,32 @@ mod tests {
     fn a_reviewed_week_or_one_without_notes_gets_no_review_nudge() {
         let friday = moment(2026, 10, 30, 16, 0);
         let mut snapshot = snapshot(&[]);
-        assert!(evaluate(REGISTRY, &friday, &snapshot).is_empty(), "no notes");
+        assert!(
+            evaluate(REGISTRY, &friday, &snapshot).is_empty(),
+            "no notes"
+        );
         snapshot.week_days.insert(date(2026, 10, 27));
         snapshot.week = Some(note(&["Week Goals", "AI Week Review"]));
-        assert!(evaluate(REGISTRY, &friday, &snapshot).is_empty(), "reviewed");
+        assert!(
+            evaluate(REGISTRY, &friday, &snapshot).is_empty(),
+            "reviewed"
+        );
         snapshot.week = Some(note(&["Week Goals"]));
-        assert_eq!(ids(&evaluate(REGISTRY, &friday, &snapshot)), ["week-review"]);
+        assert_eq!(
+            ids(&evaluate(REGISTRY, &friday, &snapshot)),
+            ["week-review"]
+        );
     }
 
     #[test]
     fn the_wrap_nudge_names_the_last_day_that_was_written() {
         let monday = moment(2026, 11, 2, 9, 0);
         let friday_unwrapped = (FRI, note(&["Day Planner"]));
-        let offers = evaluate(REGISTRY, &monday, &snapshot(&[friday_unwrapped.clone()]));
+        let offers = evaluate(
+            REGISTRY,
+            &monday,
+            &snapshot(std::slice::from_ref(&friday_unwrapped)),
+        );
         assert_eq!(ids(&offers), ["wrap-yesterday"]);
         assert_eq!(
             offers[0].text.as_ref(),
@@ -513,7 +511,10 @@ mod tests {
 
         let with_empty_sunday = snapshot(&[friday_unwrapped, (date(2026, 11, 1), template_only())]);
         let offers = evaluate(REGISTRY, &monday, &with_empty_sunday);
-        assert!(offers[0].text.contains("Friday"), "a template-only day isn't a day");
+        assert!(
+            offers[0].text.contains("Friday"),
+            "a template-only day isn't a day"
+        );
 
         let tuesday = moment(2026, 11, 3, 9, 0);
         let offers = evaluate(
@@ -536,11 +537,17 @@ mod tests {
             evaluate(REGISTRY, &monday, &snapshot(&[wrapped, thursday])).is_empty(),
             "the last day is wrapped; older gaps don't count"
         );
-        assert!(evaluate(REGISTRY, &monday, &snapshot(&[])).is_empty(), "no notes");
+        assert!(
+            evaluate(REGISTRY, &monday, &snapshot(&[])).is_empty(),
+            "no notes"
+        );
         let only_template = snapshot(&[(date(2026, 11, 1), template_only())]);
         assert!(evaluate(REGISTRY, &monday, &only_template).is_empty());
         let too_old = snapshot(&[(date(2026, 10, 29), note(&["Day Planner"]))]);
-        assert!(evaluate(REGISTRY, &monday, &too_old).is_empty(), "four days back");
+        assert!(
+            evaluate(REGISTRY, &monday, &too_old).is_empty(),
+            "four days back"
+        );
     }
 
     #[test]
@@ -571,45 +578,51 @@ mod tests {
         let pick = ledger.pick(vec![offer("a"), offer("b")], today, None);
         assert_eq!(pick.map(|offer| offer.id), Some("a"));
         // Still pending: nothing new.
-        assert!(ledger.pick(vec![offer("a"), offer("b")], today, Some("a")).is_none());
+        assert!(
+            ledger
+                .pick(vec![offer("a"), offer("b")], today, Some("a"))
+                .is_none()
+        );
         ledger.snooze("a", today);
         assert_eq!(
-            ledger.pick(vec![offer("a"), offer("b")], today, None).map(|offer| offer.id),
+            ledger
+                .pick(vec![offer("a"), offer("b")], today, None)
+                .map(|offer| offer.id),
             Some("b")
         );
         // Two offered today: a third waits for tomorrow, but one of the two
         // comes back without counting.
         assert!(ledger.pick(vec![offer("c")], today, None).is_none());
         assert_eq!(
-            ledger.pick(vec![offer("b"), offer("c")], today, None).map(|offer| offer.id),
+            ledger
+                .pick(vec![offer("b"), offer("c")], today, None)
+                .map(|offer| offer.id),
             Some("b")
         );
         let tomorrow = date(2026, 10, 31);
         assert_eq!(
-            ledger.pick(vec![offer("a"), offer("c")], tomorrow, None).map(|offer| offer.id),
+            ledger
+                .pick(vec![offer("a"), offer("c")], tomorrow, None)
+                .map(|offer| offer.id),
             Some("a")
         );
         assert!(!ledger.is_snoozed("a", tomorrow));
-        assert!(ledger.offered.keys().all(|day| *day == tomorrow), "old days are pruned");
+        assert!(
+            ledger.offered.keys().all(|day| *day == tomorrow),
+            "old days are pruned"
+        );
     }
 
     #[test]
     fn the_tick_lands_just_past_the_next_hour() {
-        let now = date(2026, 10, 30).and_hms_opt(9, 12, 30).expect("a valid time");
+        let now = date(2026, 10, 30)
+            .and_hms_opt(9, 12, 30)
+            .expect("a valid time");
         assert_eq!(next_tick(now), Duration::from_secs(47 * 60 + 35));
-        let on_the_hour = date(2026, 10, 30).and_hms_opt(23, 0, 0).expect("a valid time");
+        let on_the_hour = date(2026, 10, 30)
+            .and_hms_opt(23, 0, 0)
+            .expect("a valid time");
         assert_eq!(next_tick(on_the_hour), Duration::from_secs(60 * 60 + 5));
-    }
-
-    #[test]
-    fn a_template_only_note_is_recognized() {
-        let template = "# {{date}}\n\nStarted {{time}}\n\n## Day Planner\n";
-        let day = FRI;
-        let untouched = "# 2026-10-30\n\nStarted 09:12\n\n## Day Planner\n";
-        assert!(is_template_only(untouched, template, day, "2026-10-30"));
-        let written = "# 2026-10-30\n\nStarted 09:12\n\n## Day Planner\n- [ ] Call the plumber\n";
-        assert!(!is_template_only(written, template, day, "2026-10-30"));
-        assert!(!is_template_only("", template, day, "2026-10-30"));
     }
 
     #[test]
@@ -679,7 +692,10 @@ mod tests {
         assert!(!friday.template_only);
         assert!(snapshot.daily[&date(2026, 11, 1)].template_only);
         assert!(!snapshot.daily.contains_key(&date(2026, 10, 31)), "no note");
-        assert!(!snapshot.daily.contains_key(&date(2026, 10, 27)), "outside the window");
+        assert!(
+            !snapshot.daily.contains_key(&date(2026, 10, 27)),
+            "outside the window"
+        );
         let week = snapshot.week.as_ref().expect("last week's note");
         assert!(week.headings.contains(AI_WEEK_REVIEW));
         assert_eq!(

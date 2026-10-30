@@ -21,6 +21,7 @@ use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeDelta};
 use collections::{HashMap, HashSet};
+use db::kvp::KeyValueStore;
 use editor::{
     DisplayPoint, Editor, EditorEvent, HighlightKey, SelectionEffects, display_map::DisplayRow,
     scroll::Autoscroll,
@@ -36,7 +37,6 @@ use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use multi_buffer::Anchor;
 use project::Project;
 use pulldown_cmark::{Event as MarkdownEvent, Parser as MarkdownParser, Tag, TagEnd};
-use db::kvp::KeyValueStore;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{CenteredPaddingSettings, OpenerFrequency, Settings as _};
@@ -2523,7 +2523,12 @@ impl ChatPanel {
         }
     }
 
-    fn accept_nudge_action(&mut self, _: &AcceptNudge, window: &mut Window, cx: &mut Context<Self>) {
+    fn accept_nudge_action(
+        &mut self,
+        _: &AcceptNudge,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if matches!(self.opener, Some(Opener::Nudge(_))) {
             self.answer_opener(0, window, cx);
         }
@@ -8156,9 +8161,9 @@ mod tests {
     }
 
     fn nudge_id(setup: &Setup) -> Option<&'static str> {
-        setup
-            .panel
-            .read_with(&setup.cx, |panel, _| panel.opener.as_ref().and_then(Opener::nudge_id))
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            panel.opener.as_ref().and_then(Opener::nudge_id)
+        })
     }
 
     fn snoozed(setup: &Setup, id: &str, day: &str) -> bool {
@@ -8190,7 +8195,10 @@ mod tests {
         assert_eq!(visible_chips(&setup), ["Go for it", "Not now"]);
         assert!(is_focused(&mut setup, &editor), "it takes no focus");
         let text = opener_text(&setup);
-        assert!(text.contains("It looks like Friday wasn't wrapped up."), "{text}");
+        assert!(
+            text.contains("It looks like Friday wasn't wrapped up."),
+            "{text}"
+        );
         for leak in ["wrap-yesterday", "routines/", ".md", "{"] {
             assert!(!text.contains(leak), "the bubble leaks {leak:?}: {text}");
         }
@@ -8210,19 +8218,23 @@ mod tests {
             );
         });
         assert!(snoozed(&setup, "wrap-yesterday", "2026-11-02"));
-        // Snoozed, it isn't offered again today, even on a fresh evaluation.
+        // Snoozed, it isn't offered again today. A fresh evaluation moves
+        // on to the day's second offer: last week's review, Monday morning.
         setup.panel.update(&mut setup.cx, |panel, cx| {
             panel.cancel_connect(cx);
             panel.evaluate_nudges(cx);
         });
         setup.cx.run_until_parked();
-        assert_eq!(nudge_id(&setup), None);
+        assert_eq!(nudge_id(&setup), Some("week-review"));
+        assert!(
+            opener_text(&setup).contains("Last week never got its review."),
+            "{}",
+            opener_text(&setup)
+        );
     }
 
     #[gpui::test]
-    async fn not_now_snoozes_a_nudge_for_the_day_and_it_survives_a_reload(
-        cx: &mut TestAppContext,
-    ) {
+    async fn not_now_snoozes_a_nudge_for_the_day_and_it_survives_a_reload(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
         let editor = open_note(&mut setup).await;
         install_timeline(
@@ -8253,7 +8265,10 @@ mod tests {
         advance(&mut setup, Duration::from_secs(8));
         assert_eq!(nudge_id(&setup), Some("wrap-yesterday"));
         let text = opener_text(&setup);
-        assert!(text.contains("It looks like Monday wasn't wrapped up."), "{text}");
+        assert!(
+            text.contains("It looks like Monday wasn't wrapped up."),
+            "{text}"
+        );
     }
 
     #[gpui::test]
