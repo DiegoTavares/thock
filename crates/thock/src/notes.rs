@@ -76,6 +76,54 @@ pub fn expand_template(template: &str, date: NaiveDate, time: NaiveTime, title: 
     output
 }
 
+/// How far back `cleanup_dates` reaches without a record of the last day a
+/// note was ensured, and the most dates a stale record may add (V51 §4.3).
+pub const CLEANUP_WINDOW_DAYS: u64 = 30;
+pub const CLEANUP_MAX_DAYS: u64 = 400;
+
+/// The past dates whose daily notes are checked for being template-only
+/// (V51 §4.3): from `CLEANUP_WINDOW_DAYS` back, or from `last_ensured` when
+/// that is older, up to yesterday, oldest first, never today and never more
+/// than `CLEANUP_MAX_DAYS`.
+pub fn cleanup_dates(today: NaiveDate, last_ensured: Option<NaiveDate>) -> Vec<NaiveDate> {
+    let (Some(floor), Some(cap)) = (
+        today.checked_sub_days(Days::new(CLEANUP_WINDOW_DAYS)),
+        today.checked_sub_days(Days::new(CLEANUP_MAX_DAYS)),
+    ) else {
+        return Vec::new();
+    };
+    let start = last_ensured.map_or(floor, |last| last.min(floor)).max(cap);
+    std::iter::successors(Some(start), |date| date.succ_opt())
+        .take_while(|date| *date < today)
+        .collect()
+}
+
+/// Whether `note` is what `ensure_note` writes for `date` from `template`
+/// and nothing more (V51 §4.2): the same lines, once line endings, trailing
+/// whitespace and trailing blank lines are ignored, except that a template
+/// line carrying `{{time}}` matches whatever the note has on that line,
+/// since the creation time is not known any more.
+pub fn is_template_only(note: &str, template: &str, date: NaiveDate, title: &str) -> bool {
+    let note_lines = normalized_lines(note);
+    let template_lines = normalized_lines(template);
+    note_lines.len() == template_lines.len()
+        && template_lines
+            .iter()
+            .zip(&note_lines)
+            .all(|(template_line, note_line)| {
+                template_line.contains("{{time}}")
+                    || expand_template(template_line, date, NaiveTime::MIN, title) == *note_line
+            })
+}
+
+fn normalized_lines(text: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    while lines.last() == Some(&"") {
+        lines.pop();
+    }
+    lines
+}
+
 /// The outcome of ensuring a note exists.
 #[derive(Debug, PartialEq)]
 pub enum EnsureNoteOutcome {
@@ -170,7 +218,8 @@ pub async fn ensure_example_day(
     Ok(Some(path))
 }
 
-fn note_title(path: &Path) -> String {
+/// The `{{title}}` of the note at `path`: its file stem.
+pub(crate) fn note_title(path: &Path) -> String {
     path.file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default()
@@ -289,6 +338,59 @@ mod tests {
             ),
             "# Sunday, July 19, 2026\n2026-07-19 14:31 2026-07-19"
         );
+    }
+
+    #[test]
+    fn cleanup_dates_reach_thirty_days_or_the_last_ensured_day() {
+        let today = date(2026, 10, 30);
+        let dates = cleanup_dates(today, None);
+        assert_eq!(dates.len(), 30);
+        assert_eq!(dates.first(), Some(&date(2026, 9, 30)));
+        assert_eq!(dates.last(), Some(&date(2026, 10, 29)));
+
+        // A record inside the window changes nothing; an older one extends it.
+        assert_eq!(cleanup_dates(today, Some(date(2026, 10, 20))).len(), 30);
+        let dates = cleanup_dates(today, Some(date(2026, 9, 15)));
+        assert_eq!(dates.first(), Some(&date(2026, 9, 15)));
+        assert_eq!(dates.len(), 45);
+
+        // A years-old record is capped; today is never included.
+        let dates = cleanup_dates(today, Some(date(2020, 1, 1)));
+        assert_eq!(dates.len(), CLEANUP_MAX_DAYS as usize);
+        assert!(dates.iter().all(|d| *d < today));
+        assert!(cleanup_dates(today, Some(today)).iter().all(|d| *d < today));
+    }
+
+    #[test]
+    fn template_only_ignores_what_saving_and_the_clock_change() {
+        let d = date(2026, 10, 29);
+        let template =
+            "# {{date:dddd, MMMM D, YYYY}}\n\nStarted {{time}}\n\n## Journal\n\n{{weather}}\n";
+        let made = expand_template(template, d, NaiveTime::from_hms_opt(9, 7, 0).unwrap(), "x");
+        assert!(is_template_only(&made, template, d, "x"));
+
+        // A different time, CRLF endings, trailing spaces and extra blank
+        // lines at the end are all still the template.
+        let later = expand_template(template, d, NaiveTime::from_hms_opt(23, 1, 0).unwrap(), "x");
+        assert!(is_template_only(&later, template, d, "x"));
+        let crlf = made.replace('\n', "\r\n");
+        assert!(is_template_only(&crlf, template, d, "x"));
+        let padded = made.replace("## Journal", "## Journal   ") + "\n\n\n";
+        assert!(is_template_only(&padded, template, d, "x"));
+        assert!(is_template_only(made.trim_end(), template, d, "x"));
+
+        // One character of the user's, a line more, or another day's date
+        // is not.
+        assert!(!is_template_only(&format!("{made}."), template, d, "x"));
+        assert!(!is_template_only(
+            &format!("{made}- Called Ana\n"),
+            template,
+            d,
+            "x"
+        ));
+        assert!(!is_template_only(&made, template, date(2026, 10, 28), "x"));
+        assert!(!is_template_only("", template, d, "x"));
+        assert!(is_template_only("", "", d, "x"));
     }
 
     #[test]

@@ -44,6 +44,7 @@ pub mod routines_panel;
 pub mod sync_status;
 pub mod tasks_google;
 pub mod thock_theme;
+pub mod today_note;
 pub mod ui;
 pub mod vault;
 pub mod vault_sync;
@@ -131,6 +132,9 @@ pub fn init(cx: &mut App) {
     reminder_notifier::init(cx);
     sync_status::init(cx);
     vault_sync::init(cx);
+    // After vault sync, so a vault's sync service exists before the
+    // today-note service asks whether its first pass has settled.
+    today_note::init(cx);
     markdown_conceal::init(cx);
     masthead::init(cx);
     wikilink_completion::init(cx);

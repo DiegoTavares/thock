@@ -56,7 +56,7 @@ These are the invariants. Design and engineering decisions should be checkable a
 Thock looks like a focused, three-pane writing environment. Zed's speed and editing quality are the foundation; the chrome around it is re-conceived for life-management rather than code.
 
 ### 5.1 Left rail A — **Timeline** (the "now" navigator)
-A small, always-present list of the files you almost always want: **Today**, **Yesterday**, **This Week**, **Last Week**. One click (or keystroke) opens the right note. It resolves the app's naming conventions for the user (daily = `YYYY-MM-DD.md`, weekly = ISO week `YYYY-Www.md`, e.g. `2026-W30.md`) so they never think about filenames. Creating today's note if it doesn't exist yet is a single action — replacing the current "open Obsidian just to trigger a plugin" workaround. _(Since V7 these rows are the Timeline Routine's own templated quick links — the panel is purely sections-per-Routine — while note creation and the `thock: open …` actions stay core.)_
+A small, always-present list of the files you almost always want: **Today**, **Yesterday**, **This Week**, **Last Week**. One click (or keystroke) opens the right note. It resolves the app's naming conventions for the user (daily = `YYYY-MM-DD.md`, weekly = ISO week `YYYY-Www.md`, e.g. `2026-W30.md`) so they never think about filenames. Today's note exists before anyone asks for it: Thock creates it from the daily template when the vault opens and when the day rolls over, and tidies away a past day left exactly as the template (V51) — replacing the current "open Obsidian just to trigger a plugin" workaround. _(Since V7 these rows are the Timeline Routine's own templated quick links — the panel is purely sections-per-Routine — while note creation and the `thock: open …` actions stay core.)_
 
 ### 5.2 Left rail B — **Routines** (the modular navigator)
 A switchable list of the life-domains the user has enabled: _Daily & Weekly_, _Finance_, _Journaling_, _Team_, etc. Each Routine is a bundle of folders, templates, quick links, a right-pane context view, and skills — defined by a vault-visible `routines/<id>/routine.toml` (V7), so the app-shipped catalog is just one way a Routine gets there: the user's own agent can author one directly in the vault. Users add or remove Routines from a gallery. Beneath the Routines view, the full file tree remains available for people who want to roam freely.
@@ -546,6 +546,15 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   so the watch catches up within seconds even when Apple holds a push back. No note content ever
   travels in a push. Spec `specs/v50-background-sync.md`. _(shipped on `main` with the V50 PR; the APNs
   key is deployed, and the by-hand checks on a real phone and watch passed on TestFlight build 23)_
+- [x] **Today's note exists when the day starts:** the desk creates `daily/<today>.md` from
+  `templates/daily.md` when a vault opens and again when the date rolls over (midnight, a wake from
+  sleep), so calendar sync, the reminders day section and the rituals always find a page to write
+  into. A past day whose page is still exactly the template, time line aside, is removed once it
+  stops being today, at launch and at rollover, from a window that reaches back to the last day the
+  desk made a page; one character of the user's keeps it. Cleanup waits for the phone's queued
+  writes to land first, and a cleaned page a phone edit still targets comes back around the words.
+  Nothing happens in a vault without a daily template. Spec `specs/v51-today-note-on-open.md`.
+  _(shipped on `main` with the V51 PR)_
 
 ---
 

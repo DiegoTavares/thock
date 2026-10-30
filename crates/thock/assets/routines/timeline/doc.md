@@ -14,7 +14,11 @@ whether these rituals go looking for code or leave your notes alone.
 The Routines panel in the left sidebar carries this Routine's section:
 
 - **Today** / **Yesterday** open daily notes (`daily/YYYY-MM-DD.md` by
-  default), created from `templates/daily.md` the first time.
+  default). Today's page is ready when the day starts: Thock creates it
+  from `templates/daily.md` when the vault opens and again at midnight, so
+  meetings, reminders and your rituals always have a page to land on. A
+  past day you never wrote on — still exactly the template — is tidied
+  away once it stops being today.
 - **This Week** / **Last Week** open weekly notes (`weekly/GGGG-Www.md` by
   default), created from `templates/weekly.md`.
 - The same entries (plus **Tomorrow**) live in the command palette:
