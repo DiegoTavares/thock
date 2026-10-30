@@ -55,12 +55,13 @@ never two questions at once.
    each as a checkbox line: `- [ ] like this`. Point out the right-hand
    rail drawing their list as a day plan while they type. Mention once that
    tomorrow's page starts from `templates/daily.md`, which they (or you)
-   can change any time.
+   can change any time, and that Thock makes each day's page when the day
+   starts, so it is already there when they sit down.
 
-   If today's note doesn't exist (an older vault, or they deleted it),
-   create `daily/<today's date as YYYY-MM-DD>.md` from `templates/daily.md`
-   (fill the template's `{{date:…}}` tokens with real values) and continue
-   the same way.
+   If today's note doesn't exist (a vault without `templates/daily.md`, or
+   they deleted it), create `daily/<today's date as YYYY-MM-DD>.md` from
+   `templates/daily.md` (fill the template's `{{date:…}}` tokens with real
+   values) and continue the same way.
 
 5. **Show the one promise that matters.** Once they've written something,
    ask permission to add a short section to today's note. On a yes, append
