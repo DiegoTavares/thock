@@ -27,6 +27,7 @@ pub mod markdown_text;
 pub mod masthead;
 pub mod memory;
 pub mod notes;
+pub mod nudges;
 pub mod plus;
 pub mod readwise;
 pub mod readwise_service;

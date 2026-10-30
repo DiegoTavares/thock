@@ -11,7 +11,7 @@ Review the previous week's daily notes, plus whatever outside activity the vault
 
 ## 1. Determine the week and locate the weekly file
 
-1. The review covers **Monday–Sunday of the week before today**. Compute those two dates (YYYY-MM-DD).
+1. The review covers **the week being closed**: Monday–Sunday of the ISO week that contains today when today is Friday, Saturday or Sunday, and of the previous ISO week otherwise. Compute those two dates (YYYY-MM-DD).
 2. Resolve the weekly file from the config (`[weekly]` `dir` + `filename`), formatting the pattern with the week's Monday. The default names weeks by **ISO week** — `GGGG-[W]WW`, i.e. ISO week-year, a literal `W`, and the zero-padded ISO week number — so the week starting Mon 2026-07-20 is `weekly/2026-W30.md` by default. If the file doesn't exist yet, create it.
 3. The **week id** used everywhere below is the weekly filename without `.md` (e.g. `2026-W30`).
 
