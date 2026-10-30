@@ -243,6 +243,10 @@ struct KindGlyph: View {
 /// Four hours from the half hour before now: tasks filled, events
 /// outlined, reminders a tick and a line, done items faint, now an accent
 /// line. Every difference is a shape or an opacity too, for tinted faces.
+///
+/// Two canvases, not a view per block: the face's shared renderer holds
+/// every third-party complication at once and is killed at its memory mark
+/// on a busy day, so what it keeps for this one is kept small.
 struct TimelineTrack: View {
     var rows: [WatchRow]
     var moment: WatchTimelineEntry
@@ -251,81 +255,60 @@ struct TimelineTrack: View {
     static let height: CGFloat = 24
 
     var body: some View {
-        GeometryReader { geometry in
-            let width = geometry.size.width
-            let start = moment.windowStart
-            let span = CGFloat(TimelineEntries.windowMinutes)
-            let x = { (minute: Int) in CGFloat(minute - start) / span * width }
-            let nowMinute = moment.minute
-            ZStack(alignment: .topLeading) {
-                Rectangle()
-                    .fill(.secondary.opacity(0.3))
-                    .frame(width: width, height: 1)
-                    .offset(y: 3 + trackHeight / 2)
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+        ZStack(alignment: .topLeading) {
+            Canvas { context, size in
+                var baseline = Path()
+                baseline.addRect(CGRect(x: 0, y: 3 + trackHeight / 2, width: size.width, height: 1))
+                context.fill(baseline, with: .style(.secondary.opacity(0.3)))
+                for row in rows {
                     if let begin = row.start {
-                        block(row, from: x(begin), to: x(row.end ?? begin + 30))
+                        draw(row, from: x(begin, in: size.width), to: x(row.end ?? begin + 30, in: size.width), in: &context)
                     }
                 }
-                Rectangle()
-                    .fill(WatchTheme.amber)
-                    .frame(width: 2, height: trackHeight + 5)
-                    .offset(x: x(nowMinute) - 1, y: 1.5)
-                    .widgetAccentable()
-                Circle()
-                    .fill(WatchTheme.amber)
-                    .frame(width: 4, height: 4)
-                    .offset(x: x(nowMinute) - 2, y: 0)
-                    .widgetAccentable()
-                ForEach(hours(from: start), id: \.self) { hour in
-                    // Kept inside the frame, so the first and last hours are never cut.
-                    Text(String(format: "%02d", hour % 24))
+                for hour in hours {
+                    let label = Text(String(format: "%02d", hour % 24))
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .offset(x: min(max(x(hour * 60) - 6, 0), width - 12), y: trackHeight + 7)
+                    // Kept inside the frame, so the first and last hours are never cut.
+                    let left = min(max(x(hour * 60, in: size.width) - 6, 0), size.width - 12)
+                    context.draw(label, at: CGPoint(x: left, y: trackHeight + 7), anchor: .topLeading)
                 }
             }
-            // The full height, or the clip cuts off the hour numbers, which
-            // are drawn below the tallest shape.
-            .frame(width: width, height: Self.height, alignment: .topLeading)
-            .clipped()
+            // "Now" is its own canvas, so a tinted face colours it.
+            Canvas { context, size in
+                let now = x(moment.minute, in: size.width)
+                var marker = Path()
+                marker.addRect(CGRect(x: now - 1, y: 1.5, width: 2, height: trackHeight + 5))
+                marker.addEllipse(in: CGRect(x: now - 2, y: 0, width: 4, height: 4))
+                context.fill(marker, with: .color(WatchTheme.amber))
+            }
+            .widgetAccentable()
         }
         .frame(height: Self.height)
     }
 
-    private func hours(from start: Int) -> [Int] {
-        let first = (start + 59) / 60
-        return Array(first...(first + 4)).filter { $0 * 60 <= start + TimelineEntries.windowMinutes }
+    private func x(_ minute: Int, in width: CGFloat) -> CGFloat {
+        CGFloat(minute - moment.windowStart) / CGFloat(TimelineEntries.windowMinutes) * width
     }
 
-    @ViewBuilder
-    private func block(_ row: WatchRow, from left: CGFloat, to right: CGFloat) -> some View {
+    private var hours: [Int] {
+        let first = (moment.windowStart + 59) / 60
+        return Array(first...(first + 4)).filter { $0 * 60 <= moment.windowStart + TimelineEntries.windowMinutes }
+    }
+
+    private func draw(_ row: WatchRow, from left: CGFloat, to right: CGFloat, in context: inout GraphicsContext) {
         let opacity = row.done ? 0.25 : 1
+        let bar = CGRect(x: left, y: 3, width: max(right - left, 2), height: trackHeight)
         switch row.kind {
         case .task:
-            RoundedRectangle(cornerRadius: 1.5)
-                .fill(.primary)
-                .frame(width: max(right - left, 2), height: trackHeight)
-                .offset(x: left, y: 3)
-                .opacity(opacity)
+            context.fill(Path(roundedRect: bar, cornerRadius: 1.5), with: .style(.primary.opacity(opacity)))
         case .calendar:
-            RoundedRectangle(cornerRadius: 1.5)
-                .stroke(WatchTheme.cal, lineWidth: 1.2)
-                .frame(width: max(right - left, 2), height: trackHeight)
-                .offset(x: left, y: 3)
-                .opacity(opacity)
+            context.stroke(Path(roundedRect: bar, cornerRadius: 1.5), with: .color(WatchTheme.cal.opacity(opacity)), lineWidth: 1.2)
         case .reminder:
-            ZStack(alignment: .topLeading) {
-                Rectangle()
-                    .fill(.primary)
-                    .frame(width: 1.5, height: trackHeight + 4)
-                    .offset(x: left, y: 1)
-                Rectangle()
-                    .fill(.primary)
-                    .frame(width: 5, height: 2)
-                    .offset(x: left - 1.75, y: -1)
-            }
-            .opacity(opacity)
+            var tick = Path()
+            tick.addRect(CGRect(x: left, y: 1, width: 1.5, height: trackHeight + 4))
+            tick.addRect(CGRect(x: left - 1.75, y: -1, width: 5, height: 2))
+            context.fill(tick, with: .style(.primary.opacity(opacity)))
         }
     }
 }
