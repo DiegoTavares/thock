@@ -1399,6 +1399,19 @@ impl VaultSyncService {
     }
 }
 
+/// Makes `service` the one `service_for_project` answers with, as `init`
+/// does for a window's project.
+#[cfg(test)]
+pub(crate) fn register_for_test(
+    project: &Entity<Project>,
+    service: Entity<VaultSyncService>,
+    cx: &mut App,
+) {
+    cx.default_global::<GlobalVaultSyncServices>()
+        .0
+        .insert(project.entity_id(), service);
+}
+
 // --- the worker ---
 
 #[allow(clippy::too_many_arguments)]
@@ -2482,6 +2495,86 @@ mod tests {
         service.read_with(cx, |service, _| {
             assert!(matches!(service.status(), PhoneSyncState::UpToDate { .. }));
             assert_eq!(service.state.acked_through_seq, 2);
+        });
+    }
+
+    /// V51 §5: a page the phone edited while the desk was closed is never
+    /// judged before the session's first drain lands the edit.
+    #[gpui::test]
+    async fn todays_note_cleanup_waits_for_the_first_pass(cx: &mut TestAppContext) {
+        use crate::notes::expand_template;
+        use crate::today_note::TodayNoteService;
+        use crate::vault::DEFAULT_DAILY_TEMPLATE;
+
+        init_test(cx);
+        cx.update(|cx| {
+            cx.set_global(db::AppDatabase::test_new());
+            crate::reminders::TestClock::install(
+                chrono::NaiveDateTime::parse_from_str("2026-10-03 09:00:00", "%Y-%m-%d %H:%M:%S")
+                    .unwrap(),
+                cx,
+            );
+        });
+        let yesterday = expand_template(
+            DEFAULT_DAILY_TEMPLATE,
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap(),
+            chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            "2026-10-02",
+        );
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "templates": {"daily.md": DEFAULT_DAILY_TEMPLATE},
+                "daily": {"2026-10-02.md": yesterday.clone()},
+            }),
+        )
+        .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        let (release, gate) = futures::channel::oneshot::channel();
+        {
+            let mut server = server.lock().unwrap();
+            server.phone_paired = true;
+            server.writes_gate = Some(gate);
+            server.queue_write(
+                "daily/2026-10-02.md",
+                "c1",
+                &write_json("c1", "daily/2026-10-02.md", "Journal", "- Called Ana"),
+            );
+        }
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+        let service = cx.new(|cx| VaultSyncService::new(project.clone(), cx));
+        service.update(cx, |service, cx| {
+            service.configure_for_test(test_vault(), stub_api(server.clone()), KEY, cx)
+        });
+        cx.update(|cx| register_for_test(&project, service.clone(), cx));
+        cx.update(|cx| TodayNoteService::attach(test_vault(), &project, None, cx));
+        cx.run_until_parked();
+
+        // Today's page is there at once; yesterday's waits for the drain.
+        assert!(fs.is_file(Path::new("/vault/daily/2026-10-03.md")).await);
+        assert_eq!(
+            fs.load(Path::new("/vault/daily/2026-10-02.md"))
+                .await
+                .unwrap(),
+            yesterday
+        );
+        service.read_with(cx, |service, _| {
+            assert!(matches!(service.status(), PhoneSyncState::Working));
+        });
+
+        release.send(()).unwrap();
+        cx.run_until_parked();
+
+        let note = fs
+            .load(Path::new("/vault/daily/2026-10-02.md"))
+            .await
+            .unwrap();
+        assert!(note.contains("- Called Ana"), "{note}");
+        service.read_with(cx, |service, _| {
+            assert!(matches!(service.status(), PhoneSyncState::UpToDate { .. }));
         });
     }
 
