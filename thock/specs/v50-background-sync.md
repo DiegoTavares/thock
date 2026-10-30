@@ -1,6 +1,7 @@
 # Thock V50 - Desk changes reach a pocketed phone and the wrist
 
-**Status:** Built (2026-10-29) on `v50-background-sync`. The push half was first built on
+**Status:** Shipped (2026-10-29): merged as #170, the APNs key deployed to Plus, and §8's by-hand
+checks passed on TestFlight build 23. The push half was first built on
 `v45-push` (2026-10-22); §4 reviews it and §5 lists what it is missing. §11 lists where the build
 corrected this spec.
 **Owner:** Diego · **Date:** 2026-10-29
