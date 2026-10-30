@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Checks the build-number bump of script/testflight on a copy of the project
+# file: every target moves up by one, and targets that disagree are refused.
+# Runs anywhere; the upload half can only be tried for real.
+set -euo pipefail
+
+script="$(cd "$(dirname "$0")" && pwd)/testflight"
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+
+cat >"$scratch/project.pbxproj" <<'PBX'
+		A1 /* Release */ = {
+			buildSettings = {
+				CURRENT_PROJECT_VERSION = 24;
+				MARKETING_VERSION = 1.0;
+			};
+		};
+		A2 /* Debug */ = {
+			buildSettings = {
+				CURRENT_PROJECT_VERSION = 24;
+				MARKETING_VERSION = 1.0;
+			};
+		};
+PBX
+
+got="$(THOCK_PBXPROJ="$scratch/project.pbxproj" "$script" bump)"
+[[ "$got" == "25" ]] || { echo "expected 25, got $got" >&2; exit 1; }
+[[ "$(grep -c 'CURRENT_PROJECT_VERSION = 25;' "$scratch/project.pbxproj")" -eq 2 ]] || { echo "not every target was bumped" >&2; exit 1; }
+grep -q 'MARKETING_VERSION = 1.0;' "$scratch/project.pbxproj" || { echo "the marketing version was touched" >&2; exit 1; }
+[[ ! -e "$scratch/project.pbxproj.bak" ]] || { echo "a backup file was left behind" >&2; exit 1; }
+
+sed -i.orig 's/CURRENT_PROJECT_VERSION = 25;/CURRENT_PROJECT_VERSION = 26;/' "$scratch/project.pbxproj"
+# Only the first target now says 26; sed -i without a global flag edits every
+# line, so make them disagree by hand.
+printf '%s\n' '			CURRENT_PROJECT_VERSION = 25;' >>"$scratch/project.pbxproj"
+if THOCK_PBXPROJ="$scratch/project.pbxproj" "$script" bump >/dev/null 2>&1; then
+    echo "a project whose targets disagree should be refused" >&2
+    exit 1
+fi
+
+echo "test-testflight: ok"

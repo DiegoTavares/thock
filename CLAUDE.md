@@ -287,7 +287,8 @@ New docked panes implement the `Panel` trait and are registered with the workspa
 `thock/RELEASING.md` is the runbook for every pipeline (desktop release, site, services, iPhone).
 
 - **Don't ship without being asked in this session**: no `v*` tags, no `promote-release`, no `deploy.sh`, no
-  iOS uploads. Preparing a release PR is fine.
+  App Store submissions. Preparing a release PR is fine, and so is a TestFlight upload from a pull
+  request's branch (the `ship` skill's last step for an iPhone change).
 - Merging to `main` deploys `thock/site/` and `thock/services/` changes. Say so in the PR when it applies.
 - `main` only moves through pull requests with a green `CI` check.
 
