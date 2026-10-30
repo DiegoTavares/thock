@@ -544,9 +544,8 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   hands iOS the new reminders and sends the watch a fresh reading before it is suspended. Opening the
   watch app on a reading over a minute old asks the phone to sync, which wakes the iPhone app too,
   so the watch catches up within seconds even when Apple holds a push back. No note content ever
-  travels in a push. Spec `specs/v50-background-sync.md`. _(built on `main` with the V50 PR; pushes
-  are only logged until the APNs key is deployed (§9 steps 4–5), and the by-hand checks on a real
-  phone and watch (§8) come with the next TestFlight build)_
+  travels in a push. Spec `specs/v50-background-sync.md`. _(shipped on `main` with the V50 PR; the APNs
+  key is deployed, and the by-hand checks on a real phone and watch passed on TestFlight build 23)_
 
 ---
 
