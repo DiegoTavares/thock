@@ -555,6 +555,16 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   writes to land first, and a cleaned page a phone edit still targets comes back around the words.
   Nothing happens in a vault without a daily template. Spec `specs/v51-today-note-on-open.md`.
   _(shipped on `main` with the V51 PR)_
+- [x] **A desk agent that remembers the routine:** the Thock Agent offers a ritual at the right
+  moment, as a passing note with two chips, **Go for it** and **Not now**. When the last day you
+  wrote in isn't wrapped (looking back three days, so Monday asks about Friday), it offers Wrap
+  Yesterday; from Friday afternoon until the week is reviewed, Week Review. The offers are fixed
+  words, decided at coarse moments only (vault open, the top of each hour), from one structural
+  look at a handful of notes and never from a file event, so it is a colleague remembering, not
+  something watching. One at a time, two a day, and *Not now* keeps one away until tomorrow,
+  across restarts. A nudge exists only while its Routine is installed; the next one is a registry
+  entry, not a subsystem. Spec `specs/v52-nudges.md`. _(shipped on `main` with the V52 PR; people
+  on their own terminal agent get no nudge yet)_
 
 ---
 

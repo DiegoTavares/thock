@@ -1181,6 +1181,14 @@
     },
   },
   {
+    "context": "ThockChatPanel && nudge",
+    "use_key_equivalents": true,
+    "bindings": {
+      "y": "thock::AcceptNudge",
+      "n": "thock::DismissNudge",
+    },
+  },
+  {
     "context": "ThockSyncStatus",
     "use_key_equivalents": true,
     "bindings": {

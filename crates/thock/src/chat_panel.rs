@@ -19,8 +19,9 @@ use acp_thread::{
 };
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
-use chrono::{DateTime, Local, NaiveDate, TimeDelta};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeDelta};
 use collections::{HashMap, HashSet};
+use db::kvp::KeyValueStore;
 use editor::{
     DisplayPoint, Editor, EditorEvent, HighlightKey, SelectionEffects, display_map::DisplayRow,
     scroll::Autoscroll,
@@ -53,8 +54,9 @@ use workspace::{OpenOptions, OpenVisible, Workspace, WorkspaceSettings};
 
 use crate::ThockSettings;
 use crate::agent::{self, ConnectionMode, ModelTier};
-use crate::agent_panel::{AgentPanel, ConnectionEpoch, LaunchRequest};
+use crate::agent_panel::{AgentPanel, ConnectionEpoch, LaunchRequest, RunSkill};
 use crate::hosted_agent;
+use crate::nudges::{self, Ledger, Moment, NudgeOffer, VaultSnapshot};
 use crate::plus::{self, Entitlement, PlusError};
 use crate::vault::{Vault, VaultStatus};
 
@@ -104,6 +106,10 @@ actions!(
         /// Moves the keyboard focus from the message box to the chat's last
         /// message.
         FocusChatThread,
+        /// Go for it: runs the ritual the Thock Agent just offered.
+        AcceptNudge,
+        /// Not now: keeps the Thock Agent's offer away until tomorrow.
+        DismissNudge,
     ]
 );
 
@@ -135,6 +141,12 @@ pub fn init(cx: &mut App) {
         });
         for_action::<UseOwnAgent>(workspace, &chat, |chat, _, cx| {
             chat.set_mode(ConnectionMode::Byo, cx)
+        });
+        for_action::<AcceptNudge>(workspace, &chat, |chat, window, cx| {
+            chat.accept_nudge_action(&AcceptNudge, window, cx)
+        });
+        for_action::<DismissNudge>(workspace, &chat, |chat, window, cx| {
+            chat.dismiss_nudge_action(&DismissNudge, window, cx)
         });
         workspace.register_action(|workspace, _: &NewChat, window, cx| {
             ChatPanel::launch_in_workspace(workspace, LaunchRequest::conversation(), window, cx);
@@ -192,10 +204,12 @@ enum Waiting {
 }
 
 /// A conversation Thock starts (§5.8): one thing it says and one question,
-/// with two chips. The first is the Reflect nudge (V28).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// with two chips. The first is the Reflect nudge (V28); the rest are the
+/// ritual nudges (V52).
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Opener {
     Reflect,
+    Nudge(NudgeOffer),
 }
 
 impl Opener {
@@ -204,12 +218,21 @@ impl Opener {
             Opener::Reflect => {
                 "I've noted a few things about you that I haven't filed yet. File them now?".into()
             }
+            Opener::Nudge(offer) => offer.text.clone(),
         }
     }
 
     fn choices(&self) -> [SharedString; 2] {
         match self {
             Opener::Reflect => ["File them".into(), "Not now".into()],
+            Opener::Nudge(_) => ["Go for it".into(), "Not now".into()],
+        }
+    }
+
+    fn nudge_id(&self) -> Option<&'static str> {
+        match self {
+            Opener::Reflect => None,
+            Opener::Nudge(offer) => Some(offer.id),
         }
     }
 }
@@ -1359,6 +1382,15 @@ pub struct ChatPanel {
     opener_pause: Option<Task<()>>,
     /// Folds an opener left alone into the dot (§5.8).
     opener_linger: Option<Task<()>>,
+    /// The day's nudge offers and snoozes (V52 §4.2), once the vault's
+    /// ledger is loaded.
+    nudge_ledger: Option<Ledger>,
+    /// The hourly evaluation (V52 §4.3).
+    nudge_tick: Option<Task<()>>,
+    /// The ledger write in flight; the newest state owns the record.
+    nudge_save: Option<Task<()>>,
+    /// A pinned clock for the nudges, so tests can set the day and hour.
+    nudge_now: Option<NaiveDateTime>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1475,6 +1507,10 @@ impl ChatPanel {
                 opener: None,
                 opener_pause: None,
                 opener_linger: None,
+                nudge_ledger: None,
+                nudge_tick: None,
+                nudge_save: None,
+                nudge_now: None,
                 _subscriptions: vec![
                     project_subscription,
                     workspace_subscription,
@@ -2128,7 +2164,13 @@ impl ChatPanel {
             None => VaultStatus::NotAVault,
         };
         if status != self.vault_status {
+            let previous_root = self.vault().map(|vault| vault.root.clone());
             self.vault_status = status;
+            // Nudges start with a vault, not with every config change on
+            // the way: those are file events (V52 G2).
+            if self.vault().map(|vault| &vault.root) != previous_root.as_ref() {
+                self.start_nudges(cx);
+            }
             cx.notify();
         }
     }
@@ -2476,7 +2518,159 @@ impl ChatPanel {
         match (opener, index) {
             (Opener::Reflect, 0) => self.reflect_now(window, cx),
             (Opener::Reflect, _) => self.dismiss_nudge(cx),
+            (Opener::Nudge(offer), 0) => self.accept_nudge(offer, window, cx),
+            (Opener::Nudge(offer), _) => self.snooze_nudge(offer.id, cx),
         }
+    }
+
+    fn accept_nudge_action(
+        &mut self,
+        _: &AcceptNudge,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.opener, Some(Opener::Nudge(_))) {
+            self.answer_opener(0, window, cx);
+        }
+    }
+
+    fn dismiss_nudge_action(
+        &mut self,
+        _: &DismissNudge,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.opener, Some(Opener::Nudge(_))) {
+            self.answer_opener(1, window, cx);
+        }
+    }
+
+    /// Go for it (V52 §6.3): the ritual runs through `thock::RunSkill`, the
+    /// rail's own path, once this update is over.
+    fn accept_nudge(&mut self, offer: NudgeOffer, window: &mut Window, cx: &mut Context<Self>) {
+        self.snooze_nudge(offer.id, cx);
+        let action = RunSkill {
+            skill: Some(offer.skill.to_string()),
+        };
+        window.defer(cx, move |window, cx| {
+            window.dispatch_action(action.boxed_clone(), cx);
+        });
+    }
+
+    /// Keeps the nudge away for the rest of the day, across restarts.
+    fn snooze_nudge(&mut self, id: &str, cx: &mut Context<Self>) {
+        let today = self.nudge_moment().today;
+        if let Some(ledger) = &mut self.nudge_ledger {
+            ledger.snooze(id, today);
+            self.save_nudge_ledger(cx);
+        }
+    }
+
+    fn nudge_moment(&self) -> Moment {
+        self.nudge_now.map_or_else(Moment::now, Moment::at)
+    }
+
+    fn nudge_clock(&self) -> NaiveDateTime {
+        self.nudge_now.unwrap_or_else(|| Local::now().naive_local())
+    }
+
+    /// A vault opened (V52 §4.3): load its ledger, evaluate once and start
+    /// the hourly tick. Without a vault, everything stops.
+    fn start_nudges(&mut self, cx: &mut Context<Self>) {
+        self.nudge_ledger = None;
+        self.nudge_tick = None;
+        let Some(vault) = self.vault() else {
+            return;
+        };
+        let key = Ledger::store_key(&vault.root);
+        let store = KeyValueStore::global(cx);
+        cx.spawn(async move |this, cx| {
+            let ledger = cx
+                .background_spawn(async move { Ledger::load(&store, &key) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.nudge_ledger = Some(ledger);
+                this.evaluate_nudges(cx);
+                this.arm_nudge_tick(cx);
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn arm_nudge_tick(&mut self, cx: &mut Context<Self>) {
+        let wait = nudges::next_tick(self.nudge_clock());
+        self.nudge_tick = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, cx| {
+                this.evaluate_nudges(cx);
+                this.arm_nudge_tick(cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// One reading of the vault, then the ledger's pick becomes the opener
+    /// (V52 §4.3). Skipped without reading when openers are off or the chat
+    /// is hidden.
+    fn evaluate_nudges(&mut self, cx: &mut Context<Self>) {
+        if self.nudge_ledger.is_none()
+            || self.mode == Some(ConnectionMode::Byo)
+            || ThockSettings::get_global(cx).openers == OpenerFrequency::Off
+        {
+            return;
+        }
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
+        let moment = self.nudge_moment();
+        let fs = self.project.read(cx).fs().clone();
+        cx.spawn(async move |this, cx| {
+            let snapshot = cx
+                .background_spawn(VaultSnapshot::read(fs, vault, moment.today))
+                .await;
+            this.update(cx, |this, cx| this.apply_nudges(moment, &snapshot, cx))
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn apply_nudges(&mut self, moment: Moment, snapshot: &VaultSnapshot, cx: &mut Context<Self>) {
+        let offers = nudges::evaluate(nudges::REGISTRY, &moment, snapshot);
+        let pending = self.opener.as_ref().and_then(Opener::nudge_id);
+        // A nudge whose moment passed (the ritual ran by hand) is withdrawn.
+        if let Some(pending_id) = pending
+            && !offers.iter().any(|offer| offer.id == pending_id)
+        {
+            self.opener = None;
+            self.opener_pause = None;
+            self.opener_linger = None;
+            if self.waiting == Some(Waiting::Opener) {
+                self.settled(cx);
+            }
+            cx.notify();
+        }
+        let Some(ledger) = &mut self.nudge_ledger else {
+            return;
+        };
+        if let Some(offer) = ledger.pick(offers, moment.today, pending) {
+            self.save_nudge_ledger(cx);
+            self.offer_opener(Opener::Nudge(offer), cx);
+        }
+    }
+
+    fn save_nudge_ledger(&mut self, cx: &mut Context<Self>) {
+        let (Some(ledger), Some(vault)) = (&self.nudge_ledger, self.vault()) else {
+            return;
+        };
+        let Some(payload) = ledger.to_json().log_err() else {
+            return;
+        };
+        let key = Ledger::store_key(&vault.root);
+        let store = KeyValueStore::global(cx);
+        self.nudge_save = Some(cx.background_spawn(async move {
+            if let Err(error) = store.write_kvp(key, payload).await {
+                log::error!("couldn't save the nudge ledger: {error}");
+            }
+        }));
     }
 
     fn dismiss_memory_nudge(
@@ -2518,7 +2712,7 @@ impl ChatPanel {
     /// A conversation Thock started (§5.8): one thing, one question, two
     /// chips.
     fn render_opener(&self, cx: &Context<Self>) -> AnyElement {
-        let Some(opener) = self.opener else {
+        let Some(opener) = self.opener.as_ref() else {
             return div().into_any_element();
         };
         v_flex()
@@ -3336,6 +3530,7 @@ impl ChatPanel {
             .or_else(|| {
                 self.opener_takes_keys().then(|| {
                     self.opener
+                        .as_ref()
                         .map(|opener| opener.choices().map(|choice| choice.to_string()).to_vec())
                         .unwrap_or_default()
                 })
@@ -5819,6 +6014,10 @@ impl Render for ChatPanel {
                     key_context.add("choice_pair");
                 }
             }
+            // A nudge's chips answer to the named actions (V52 §6.2).
+            if self.opener_takes_keys() && matches!(self.opener, Some(Opener::Nudge(_))) {
+                key_context.add("nudge");
+            }
         }
         if keyed_chips != self.keyed_chips {
             self.keyed_chips = keyed_chips;
@@ -5883,6 +6082,8 @@ impl Render for ChatPanel {
             .on_action(cx.listener(Self::retry_turn))
             .on_action(cx.listener(Self::toggle_usage))
             .on_action(cx.listener(Self::dismiss_memory_nudge))
+            .on_action(cx.listener(Self::accept_nudge_action))
+            .on_action(cx.listener(Self::dismiss_nudge_action))
             .on_action(cx.listener(Self::answer_choice))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_previous))
@@ -6253,6 +6454,7 @@ mod tests {
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             release_channel::init(semver::Version::new(0, 0, 0), cx);
             editor::init(cx);
+            crate::agent_panel::init(cx);
             init(cx);
             // The shipped keymap, so a missing or shadowed binding fails here.
             let bindings = match KeymapFile::load(
@@ -7905,6 +8107,288 @@ mod tests {
             );
             assert!(matches!(panel.view, PanelView::Connect(_)));
         });
+    }
+
+    /// The Timeline Routine installed in the test vault, so `thock::RunSkill`
+    /// can resolve its skills, with a daily template and the notes given.
+    const TIMELINE_CONFIG: &str = "schema = 1\n\n[[routines.installed]]\nid = \"timeline\"\n\
+                                   enabled = true\nversion = 13\n";
+    const DAILY_TEMPLATE: &str = "# {{date}}\n\n## Day Planner\n";
+
+    async fn install_timeline(setup: &mut Setup, notes: serde_json::Value) {
+        let manifest = include_str!("../assets/routines/timeline/routine.toml");
+        std::fs::write(setup.root.join(".thock/config.toml"), TIMELINE_CONFIG).unwrap();
+        std::fs::create_dir_all(setup.root.join("routines/timeline")).unwrap();
+        std::fs::write(setup.root.join("routines/timeline/routine.toml"), manifest).unwrap();
+        setup
+            .fs
+            .insert_tree(
+                &setup.root,
+                json!({
+                    ".thock": { "config.toml": TIMELINE_CONFIG },
+                    "routines": { "timeline": { "routine.toml": manifest } },
+                    "templates": { "daily.md": DAILY_TEMPLATE },
+                    "daily": notes,
+                }),
+            )
+            .await;
+        setup.cx.run_until_parked();
+    }
+
+    /// Opens the vault's nudges at `now`, as a vault open would, with the
+    /// clock pinned so the day and hour are the test's.
+    fn open_nudges(setup: &mut Setup, now: &str) {
+        let now = NaiveDateTime::parse_from_str(now, "%Y-%m-%d %H:%M").unwrap();
+        setup.panel.update(&mut setup.cx, |panel, cx| {
+            panel.nudge_now = Some(now);
+            // The hosted chat is this test's agent, so a launch reaches it.
+            panel.mode = Some(ConnectionMode::Hosted);
+            panel.refresh_vault_status(cx);
+            panel.start_nudges(cx);
+        });
+        setup.cx.run_until_parked();
+    }
+
+    /// The words of the bubble up, with its chips.
+    fn opener_text(setup: &Setup) -> String {
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            panel
+                .opener
+                .as_ref()
+                .map(|opener| format!("{}\n{}", opener.text(), opener.choices().join(" ")))
+                .unwrap_or_default()
+        })
+    }
+
+    fn nudge_id(setup: &Setup) -> Option<&'static str> {
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            panel.opener.as_ref().and_then(Opener::nudge_id)
+        })
+    }
+
+    fn snoozed(setup: &Setup, id: &str, day: &str) -> bool {
+        let day = NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap();
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            panel
+                .nudge_ledger
+                .as_ref()
+                .is_some_and(|ledger| ledger.is_snoozed(id, day))
+        })
+    }
+
+    #[gpui::test]
+    async fn a_wrap_nudge_floats_and_go_for_it_runs_the_ritual(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let editor = open_note(&mut setup).await;
+        install_timeline(
+            &mut setup,
+            json!({ "2026-10-30.md": "# 2026-10-30\n\n## Day Planner\n- [ ] Call\n" }),
+        )
+        .await;
+        // Monday morning, with Friday's note unwrapped.
+        open_nudges(&mut setup, "2026-11-02 09:12");
+        assert_eq!(nudge_id(&setup), Some("wrap-yesterday"));
+        assert!(!bubble_up(&setup), "it waits for the page to be quiet");
+        advance(&mut setup, Duration::from_secs(8));
+        assert_eq!(presence(&setup), Presence::NeedsYou);
+        assert_eq!(waiting(&setup), Some(Waiting::Opener));
+        assert_eq!(visible_chips(&setup), ["Go for it", "Not now"]);
+        assert!(is_focused(&mut setup, &editor), "it takes no focus");
+        let text = opener_text(&setup);
+        assert!(
+            text.contains("It looks like Friday wasn't wrapped up."),
+            "{text}"
+        );
+        for leak in ["wrap-yesterday", "routines/", ".md", "{"] {
+            assert!(!text.contains(leak), "the bubble leaks {leak:?}: {text}");
+        }
+
+        setup.cx.simulate_keystrokes("ctrl-? y");
+        setup.cx.run_until_parked();
+        // The launch waits on the connect flow, which proves it was Wrap
+        // Yesterday that `thock::RunSkill` resolved and started.
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            assert_eq!(panel.opener, None);
+            assert_eq!(
+                panel
+                    .pending_launch
+                    .as_ref()
+                    .map(|launch| launch.title.as_str()),
+                Some("Wrap Yesterday")
+            );
+        });
+        assert!(snoozed(&setup, "wrap-yesterday", "2026-11-02"));
+        // Snoozed, it isn't offered again today. A fresh evaluation moves
+        // on to the day's second offer: last week's review, Monday morning.
+        setup.panel.update(&mut setup.cx, |panel, cx| {
+            panel.cancel_connect(cx);
+            panel.evaluate_nudges(cx);
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(nudge_id(&setup), Some("week-review"));
+        assert!(
+            opener_text(&setup).contains("Last week never got its review."),
+            "{}",
+            opener_text(&setup)
+        );
+    }
+
+    #[gpui::test]
+    async fn not_now_snoozes_a_nudge_for_the_day_and_it_survives_a_reload(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let editor = open_note(&mut setup).await;
+        install_timeline(
+            &mut setup,
+            json!({ "2026-11-02.md": "# 2026-11-02\n\n## Day Planner\n- [ ] Call\n" }),
+        )
+        .await;
+        open_nudges(&mut setup, "2026-11-03 10:00");
+        advance(&mut setup, Duration::from_secs(8));
+        assert_eq!(nudge_id(&setup), Some("wrap-yesterday"));
+        setup.cx.simulate_keystrokes("ctrl-? n");
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Resting);
+        assert_eq!(nudge_id(&setup), None);
+        assert!(is_focused(&mut setup, &editor));
+        assert!(snoozed(&setup, "wrap-yesterday", "2026-11-03"));
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            assert!(panel.pending_launch.is_none(), "nothing ran");
+        });
+
+        // A restart: the ledger comes back from the store with the snooze.
+        open_nudges(&mut setup, "2026-11-03 11:00");
+        advance(&mut setup, Duration::from_secs(8));
+        assert_eq!(nudge_id(&setup), None);
+        assert!(snoozed(&setup, "wrap-yesterday", "2026-11-03"));
+        // Tomorrow it is back.
+        open_nudges(&mut setup, "2026-11-04 09:00");
+        advance(&mut setup, Duration::from_secs(8));
+        assert_eq!(nudge_id(&setup), Some("wrap-yesterday"));
+        let text = opener_text(&setup);
+        assert!(
+            text.contains("It looks like Monday wasn't wrapped up."),
+            "{text}"
+        );
+    }
+
+    #[gpui::test]
+    async fn escape_and_the_palette_say_not_now_to_a_nudge(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        open_note(&mut setup).await;
+        install_timeline(
+            &mut setup,
+            json!({ "2026-11-02.md": "# 2026-11-02\n\n## Day Planner\n- [ ] Call\n" }),
+        )
+        .await;
+        open_nudges(&mut setup, "2026-11-03 10:00");
+        advance(&mut setup, Duration::from_secs(8));
+        setup.cx.simulate_keystrokes("ctrl-? escape");
+        setup.cx.run_until_parked();
+        assert_eq!(nudge_id(&setup), None);
+        assert!(snoozed(&setup, "wrap-yesterday", "2026-11-03"));
+
+        // Left alone, the bubble folds into the dot; the palette still
+        // reaches it.
+        open_nudges(&mut setup, "2026-11-04 10:00");
+        advance(&mut setup, Duration::from_secs(8));
+        assert_eq!(nudge_id(&setup), Some("wrap-yesterday"));
+        advance(&mut setup, Duration::from_secs(60));
+        assert!(!bubble_up(&setup), "folded into the dot");
+        setup.cx.dispatch_action(DismissNudge);
+        setup.cx.run_until_parked();
+        assert_eq!(nudge_id(&setup), None);
+        assert!(snoozed(&setup, "wrap-yesterday", "2026-11-04"));
+    }
+
+    #[gpui::test]
+    async fn the_week_review_nudge_comes_on_friday_afternoon(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        open_note(&mut setup).await;
+        install_timeline(
+            &mut setup,
+            json!({
+                "2026-10-26.md": "# 2026-10-26\n\n## Day Planner\n- [x] Done\n# Daily Closure\n",
+            }),
+        )
+        .await;
+        open_nudges(&mut setup, "2026-10-30 14:00");
+        advance(&mut setup, Duration::from_secs(8));
+        assert_eq!(nudge_id(&setup), None, "too early, and Monday is wrapped");
+        open_nudges(&mut setup, "2026-10-30 16:00");
+        advance(&mut setup, Duration::from_secs(8));
+        assert_eq!(nudge_id(&setup), Some("week-review"));
+        setup.cx.simulate_keystrokes("ctrl-? y");
+        setup.cx.run_until_parked();
+        setup.panel.read_with(&setup.cx, |panel, _| {
+            assert_eq!(
+                panel
+                    .pending_launch
+                    .as_ref()
+                    .map(|launch| launch.title.as_str()),
+                Some("Week Review")
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn nudges_wait_for_the_hour_and_never_for_a_file_event(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        open_note(&mut setup).await;
+        install_timeline(&mut setup, json!({})).await;
+        // Just before the hour: simulating a whole one steps the executor
+        // through every blink and poll timer and takes a minute of real time.
+        open_nudges(&mut setup, "2026-11-03 10:59");
+        advance(&mut setup, Duration::from_secs(8));
+        assert_eq!(nudge_id(&setup), None, "nothing to wrap");
+
+        // Yesterday's note appears on disk: a file event, not a moment.
+        setup
+            .fs
+            .insert_file(
+                setup.root.join("daily/2026-11-02.md"),
+                "# 2026-11-02\n\n## Day Planner\n- [ ] Call\n".into(),
+            )
+            .await;
+        advance(&mut setup, Duration::from_secs(30));
+        assert_eq!(nudge_id(&setup), None, "a file event never evaluates");
+        // The top of the hour does.
+        advance(&mut setup, Duration::from_secs(40));
+        assert_eq!(nudge_id(&setup), Some("wrap-yesterday"));
+    }
+
+    #[gpui::test]
+    async fn without_the_routine_or_with_openers_off_there_is_no_nudge(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        open_note(&mut setup).await;
+        setup
+            .fs
+            .insert_tree(
+                &setup.root,
+                json!({
+                    "templates": { "daily.md": DAILY_TEMPLATE },
+                    "daily": { "2026-11-02.md": "# 2026-11-02\n\n## Day Planner\n- [ ] Call\n" },
+                }),
+            )
+            .await;
+        open_nudges(&mut setup, "2026-11-03 10:00");
+        advance(&mut setup, Duration::from_secs(8));
+        assert_eq!(nudge_id(&setup), None, "no Timeline Routine, no nudge");
+
+        install_timeline(
+            &mut setup,
+            json!({ "2026-11-02.md": "# 2026-11-02\n\n## Day Planner\n- [ ] Call\n" }),
+        )
+        .await;
+        setup.cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.thock.get_or_insert_default().openers = Some(OpenerFrequency::Off);
+                });
+            });
+        });
+        open_nudges(&mut setup, "2026-11-03 10:00");
+        advance(&mut setup, Duration::from_secs(8));
+        assert_eq!(nudge_id(&setup), None, "openers are off");
     }
 
     #[gpui::test]
