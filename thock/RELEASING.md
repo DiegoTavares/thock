@@ -9,16 +9,21 @@ release, person or agent.
 | Site, thethock.com | Cloud Run `thock-site` | `thock/site/**` lands on `main` | `deploy-site.yml` | redeploy a revision |
 | Thock Plus backend | Cloud Run `thock-plus-api` | `thock/services/plus/**` lands on `main` | `deploy-services.yml` | redeploy a revision |
 | Release index, updates.thethock.com | Cloud Run `thock-releases-api` | `thock/services/releases/**` lands on `main` | `deploy-services.yml` | redeploy a revision |
-| iPhone app | TestFlight / App Store | by hand, from Xcode | none yet | expire the build |
+| iPhone app | TestFlight / App Store | `thock/ios/script/testflight upload` on a Mac | none in CI | expire the build |
 
 All Cloud Run deploys authenticate with Workload Identity Federation: no keys in GitHub. The pool
 accepts this repository on `main` or on a tag, nothing else (setup: `specs/v20-auto-update-rollout.md` §5).
 
 ## Rules for agents
 
-- **An agent never pushes a `v*` tag, runs `promote-release`, runs `deploy.sh`, or uploads an iOS
-  build unless the user asked for that release in this session.** Each of these reaches real users
-  and none can be fully undone. Preparing the version-bump PR is fine; shipping it is the user's call.
+- **An agent never pushes a `v*` tag, runs `promote-release`, runs `deploy.sh`, or submits an iOS
+  build to App Store review unless the user asked for that release in this session.** Each of these
+  reaches real users and none can be fully undone. Preparing the version-bump PR is fine; shipping
+  it is the user's call.
+- **A TestFlight upload is not a release.** It reaches only the internal testers, and it is the
+  `ship` skill's last step for a pull request that touches `thock/ios/`: the build Diego checks by
+  hand is the one about to be merged. Upload from the pull request's branch, never from `main`
+  ahead of the merge, and record the build number in the PR and the spec.
 - Merging to `main` deploys the site and the services. Treat a merge that touches `thock/site/` or
   `thock/services/` as a deploy and say so in the PR.
 - After anything ships, verify it with the check listed in its section and report what you saw.
@@ -117,17 +122,31 @@ for the stable macOS asset, the request every installed app makes.
 
 ## iPhone app
 
-Manual for now; there is no upload pipeline and no App Store Connect key in the repository.
+There is no upload pipeline in CI and no App Store Connect key in the repository; the upload runs
+on a Mac that is signed in to the team (palloma), driven by `thock/ios/script/testflight`.
 
 1. `thock/ios/script/test` and `thock/ios/script/smoke` pass.
-2. Bump `CURRENT_PROJECT_VERSION` (every upload needs a new build number) and, for a new App Store
-   version, `MARKETING_VERSION` in `Thock.xcodeproj`. All three targets share them. Commit as
-   `thock: Version the phone app X.Y (build N)`.
-3. In Xcode: scheme *Thock*, destination *Any iOS Device*, **Product → Archive**, then
-   **Distribute App → App Store Connect**. Signing is automatic under team `KY338LSPPB`.
-4. The build appears in TestFlight after processing. `ITSAppUsesNonExemptEncryption` is `NO`, so
+2. **Bump.** `thock/ios/script/testflight bump` raises `CURRENT_PROJECT_VERSION` in every target
+   (every upload needs a new build number) and prints it. Commit as
+   `thock: Bump the iPhone build to N`. A new App Store version also needs `MARKETING_VERSION`,
+   by hand in `Thock.xcodeproj`, committed as `thock: Version the phone app X.Y (build N)`.
+3. **Upload.** Push the branch, check it out on the Mac, and run `thock/ios/script/testflight upload`
+   from inside a herdr pane (`fleet herdr palloma …`), because signing needs the login keychain and
+   a plain ssh session can't reach it. It takes 15–20 minutes and writes `archive.log` and
+   `export.log` under `thock/ios/build/release/`. Poll the pane for a whole-line done marker:
+   `… testflight upload; echo TESTFLIGHT-DONE-$?` and `herdr pane wait-output … --regex '^TESTFLIGHT-DONE-[0-9]+$'`.
+   Signing is automatic under team `KY338LSPPB`; `-allowProvisioningUpdates` registers new App IDs
+   and app groups on its own.
+4. **When it stops.** The script checks what it can before building and reads the export's log
+   after, so the failure names the fix. Each one is the user's to do, never an agent's:
+   - *screen locked* or *keychain locked*: unlock the Mac and the login keychain
+     (`security unlock-keychain`). Unlocking the screen alone does not unlock the keychain.
+   - *not signed in*: Xcode → Settings → Accounts, sign the Apple ID in again.
+   - *Program License Agreement*: accept it on developer.apple.com → Agreements.
+   The archive stays valid; after the fix rerun `testflight upload --export-only`.
+5. The build appears in TestFlight after processing. `ITSAppUsesNonExemptEncryption` is `NO`, so
    there is no export-compliance question.
-5. Verify on a phone from TestFlight: open the practice notebook, then pair with a real desk.
+6. Verify on a phone from TestFlight: open the practice notebook, then pair with a real desk.
 
 **Undo:** expire the build in App Store Connect → TestFlight. A build that reached the App Store
 can only be superseded.
