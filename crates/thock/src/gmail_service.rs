@@ -4,35 +4,48 @@
 //! crash-safe order — note files first, then landing integrations (the
 //! backlog append), then the dedup state. It lives independently of the
 //! Backlog panel; the panel only displays the status this service exposes.
+//!
+//! After each poll it also runs the Gmail archive pass (V53): new lines in
+//! the triage log take their thread out of the Gmail inbox, and undone ones
+//! put it back.
 
 use anyhow::{Context as _, Result, anyhow};
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
+use editor::{Editor, SelectionEffects, scroll::Autoscroll};
 use fs::Fs;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, Subscription,
-    Task, WeakEntity, actions,
+    Action as _, App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global,
+    SharedString, Subscription, Task, TaskExt as _, WeakEntity, Window, actions,
 };
 use project::Project;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use text::{Bias, Point};
 use ui::IconName;
-use workspace::Workspace;
+use util::ResultExt as _;
+use workspace::notifications::NotificationId;
+use workspace::{OpenOptions, OpenVisible, Toast, Workspace};
 
 use crate::backlog::{
     DEFAULT_BACKLOG, EMAIL_ARCHIVE_DIR, SectionKind, append_to_section_edit, apply_edits,
     email_capture_line,
 };
+use crate::calendar_service::ConnectGoogleWorkspace;
 use crate::calendar_service::{ManualSyncFinished, SyncState, show_sync_toast};
 use crate::gmail::{
-    GMAIL_CONFIG_FILE, GmailConfig, MailTransport, MappingFetched, archive_frontmatter_digest,
-    parse_gmail_config, scan_backlog_markers,
+    ARCHIVE_GRACE, ArchiveConfig, ArchiveEvent, ArchiveState, GMAIL_CONFIG_FILE, GmailConfig,
+    MailTransport, MappingFetched, MissingPermission, ThreadMove, archive_frontmatter_digest,
+    logged_decisions, parse_gmail_config, parse_imported_index, plan_archive, scan_backlog_markers,
 };
 use crate::gmail_google::GmailTransport;
-use crate::google_auth::{AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings};
+use crate::google_auth::{
+    self, AuthRevoked, GOOGLE_CONFIG_FILE, GoogleClient, resolve_google_settings,
+};
 use crate::inbox::{
-    ImportRecord, TRIAGE_LOG_PATH, inbox_note_digest, plan_inbox_capture, scan_triage_log_markers,
+    INBOX_CONFIG_FILE, ImportRecord, TRIAGE_LOG_PATH, inbox_note_digest, parse_inbox_config,
+    plan_inbox_capture, scan_triage_log_markers,
 };
 use crate::vault::{VAULT_CONFIG_FILE, VAULT_MARKER_DIR, Vault, VaultStatus};
 
@@ -43,6 +56,8 @@ const BACKOFF_CEILING: Duration = Duration::from_secs(60 * 60);
 
 const STATE_DIR: &str = "state/gmail";
 const STATE_FILE: &str = "imported.jsonl";
+/// Gmail archive's record (V53 §7.2), beside the capture state.
+const ARCHIVE_STATE_FILE: &str = "archive.jsonl";
 /// Read for its digests during dedup (pre-V15 Gmail captures were recorded
 /// there); never written by this service.
 const INBOX_STATE_DIR: &str = "state/inbox";
@@ -53,6 +68,13 @@ actions!(
         /// Checks Gmail for newly labeled emails and lands them in their
         /// mapped folders now.
         SyncGmailNow,
+        /// Lets Thock archive an email in Gmail when you file it from the
+        /// inbox, so you only triage it once. Asks Google for permission
+        /// first.
+        EnableGmailArchive,
+        /// Stops archiving emails in Gmail when you file them. Nothing
+        /// already archived moves.
+        DisableGmailArchive,
     ]
 );
 
@@ -83,8 +105,48 @@ pub fn init(cx: &mut App) {
                 service.update(cx, |service, cx| service.sync_now(cx));
             }
         });
+        workspace.register_action(|workspace, _: &EnableGmailArchive, _window, cx| {
+            let handle = workspace.weak_handle();
+            if let Some(service) = service_for_project(workspace.project(), cx) {
+                service.update(cx, |service, cx| service.enable_archive(handle, cx));
+            }
+        });
+        workspace.register_action(|workspace, _: &DisableGmailArchive, _window, cx| {
+            let handle = workspace.weak_handle();
+            if let Some(service) = service_for_project(workspace.project(), cx) {
+                service.update(cx, |service, cx| service.disable_archive(handle, cx));
+            }
+        });
     })
     .detach();
+}
+
+/// The toast Gmail archive's on and off actions show.
+struct GmailArchiveToast;
+
+/// Where Gmail archive stands, for the connector row (V53 §8).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArchiveStatus {
+    Off,
+    /// `[archive]` is in a shape this build can't read.
+    Unreadable,
+    /// On, but the Google grant lacks `gmail.modify`.
+    NeedsPermission,
+    /// The last pass couldn't archive `emails` threads, or couldn't record
+    /// what it did when `emails` is 0.
+    Failing {
+        emails: usize,
+        error: SharedString,
+    },
+    Healthy,
+}
+
+/// What one archive pass ended with.
+#[derive(Default)]
+struct ArchivePass {
+    permission_missing: bool,
+    failed: usize,
+    error: Option<String>,
 }
 
 #[derive(Default)]
@@ -159,6 +221,18 @@ pub struct GmailService {
     /// Set by `sync_now` so the next completed sync announces itself
     /// ([`ManualSyncFinished`]); background polls stay quiet.
     announce_next_sync: bool,
+    /// Archive passes read the state file and append to it, so they run one
+    /// at a time: a lost `archived` record would archive a thread twice.
+    archive_lock: Arc<futures::lock::Mutex<()>>,
+    /// The pass pair [`GmailService::reconcile_soon`] schedules.
+    reconcile_soon_task: Option<Task<()>>,
+    /// The enable or disable flow in flight.
+    archive_toggle_task: Option<Task<()>>,
+    /// Learned from the grant or a refused write; cleared when the transport
+    /// is rebuilt, which is what a new consent does.
+    archive_permission_missing: bool,
+    archive_failure: Option<(usize, SharedString)>,
+    now: Arc<dyn Fn() -> DateTime<Utc>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -176,6 +250,12 @@ impl GmailService {
             poll_task: None,
             imported: None,
             announce_next_sync: false,
+            archive_lock: Arc::new(futures::lock::Mutex::new(())),
+            reconcile_soon_task: None,
+            archive_toggle_task: None,
+            archive_permission_missing: false,
+            archive_failure: None,
+            now: Arc::new(Utc::now),
             _subscriptions: vec![project_subscription],
         };
         this.reload(cx);
@@ -184,6 +264,45 @@ impl GmailService {
 
     pub fn state(&self) -> &SyncState {
         &self.state
+    }
+
+    /// Gmail archive's part of the connector row.
+    pub fn archive_status(&self) -> ArchiveStatus {
+        match self.config.as_ref().map(|config| &config.archive) {
+            None | Some(ArchiveConfig::Off) => ArchiveStatus::Off,
+            Some(ArchiveConfig::Unreadable) => ArchiveStatus::Unreadable,
+            Some(ArchiveConfig::On(_)) if self.archive_permission_missing => {
+                ArchiveStatus::NeedsPermission
+            }
+            Some(ArchiveConfig::On(_)) => match &self.archive_failure {
+                Some((emails, error)) => ArchiveStatus::Failing {
+                    emails: *emails,
+                    error: error.clone(),
+                },
+                None => ArchiveStatus::Healthy,
+            },
+        }
+    }
+
+    /// Runs an archive pass now and another once the grace period is over,
+    /// so an inbox decision or its undo reaches Gmail without waiting for
+    /// the next poll (V53 §7.4).
+    pub fn reconcile_soon(&mut self, cx: &mut Context<Self>) {
+        let archive_on = self
+            .config
+            .as_ref()
+            .is_some_and(|config| config.archive.is_on());
+        if !archive_on || self.transport.is_none() {
+            return;
+        }
+        self.reconcile_soon_task = Some(cx.spawn(async move |this, cx| {
+            Self::reconcile_archive(&this, cx).await;
+            // A second past the grace, so the pass sees it fully elapsed.
+            cx.background_executor()
+                .timer(ARCHIVE_GRACE + Duration::from_secs(1))
+                .await;
+            Self::reconcile_archive(&this, cx).await;
+        }));
     }
 
     /// Whether the status row should be shown at all: only when the vault
@@ -320,6 +439,8 @@ impl GmailService {
                     match self.build_transport(cx) {
                         Ok(transport) => {
                             self.transport = Some(transport);
+                            self.archive_permission_missing = false;
+                            self.archive_failure = None;
                             self.state = SyncState::Idle;
                             self.start_poll(cx);
                         }
@@ -545,10 +666,273 @@ impl GmailService {
             }
         }
 
+        Self::reconcile_archive(this, cx).await;
+
         if let Some(reason) = hold_reason(&holding) {
             return SyncOutcome::Held(reason.into());
         }
         SyncOutcome::Synced { captured }
+    }
+
+    /// One Gmail archive pass (V53 §7), serialized with any other. Its
+    /// outcome lands in [`GmailService::archive_status`]; capture never
+    /// fails because of it.
+    async fn reconcile_archive(this: &WeakEntity<Self>, cx: &mut AsyncApp) {
+        let context = this
+            .read_with(cx, |service, _| {
+                Some((
+                    service.transport.clone()?,
+                    service.config.clone()?,
+                    service.vault.clone()?,
+                    service.project.clone(),
+                    service.archive_lock.clone(),
+                ))
+            })
+            .ok()
+            .flatten();
+        let Some((transport, config, vault, project, lock)) = context else {
+            return;
+        };
+        let _guard = lock.lock().await;
+        let fs = project.read_with(cx, |project, _| project.fs().clone());
+        let outcome = Self::archive_pass(this, &transport, &config, &vault, &fs, cx).await;
+        this.update(cx, |service, cx| {
+            match outcome {
+                Ok(pass) => {
+                    service.archive_permission_missing = pass.permission_missing;
+                    service.archive_failure = pass
+                        .error
+                        .filter(|_| pass.failed > 0)
+                        .map(|error| (pass.failed, error.into()));
+                }
+                Err(error) => {
+                    log::warn!("Thock: the Gmail archive pass failed: {error:#}");
+                    service.archive_failure = Some((0, format!("{error:#}").into()));
+                }
+            }
+            cx.notify();
+        })
+        .ok();
+    }
+
+    async fn archive_pass(
+        this: &WeakEntity<Self>,
+        transport: &Arc<dyn MailTransport>,
+        config: &GmailConfig,
+        vault: &Vault,
+        fs: &Arc<dyn Fs>,
+        cx: &mut AsyncApp,
+    ) -> Result<ArchivePass> {
+        let (now, permission_missing) = this.read_with(cx, |service, _| {
+            (service.now.clone(), service.archive_permission_missing)
+        })?;
+        let state_path = archive_state_path(vault);
+        // A missing record is a fresh start; a lost one costs at most a
+        // redundant `INBOX` removal.
+        let mut contents = fs.load(&state_path).await.unwrap_or_default();
+        let state = ArchiveState::from_jsonl(&contents);
+        let mut pass = ArchivePass::default();
+        let mut events = Vec::new();
+        match &config.archive {
+            ArchiveConfig::On(on) => {
+                let imported = fs.load(&state_file_path(vault)).await.unwrap_or_default();
+                let log = fs
+                    .load(&vault.root.join(TRIAGE_LOG_PATH))
+                    .await
+                    .unwrap_or_default();
+                let headings = &vault.config.backlog.headings;
+                let decisions = logged_decisions(&log, &headings.soon, &headings.someday);
+                let plan = plan_archive(
+                    &decisions,
+                    &parse_imported_index(&imported),
+                    &state,
+                    on,
+                    &inbox_dir(fs, vault).await,
+                    now(),
+                );
+                events = plan.events;
+                pass.permission_missing =
+                    permission_missing || transport.archive_permission() == Some(false);
+                for action in plan.actions {
+                    if pass.permission_missing {
+                        break;
+                    }
+                    match transport
+                        .modify_thread(&action.thread, action.change, cx)
+                        .await
+                    {
+                        Ok(()) => events.push(match action.change {
+                            ThreadMove::Archive => ArchiveEvent::Archived {
+                                digest: action.digest,
+                                thread: action.thread,
+                                at: now(),
+                            },
+                            ThreadMove::Unarchive => ArchiveEvent::Unarchived {
+                                digest: action.digest,
+                                thread: action.thread,
+                                at: now(),
+                            },
+                        }),
+                        Err(error) if error.is::<MissingPermission>() => {
+                            pass.permission_missing = true;
+                        }
+                        Err(error) => {
+                            log::warn!("Thock: couldn't update a thread in Gmail: {error:#}");
+                            pass.failed += 1;
+                            pass.error = Some(format!("{error:#}"));
+                            events.push(ArchiveEvent::Failed {
+                                digest: action.digest,
+                                thread: action.thread,
+                                at: now(),
+                                error: format!("{error:#}"),
+                            });
+                        }
+                    }
+                }
+            }
+            // Off: remember that, so turning it on again starts from a new
+            // baseline instead of acting on what was pending.
+            ArchiveConfig::Off | ArchiveConfig::Unreadable => {
+                if state.last_on.as_ref().is_some_and(|on| !on.is_empty()) {
+                    events.push(ArchiveEvent::On {
+                        classes: BTreeSet::new(),
+                        at: now(),
+                    });
+                }
+            }
+        }
+        if events.is_empty() {
+            return Ok(pass);
+        }
+        for event in &events {
+            contents.push_str(&event.to_json_line());
+            contents.push('\n');
+        }
+        if let Some(parent) = state_path.parent() {
+            fs.create_dir(parent).await?;
+        }
+        fs.atomic_write(state_path, contents)
+            .await
+            .context("recording Gmail archive state")?;
+        Ok(pass)
+    }
+
+    /// `thock::EnableGmailArchive` (V53 §5.1): Google's consent for
+    /// `gmail.modify` alone, then `[archive]` in `.thock/gmail.toml`.
+    fn enable_archive(&mut self, workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) {
+        let context = match (&self.vault, &self.config) {
+            (Some(vault), Some(config)) => config
+                .account
+                .clone()
+                .map(|account| (vault.root.clone(), account, config.google.clone())),
+            _ => None,
+        };
+        let Some((vault_root, account, overrides)) = context else {
+            show_archive_toast(
+                &workspace,
+                "Connect Google Workspace first, then turn on Gmail archive.".into(),
+                None,
+                cx,
+            );
+            return;
+        };
+        let http = cx.http_client();
+        let fs = self.project.read(cx).fs().clone();
+        self.archive_toggle_task = Some(cx.spawn(async move |this, cx| {
+            let config_path = vault_root.join(VAULT_MARKER_DIR).join(GMAIL_CONFIG_FILE);
+            let result = async {
+                let client = GoogleClient::resolve(&overrides)?;
+                if !google_auth::grant_gmail_modify(http, client, &account, cx).await? {
+                    return Ok(None);
+                }
+                let existing = fs.load(&config_path).await.unwrap_or_default();
+                let updated = with_archive_table(&existing)?;
+                if updated != existing {
+                    fs.atomic_write(config_path.clone(), updated.clone())
+                        .await?;
+                }
+                anyhow::Ok(Some(archive_table_row(&updated)))
+            }
+            .await;
+            let (message, button): (SharedString, Option<ToastButton>) = match result {
+                Ok(Some(row)) => {
+                    // The new grant is in the keychain; a fresh transport
+                    // reads it instead of the cached read-only token.
+                    this.update(cx, |service, cx| {
+                        service.transport = None;
+                        service.reload(cx);
+                    })
+                    .ok();
+                    let workspace = workspace.clone();
+                    let path = config_path.clone();
+                    (
+                        "Gmail archive is on".into(),
+                        Some((
+                            "Edit which decisions",
+                            Arc::new(move |window: &mut Window, cx: &mut App| {
+                                open_at_row(workspace.clone(), path.clone(), row, window, cx)
+                            }),
+                        )),
+                    )
+                }
+                Ok(None) => (
+                    "Gmail archive stays off: Google wasn't given the permission".into(),
+                    None,
+                ),
+                Err(error) => {
+                    log::warn!("Thock: turning on Gmail archive failed: {error:#}");
+                    (
+                        format!("Couldn't turn on Gmail archive: {error:#}").into(),
+                        None,
+                    )
+                }
+            };
+            cx.update(|cx| show_archive_toast(&workspace, message, button, cx));
+        }));
+    }
+
+    /// `thock::DisableGmailArchive` (V53 §5.3): removes `[archive]`. The
+    /// toast offers to drop the permission itself, which means revoking the
+    /// grant and connecting again read-only.
+    fn disable_archive(&mut self, workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) {
+        let Some(vault) = &self.vault else {
+            return;
+        };
+        let config_path = vault.root.join(VAULT_MARKER_DIR).join(GMAIL_CONFIG_FILE);
+        let fs = self.project.read(cx).fs().clone();
+        self.archive_toggle_task = Some(cx.spawn(async move |this, cx| {
+            let result = async {
+                let Ok(existing) = fs.load(&config_path).await else {
+                    return anyhow::Ok(());
+                };
+                let updated = without_archive_table(&existing)?;
+                if updated != existing {
+                    fs.atomic_write(config_path, updated).await?;
+                }
+                Ok(())
+            }
+            .await;
+            let (message, button): (SharedString, Option<ToastButton>) = match result {
+                Ok(()) => {
+                    this.update(cx, |service, cx| service.reload(cx)).ok();
+                    let error_workspace = workspace.clone();
+                    (
+                        "Gmail archive is off".into(),
+                        Some((
+                            "Reconnect read-only",
+                            Arc::new(move |window: &mut Window, cx: &mut App| {
+                                reconnect_read_only(error_workspace.clone(), window, cx)
+                            }),
+                        )),
+                    )
+                }
+                Err(error) => (
+                    format!("Couldn't turn off Gmail archive: {error:#}").into(),
+                    None,
+                ),
+            };
+            cx.update(|cx| show_archive_toast(&workspace, message, button, cx));
+        }));
     }
 
     /// The state-file digests, loaded once per transport start (spec §4.4).
@@ -811,7 +1195,12 @@ impl GmailService {
     }
 
     #[cfg(test)]
-    fn configure_for_test(
+    pub(crate) fn set_now_for_test(&mut self, now: Arc<dyn Fn() -> DateTime<Utc>>) {
+        self.now = now;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configure_for_test(
         &mut self,
         vault: Vault,
         config: GmailConfig,
@@ -822,9 +1211,230 @@ impl GmailService {
         self.config = Some(config);
         self.transport = Some(transport);
         self.imported = None;
+        self.archive_permission_missing = false;
+        self.archive_failure = None;
         self.state = SyncState::Idle;
         self.start_poll(cx);
     }
+}
+
+/// A transport that returns canned items and records every write.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct StubTransport {
+    /// Items per mapping, index-aligned.
+    pub(crate) items: std::sync::Mutex<Vec<Vec<crate::inbox::CapturedItem>>>,
+    pub(crate) skips_seen: std::sync::Mutex<Vec<HashSet<String>>>,
+    /// Every `threads.modify` sent.
+    pub(crate) modified: std::sync::Mutex<Vec<(String, ThreadMove)>>,
+    /// When set, every write fails with it.
+    pub(crate) modify_error: std::sync::Mutex<Option<String>>,
+    pub(crate) permission: std::sync::Mutex<Option<bool>>,
+}
+
+#[cfg(test)]
+impl MailTransport for StubTransport {
+    fn modify_thread(
+        &self,
+        thread_id: &str,
+        change: ThreadMove,
+        _cx: &AsyncApp,
+    ) -> Task<Result<()>> {
+        if let Some(error) = self.modify_error.lock().unwrap().clone() {
+            return Task::ready(Err(anyhow!(error)));
+        }
+        self.modified
+            .lock()
+            .unwrap()
+            .push((thread_id.to_string(), change));
+        Task::ready(Ok(()))
+    }
+
+    fn archive_permission(&self) -> Option<bool> {
+        *self.permission.lock().unwrap()
+    }
+
+    fn fetch(
+        &self,
+        skip: &HashSet<String>,
+        _cx: &AsyncApp,
+    ) -> Task<Result<crate::gmail::GmailFetched>> {
+        self.skips_seen.lock().unwrap().push(skip.clone());
+        let mappings = self
+            .items
+            .lock()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .map(MappingFetched::Items)
+            .collect();
+        Task::ready(Ok(crate::gmail::GmailFetched { mappings }))
+    }
+}
+
+type ToastButton = (&'static str, Arc<dyn Fn(&mut Window, &mut App)>);
+
+fn show_archive_toast(
+    workspace: &WeakEntity<Workspace>,
+    message: SharedString,
+    button: Option<ToastButton>,
+    cx: &mut App,
+) {
+    workspace
+        .update(cx, |workspace, cx| {
+            let mut toast = Toast::new(
+                NotificationId::unique::<GmailArchiveToast>(),
+                message.to_string(),
+            )
+            .autohide();
+            if let Some((label, on_click)) = button {
+                toast = toast.on_click(label, move |window, cx| on_click(window, cx));
+            }
+            workspace.show_toast(toast, cx);
+        })
+        .log_err();
+}
+
+/// Opens `path` with the cursor at the start of `row`.
+fn open_at_row(
+    workspace: WeakEntity<Workspace>,
+    path: PathBuf,
+    row: u32,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window
+        .spawn(cx, async move |cx| {
+            let item = workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.open_abs_path(
+                        path,
+                        OpenOptions {
+                            visible: Some(OpenVisible::All),
+                            ..Default::default()
+                        },
+                        window,
+                        cx,
+                    )
+                })?
+                .await?;
+            if let Some(editor) = item.downcast::<Editor>() {
+                editor.update_in(cx, |editor, window, cx| {
+                    let snapshot = editor.buffer().read(cx).snapshot(cx);
+                    let point = snapshot.clip_point(Point::new(row, 0), Bias::Left);
+                    editor.change_selections(
+                        SelectionEffects::scroll(Autoscroll::center()),
+                        window,
+                        cx,
+                        |selections| selections.select_ranges([point..point]),
+                    );
+                })?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+}
+
+/// Revokes the Google grant, then runs the usual connect, which asks for
+/// the read-only scopes alone now that `[archive]` is gone.
+fn reconnect_read_only(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut App) {
+    let http = cx.http_client();
+    window
+        .spawn(cx, async move |cx| {
+            match google_auth::revoke_grant(http, cx).await {
+                Ok(()) => {
+                    cx.update(|window, cx| {
+                        window.dispatch_action(ConnectGoogleWorkspace.boxed_clone(), cx)
+                    })
+                    .log_err();
+                }
+                Err(error) => {
+                    log::warn!("Thock: revoking the Google grant failed: {error:#}");
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.show_error(
+                                format!("Couldn't remove Thock's Google permission: {error:#}"),
+                                cx,
+                            )
+                        })
+                        .log_err();
+                }
+            }
+        })
+        .detach();
+}
+
+/// `.thock/gmail.toml` with an `[archive]` table that is on: added with the
+/// default `on = ["archive"]` when missing or empty, left alone when it
+/// already lists decisions. Everything else in the file keeps its bytes.
+fn with_archive_table(text: &str) -> Result<String> {
+    let mut document: toml_edit::DocumentMut = text.parse().context("parsing .thock/gmail.toml")?;
+    if !document.contains_key("schema") {
+        document.insert("schema", toml_edit::value(2));
+    }
+    let listed = document
+        .get("archive")
+        .and_then(|archive| archive.get("on"))
+        .and_then(|on| on.as_array())
+        .is_some_and(|on| !on.is_empty());
+    if listed {
+        return Ok(document.to_string());
+    }
+    let mut on = toml_edit::Array::new();
+    on.push("archive");
+    match document
+        .get_mut("archive")
+        .and_then(|item| item.as_table_mut())
+    {
+        Some(table) => {
+            table.insert("on", toml_edit::value(on));
+        }
+        None => {
+            let mut table = toml_edit::Table::new();
+            table.decor_mut().set_prefix(
+                "\n# Which inbox decisions also archive the email in Gmail.\n\
+                 # Any of: today, soon, someday, archive, discard, other.\n",
+            );
+            table.insert("on", toml_edit::value(on));
+            document.insert("archive", toml_edit::Item::Table(table));
+        }
+    }
+    Ok(document.to_string())
+}
+
+/// `.thock/gmail.toml` without its `[archive]` table, everything else kept.
+fn without_archive_table(text: &str) -> Result<String> {
+    let mut document: toml_edit::DocumentMut = text.parse().context("parsing .thock/gmail.toml")?;
+    document.remove("archive");
+    Ok(document.to_string())
+}
+
+/// The zero-based row of the `[archive]` header, for the toast's link.
+fn archive_table_row(text: &str) -> u32 {
+    text.lines()
+        .position(|line| line.trim() == "[archive]")
+        .and_then(|row| u32::try_from(row).ok())
+        .unwrap_or(0)
+}
+
+fn archive_state_path(vault: &Vault) -> PathBuf {
+    vault
+        .root
+        .join(VAULT_MARKER_DIR)
+        .join(STATE_DIR)
+        .join(ARCHIVE_STATE_FILE)
+}
+
+/// The Inbox Routine's landing folder: only threads captured there go
+/// through triage (V53 §3).
+async fn inbox_dir(fs: &Arc<dyn Fs>, vault: &Vault) -> String {
+    let path = vault.root.join(VAULT_MARKER_DIR).join(INBOX_CONFIG_FILE);
+    fs.load(&path)
+        .await
+        .ok()
+        .and_then(|text| parse_inbox_config(&text).ok())
+        .map(|config| config.dir)
+        .unwrap_or_else(|| crate::inbox::InboxConfig::default().dir)
 }
 
 fn state_file_path(vault: &Vault) -> PathBuf {
@@ -907,27 +1517,6 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
 
-    struct StubTransport {
-        /// Items per mapping, index-aligned.
-        items: Mutex<Vec<Vec<CapturedItem>>>,
-        skips_seen: Mutex<Vec<HashSet<String>>>,
-    }
-
-    impl MailTransport for StubTransport {
-        fn fetch(&self, skip: &HashSet<String>, _cx: &AsyncApp) -> Task<Result<GmailFetched>> {
-            self.skips_seen.lock().unwrap().push(skip.clone());
-            let mappings = self
-                .items
-                .lock()
-                .unwrap()
-                .clone()
-                .into_iter()
-                .map(MappingFetched::Items)
-                .collect();
-            Task::ready(Ok(GmailFetched { mappings }))
-        }
-    }
-
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
@@ -985,6 +1574,7 @@ mod tests {
                 vec![email("t-idea", "An idea from the road", "Two thoughts.")],
             ]),
             skips_seen: Mutex::new(Vec::new()),
+            ..Default::default()
         });
         service.update(cx, |service, cx| {
             service.configure_for_test(test_vault(), test_config(), transport.clone(), cx)
@@ -1084,6 +1674,7 @@ mod tests {
         let transport = Arc::new(StubTransport {
             items: Mutex::new(vec![vec![email("t-new", "Fresh thing", "body")], vec![]]),
             skips_seen: Mutex::new(Vec::new()),
+            ..Default::default()
         });
         service.update(cx, |service, cx| {
             service.configure_for_test(test_vault(), test_config(), transport.clone(), cx)
@@ -1149,6 +1740,7 @@ mod tests {
                 vec![],
             ]),
             skips_seen: Mutex::new(Vec::new()),
+            ..Default::default()
         });
         service.update(cx, |service, cx| {
             service.configure_for_test(test_vault(), test_config(), transport.clone(), cx)
@@ -1193,6 +1785,10 @@ mod tests {
 
         struct HoldingTransport;
         impl MailTransport for HoldingTransport {
+            fn modify_thread(&self, _: &str, _: ThreadMove, _cx: &AsyncApp) -> Task<Result<()>> {
+                Task::ready(Ok(()))
+            }
+
             fn fetch(&self, _: &HashSet<String>, _cx: &AsyncApp) -> Task<Result<GmailFetched>> {
                 Task::ready(Ok(GmailFetched {
                     mappings: vec![
@@ -1219,5 +1815,238 @@ mod tests {
             hold_reason(&["a", "b"]).unwrap(),
             "labels \"a\", \"b\" not found in Gmail"
         );
+    }
+
+    const ARCHIVE_DIGEST: &str = "4d1f9a02c7b3";
+
+    /// A vault with one email captured into `inbox/`, the service on a
+    /// pinned clock, and Gmail archive configured by `archive`.
+    async fn archive_harness(
+        archive: ArchiveConfig,
+        cx: &mut TestAppContext,
+    ) -> (
+        Arc<FakeFs>,
+        Entity<GmailService>,
+        Arc<StubTransport>,
+        Arc<Mutex<DateTime<Utc>>>,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(Path::new("/vault/.thock/state/gmail"))
+            .await
+            .unwrap();
+        fs.create_dir(Path::new("/vault/archives/inbox"))
+            .await
+            .unwrap();
+        fs.insert_file(
+            Path::new("/vault/.thock/state/gmail/imported.jsonl"),
+            format!(
+                "{{\"digest\":\"{ARCHIVE_DIGEST}\",\"thread\":\"t-q4\",\"title\":\"Q4\",\
+                 \"path\":\"inbox\",\"at\":\"2026-11-02T09:00:00Z\"}}\n"
+            )
+            .into_bytes(),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+
+        let clock = Arc::new(Mutex::new(
+            DateTime::parse_from_rfc3339("2026-11-02T10:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        ));
+        let service = cx.new(|cx| GmailService::new(project.clone(), cx));
+        let transport = Arc::new(StubTransport {
+            items: Mutex::new(vec![vec![], vec![]]),
+            ..Default::default()
+        });
+        service.update(cx, |service, cx| {
+            service.set_now_for_test(Arc::new({
+                let clock = clock.clone();
+                move || *clock.lock().unwrap()
+            }));
+            let config = GmailConfig {
+                archive,
+                ..test_config()
+            };
+            service.configure_for_test(test_vault(), config, transport.clone(), cx)
+        });
+        cx.run_until_parked();
+        (fs, service, transport, clock)
+    }
+
+    fn advance(clock: &Mutex<DateTime<Utc>>, seconds: u64, cx: &mut TestAppContext) {
+        *clock.lock().unwrap() += chrono::Duration::seconds(seconds as i64);
+        cx.executor().advance_clock(Duration::from_secs(seconds));
+        cx.run_until_parked();
+    }
+
+    async fn write_log(fs: &FakeFs, text: &str) {
+        fs.insert_file(
+            Path::new("/vault/archives/inbox/triage-log.md"),
+            text.as_bytes().to_vec(),
+        )
+        .await;
+    }
+
+    fn archive_on() -> ArchiveConfig {
+        ArchiveConfig::On([thock_sync_core::DecisionClass::Archive].into())
+    }
+
+    fn decided_line() -> String {
+        format!("- 2026-11-02 · Q4 → Archived <!--inbox:{ARCHIVE_DIGEST}-->\n")
+    }
+
+    #[gpui::test]
+    async fn a_desk_decision_archives_after_the_grace_and_undo_puts_it_back(
+        cx: &mut TestAppContext,
+    ) {
+        let (fs, service, transport, clock) = archive_harness(archive_on(), cx).await;
+        // Turning it on wrote the baseline record and sent nothing.
+        assert!(transport.modified.lock().unwrap().is_empty());
+        let state = fs
+            .load(Path::new("/vault/.thock/state/gmail/archive.jsonl"))
+            .await
+            .unwrap();
+        assert!(state.contains("\"event\":\"on\""), "{state}");
+
+        // The desk files the email: one write, after the grace period.
+        write_log(&fs, &decided_line()).await;
+        service.update(cx, |service, cx| service.reconcile_soon(cx));
+        cx.run_until_parked();
+        assert!(transport.modified.lock().unwrap().is_empty());
+        advance(&clock, 30, cx);
+        assert!(transport.modified.lock().unwrap().is_empty());
+        advance(&clock, 31, cx);
+        assert_eq!(
+            *transport.modified.lock().unwrap(),
+            vec![("t-q4".to_string(), ThreadMove::Archive)]
+        );
+        let state = fs
+            .load(Path::new("/vault/.thock/state/gmail/archive.jsonl"))
+            .await
+            .unwrap();
+        assert!(state.contains("\"event\":\"archived\""), "{state}");
+        service.read_with(cx, |service, _| {
+            assert_eq!(service.archive_status(), ArchiveStatus::Healthy);
+        });
+
+        // A poll later, nothing is sent twice.
+        advance(&clock, 301, cx);
+        assert_eq!(transport.modified.lock().unwrap().len(), 1);
+
+        // Desk `u` removes the line: the thread goes back to the inbox.
+        write_log(&fs, "").await;
+        service.update(cx, |service, cx| service.reconcile_soon(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            *transport.modified.lock().unwrap(),
+            vec![
+                ("t-q4".to_string(), ThreadMove::Archive),
+                ("t-q4".to_string(), ThreadMove::Unarchive),
+            ]
+        );
+        advance(&clock, 301, cx);
+        assert_eq!(transport.modified.lock().unwrap().len(), 2);
+    }
+
+    #[gpui::test]
+    async fn a_failing_write_shows_and_is_retried_on_the_next_poll(cx: &mut TestAppContext) {
+        let (fs, service, transport, clock) = archive_harness(archive_on(), cx).await;
+        *transport.modify_error.lock().unwrap() = Some("Gmail said 503".to_string());
+        write_log(&fs, &decided_line()).await;
+        service.update(cx, |service, cx| service.reconcile_soon(cx));
+        cx.run_until_parked();
+        advance(&clock, 61, cx);
+        service.read_with(cx, |service, _| {
+            assert_eq!(
+                service.archive_status(),
+                ArchiveStatus::Failing {
+                    emails: 1,
+                    error: "Gmail said 503".into(),
+                }
+            );
+            let row = crate::sync_status::gmail_status(service).unwrap();
+            assert_eq!(row.summary.as_ref(), "couldn't archive 1 email in Gmail");
+        });
+
+        *transport.modify_error.lock().unwrap() = None;
+        advance(&clock, 301, cx);
+        assert_eq!(
+            *transport.modified.lock().unwrap(),
+            vec![("t-q4".to_string(), ThreadMove::Archive)]
+        );
+        service.read_with(cx, |service, _| {
+            assert_eq!(service.archive_status(), ArchiveStatus::Healthy);
+        });
+    }
+
+    #[gpui::test]
+    async fn a_missing_permission_holds_without_writing(cx: &mut TestAppContext) {
+        let (fs, service, transport, clock) = archive_harness(archive_on(), cx).await;
+        *transport.permission.lock().unwrap() = Some(false);
+        write_log(&fs, &decided_line()).await;
+        service.update(cx, |service, cx| service.reconcile_soon(cx));
+        cx.run_until_parked();
+        advance(&clock, 61, cx);
+        advance(&clock, 301, cx);
+        assert!(transport.modified.lock().unwrap().is_empty());
+        service.read_with(cx, |service, _| {
+            assert_eq!(service.archive_status(), ArchiveStatus::NeedsPermission);
+        });
+    }
+
+    #[gpui::test]
+    async fn no_archive_table_never_writes_to_gmail(cx: &mut TestAppContext) {
+        let (fs, service, transport, clock) = archive_harness(ArchiveConfig::Off, cx).await;
+        write_log(&fs, &decided_line()).await;
+        service.update(cx, |service, cx| service.reconcile_soon(cx));
+        advance(&clock, 61, cx);
+        advance(&clock, 301, cx);
+        assert!(transport.modified.lock().unwrap().is_empty());
+        assert!(
+            !fs.is_file(Path::new("/vault/.thock/state/gmail/archive.jsonl"))
+                .await
+        );
+        service.read_with(cx, |service, _| {
+            assert_eq!(service.archive_status(), ArchiveStatus::Off);
+        });
+    }
+
+    #[test]
+    fn the_archive_table_is_added_and_removed_in_place() {
+        let original = "# My Gmail settings\nschema = 2\npoll_seconds = 120 # every two minutes\n\n\
+                        [[sync]]\nlabel = \"thock/inbox\"\npath = \"inbox\"\n";
+        let on = with_archive_table(original).unwrap();
+        assert!(on.starts_with(original), "{on}");
+        let config = parse_gmail_config(&on).unwrap();
+        assert_eq!(config.archive, archive_on());
+        assert_eq!(config.poll_interval, Duration::from_secs(120));
+        assert_eq!(
+            on.lines().nth(archive_table_row(&on) as usize),
+            Some("[archive]")
+        );
+        assert!(on.contains("# Any of: today, soon, someday"), "{on}");
+
+        // Already on with the user's own list: left exactly as it is.
+        let custom = format!("{original}\n[archive]\non = [\"soon\", \"discard\"]\n");
+        assert_eq!(with_archive_table(&custom).unwrap(), custom);
+        // On but empty: given the default list, keeping the table.
+        let empty = format!("{original}\n[archive]\non = []\n");
+        assert_eq!(
+            parse_gmail_config(&with_archive_table(&empty).unwrap())
+                .unwrap()
+                .archive,
+            archive_on()
+        );
+
+        // Turning it off removes only the table.
+        let off = without_archive_table(&custom).unwrap();
+        assert_eq!(off.trim_end(), original.trim_end());
+        assert_eq!(without_archive_table(original).unwrap(), original);
+        // A file with nothing in it gets a schema too.
+        let fresh = with_archive_table("").unwrap();
+        assert!(fresh.starts_with("schema = 2\n"), "{fresh}");
+        assert!(with_archive_table("not [toml").is_err());
     }
 }

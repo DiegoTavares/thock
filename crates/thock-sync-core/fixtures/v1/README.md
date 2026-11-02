@@ -171,3 +171,10 @@ Decisions the implementation had to take; the contract will be amended to match.
   tell whether it already ran. The phone sends one remove per tap and accepts this.
 - `replace_line` and `remove_line` accept `heading: null`, meaning the whole file.
 - A **front-matter block that never closes** is ordinary content.
+
+## `triage_log.json`
+
+`{"line", "soon", "someday", "parsed", "class"}` (V53 §4.2): `parsed` is
+`parse_triage_log_line(line)` as `{"day", "title", "destination", "digest"}`, or null for a line
+without a marker or out of the log's shape; `class` is
+`decision_class(parsed.destination, soon, someday)` by name, null when `parsed` is.

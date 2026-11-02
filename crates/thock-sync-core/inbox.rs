@@ -56,6 +56,110 @@ pub fn triage_log_line(day: &str, title: &str, destination: &str, digest: Option
     }
 }
 
+/// What a triage-log line decided, read from its destination text (V53 §4.2).
+/// The names are the ones `.thock/gmail.toml`'s `[archive] on` lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DecisionClass {
+    Today,
+    Soon,
+    Someday,
+    Archive,
+    Discard,
+    /// Kept as a note, appended to a note, or anything hand-written.
+    Other,
+}
+
+impl DecisionClass {
+    pub const ALL: [DecisionClass; 6] = [
+        Self::Today,
+        Self::Soon,
+        Self::Someday,
+        Self::Archive,
+        Self::Discard,
+        Self::Other,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Today => "today",
+            Self::Soon => "soon",
+            Self::Someday => "someday",
+            Self::Archive => "archive",
+            Self::Discard => "discard",
+            Self::Other => "other",
+        }
+    }
+
+    /// The class `name` spells, case-insensitively.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let name = name.trim();
+        Self::ALL
+            .into_iter()
+            .find(|class| class.name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// The class of a log line's destination. The Backlog headings are the
+/// vault's configured ones, because the desk and the phone write those
+/// (`Backlog · <soon heading>`), not the defaults.
+pub fn decision_class(
+    destination: &str,
+    soon_heading: &str,
+    someday_heading: &str,
+) -> DecisionClass {
+    let destination = destination.trim();
+    if destination.starts_with("Today") {
+        return DecisionClass::Today;
+    }
+    if let Some(heading) = destination.strip_prefix("Backlog · ") {
+        let heading = heading.trim();
+        if heading == soon_heading.trim() {
+            return DecisionClass::Soon;
+        }
+        if heading == someday_heading.trim() {
+            return DecisionClass::Someday;
+        }
+    }
+    match destination {
+        "Archived" => DecisionClass::Archive,
+        "Discarded" => DecisionClass::Discard,
+        _ => DecisionClass::Other,
+    }
+}
+
+/// One triage-log line that carries a capture marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriageLogLine {
+    pub day: String,
+    pub title: String,
+    pub destination: String,
+    pub digest: String,
+}
+
+/// Reads a line [`triage_log_line`] wrote. A line without a marker, or that
+/// isn't in the log's shape, is `None`: it can't name a captured item.
+pub fn parse_triage_log_line(line: &str) -> Option<TriageLogLine> {
+    let rest = line.trim_end().strip_prefix("- ")?;
+    let (rest, marker) = rest.rsplit_once(" <!--inbox:")?;
+    let digest = marker.strip_suffix("-->")?.trim();
+    if digest.is_empty() || digest.len() > 64 || digest.contains(char::is_whitespace) {
+        return None;
+    }
+    let (day, rest) = rest.split_once(" · ")?;
+    // The title is sanitized but may still hold an arrow; the destination
+    // never does, so the last one splits them.
+    let (title, destination) = rest.rsplit_once(" → ")?;
+    if day.trim().is_empty() || destination.trim().is_empty() {
+        return None;
+    }
+    Some(TriageLogLine {
+        day: day.to_string(),
+        title: title.to_string(),
+        destination: destination.to_string(),
+        digest: digest.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +223,71 @@ mod tests {
             triage_log_line("2026-10-10", "Call Ana", "Archived", None),
             "- 2026-10-10 · Call Ana → Archived"
         );
+    }
+
+    #[test]
+    fn log_lines_parse_back_into_their_parts() {
+        let line = triage_log_line(
+            "2026-11-02",
+            "Re: Q4 planning doc",
+            "Backlog · Soon",
+            Some("4d1f9a02c7b3"),
+        );
+        assert_eq!(
+            parse_triage_log_line(&line),
+            Some(TriageLogLine {
+                day: "2026-11-02".to_string(),
+                title: "Re: Q4 planning doc".to_string(),
+                destination: "Backlog · Soon".to_string(),
+                digest: "4d1f9a02c7b3".to_string(),
+            })
+        );
+        // A title with its own arrow and dot still splits at the last arrow.
+        let line = triage_log_line("2026-11-02", "A → B · C", "Archived", Some("abc"));
+        let parsed = parse_triage_log_line(&line).unwrap();
+        assert_eq!(parsed.title, "A → B · C");
+        assert_eq!(parsed.destination, "Archived");
+
+        let marker_less = triage_log_line("2026-11-02", "Buy milk", "Archived", None);
+        assert_eq!(parse_triage_log_line(&marker_less), None);
+        for malformed in [
+            "",
+            "# Triage log",
+            "- 2026-11-02 · no arrow <!--inbox:abc-->",
+            "- 2026-11-02 · x → Archived <!--inbox:-->",
+            "- 2026-11-02 · x → Archived <!--inbox:abc",
+            "* 2026-11-02 · x → Archived <!--inbox:abc-->",
+            "- 2026-11-02 · x →  <!--inbox:abc-->",
+        ] {
+            assert_eq!(parse_triage_log_line(malformed), None, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn destinations_classify_with_the_vaults_headings() {
+        let class = |destination| decision_class(destination, "Soon", "Someday");
+        assert_eq!(class("Today · Day planner"), DecisionClass::Today);
+        assert_eq!(class("Backlog · Soon"), DecisionClass::Soon);
+        assert_eq!(class("Backlog · Someday"), DecisionClass::Someday);
+        assert_eq!(class("Archived"), DecisionClass::Archive);
+        assert_eq!(class("Discarded"), DecisionClass::Discard);
+        assert_eq!(class("notes/ideas/ (kept as note)"), DecisionClass::Other);
+        assert_eq!(class("Backlog · Later"), DecisionClass::Other);
+        assert_eq!(
+            decision_class("Backlog · Next up", "Next up", "Maybe"),
+            DecisionClass::Soon
+        );
+        assert_eq!(
+            decision_class("Backlog · Soon", "Next up", "Maybe"),
+            DecisionClass::Other
+        );
+        for class in DecisionClass::ALL {
+            assert_eq!(DecisionClass::from_name(class.name()), Some(class));
+        }
+        assert_eq!(
+            DecisionClass::from_name(" Archive "),
+            Some(DecisionClass::Archive)
+        );
+        assert_eq!(DecisionClass::from_name("trash"), None);
     }
 }

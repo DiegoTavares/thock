@@ -1,8 +1,10 @@
 //! The shared Google OAuth core (spec `v9-gmail-backlog-capture.md` §6):
 //! PKCE installed-app authorization, token exchange and refresh, and
 //! refresh-token storage in the system keychain. One consent grants every
-//! Google scope Thock uses (Calendar + Gmail, both read-only); the calendar
-//! and mail API clients live in `calendar_google.rs` / `gmail_google.rs`.
+//! read-only Google scope Thock uses (Calendar, Gmail, Tasks); Gmail archive
+//! (V53) adds `gmail.modify` through a second, incremental consent. The
+//! calendar and mail API clients live in `calendar_google.rs` /
+//! `gmail_google.rs`.
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
@@ -42,8 +44,13 @@ pub const SCOPES: [&str; 3] = [
     "https://www.googleapis.com/auth/tasks.readonly",
 ];
 
+/// Asked for only by the Gmail archive opt-in (V53 §7.5), never by the
+/// plain connect, so a vault that never opts in stays read-only.
+pub const GMAIL_MODIFY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
+
 const AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
+const REVOKE_ENDPOINT: &str = "https://oauth2.googleapis.com/revoke";
 
 /// The bundled Google *Desktop app* OAuth client, baked in at build time.
 /// Google's own guidance is that a desktop client secret is not confidential,
@@ -79,6 +86,31 @@ impl std::fmt::Display for Unauthorized {
 }
 
 impl std::error::Error for Unauthorized {}
+
+/// A 403 naming insufficient scopes on a write: the grant lacks the scope
+/// the call needs. Unlike a read's, it doesn't disconnect anything.
+#[derive(Debug)]
+pub(crate) struct InsufficientScope;
+
+impl std::fmt::Display for InsufficientScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the Google sign-in doesn't allow this")
+    }
+}
+
+impl std::error::Error for InsufficientScope {}
+
+/// A 404 from a Google API: the thing addressed no longer exists.
+#[derive(Debug)]
+pub(crate) struct NotFound;
+
+impl std::fmt::Display for NotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Google couldn't find it")
+    }
+}
+
+impl std::error::Error for NotFound {}
 
 #[derive(Debug, Clone)]
 pub struct GoogleClient {
@@ -184,6 +216,23 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     #[serde(default)]
     pub expires_in: Option<u64>,
+    /// The space-separated scopes the grant carries, which Google returns on
+    /// both the code exchange and every refresh.
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+impl TokenResponse {
+    /// `None` when Google didn't say which scopes were granted.
+    pub fn has_scope(&self, scope: &str) -> Option<bool> {
+        self.scope
+            .as_deref()
+            .map(|granted| scope_listed(granted, scope))
+    }
+}
+
+fn scope_listed(granted: &str, scope: &str) -> bool {
+    granted.split_whitespace().any(|granted| granted == scope)
 }
 
 /// The outcome of the workspace connect flow (spec §6.1): the account is
@@ -197,41 +246,26 @@ pub struct Connected {
 
 /// Runs the full OAuth 2.0 installed-app flow for every Thock scope at once:
 /// loopback listener, system browser, PKCE code exchange, then
-/// `calendarList.list` to identify the account. Stores the refresh token in
-/// the unified keychain slot (retiring the legacy calendar-only one) before
-/// returning.
+/// `calendarList.list` to identify the account. Asks for `gmail.modify` too
+/// when Gmail archive is on, so reconnecting after a lost sign-in keeps it.
+/// Stores the refresh token in the unified keychain slot (retiring the legacy
+/// calendar-only one) before returning.
 pub async fn connect_workspace(
     http: Arc<dyn HttpClient>,
     client: GoogleClient,
+    with_gmail_modify: bool,
     cx: &mut AsyncApp,
 ) -> Result<Connected> {
-    let verifier =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(Sha256::digest(verifier.as_bytes()));
-    let state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 16]>());
-
-    let (redirect_uri, callback) = oauth_callback_server::start_oauth_callback_server()?;
-    let auth_url = build_auth_url(&client.client_id, &redirect_uri, &challenge, &state);
-    cx.update(|cx| cx.open_url(&auth_url));
-
-    let params = callback
-        .await
-        .context("the sign-in window was closed before authorization completed")??;
-    if params.state != state {
-        bail!("OAuth state mismatch — rejecting the callback");
+    let mut scopes = SCOPES.to_vec();
+    if with_gmail_modify {
+        scopes.push(GMAIL_MODIFY_SCOPE);
     }
-
-    let tokens = exchange_code(&http, &client, &params.code, &verifier, &redirect_uri).await?;
+    let tokens = authorize(&http, &client, &scopes, cx).await?;
     let refresh_token = tokens
         .refresh_token
         .context("Google did not return a refresh token")?;
     let calendars = list_calendars(&http, &tokens.access_token).await?;
-    let email = calendars
-        .iter()
-        .find(|entry| entry.primary)
-        .map(|entry| entry.id.clone())
-        .context("no primary calendar in the account's calendar list")?;
+    let email = primary_email(&calendars)?;
 
     write_refresh_token(&email, &refresh_token, cx).await?;
     Ok(Connected {
@@ -241,12 +275,112 @@ pub async fn connect_workspace(
     })
 }
 
-fn build_auth_url(client_id: &str, redirect_uri: &str, challenge: &str, state: &str) -> String {
+/// The Gmail archive opt-in (V53 §5.1): an incremental consent for
+/// `gmail.modify` alone, which Google folds into the existing grant. Returns
+/// `false`, storing nothing, when the user left the permission unticked.
+/// Fails when the consent was given for an account other than `account`.
+pub async fn grant_gmail_modify(
+    http: Arc<dyn HttpClient>,
+    client: GoogleClient,
+    account: &str,
+    cx: &mut AsyncApp,
+) -> Result<bool> {
+    let tokens = authorize(&http, &client, &[GMAIL_MODIFY_SCOPE], cx).await?;
+    if tokens.has_scope(GMAIL_MODIFY_SCOPE) != Some(true) {
+        return Ok(false);
+    }
+    let refresh_token = tokens
+        .refresh_token
+        .context("Google did not return a refresh token")?;
+    let calendars = list_calendars(&http, &tokens.access_token).await?;
+    let email = primary_email(&calendars)?;
+    if !email.eq_ignore_ascii_case(account) {
+        bail!("Google signed in as {email}, but this vault is connected to {account}");
+    }
+    write_refresh_token(&email, &refresh_token, cx).await?;
+    Ok(true)
+}
+
+/// Revokes the whole stored grant at Google and forgets it locally, for
+/// the "Reconnect read-only" path (V53 §5.3). Google has no per-scope revoke.
+pub async fn revoke_grant(http: Arc<dyn HttpClient>, cx: &mut AsyncApp) -> Result<()> {
+    if let Some((_, token)) = read_refresh_token(cx).await? {
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("token", &token)
+            .finish();
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri(REVOKE_ENDPOINT)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(AsyncBody::from(body.into_bytes()))?;
+        let mut response = http.send(request).await?;
+        // A token Google already dropped answers 400 invalid_token: the
+        // grant is gone either way.
+        if !response.status().is_success() {
+            let mut body = String::new();
+            response.body_mut().read_to_string(&mut body).await?;
+            if !body.contains("invalid_token") {
+                bail!(
+                    "Google revoke request failed with status {}: {body}",
+                    response.status()
+                );
+            }
+        }
+    }
+    delete_refresh_token(cx).await
+}
+
+fn primary_email(calendars: &[CalendarListEntry]) -> Result<String> {
+    calendars
+        .iter()
+        .find(|entry| entry.primary)
+        .map(|entry| entry.id.clone())
+        .context("no primary calendar in the account's calendar list")
+}
+
+/// The installed-app authorization for `scopes`: loopback listener, system
+/// browser, PKCE code exchange.
+async fn authorize(
+    http: &Arc<dyn HttpClient>,
+    client: &GoogleClient,
+    scopes: &[&str],
+    cx: &mut AsyncApp,
+) -> Result<TokenResponse> {
+    let verifier =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
+    let state = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 16]>());
+
+    let (redirect_uri, callback) = oauth_callback_server::start_oauth_callback_server()?;
+    let auth_url = build_auth_url(&client.client_id, &redirect_uri, &challenge, &state, scopes);
+    cx.update(|cx| cx.open_url(&auth_url));
+
+    let params = callback
+        .await
+        .context("the sign-in window was closed before authorization completed")??;
+    if params.state != state {
+        bail!("OAuth state mismatch — rejecting the callback");
+    }
+
+    exchange_code(http, client, &params.code, &verifier, &redirect_uri).await
+}
+
+/// `include_granted_scopes` makes every consent incremental: the refresh
+/// token that comes back carries what was granted before plus `scopes`.
+fn build_auth_url(
+    client_id: &str,
+    redirect_uri: &str,
+    challenge: &str,
+    state: &str,
+    scopes: &[&str],
+) -> String {
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("client_id", client_id)
         .append_pair("redirect_uri", redirect_uri)
         .append_pair("response_type", "code")
-        .append_pair("scope", &SCOPES.join(" "))
+        .append_pair("scope", &scopes.join(" "))
+        .append_pair("include_granted_scopes", "true")
         .append_pair("access_type", "offline")
         .append_pair("prompt", "consent")
         .append_pair("code_challenge", challenge)
@@ -358,6 +492,46 @@ pub(crate) async fn api_get_json(
     Ok(body)
 }
 
+/// Authorized POST of a JSON body, returning the response body. 401 is
+/// [`Unauthorized`] for the retry-once-behind-refresh path, a 403 naming
+/// insufficient scopes is [`InsufficientScope`], and 404 is [`NotFound`].
+pub(crate) async fn api_post_json(
+    http: &Arc<dyn HttpClient>,
+    url: &str,
+    access_token: &str,
+    body: &serde_json::Value,
+    what: &str,
+) -> Result<String> {
+    let request = Request::builder()
+        .method(http::Method::POST)
+        .uri(url)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .body(AsyncBody::from(body.to_string().into_bytes()))?;
+    let mut response = http.send(request).await?;
+    if response.status() == http::StatusCode::UNAUTHORIZED {
+        return Err(anyhow!(Unauthorized));
+    }
+    if response.status() == http::StatusCode::NOT_FOUND {
+        return Err(anyhow!(NotFound));
+    }
+    let mut text = String::new();
+    response.body_mut().read_to_string(&mut text).await?;
+    if response.status() == http::StatusCode::FORBIDDEN
+        && text.to_lowercase().contains("insufficient")
+    {
+        return Err(anyhow!(InsufficientScope));
+    }
+    if !response.status().is_success() {
+        bail!(
+            "{what} request failed with status {}: {text}",
+            response.status()
+        );
+    }
+    Ok(text)
+}
+
 pub(crate) fn token_lifetime(expires_in: Option<u64>) -> Duration {
     // A one-minute safety margin so a token is never used mid-expiry.
     Duration::from_secs(expires_in.unwrap_or(3600).saturating_sub(60).max(60))
@@ -432,6 +606,8 @@ pub struct TokenKeeper {
 struct KeeperState {
     access_token: Option<(String, Instant)>,
     refresh_token: Option<String>,
+    /// The scopes the last refresh reported.
+    granted_scopes: Option<String>,
 }
 
 impl TokenKeeper {
@@ -440,6 +616,16 @@ impl TokenKeeper {
             client,
             state: Mutex::new(KeeperState::default()),
         }
+    }
+
+    /// Whether the grant carries `scope`, as of the last token refresh (V53
+    /// §4.3); `None` before one, or when Google didn't say.
+    pub fn has_scope(&self, scope: &str) -> Option<bool> {
+        let state = self.state.lock().ok()?;
+        state
+            .granted_scopes
+            .as_deref()
+            .map(|granted| scope_listed(granted, scope))
     }
 
     /// Drops the cached access token so the next call re-mints one — the
@@ -485,6 +671,9 @@ impl TokenKeeper {
                 token.clone(),
                 Instant::now() + token_lifetime(response.expires_in),
             ));
+            if let Some(scope) = response.scope {
+                state.granted_scopes = Some(scope);
+            }
         }
         Ok(token)
     }
@@ -503,6 +692,7 @@ mod tests {
             "http://127.0.0.1:9000/callback",
             "chal",
             "nonce",
+            &SCOPES,
         );
         assert!(url.starts_with(AUTH_ENDPOINT));
         for needle in [
@@ -513,11 +703,95 @@ mod tests {
             "code_challenge=chal",
             "code_challenge_method=S256",
             "access_type=offline",
+            "include_granted_scopes=true",
             "prompt=consent",
             "state=nonce",
         ] {
             assert!(url.contains(needle), "missing {needle} in {url}");
         }
+        assert!(!url.contains("gmail.modify"), "{url}");
+    }
+
+    #[test]
+    fn the_archive_opt_in_asks_for_gmail_modify_alone() {
+        let url = build_auth_url(
+            "client-123",
+            "http://127.0.0.1:9000/callback",
+            "chal",
+            "nonce",
+            &[GMAIL_MODIFY_SCOPE],
+        );
+        assert!(
+            url.contains("scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.modify&"),
+            "{url}"
+        );
+        assert!(url.contains("include_granted_scopes=true"), "{url}");
+        assert!(!url.contains("readonly"), "{url}");
+    }
+
+    #[test]
+    fn granted_scopes_are_read_from_the_refresh_response() {
+        let refresh = |scope: Option<&'static str>| {
+            let http = FakeHttpClient::create(move |_| async move {
+                let body = match scope {
+                    Some(scope) => serde_json::json!({
+                        "access_token": "a", "expires_in": 3599, "scope": scope,
+                    }),
+                    None => serde_json::json!({"access_token": "a", "expires_in": 3599}),
+                };
+                Ok(Response::builder()
+                    .status(200)
+                    .body(AsyncBody::from(body.to_string().into_bytes()))
+                    .unwrap())
+            });
+            let http: Arc<dyn HttpClient> = http;
+            let client = GoogleClient {
+                client_id: "id".to_string(),
+                client_secret: None,
+            };
+            block_on(refresh_access_token(&http, &client, "refresh")).unwrap()
+        };
+        let read_only = refresh(Some(
+            "https://www.googleapis.com/auth/gmail.readonly \
+             https://www.googleapis.com/auth/calendar.readonly",
+        ));
+        assert_eq!(read_only.has_scope(GMAIL_MODIFY_SCOPE), Some(false));
+        let with_modify = refresh(Some(
+            "https://www.googleapis.com/auth/gmail.readonly \
+             https://www.googleapis.com/auth/gmail.modify",
+        ));
+        assert_eq!(with_modify.has_scope(GMAIL_MODIFY_SCOPE), Some(true));
+        assert_eq!(refresh(None).has_scope(GMAIL_MODIFY_SCOPE), None);
+    }
+
+    #[test]
+    fn writes_type_their_failures() {
+        let respond = |status: u16, body: &'static str| {
+            let http = FakeHttpClient::create(move |_| async move {
+                Ok(Response::builder()
+                    .status(status)
+                    .body(AsyncBody::from(body.as_bytes().to_vec()))
+                    .unwrap())
+            });
+            let http: Arc<dyn HttpClient> = http;
+            block_on(api_post_json(
+                &http,
+                "https://example.com",
+                "token",
+                &serde_json::json!({}),
+                "Test",
+            ))
+        };
+        assert!(respond(401, "").unwrap_err().is::<Unauthorized>());
+        assert!(respond(404, "").unwrap_err().is::<NotFound>());
+        assert!(
+            respond(403, "Request had insufficient authentication scopes.")
+                .unwrap_err()
+                .is::<InsufficientScope>()
+        );
+        let error = respond(500, "boom").unwrap_err();
+        assert!(error.to_string().contains("500"), "{error:#}");
+        assert_eq!(respond(200, "{}").unwrap(), "{}");
     }
 
     /// The §7.4 migration matrix: `google.toml` only, legacy only, both,

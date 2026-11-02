@@ -792,6 +792,7 @@ impl CalendarService {
             .as_ref()
             .map(|config| config.calendars.clone())
             .unwrap_or_default();
+        let with_gmail_modify = crate::gmail::archive_on_in_vault(&vault_root);
         let http = cx.http_client();
         let fs = self.project.read(cx).fs().clone();
         self.state = SyncState::Connecting;
@@ -806,7 +807,8 @@ impl CalendarService {
         self.connect_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = async {
                 let client = GoogleClient::resolve(&overrides)?;
-                let connected = google_auth::connect_workspace(http, client, cx).await?;
+                let connected =
+                    google_auth::connect_workspace(http, client, with_gmail_modify, cx).await?;
                 let email = connected.email.clone();
                 let selected = if existing_calendars.is_empty() {
                     vec![email.clone()]

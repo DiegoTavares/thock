@@ -3,7 +3,8 @@
 //! base64url body decoding, RFC 2047 header decoding, and an honest HTML →
 //! plain-text reduction. One fetch covers every configured mapping; the
 //! claim pass — a thread lands once, first mapping wins — happens here.
-//! Read-only toward Google — no label is ever modified.
+//! Read-only toward Google except for one write, opted into separately:
+//! Gmail archive (V53) adds or removes a thread's `INBOX` label.
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
@@ -16,10 +17,13 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::gmail::{
-    GmailFetched, MailTransport, MappingFetched, SyncMapping, gmail_thread_url, sanitize_subject,
-    thread_marker_id,
+    GmailFetched, MailTransport, MappingFetched, MissingPermission, SyncMapping, ThreadMove,
+    gmail_thread_url, sanitize_subject, thread_marker_id,
 };
-use crate::google_auth::{AuthRevoked, GoogleClient, TokenKeeper, Unauthorized};
+use crate::google_auth::{
+    AuthRevoked, GMAIL_MODIFY_SCOPE, GoogleClient, InsufficientScope, NotFound, TokenKeeper,
+    Unauthorized, api_post_json,
+};
 use crate::inbox::{CapturedItem, capture_digest};
 
 const API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
@@ -139,6 +143,30 @@ async fn get_thread(
     );
     let body = get_json(http, &url, access_token).await?;
     serde_json::from_str(&body).context("failed to parse Gmail thread response")
+}
+
+/// `threads.modify` for the `INBOX` label alone (V53 §7.3). A thread deleted
+/// in Gmail is done; a grant without `gmail.modify` is [`MissingPermission`].
+async fn modify_thread(
+    http: &Arc<dyn HttpClient>,
+    access_token: &str,
+    thread_id: &str,
+    change: ThreadMove,
+) -> Result<()> {
+    let url = format!(
+        "{API_BASE}/users/me/threads/{}/modify",
+        url_path_escape(thread_id)
+    );
+    let body = match change {
+        ThreadMove::Archive => serde_json::json!({"removeLabelIds": ["INBOX"]}),
+        ThreadMove::Unarchive => serde_json::json!({"addLabelIds": ["INBOX"]}),
+    };
+    match api_post_json(http, &url, access_token, &body, "Gmail threads.modify").await {
+        Ok(_) => Ok(()),
+        Err(error) if error.is::<NotFound>() => Ok(()),
+        Err(error) if error.is::<InsufficientScope>() => Err(anyhow!(MissingPermission)),
+        Err(error) => Err(error),
+    }
 }
 
 fn url_path_escape(segment: &str) -> String {
@@ -470,6 +498,39 @@ impl MailTransport for GmailTransport {
                     inner.keeper.invalidate_access_token();
                     let token = inner.keeper.valid_access_token(&inner.http, cx).await?;
                     match inner.fetch_with_token(&skip, &token).await {
+                        Err(error) if error.is::<Unauthorized>() => Err(anyhow!(AuthRevoked)),
+                        other => other,
+                    }
+                }
+                other => other,
+            }
+        })
+    }
+
+    fn archive_permission(&self) -> Option<bool> {
+        self.inner.keeper.has_scope(GMAIL_MODIFY_SCOPE)
+    }
+
+    fn modify_thread(
+        &self,
+        thread_id: &str,
+        change: ThreadMove,
+        cx: &AsyncApp,
+    ) -> Task<Result<()>> {
+        let inner = self.inner.clone();
+        let thread_id = thread_id.to_string();
+        cx.spawn(async move |cx| {
+            let token = inner.keeper.valid_access_token(&inner.http, cx).await?;
+            // The refresh that minted the token said what the grant carries:
+            // don't send a write it is known to refuse.
+            if inner.keeper.has_scope(GMAIL_MODIFY_SCOPE) == Some(false) {
+                return Err(anyhow!(MissingPermission));
+            }
+            match modify_thread(&inner.http, &token, &thread_id, change).await {
+                Err(error) if error.is::<Unauthorized>() => {
+                    inner.keeper.invalidate_access_token();
+                    let token = inner.keeper.valid_access_token(&inner.http, cx).await?;
+                    match modify_thread(&inner.http, &token, &thread_id, change).await {
                         Err(error) if error.is::<Unauthorized>() => Err(anyhow!(AuthRevoked)),
                         other => other,
                     }
@@ -999,5 +1060,77 @@ mod tests {
         let http: Arc<dyn HttpClient> = http;
         let error = block_on(list_labels(&http, "token")).unwrap_err();
         assert!(error.is::<AuthRevoked>());
+    }
+
+    #[test]
+    fn modify_sends_only_the_inbox_label() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let http = FakeHttpClient::create({
+            let requests = requests.clone();
+            move |mut request| {
+                let requests = requests.clone();
+                async move {
+                    let mut body = String::new();
+                    request.body_mut().read_to_string(&mut body).await?;
+                    requests.lock().unwrap().push((
+                        request.method().to_string(),
+                        request.uri().to_string(),
+                        body,
+                    ));
+                    Ok(Response::builder()
+                        .status(200)
+                        .body(AsyncBody::from(b"{}".to_vec()))
+                        .unwrap())
+                }
+            }
+        });
+        let http: Arc<dyn HttpClient> = http;
+        block_on(modify_thread(&http, "token", "t-1", ThreadMove::Archive)).unwrap();
+        block_on(modify_thread(&http, "token", "t-1", ThreadMove::Unarchive)).unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            *requests,
+            vec![
+                (
+                    "POST".to_string(),
+                    "https://gmail.googleapis.com/gmail/v1/users/me/threads/t-1/modify".to_string(),
+                    r#"{"removeLabelIds":["INBOX"]}"#.to_string(),
+                ),
+                (
+                    "POST".to_string(),
+                    "https://gmail.googleapis.com/gmail/v1/users/me/threads/t-1/modify".to_string(),
+                    r#"{"addLabelIds":["INBOX"]}"#.to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn modify_treats_a_deleted_thread_as_done_and_names_a_missing_permission() {
+        let respond = |status: u16, body: &'static str| {
+            let http = FakeHttpClient::create(move |_| async move {
+                Ok(Response::builder()
+                    .status(status)
+                    .body(AsyncBody::from(body.as_bytes().to_vec()))
+                    .unwrap())
+            });
+            let http: Arc<dyn HttpClient> = http;
+            block_on(modify_thread(&http, "token", "t-1", ThreadMove::Archive))
+        };
+        respond(404, "Requested entity was not found.").unwrap();
+        let error = respond(
+            403,
+            r#"{"error": {"message": "Request had insufficient authentication scopes."}}"#,
+        )
+        .unwrap_err();
+        assert!(error.is::<MissingPermission>(), "{error:#}");
+        // A missing permission is not a lost sign-in.
+        assert!(!error.is::<AuthRevoked>());
+        assert!(
+            respond(503, "unavailable")
+                .unwrap_err()
+                .to_string()
+                .contains("503")
+        );
     }
 }

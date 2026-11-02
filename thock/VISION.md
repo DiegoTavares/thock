@@ -565,6 +565,13 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   across restarts. A nudge exists only while its Routine is installed; the next one is a registry
   entry, not a subsystem. Spec `specs/v52-nudges.md`. _(shipped on `main` with the V52 PR; people
   on their own terminal agent get no nudge yet)_
+- [ ] **Triage an email once:** with Gmail archive turned on, an email labelled `thock/inbox`
+  that is filed from the Inbox (a desk key, a phone swipe, or the ritual) leaves the Gmail inbox
+  too; only its `INBOX` label changes, a minute after the decision, and undoing the decision puts
+  it back. Opt-in through its own action and Google consent for `gmail.modify`, so a vault that
+  never opts in stays read-only toward Google; which decisions count is a list in
+  `.thock/gmail.toml`, and nothing decided before the opt-in moves. Spec
+  `specs/v53-gmail-archive-on-triage.md`. _(implemented on the `v53-gmail-archive` branch)_
 
 ---
 

@@ -999,6 +999,7 @@ impl InboxView {
                         this.marked.remove(&item.stem);
                     }
                     this.record_decisions(&filed, &filed_suggestions, via, cx);
+                    this.reconcile_gmail_archive(cx);
                     this.show_undo_toast(&filed, window, cx);
                     this.last_decision = Some(Decision { items: filed });
                 } else if this.queued.is_empty() {
@@ -1122,6 +1123,14 @@ impl InboxView {
         });
     }
 
+    /// A decision or its undo reaches Gmail archive without waiting for the
+    /// next poll (V53 §7.4).
+    fn reconcile_gmail_archive(&self, cx: &mut Context<Self>) {
+        if let Some(gmail) = crate::gmail_service::service_for_project(&self.project, cx) {
+            gmail.update(cx, |gmail, cx| gmail.reconcile_soon(cx));
+        }
+    }
+
     fn show_undo_toast(&self, filed: &[FiledItem], _window: &mut Window, cx: &mut Context<Self>) {
         let count = filed.len();
         let destination = filed.first().map(|item| item.destination);
@@ -1198,6 +1207,7 @@ impl InboxView {
                 if let Some(error) = failure {
                     this.status = Some(format!("Couldn't undo: {error:#}").into());
                 }
+                this.reconcile_gmail_archive(cx);
                 let workspace = this.workspace.clone();
                 cx.defer(move |cx| {
                     workspace
@@ -3347,6 +3357,88 @@ mod tests {
         setup.cx.simulate_keystrokes("u");
         setup.cx.run_until_parked();
         assert_eq!(titles(&setup).len(), 4);
+    }
+
+    /// V53 §10.4: `e` on an email archives its thread in Gmail once the
+    /// grace period is over, and `u` puts it back.
+    #[gpui::test]
+    async fn e_then_u_reaches_gmail_archive(cx: &mut TestAppContext) {
+        use crate::gmail::{ArchiveConfig, GmailConfig, ThreadMove};
+        use crate::gmail_service::{self, StubTransport};
+        use thock_sync_core::DecisionClass;
+
+        let mut setup = setup(cx, Options::default()).await;
+        let root = setup._vault_dir.path().to_path_buf();
+        setup
+            .fs
+            .insert_tree(
+                root.join(".thock/state/gmail"),
+                json!({
+                    "imported.jsonl": "{\"digest\":\"a1a1a1a1a1a1\",\"thread\":\"t-q4\",\"path\":\"inbox\"}\n",
+                }),
+            )
+            .await;
+        let clock = Arc::new(std::sync::Mutex::new(
+            chrono::DateTime::parse_from_rfc3339("2026-11-02T10:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        ));
+        let transport = Arc::new(StubTransport {
+            items: std::sync::Mutex::new(vec![vec![], vec![]]),
+            ..Default::default()
+        });
+        let project = setup
+            .workspace
+            .read_with(&setup.cx, |workspace, _| workspace.project().clone());
+        let gmail = setup
+            .cx
+            .update(|_, cx| gmail_service::new_for_test(&project, cx));
+        gmail.update(&mut setup.cx, |gmail, cx| {
+            gmail.set_now_for_test(Arc::new({
+                let clock = clock.clone();
+                move || *clock.lock().unwrap()
+            }));
+            let config = GmailConfig {
+                account: Some("diego@example.com".to_string()),
+                archive: ArchiveConfig::On([DecisionClass::Archive].into()),
+                ..GmailConfig::default()
+            };
+            let vault = Vault {
+                root: root.clone(),
+                config: crate::vault::VaultConfig::default(),
+            };
+            gmail.configure_for_test(vault, config, transport.clone(), cx)
+        });
+        setup.cx.run_until_parked();
+        let advance = |setup: &mut Setup, seconds: u64| {
+            *clock.lock().unwrap() += chrono::Duration::seconds(seconds as i64);
+            setup
+                .cx
+                .executor()
+                .advance_clock(std::time::Duration::from_secs(seconds));
+            setup.cx.run_until_parked();
+        };
+
+        setup.cx.simulate_keystrokes("down");
+        assert_eq!(selected(&setup).as_deref(), Some("Re: Q4 planning doc"));
+        setup.cx.simulate_keystrokes("e");
+        setup.cx.run_until_parked();
+        assert!(transport.modified.lock().unwrap().is_empty());
+        advance(&mut setup, 61);
+        assert_eq!(
+            *transport.modified.lock().unwrap(),
+            vec![("t-q4".to_string(), ThreadMove::Archive)]
+        );
+
+        setup.cx.simulate_keystrokes("u");
+        setup.cx.run_until_parked();
+        assert_eq!(
+            *transport.modified.lock().unwrap(),
+            vec![
+                ("t-q4".to_string(), ThreadMove::Archive),
+                ("t-q4".to_string(), ThreadMove::Unarchive),
+            ]
+        );
     }
 
     #[gpui::test]
