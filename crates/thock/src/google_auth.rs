@@ -275,18 +275,22 @@ pub async fn connect_workspace(
     })
 }
 
-/// The Gmail archive opt-in (V53 §5.1): an incremental consent for
-/// `gmail.modify` alone, which Google folds into the existing grant. Returns
-/// `false`, storing nothing, when the user left the permission unticked.
-/// Fails when the consent was given for an account other than `account`.
+/// The Gmail archive opt-in (V53 §5.1): a consent for the read-only scopes
+/// plus `gmail.modify`, where Google only prompts for what is new. Asking
+/// for `gmail.modify` alone isn't enough: `include_granted_scopes` doesn't
+/// always fold the earlier scopes into the new tokens, and storing such a
+/// refresh token would cut off calendar and inbox sync. Returns `false`,
+/// storing nothing, when the user left `gmail.modify` unticked. Fails, also
+/// storing nothing, when a read-only scope is missing from the grant or the
+/// consent was given for an account other than `account`.
 pub async fn grant_gmail_modify(
     http: Arc<dyn HttpClient>,
     client: GoogleClient,
     account: &str,
     cx: &mut AsyncApp,
 ) -> Result<bool> {
-    let tokens = authorize(&http, &client, &[GMAIL_MODIFY_SCOPE], cx).await?;
-    if tokens.has_scope(GMAIL_MODIFY_SCOPE) != Some(true) {
+    let tokens = authorize(&http, &client, &opt_in_scopes(), cx).await?;
+    if !opt_in_grant_is_complete(tokens.scope.as_deref())? {
         return Ok(false);
     }
     let refresh_token = tokens
@@ -298,6 +302,28 @@ pub async fn grant_gmail_modify(
         bail!("Google signed in as {email}, but this vault is connected to {account}");
     }
     write_refresh_token(&email, &refresh_token, cx).await?;
+    Ok(true)
+}
+
+fn opt_in_scopes() -> Vec<&'static str> {
+    let mut scopes = SCOPES.to_vec();
+    scopes.push(GMAIL_MODIFY_SCOPE);
+    scopes
+}
+
+/// Whether the opt-in's grant carries `gmail.modify`; an error when it
+/// lacks one of the read-only scopes, so it is never stored.
+fn opt_in_grant_is_complete(granted: Option<&str>) -> Result<bool> {
+    let granted = granted.unwrap_or_default();
+    if !scope_listed(granted, GMAIL_MODIFY_SCOPE) {
+        return Ok(false);
+    }
+    if SCOPES.iter().any(|scope| !scope_listed(granted, scope)) {
+        bail!(
+            "Google's answer left out Thock's calendar, Gmail or Tasks reading permission; \
+             nothing was changed — allow every permission on Google's screen"
+        );
+    }
     Ok(true)
 }
 
@@ -713,20 +739,32 @@ mod tests {
     }
 
     #[test]
-    fn the_archive_opt_in_asks_for_gmail_modify_alone() {
+    fn the_archive_opt_in_asks_for_every_scope_and_stores_only_a_full_grant() {
         let url = build_auth_url(
             "client-123",
             "http://127.0.0.1:9000/callback",
             "chal",
             "nonce",
-            &[GMAIL_MODIFY_SCOPE],
+            &opt_in_scopes(),
         );
-        assert!(
-            url.contains("scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.modify&"),
-            "{url}"
-        );
+        for scope in [
+            "calendar.readonly",
+            "gmail.readonly",
+            "tasks.readonly",
+            "gmail.modify",
+        ] {
+            assert!(url.contains(scope), "missing {scope} in {url}");
+        }
         assert!(url.contains("include_granted_scopes=true"), "{url}");
-        assert!(!url.contains("readonly"), "{url}");
+
+        let read_only = SCOPES.join(" ");
+        let full = format!("{read_only} {GMAIL_MODIFY_SCOPE}");
+        assert!(opt_in_grant_is_complete(Some(&full)).unwrap());
+        // gmail.modify unticked: stays off, nothing stored.
+        assert!(!opt_in_grant_is_complete(Some(&read_only)).unwrap());
+        assert!(!opt_in_grant_is_complete(None).unwrap());
+        // The case seen live: the new grant carries gmail.modify alone.
+        assert!(opt_in_grant_is_complete(Some(GMAIL_MODIFY_SCOPE)).is_err());
     }
 
     #[test]

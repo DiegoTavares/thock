@@ -109,8 +109,11 @@ grant is a holding state with an **Allow** action (§8), never an error loop.
 `thock: enable gmail archive` (`thock::EnableGmailArchive`, also the **Allow** button of the Gmail
 row while the permission is missing):
 
-1. Opens Google's consent for `gmail.modify` only, with `include_granted_scopes=true`, so the
-   result is one refresh token carrying the old scopes plus the new one.
+1. Opens Google's consent for the three read-only scopes plus `gmail.modify`, with
+   `include_granted_scopes=true`; Google prompts only for what is new. Asking for `gmail.modify`
+   alone was tried first and returned tokens without the earlier scopes, which can't be stored
+   without cutting off calendar and inbox sync. A grant missing any read-only scope is refused
+   and nothing is stored.
 2. If the granted `scope` comes back without `gmail.modify` (the user unticked it), nothing is
    written and a toast says so: *Gmail archive stays off: Google wasn't given the permission*.
    A consent given for another Google account than the vault's is refused the same way.
@@ -268,8 +271,9 @@ so the user can always see whether Thock is writing.
 ### 10.3 Transport and auth
 - `modify_thread` sends the exact body and path; 404 is success-and-done; 403 `insufficient` →
   the holding error.
-- `build_auth_url` carries `include_granted_scopes=true`; the opt-in URL asks for
-  `gmail.modify` only; `connect_workspace` includes it only when `[archive]` is on.
+- `build_auth_url` carries `include_granted_scopes=true`; the opt-in URL asks for every
+  read-only scope plus `gmail.modify`, and a grant that comes back with `gmail.modify` alone is
+  refused; `connect_workspace` includes it only when `[archive]` is on.
 - Granted-scope parsing from a refresh response with and without `gmail.modify`.
 
 ### 10.4 Service (`gmail_service.rs`, stub transport)
