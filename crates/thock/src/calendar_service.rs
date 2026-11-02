@@ -792,7 +792,9 @@ impl CalendarService {
             .as_ref()
             .map(|config| config.calendars.clone())
             .unwrap_or_default();
-        let with_gmail_modify = crate::gmail::archive_on_in_vault(&vault_root);
+        let with_gmail_modify = gmail
+            .as_ref()
+            .is_some_and(|gmail| gmail.read(cx).archive_on());
         let http = cx.http_client();
         let fs = self.project.read(cx).fs().clone();
         self.state = SyncState::Connecting;

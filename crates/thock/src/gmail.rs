@@ -103,18 +103,6 @@ impl ArchiveConfig {
     }
 }
 
-/// Whether the vault's `.thock/gmail.toml` turns Gmail archive on. Blocking
-/// I/O, like the services' config reloads.
-pub fn archive_on_in_vault(vault_root: &std::path::Path) -> bool {
-    let path = vault_root
-        .join(crate::vault::VAULT_MARKER_DIR)
-        .join(GMAIL_CONFIG_FILE);
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| parse_gmail_config(&text).ok())
-        .is_some_and(|config| config.archive.is_on())
-}
-
 /// The shipped map, used when the file has no `[[sync]]` entries: backlog
 /// first, so a both-labels thread keeps taking the fast lane (spec §4.1).
 pub fn default_mappings() -> Vec<SyncMapping> {
@@ -552,16 +540,19 @@ pub fn plan_archive(
     let mut plan = ArchivePlan::default();
     let inbox_dir = inbox_dir.trim_matches('/');
     let mut present: Vec<(&str, DecisionClass, &ImportedThread)> = Vec::new();
+    // Every digest still in the log counts as present, captured here or not:
+    // an unreadable capture record or a moved inbox folder must never read
+    // as an undo.
     let mut present_digests: HashSet<&str> = HashSet::new();
     for decision in log.iter().rev() {
-        let Some(thread) = imported
+        // The newest line for a digest is its decision.
+        if !present_digests.insert(&decision.digest) {
+            continue;
+        }
+        if let Some(thread) = imported
             .get(&decision.digest)
             .filter(|thread| thread.path == inbox_dir)
-        else {
-            continue;
-        };
-        // The newest line for a digest is its decision.
-        if present_digests.insert(&decision.digest) {
+        {
             present.push((&decision.digest, decision.class, thread));
         }
     }
@@ -1173,6 +1164,25 @@ mod tests {
         // d-2's line goes after a day: Gmail is left alone.
         let log = vec![decision("d-1", DecisionClass::Archive)];
         assert_eq!(run(&mut state, &log, &on, at(100 + 24 * 3600)), vec![]);
+    }
+
+    #[test]
+    fn a_line_still_in_the_log_is_never_undone() {
+        let on = classes(&[DecisionClass::Archive]);
+        let mut state = ArchiveState::default();
+        run(&mut state, &[], &on, at(0));
+        let log = vec![decision("d-1", DecisionClass::Archive)];
+        run(&mut state, &log, &on, at(10));
+        assert_eq!(
+            run(&mut state, &log, &on, at(100)),
+            vec![archive("d-1", "t-1")]
+        );
+        // The capture record went missing, then the inbox folder moved: the
+        // line is still there, so Gmail is left alone.
+        let missing = plan_archive(&log, &ImportedIndex::new(), &state, &on, "inbox", at(200));
+        assert_eq!(missing.actions, vec![]);
+        let moved = plan_archive(&log, &imported(), &state, &on, "elsewhere", at(200));
+        assert_eq!(moved.actions, vec![]);
     }
 
     #[test]

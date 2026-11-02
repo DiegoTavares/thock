@@ -284,15 +284,18 @@ impl GmailService {
         }
     }
 
+    /// Whether `.thock/gmail.toml` turns Gmail archive on.
+    pub fn archive_on(&self) -> bool {
+        self.config
+            .as_ref()
+            .is_some_and(|config| config.archive.is_on())
+    }
+
     /// Runs an archive pass now and another once the grace period is over,
     /// so an inbox decision or its undo reaches Gmail without waiting for
     /// the next poll (V53 §7.4).
     pub fn reconcile_soon(&mut self, cx: &mut Context<Self>) {
-        let archive_on = self
-            .config
-            .as_ref()
-            .is_some_and(|config| config.archive.is_on());
-        if !archive_on || self.transport.is_none() {
+        if !self.archive_on() || self.transport.is_none() {
             return;
         }
         self.reconcile_soon_task = Some(cx.spawn(async move |this, cx| {
@@ -332,8 +335,10 @@ impl GmailService {
     }
 
     /// Re-reads `.thock/gmail.toml` — the connect flow calls this after
-    /// writing `google.toml`.
+    /// writing `google.toml` — and rebuilds the transport, so a new consent's
+    /// grant is read instead of the cached one.
     pub fn reload_config(&mut self, cx: &mut Context<Self>) {
+        self.transport = None;
         self.reload(cx);
     }
 
@@ -678,6 +683,21 @@ impl GmailService {
     /// outcome lands in [`GmailService::archive_status`]; capture never
     /// fails because of it.
     async fn reconcile_archive(this: &WeakEntity<Self>, cx: &mut AsyncApp) {
+        // Detached, so a caller dropped mid-pass (a poll loop replaced on
+        // reload) can't cancel it between Gmail's answer and its record.
+        let (finished, wait) = futures::channel::oneshot::channel::<()>();
+        cx.spawn({
+            let this = this.clone();
+            async move |cx| {
+                Self::reconcile_archive_now(&this, cx).await;
+                finished.send(()).ok();
+            }
+        })
+        .detach();
+        wait.await.ok();
+    }
+
+    async fn reconcile_archive_now(this: &WeakEntity<Self>, cx: &mut AsyncApp) {
         let context = this
             .read_with(cx, |service, _| {
                 Some((
@@ -697,6 +717,15 @@ impl GmailService {
         let fs = project.read_with(cx, |project, _| project.fs().clone());
         let outcome = Self::archive_pass(this, &transport, &config, &vault, &fs, cx).await;
         this.update(cx, |service, cx| {
+            // A pass that ran on a transport since replaced (a new consent)
+            // says nothing about the new grant.
+            let current = service
+                .transport
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &transport));
+            if !current {
+                return;
+            }
             match outcome {
                 Ok(pass) => {
                     service.archive_permission_missing = pass.permission_missing;
@@ -728,18 +757,23 @@ impl GmailService {
         })?;
         let state_path = archive_state_path(vault);
         // A missing record is a fresh start; a lost one costs at most a
-        // redundant `INBOX` removal.
-        let mut contents = fs.load(&state_path).await.unwrap_or_default();
+        // redundant `INBOX` removal. One that fails to read is neither: an
+        // empty log would read as every decision undone, and an empty
+        // record would be written over the real one.
+        let mut contents = load_if_present(fs, &state_path)
+            .await
+            .context("reading Gmail archive state")?;
         let state = ArchiveState::from_jsonl(&contents);
         let mut pass = ArchivePass::default();
         let mut events = Vec::new();
         match &config.archive {
             ArchiveConfig::On(on) => {
-                let imported = fs.load(&state_file_path(vault)).await.unwrap_or_default();
-                let log = fs
-                    .load(&vault.root.join(TRIAGE_LOG_PATH))
+                let imported = load_if_present(fs, &state_file_path(vault))
                     .await
-                    .unwrap_or_default();
+                    .context("reading the Gmail capture state")?;
+                let log = load_if_present(fs, &vault.root.join(TRIAGE_LOG_PATH))
+                    .await
+                    .context("reading the triage log")?;
                 let headings = &vault.config.backlog.headings;
                 let decisions = logged_decisions(&log, &headings.soon, &headings.someday);
                 let plan = plan_archive(
@@ -858,11 +892,8 @@ impl GmailService {
                 Ok(Some(row)) => {
                     // The new grant is in the keychain; a fresh transport
                     // reads it instead of the cached read-only token.
-                    this.update(cx, |service, cx| {
-                        service.transport = None;
-                        service.reload(cx);
-                    })
-                    .ok();
+                    this.update(cx, |service, cx| service.reload_config(cx))
+                        .ok();
                     let workspace = workspace.clone();
                     let path = config_path.clone();
                     (
@@ -1372,11 +1403,8 @@ fn with_archive_table(text: &str) -> Result<String> {
     if !document.contains_key("schema") {
         document.insert("schema", toml_edit::value(2));
     }
-    let listed = document
-        .get("archive")
-        .and_then(|archive| archive.get("on"))
-        .and_then(|on| on.as_array())
-        .is_some_and(|on| !on.is_empty());
+    // A list of only unknown names reads as off, so it doesn't count.
+    let listed = parse_gmail_config(text).is_ok_and(|config| config.archive.is_on());
     if listed {
         return Ok(document.to_string());
     }
@@ -1415,6 +1443,15 @@ fn archive_table_row(text: &str) -> u32 {
         .position(|line| line.trim() == "[archive]")
         .and_then(|row| u32::try_from(row).ok())
         .unwrap_or(0)
+}
+
+/// The file's text, empty when it doesn't exist.
+async fn load_if_present(fs: &Arc<dyn Fs>, path: &std::path::Path) -> Result<String> {
+    if fs.is_file(path).await {
+        fs.load(path).await
+    } else {
+        Ok(String::new())
+    }
 }
 
 fn archive_state_path(vault: &Vault) -> PathBuf {
@@ -2031,14 +2068,18 @@ mod tests {
         // Already on with the user's own list: left exactly as it is.
         let custom = format!("{original}\n[archive]\non = [\"soon\", \"discard\"]\n");
         assert_eq!(with_archive_table(&custom).unwrap(), custom);
-        // On but empty: given the default list, keeping the table.
-        let empty = format!("{original}\n[archive]\non = []\n");
-        assert_eq!(
-            parse_gmail_config(&with_archive_table(&empty).unwrap())
-                .unwrap()
-                .archive,
-            archive_on()
-        );
+        // On but empty, or listing nothing this build knows: given the
+        // default list, keeping the table.
+        for listed in ["on = []", "on = [\"trash\"]", "on = [1]"] {
+            let table = format!("{original}\n[archive]\n{listed}\n");
+            assert_eq!(
+                parse_gmail_config(&with_archive_table(&table).unwrap())
+                    .unwrap()
+                    .archive,
+                archive_on(),
+                "{listed}"
+            );
+        }
 
         // Turning it off removes only the table.
         let off = without_archive_table(&custom).unwrap();
