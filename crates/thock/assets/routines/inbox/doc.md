@@ -58,3 +58,10 @@ can always answer "what happened to that thing I sent myself" — even with Thoc
 - `.thock/inbox.toml` — the landing folder, poll interval, and the Google Tasks list. The
   Gmail label lives in `.thock/gmail.toml`'s label → folder map instead. Delete either file and
   that transport goes away; `inbox/` keeps working as a plain folder.
+- **Archive in Gmail** — run `thock: enable gmail archive` and an email you file here also
+  leaves your Gmail inbox, so you triage it once. Google asks for the permission first; until
+  then Thock only reads your mail. `[archive] on` in `.thock/gmail.toml` lists which decisions
+  count (`today`, `soon`, `someday`, `archive`, `discard`, `other`; just `archive` to start).
+  Only the email's inbox label changes, a minute after you decide, and undoing the decision puts
+  it back. Decisions made before you turned it on stay where they are in Gmail.
+  `thock: disable gmail archive` stops it.

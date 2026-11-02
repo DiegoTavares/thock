@@ -27,7 +27,7 @@ use crate::calendar_service::{
     self, AddPlannerHeading, CalendarService, ChoosePlannerHeading, ConnectGoogleWorkspace,
     HoldReason, SyncCalendarNow, SyncState,
 };
-use crate::gmail_service::{self, GmailService, SyncGmailNow};
+use crate::gmail_service::{self, ArchiveStatus, EnableGmailArchive, GmailService, SyncGmailNow};
 use crate::inbox_service::{self, InboxService, SyncInboxNow};
 use crate::inbox_suggest::format_cost;
 use crate::inbox_view::OpenInbox;
@@ -120,6 +120,7 @@ pub enum ActionKind {
     ConnectGoogleWorkspace,
     ConnectReadwise,
     ConnectPhone,
+    EnableGmailArchive,
     AddPlannerHeading,
     ChoosePlannerHeading,
     OpenInbox,
@@ -137,6 +138,7 @@ impl ActionKind {
             Self::ConnectGoogleWorkspace => ConnectGoogleWorkspace.boxed_clone(),
             Self::ConnectReadwise => ConnectReadwise.boxed_clone(),
             Self::ConnectPhone => ConnectPhone.boxed_clone(),
+            Self::EnableGmailArchive => EnableGmailArchive.boxed_clone(),
             Self::AddPlannerHeading => AddPlannerHeading.boxed_clone(),
             Self::ChoosePlannerHeading => ChoosePlannerHeading.boxed_clone(),
             Self::OpenInbox => OpenInbox.boxed_clone(),
@@ -285,9 +287,59 @@ pub fn status_for_calendar(state: &SyncState) -> Option<ConnectorStatus> {
     })
 }
 
-/// The Gmail row (V9 §10.3, V15 §7.3). A Gmail hold always names a label
-/// the user can create, so it is a warning rather than a wait.
-pub fn status_for_gmail(state: &SyncState) -> Option<ConnectorStatus> {
+/// The Gmail row (V9 §10.3, V15 §7.3, V53 §8). A Gmail hold always names a
+/// label the user can create, so it is a warning rather than a wait. Gmail
+/// archive speaks only while capture is connected: it can't run otherwise.
+pub fn status_for_gmail(state: &SyncState, archive: &ArchiveStatus) -> Option<ConnectorStatus> {
+    let status = status_for_gmail_capture(state)?;
+    let connected = matches!(
+        state,
+        SyncState::Idle | SyncState::Synced { .. } | SyncState::Holding { .. }
+    );
+    if !connected {
+        return Some(status);
+    }
+    let holding = matches!(state, SyncState::Holding { .. });
+    let sync_now = ActionKind::SyncGmailNow;
+    Some(match archive {
+        ArchiveStatus::Off => status,
+        // A capture hold is the bigger problem; the archive's fix still
+        // gets a button.
+        ArchiveStatus::NeedsPermission if holding => {
+            status.action(ActionKind::EnableGmailArchive, "Allow archive")
+        }
+        ArchiveStatus::NeedsPermission => {
+            ConnectorStatus::new(Connector::Gmail, "archive needs permission")
+                .detail("Thock needs Google's permission to archive emails you file.")
+                .attention(Attention::Warning)
+                .action(ActionKind::EnableGmailArchive, "Allow")
+        }
+        ArchiveStatus::Failing { emails, error } => {
+            let summary = match emails {
+                0 => "couldn't record Gmail archive".to_string(),
+                1 => "couldn't archive 1 email in Gmail".to_string(),
+                emails => format!("couldn't archive {emails} emails in Gmail"),
+            };
+            ConnectorStatus::new(Connector::Gmail, summary)
+                .detail(error.clone())
+                .attention(Attention::Error)
+                .action(sync_now, "Retry")
+        }
+        ArchiveStatus::Unreadable => {
+            ConnectorStatus::new(Connector::Gmail, "gmail.toml's [archive] can't be read")
+                .detail("Gmail archive is off until .thock/gmail.toml's [archive] is fixed.")
+                .attention(Attention::Error)
+                .action(sync_now, "Retry")
+        }
+        ArchiveStatus::Healthy if holding => status,
+        ArchiveStatus::Healthy => ConnectorStatus {
+            summary: format!("{} · archiving in Gmail", status.summary).into(),
+            ..status
+        },
+    })
+}
+
+fn status_for_gmail_capture(state: &SyncState) -> Option<ConnectorStatus> {
     let connector = Connector::Gmail;
     let sync_now = ActionKind::SyncGmailNow;
     let connect = ActionKind::ConnectGoogleWorkspace;
@@ -544,7 +596,7 @@ pub fn calendar_status(service: &CalendarService) -> Option<ConnectorStatus> {
 }
 
 pub fn gmail_status(service: &GmailService) -> Option<ConnectorStatus> {
-    status_for_gmail(service.state())
+    status_for_gmail(service.state(), &service.archive_status())
 }
 
 pub fn inbox_status(
@@ -1231,9 +1283,72 @@ mod tests {
     }
 
     #[test]
+    fn gmail_archive_states_share_the_gmail_row() {
+        let healthy = status_for_gmail(&synced(), &ArchiveStatus::Healthy).unwrap();
+        assert_eq!(
+            healthy.summary.as_ref(),
+            "checked just now · archiving in Gmail"
+        );
+        assert!(!healthy.needs_user());
+
+        let permission = status_for_gmail(&synced(), &ArchiveStatus::NeedsPermission).unwrap();
+        assert_eq!(permission.summary.as_ref(), "archive needs permission");
+        assert_eq!(permission.attention, Attention::Warning);
+        assert_eq!(
+            permission.primary_action().unwrap().kind,
+            ActionKind::EnableGmailArchive
+        );
+        assert_eq!(labels(&permission), ["Allow"]);
+
+        let two_failed = ArchiveStatus::Failing {
+            emails: 2,
+            error: "503".into(),
+        };
+        let row = status_for_gmail(&synced(), &two_failed).unwrap();
+        assert_eq!(row.summary.as_ref(), "couldn't archive 2 emails in Gmail");
+        assert_eq!(row.attention, Attention::Error);
+        assert_eq!(row.detail.as_deref(), Some("503"));
+        assert_eq!(row.primary_action().unwrap().kind, ActionKind::SyncGmailNow);
+        assert_eq!(labels(&row), ["Retry"]);
+
+        let unreadable = status_for_gmail(&synced(), &ArchiveStatus::Unreadable).unwrap();
+        assert!(unreadable.summary.contains("gmail.toml"), "{unreadable:?}");
+        assert_eq!(unreadable.attention, Attention::Error);
+
+        // Capture's own trouble comes first: archive can't run without it.
+        let disconnected =
+            status_for_gmail(&SyncState::Disconnected, &ArchiveStatus::NeedsPermission).unwrap();
+        assert_eq!(disconnected.summary.as_ref(), "sign-in needed");
+        assert_eq!(
+            status_for_gmail(&failing("boom"), &failing_archive())
+                .unwrap()
+                .summary
+                .as_ref(),
+            "sync failed"
+        );
+        // A label hold keeps its text and gains the archive's fix.
+        let holding = SyncState::Holding {
+            reason: HoldReason::Waiting("label \"thock/inbox\" not found in Gmail".into()),
+        };
+        let row = status_for_gmail(&holding, &ArchiveStatus::NeedsPermission).unwrap();
+        assert!(row.summary.contains("thock/inbox"), "{row:?}");
+        assert_eq!(labels(&row), ["Sync now", "Allow archive"]);
+    }
+
+    fn failing_archive() -> ArchiveStatus {
+        ArchiveStatus::Failing {
+            emails: 1,
+            error: "boom".into(),
+        }
+    }
+
+    #[test]
     fn no_config_hides_every_connector() {
         assert_eq!(status_for_calendar(&SyncState::NoConfig), None);
-        assert_eq!(status_for_gmail(&SyncState::NoConfig), None);
+        assert_eq!(
+            status_for_gmail(&SyncState::NoConfig, &ArchiveStatus::Off),
+            None
+        );
         assert_eq!(status_for_inbox(&SyncState::NoConfig, 3, false), None);
         assert_eq!(
             status_for_readwise(&SyncState::NoConfig, ReadwiseExtras::default()),
@@ -1253,7 +1368,7 @@ mod tests {
         );
         assert_eq!(labels(&calendar), ["Sync now"]);
 
-        let gmail = status_for_gmail(&synced()).unwrap();
+        let gmail = status_for_gmail(&synced(), &ArchiveStatus::Off).unwrap();
         assert_eq!(gmail.summary.as_ref(), "checked just now");
         assert_eq!(gmail.attention, Attention::None);
 
@@ -1289,7 +1404,11 @@ mod tests {
     #[test]
     fn in_flight_states_spin_instead_of_dotting() {
         assert!(status_for_calendar(&SyncState::Connecting).unwrap().busy);
-        assert!(status_for_gmail(&SyncState::Connecting).unwrap().busy);
+        assert!(
+            status_for_gmail(&SyncState::Connecting, &ArchiveStatus::Off)
+                .unwrap()
+                .busy
+        );
         let importing = status_for_readwise(
             &SyncState::Idle,
             ReadwiseExtras {
@@ -1320,7 +1439,7 @@ mod tests {
             ActionKind::SyncCalendarNow
         );
 
-        let gmail = status_for_gmail(&SyncState::Disconnected).unwrap();
+        let gmail = status_for_gmail(&SyncState::Disconnected, &ArchiveStatus::Off).unwrap();
         assert_eq!(gmail.summary.as_ref(), "sign-in needed");
         assert_eq!(gmail.attention, Attention::Error);
         assert_eq!(
@@ -1425,7 +1544,9 @@ mod tests {
             reason: HoldReason::Waiting("label \"thock/backlog\" not found in Gmail".into()),
         };
         assert_eq!(
-            status_for_gmail(&holding).unwrap().attention,
+            status_for_gmail(&holding, &ArchiveStatus::Off)
+                .unwrap()
+                .attention,
             Attention::Warning
         );
         assert_eq!(
@@ -1534,7 +1655,7 @@ mod tests {
     #[test]
     fn only_rows_needing_the_user_go_inline() {
         let inline = inline_statuses([
-            status_for_gmail(&synced()),
+            status_for_gmail(&synced(), &ArchiveStatus::Off),
             None,
             status_for_inbox(&synced(), 2, false),
             status_for_readwise(&failing("boom"), ReadwiseExtras::default()),
@@ -1542,8 +1663,11 @@ mod tests {
         let connectors: Vec<_> = inline.iter().map(|status| status.connector).collect();
         assert_eq!(connectors, [Connector::Inbox, Connector::Readwise]);
         assert!(
-            inline_statuses([status_for_gmail(&synced()), status_for_calendar(&synced())])
-                .is_empty()
+            inline_statuses([
+                status_for_gmail(&synced(), &ArchiveStatus::Off),
+                status_for_calendar(&synced())
+            ])
+            .is_empty()
         );
     }
 
@@ -1553,7 +1677,7 @@ mod tests {
 
         let healthy = [
             status_for_calendar(&synced()).unwrap(),
-            status_for_gmail(&synced()).unwrap(),
+            status_for_gmail(&synced(), &ArchiveStatus::Off).unwrap(),
         ];
         assert_eq!(
             Glance::from_statuses(&healthy),

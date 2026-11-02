@@ -12,13 +12,13 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use thock_sync_core::{
-    Anchor, Applied, Context, DailyNotes, Due, Group, Heading, MirrorLine, MirrorMark, Operation,
-    Outcome, Place, Placement, ReminderConfig, ReminderState, Task, When, Write, add_id, apply,
-    attach, close, content_hash, cut_text, drop_token, effect_present, group, heading_key,
-    is_reminder_path, is_syncable_image_path, is_syncable_path, key_check, line_hash, mirror_text,
-    open, parse_line, parse_note, parse_write, place_token, reminder_text, reopen, rewrite,
-    seal_with_nonce, section_hash, snoozed_due, strip_reminder, trailing_comments_start,
-    trailing_metadata_start,
+    Anchor, Applied, Context, DailyNotes, DecisionClass, Due, Group, Heading, MirrorLine,
+    MirrorMark, Operation, Outcome, Place, Placement, ReminderConfig, ReminderState, Task, When,
+    Write, add_id, apply, attach, close, content_hash, cut_text, decision_class, drop_token,
+    effect_present, group, heading_key, is_reminder_path, is_syncable_image_path, is_syncable_path,
+    key_check, line_hash, mirror_text, open, parse_line, parse_note, parse_triage_log_line,
+    parse_write, place_token, reminder_text, reopen, rewrite, seal_with_nonce, section_hash,
+    snoozed_due, strip_reminder, trailing_comments_start, trailing_metadata_start,
 };
 
 fn fixtures_root() -> PathBuf {
@@ -652,6 +652,46 @@ fn reminder_vectors_match() {
             vector.due,
             "{vector:?}"
         );
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TriageLogVector {
+    line: String,
+    soon: String,
+    someday: String,
+    parsed: Option<TriageLogParts>,
+    class: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+struct TriageLogParts {
+    day: String,
+    title: String,
+    destination: String,
+    digest: String,
+}
+
+#[test]
+fn triage_log_vectors_match() {
+    let vectors: Vec<TriageLogVector> = read_json("triage_log.json");
+    assert!(vectors.len() >= 10);
+    for vector in vectors {
+        let parsed = parse_triage_log_line(&vector.line);
+        assert_eq!(
+            parsed.as_ref().map(|line| TriageLogParts {
+                day: line.day.clone(),
+                title: line.title.clone(),
+                destination: line.destination.clone(),
+                digest: line.digest.clone(),
+            }),
+            vector.parsed,
+            "{vector:?}"
+        );
+        let class = parsed
+            .map(|line| decision_class(&line.destination, &vector.soon, &vector.someday))
+            .map(DecisionClass::name);
+        assert_eq!(class, vector.class.as_deref(), "{vector:?}");
     }
 }
 

@@ -16,8 +16,8 @@ pub use apply::{Applied, Outcome, apply, effect_present};
 pub use dates::{format_date, parse_date};
 pub use envelope::{Context, SealError, content_hash, key_check, open, seal, seal_with_nonce};
 pub use inbox::{
-    INBOX_ARCHIVE_DIR, TRIAGE_LOG_PATH, archive_path, inbox_has_body, inbox_task_line,
-    triage_log_line,
+    DecisionClass, INBOX_ARCHIVE_DIR, TRIAGE_LOG_PATH, TriageLogLine, archive_path, decision_class,
+    inbox_has_body, inbox_task_line, parse_triage_log_line, triage_log_line,
 };
 pub use markdown::{heading_key, line_hash, section_hash};
 pub use reminder::{

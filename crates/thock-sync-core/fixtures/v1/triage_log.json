@@ -1,0 +1,79 @@
+[
+  {
+    "line": "- 2026-10-10 · Call Ana → Today · Day planner <!--inbox:4d1f9a02c7b3-->",
+    "soon": "Soon",
+    "someday": "Someday",
+    "parsed": {"day": "2026-10-10", "title": "Call Ana", "destination": "Today · Day planner", "digest": "4d1f9a02c7b3"},
+    "class": "today"
+  },
+  {
+    "line": "- 2026-10-10 · Call Ana → Backlog · Soon <!--inbox:4d1f9a02c7b3-->",
+    "soon": "Soon",
+    "someday": "Someday",
+    "parsed": {"day": "2026-10-10", "title": "Call Ana", "destination": "Backlog · Soon", "digest": "4d1f9a02c7b3"},
+    "class": "soon"
+  },
+  {
+    "line": "- 2026-08-23 · Ship it — a practical guide to shipping → Backlog · Someday <!--inbox:4d1f9a02c7b3-->",
+    "soon": "Soon",
+    "someday": "Someday",
+    "parsed": {"day": "2026-08-23", "title": "Ship it — a practical guide to shipping", "destination": "Backlog · Someday", "digest": "4d1f9a02c7b3"},
+    "class": "someday"
+  },
+  {
+    "line": "- 2026-11-02 · Re: Q4 planning doc → Archived <!--inbox:a1a1a1a1a1a1-->",
+    "soon": "Soon",
+    "someday": "Someday",
+    "parsed": {"day": "2026-11-02", "title": "Re: Q4 planning doc", "destination": "Archived", "digest": "a1a1a1a1a1a1"},
+    "class": "archive"
+  },
+  {
+    "line": "- 2026-11-02 · Newsletter → Discarded <!--inbox:b2b2b2b2b2b2-->",
+    "soon": "Soon",
+    "someday": "Someday",
+    "parsed": {"day": "2026-11-02", "title": "Newsletter", "destination": "Discarded", "digest": "b2b2b2b2b2b2"},
+    "class": "discard"
+  },
+  {
+    "line": "- 2026-11-02 · Sketch: vault sync ideas → notes/ideas/ (kept as note) <!--inbox:c3c3c3c3c3c3-->",
+    "soon": "Soon",
+    "someday": "Someday",
+    "parsed": {"day": "2026-11-02", "title": "Sketch: vault sync ideas", "destination": "notes/ideas/ (kept as note)", "digest": "c3c3c3c3c3c3"},
+    "class": "other"
+  },
+  {
+    "line": "- 2026-11-02 · Call Ana → Backlog · Next up <!--inbox:4d1f9a02c7b3-->",
+    "soon": "Next up",
+    "someday": "Maybe",
+    "parsed": {"day": "2026-11-02", "title": "Call Ana", "destination": "Backlog · Next up", "digest": "4d1f9a02c7b3"},
+    "class": "soon"
+  },
+  {
+    "line": "- 2026-11-02 · Call Ana → Backlog · Soon <!--inbox:4d1f9a02c7b3-->",
+    "soon": "Next up",
+    "someday": "Maybe",
+    "parsed": {"day": "2026-11-02", "title": "Call Ana", "destination": "Backlog · Soon", "digest": "4d1f9a02c7b3"},
+    "class": "other"
+  },
+  {
+    "line": "- 2026-11-02 · Buy milk → Archived",
+    "soon": "Soon",
+    "someday": "Someday",
+    "parsed": null,
+    "class": null
+  },
+  {
+    "line": "- 2026-11-02 · no arrow here <!--inbox:4d1f9a02c7b3-->",
+    "soon": "Soon",
+    "someday": "Someday",
+    "parsed": null,
+    "class": null
+  },
+  {
+    "line": "Some prose about the inbox <!--inbox:4d1f9a02c7b3-->",
+    "soon": "Soon",
+    "someday": "Someday",
+    "parsed": null,
+    "class": null
+  }
+]
