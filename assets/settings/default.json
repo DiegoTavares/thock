@@ -549,6 +549,23 @@
     "heading_font": "Petrona",
     // How often Thock may start a conversation on its own: "rare" or "off".
     "openers": "rare",
+    "page": {
+      // Characters per line of the page, in the body font.
+      "measure": 68,
+      // The page narrows to this before an agent thread floats over it.
+      "min_measure": 48,
+    },
+    // While you type in a note, the side panels tuck away to a thin mark at
+    // the window's edge, and come back when you pause or go to them.
+    // `false` keeps them where they are.
+    "tides": {
+      // "ebb" tucks the side away while you type; "stay" keeps it open.
+      "left": "ebb",
+      "right": "ebb",
+      // Seconds without typing before tucked-away panels come back, or null
+      // for never.
+      "flow_back_after": 8,
+    },
   },
   // Titlebar related settings
   "title_bar": {
