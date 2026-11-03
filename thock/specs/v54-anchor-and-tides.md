@@ -239,9 +239,11 @@ in Thock *means* the anchored page. Zed's fractional `centered_layout.left_paddi
 `right_padding` settings are deleted (fork discipline: delete what Thock doesn't use).
 
 Centred layout is **on by default** for a vault (decision 14). The workspace's saved
-`centered_layout` stays unset until the person toggles it; while it is unset and the folder is a
-vault, Thock turns centred layout on, including for a folder that becomes a vault while it is
-open. Once toggled, the saved value is theirs, so turning it off sticks across restarts.
+`centered_layout` stays unset until it is chosen. While it is unset and the folder is a local
+vault (its `.thock/config.toml` is in the project's worktree), Thock turns centred layout on and
+saves that as the workspace's choice, before the window's first frame. A folder that becomes a
+vault while it is open is centred when its marker appears. Later launches restore the saved
+value before anything is drawn, and a later toggle replaces it, so turning it off sticks.
 
 ## 7. Keys and actions
 
@@ -271,8 +273,8 @@ V44 added (§7.2 there):
    workspace's own width and the window's centre within it (so a sidebar or window decorations
    are left out), and the docks at their stored size or their panel's default, never under the
    panel's minimum. A flexible panel is drawn at that size too beside an anchored page, not from
-   its flex, and it has no resize handle there, since a drag would only change the flex
-   (decision 16). Beside an anchored page each side dock is drawn at exactly the width
+   its flex, and resizing it there, by its handle or the dock size keys, stores a pixel size and
+   leaves its flex for Zed's own row (decision 16). Beside an anchored page each side dock is drawn at exactly the width
    `anchor()` gives it, marks included, and docks drawn whole shrink together when even they
    don't fit the window. The row it placed (`CenterRow`) is kept for the docks to draw their
    marks; it is never an input to placement or to a tide transition. `place_center_row` places a
@@ -280,10 +282,8 @@ V44 added (§7.2 there):
    are now, and with a side as if it didn't hold the focus. The row width is the workspace's
    bounds as last painted, so on a resize the first frame is placed with the old width and
    corrected on the next (the bounds canvas notifies). Without an anchored page the thread's room
-   is checked against the centre pane group's width as last drawn, which is what Zed's row,
-   flexible docks included, leaves between the docks. The `center_overlay` slot is unchanged.
-4. **Centred layout left unset.** The saved `centered_layout` is `None` until it is toggled, and
-   the workspace says whether it was chosen (`centered_layout_chosen`), for Thock's default.
+   is checked against what Zed's row leaves between the docks in the same frame, a flexible dock
+   sized by its flex as `dock_size` resolves it. The `center_overlay` slot is unchanged.
 2. **Tide marks.** `Dock` keeps no tide (decision 17): Thock's `DeskLayout` owns each side's
    `Tide` and sends it in the anchor. A side drawn as a mark renders its tide mark over its
    panel, which stays laid out at its own width and keeps `is_open`. A dock holding the focus is
@@ -292,6 +292,10 @@ V44 added (§7.2 there):
    dock also takes a `tide_waiting` flag for the mark's accent line, which `desk_layout.rs` sets
    from the Desk's `has_waiting()`.
 3. `adjust_padding` and the fractional settings go.
+4. **Centred layout left unset.** The saved `centered_layout` is `None` until it is chosen, and
+   the workspace says whether it was (`centered_layout_chosen`). `set_centered_layout` (which the
+   toggle uses) marks it chosen, and the workspace's save writes a chosen value, so it survives a
+   restart even when the workspace had no database id when it was chosen.
 
 `anchor()` is a pure function in the workspace crate with its own table tests (§9). The PR calls
 out the workspace edit and why it can't live in `crates/thock`.
@@ -318,9 +322,9 @@ A new `desk_layout.rs` owns both rules on the Thock side. It's one logical compo
   drawn, so a second press before a repaint sees the first. Focus actions run while the
   workspace is being updated, so the anchor reaches the workspace through `cx.defer`, and each
   `ToggleTide` press is decided after the ones before it (CLAUDE.md, GPUI panels).
-- **Centred by default:** turns centred layout on for a vault whose workspace never chose it
-  (§6), once the restored workspace has its own setting and again when the folder changes. It
-  detects the vault through the project's `Fs`.
+- **Centred by default:** turns centred layout on for a local vault whose workspace never chose
+  it (§6), once the restored workspace has its own setting and again when a path under `.thock/`
+  changes. It reads the marker from the project's worktree, with no file read of its own.
 - **Waiting signal:** a `has_waiting()` hook the Desk implements for the tide mark's accent line.
 
 ### 8.3 Order of work
@@ -342,8 +346,9 @@ Each step ships on its own: Anchor without Tides is already the main fix.
   holds the focus; a bubble never moves the page; marks keep their width when the window
   squeezes the docks. Without an anchored page the thread takes its room or floats.
 - **Flexible panels** (workspace and thock): beside an anchored page a flexible panel is drawn at
-  its default size and shows no resize handle; a fixed one keeps its handle. Without an
-  anchored page the thread's room is measured on the centre as drawn beside a flexible dock.
+  its default size, and resizes to the pixel size its handle or the dock size keys give it.
+  Without an anchored page the thread's room is decided from the docks of the same frame, a
+  flexible one by its flex.
 - **Page doesn't move** (thock, `VisualTestContext`): record the editor's text origin; toggle the
   right dock, ebb it, resize it; the origin is unchanged each time.
 - **Ebb on typing:** `simulate_keystrokes` text into a note, and the right dock is ebbed while
@@ -361,9 +366,10 @@ Each step ships on its own: Anchor without Tides is already the main fix.
 - **Thread:** composer-only requests no room; the first message requests 408; at 1512 the Desk ebbs
   and flows back when the thread folds. With centred layout off the thread keeps its room at 1440
   and floats at 760, with the Desk left alone.
-- **Centred by default:** a vault on the project's `Fs` opens with the page anchored; turned off
-  by hand, it stays off. A folder that becomes a vault is centred. The saved value is unset until
-  toggled, and a restored value counts as chosen.
+- **Centred by default:** a vault on the project's worktree is centred before its window's first
+  frame and saved as chosen; turned off by hand, it stays off. A folder that becomes a vault is
+  centred, and only changes under `.thock/` look again. The saved value is unset until chosen, a
+  restored value counts as chosen, and a choice made before the workspace has an id is saved.
 - **Inactive:** with a split centre, typing doesn't ebb.
 - **Not persisted:** serialize the workspace while ebbed and restore it; the dock is open and
   flowing.
@@ -403,20 +409,19 @@ None.
     page is measured in characters.
 13. **Same measure everywhere:** the Inbox view, settings and any other single item use the page's
     column too.
-14. **Centred layout is on by default** for a vault until the person toggles it, recorded in the
-    workspace's own saved `centered_layout` (unset until toggled) so turning it off sticks. The
-    anchored page is the normal state and the uncentred row the opt-out; without this most
-    people would never see Anchor or Tides.
+14. **Centred layout is on by default** for a vault: the first time its workspace opens, Thock
+    saves "on" as the workspace's own `centered_layout`, so every later launch restores it before
+    the first frame and a later toggle wins. The anchored page is the normal state and the
+    uncentred row the opt-out; without this most people would never see Anchor or Tides.
 15. **No tides without an anchored page.** With centred layout off or a split, the thread keeps
     its room when the centre holds `min_column` beside it and floats otherwise; no dock ebbs or
     closes for it. V44's Desk collapse needed a persisted dock change and a second placement
     rule for a case that is now an opt-out on a small window.
 16. **Flexible panels beside an anchored page are drawn at their stored or default size,** never
     from their flex. The flex depends on the other dock's width, which depends on whether it
-    ebbs, which depends on this width. The cost: a flexible panel (only the terminal, if docked
-    on a side) shows no resize handle beside an anchored page, rather than one that would jump
-    later. Zed keeps no pixel size for a flexible panel, so making the drag store one would
-    change upstream behaviour its own tests pin.
+    ebbs, which depends on this width. Resizing it beside an anchored page stores a pixel size,
+    which Zed's own row ignores for a flexible panel; outside an anchored page Zed's resize is
+    unchanged.
 17. **One owner of tide state:** `DeskLayout` in `crates/thock` owns each side's tide and sends it
     to the workspace in the anchor. The workspace places the row as a pure function of the
     anchor, the docks' widths and the focus, and never writes tide state; the dock keeps none.
