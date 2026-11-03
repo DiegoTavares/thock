@@ -6,6 +6,8 @@
 
 use gpui::{Pixels, px};
 
+use crate::dock::DockPosition;
+
 /// The narrowest gap between the column and anything beside it.
 pub const ANCHOR_GAP: Pixels = px(24.);
 /// The width an ebbed dock keeps at the window's edge.
@@ -77,6 +79,89 @@ pub struct AnchorLayout {
     pub right_ebbs_to_fit: bool,
     /// The thread was asked for but couldn't fit, so it floats over the page.
     pub thread_floats: bool,
+}
+
+/// How the centre's row is laid out in a frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CenterRow {
+    /// Zed's own layout. The thread keeps its room on the right when it
+    /// fits, after the right dock ebbs for it if it must.
+    Ordinary {
+        thread: Option<Pixels>,
+        right_ebbs_for_thread: bool,
+    },
+    /// The page pinned to the window's centre.
+    Anchored(AnchorLayout),
+}
+
+impl Default for CenterRow {
+    fn default() -> Self {
+        Self::Ordinary {
+            thread: None,
+            right_ebbs_for_thread: false,
+        }
+    }
+}
+
+impl CenterRow {
+    pub fn anchored(&self) -> Option<AnchorLayout> {
+        match self {
+            Self::Anchored(layout) => Some(*layout),
+            Self::Ordinary { .. } => None,
+        }
+    }
+
+    /// Whether the dock at `position` ebbs in this row to make room.
+    pub fn ebbs_to_fit(&self, position: DockPosition) -> bool {
+        match (self, position) {
+            (Self::Anchored(layout), DockPosition::Left) => layout.left_ebbs_to_fit,
+            (Self::Anchored(layout), DockPosition::Right) => layout.right_ebbs_to_fit,
+            (
+                Self::Ordinary {
+                    right_ebbs_for_thread,
+                    ..
+                },
+                DockPosition::Right,
+            ) => *right_ebbs_for_thread,
+            _ => false,
+        }
+    }
+
+    /// Whether a dock is drawn as its tide mark in this row: when the row
+    /// ebbs it to fit, or when it is ebbed and the page is anchored.
+    pub fn shows_tide_mark(&self, position: DockPosition, open: bool, ebbed: bool) -> bool {
+        open && (self.ebbs_to_fit(position) || (ebbed && self.anchored().is_some()))
+    }
+}
+
+/// The row without an anchored page: the thread keeps its room on the
+/// right when the centre still holds `min_column` beside it; else the right
+/// dock ebbs for it when it may; else the thread floats.
+pub fn ordinary_row(
+    window: Pixels,
+    left_width: Option<Pixels>,
+    right: AnchorSide,
+    min_column: Pixels,
+    thread: Option<Pixels>,
+) -> CenterRow {
+    let Some(thread) = thread else {
+        return CenterRow::default();
+    };
+    let center =
+        |right_ebbs: bool| window - left_width.unwrap_or_default() - right.width(right_ebbs);
+    if center(false) - thread >= min_column {
+        CenterRow::Ordinary {
+            thread: Some(thread),
+            right_ebbs_for_thread: false,
+        }
+    } else if right.open_width.is_some() && right.may_ebb && center(true) - thread >= min_column {
+        CenterRow::Ordinary {
+            thread: Some(thread),
+            right_ebbs_for_thread: true,
+        }
+    } else {
+        CenterRow::default()
+    }
 }
 
 /// Places the page: centred on the window when the margins allow it; else
@@ -323,6 +408,44 @@ mod tests {
         assert_eq!(
             layout.right_padding,
             px(1512.) - centred(1512.) - COLUMN - TIDE_MARK_WIDTH
+        );
+    }
+
+    #[test]
+    fn without_centred_layout_the_desk_ebbs_for_a_thread_that_cannot_fit() {
+        // The V44 numbers, with the thread's room asked for and no rail.
+        let desk = open(320.);
+        let room = |window: f32| ordinary_row(px(window), None, desk, MIN_COLUMN, Some(THREAD));
+        assert_eq!(
+            room(1440.),
+            CenterRow::Ordinary {
+                thread: Some(THREAD),
+                right_ebbs_for_thread: false
+            },
+            "a 1120 centre holds the thread beside the Desk"
+        );
+        assert_eq!(
+            room(1024.),
+            CenterRow::Ordinary {
+                thread: Some(THREAD),
+                right_ebbs_for_thread: true
+            },
+            "a 704 centre gets it from the Desk ebbing"
+        );
+        assert_eq!(room(760.), CenterRow::default(), "too narrow: it floats");
+        assert_eq!(
+            ordinary_row(px(1024.), None, stay(320.), MIN_COLUMN, Some(THREAD)),
+            CenterRow::default(),
+            "a staying Desk never ebbs for it"
+        );
+        assert_eq!(
+            ordinary_row(px(1024.), None, desk, MIN_COLUMN, None),
+            CenterRow::default()
+        );
+        assert!(room(1024.).shows_tide_mark(DockPosition::Right, true, false));
+        assert!(
+            !room(1440.).shows_tide_mark(DockPosition::Right, true, true),
+            "an ebbed dock is drawn whole while the page isn't anchored"
         );
     }
 

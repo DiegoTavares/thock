@@ -13,10 +13,10 @@ use gpui::{
 use settings::{Settings as _, SettingsStore, TidePolicy};
 use theme_settings::ThemeSettings;
 use util::ResultExt as _;
-use workspace::dock::Dock;
+use workspace::dock::{Dock, DockPosition};
 use workspace::{CenterAnchor, Workspace};
 
-use crate::{ChatPanel, DeskPanel, PageSettings, ThockSettings, TidesSettings};
+use crate::{ChatPanel, DeskPanel, PageSettings, ThockSettings};
 
 actions!(
     thock,
@@ -37,30 +37,40 @@ pub fn init(cx: &mut App) {
         };
         let layout = DeskLayout::new(workspace, window, cx);
         // The action handler keeps the layout alive as long as the workspace.
-        workspace.register_action(move |workspace, _: &ToggleTide, _, cx| {
-            let anchored = workspace.is_page_anchored(cx);
-            layout.update(cx, |layout, cx| layout.toggle_tide(anchored, cx));
+        workspace.register_action(move |workspace, _: &ToggleTide, window, cx| {
+            // Read here, where the window is at hand: a side holding the
+            // focus never ebbs (§5.5).
+            let focused: Vec<DockPosition> = SIDE_DOCKS
+                .into_iter()
+                .filter(|position| {
+                    workspace
+                        .dock_at_position(*position)
+                        .read(cx)
+                        .focus_handle(cx)
+                        .contains_focused(window, cx)
+                })
+                .collect();
+            let layout = layout.downgrade();
+            // The workspace is leased while its action runs.
+            cx.defer(move |cx| {
+                layout
+                    .update(cx, |layout, cx| layout.toggle_tide(&focused, cx))
+                    .log_err();
+            });
         });
     })
     .detach();
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Side {
-    Left,
-    Right,
-}
-
-const SIDES: [Side; 2] = [Side::Left, Side::Right];
+/// The docks that ebb; the bottom dock never does (§3).
+const SIDE_DOCKS: [DockPosition; 2] = [DockPosition::Left, DockPosition::Right];
 
 /// One workspace's page and tides.
 pub struct DeskLayout {
     workspace: WeakEntity<Workspace>,
-    left_dock: Entity<Dock>,
-    right_dock: Entity<Dock>,
-    /// A side you brought back while it would ebb to fit: the page makes
-    /// room for it until it ebbs again (§4.2).
-    called: [bool; 2],
+    /// The sides you brought back while they would ebb to fit: the page
+    /// makes room for them until they ebb again (§4.2).
+    called: Vec<DockPosition>,
     /// The thread's room as last asked for.
     thread: Option<Pixels>,
     /// The note in the centre whose typing ebbs the sides.
@@ -68,13 +78,15 @@ pub struct DeskLayout {
     /// The centre's active item and its pane count, to tell a new page
     /// from the workspace's other active-item notices (a title, a focus).
     page: Option<(Option<EntityId>, usize)>,
+    /// Whether the page was anchored when last looked at.
+    anchored: bool,
     /// Brings ebbed sides back after a pause; replacing it restarts the
     /// pause.
     flow_back: Option<Task<()>>,
     /// The chat whose thread asks for room.
     chat: Option<(WeakEntity<ChatPanel>, Subscription)>,
-    /// The Desks whose waiting lights a tide mark, by side.
-    desks: [Option<(EntityId, Subscription)>; 2],
+    /// The Desks whose waiting lights a tide mark.
+    desks: Vec<(DockPosition, EntityId, Subscription)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -86,12 +98,13 @@ impl DeskLayout {
     ) -> Entity<Self> {
         let weak_workspace = workspace.weak_handle();
         let workspace_entity = cx.entity();
-        let left_dock = workspace.left_dock().clone();
-        let right_dock = workspace.right_dock().clone();
-        let left_focus = left_dock.read(cx).focus_handle(cx);
-        let right_focus = right_dock.read(cx).focus_handle(cx);
+        let docks = SIDE_DOCKS.map(|position| {
+            let dock = workspace.dock_at_position(position).clone();
+            let focus = dock.read(cx).focus_handle(cx);
+            (position, dock, focus)
+        });
         cx.new(|cx| {
-            let subscriptions = vec![
+            let mut subscriptions = vec![
                 cx.subscribe(
                     &workspace_entity,
                     |this: &mut Self, _, event: &workspace::Event, cx| match event {
@@ -101,19 +114,19 @@ impl DeskLayout {
                         _ => {}
                     },
                 ),
-                cx.observe_global::<SettingsStore>(|this, cx| this.sync(cx)),
+                // Centred layout has no event of its own.
+                cx.observe(&workspace_entity, |this, _, cx| this.anchoring_changed(cx)),
+                cx.observe_global::<SettingsStore>(|this, cx| this.settings_changed(cx)),
                 theme_settings::observe_buffer_font_size_adjustment(cx, |this, cx| this.sync(cx)),
-                cx.on_focus_in(&left_focus, window, |this, _, cx| {
-                    this.focus_entered(Side::Left, cx)
-                }),
-                cx.on_focus_in(&right_focus, window, |this, _, cx| {
-                    this.focus_entered(Side::Right, cx)
-                }),
-                cx.observe(&left_dock, |this, _, cx| this.dock_changed(Side::Left, cx)),
-                cx.observe(&right_dock, |this, _, cx| {
-                    this.dock_changed(Side::Right, cx)
-                }),
             ];
+            for (position, dock, focus) in docks {
+                subscriptions.push(cx.on_focus_in(&focus, window, move |this, _, cx| {
+                    this.focus_entered(position, cx)
+                }));
+                subscriptions.push(cx.observe(&dock, move |this, dock, cx| {
+                    this.dock_changed(position, &dock, cx)
+                }));
+            }
             // The workspace is leased by the observer constructing this; look
             // at its centre and its chat once the lease is returned.
             let this = cx.weak_entity();
@@ -127,56 +140,55 @@ impl DeskLayout {
             });
             Self {
                 workspace: weak_workspace,
-                left_dock,
-                right_dock,
-                called: [false; 2],
+                called: Vec::new(),
                 thread: None,
                 editor: None,
                 page: None,
+                anchored: false,
                 flow_back: None,
                 chat: None,
-                desks: [None, None],
+                desks: Vec::new(),
                 _subscriptions: subscriptions,
             }
         })
     }
 
-    fn dock(&self, side: Side) -> &Entity<Dock> {
-        match side {
-            Side::Left => &self.left_dock,
-            Side::Right => &self.right_dock,
+    fn dock(&self, position: DockPosition, cx: &App) -> Option<Entity<Dock>> {
+        let workspace = self.workspace.upgrade()?;
+        Some(workspace.read(cx).dock_at_position(position).clone())
+    }
+
+    fn set_ebbed(&self, position: DockPosition, ebbed: bool, cx: &mut Context<Self>) {
+        if let Some(dock) = self.dock(position, cx) {
+            dock.update(cx, |dock, cx| dock.set_ebbed(ebbed, cx));
         }
     }
 
-    fn index(side: Side) -> usize {
-        match side {
-            Side::Left => 0,
-            Side::Right => 1,
+    fn set_called(&mut self, position: DockPosition, called: bool) -> bool {
+        let was = self.called.contains(&position);
+        if called && !was {
+            self.called.push(position);
+        } else if !called {
+            self.called.retain(|side| *side != position);
         }
-    }
-
-    fn policy(tides: &TidesSettings, side: Side) -> TidePolicy {
-        match side {
-            Side::Left => tides.left,
-            Side::Right => tides.right,
-        }
+        was != called
     }
 
     /// What the workspace should keep for the page right now.
     fn anchor(&self, cx: &App) -> CenterAnchor {
         let settings = ThockSettings::get_global(cx);
         let (column, min_column) = page_columns(settings.page, cx);
-        let may_ebb = |side: Side| {
+        let may_ebb = |position: DockPosition| {
             settings.tides.is_some_and(|tides| {
-                Self::policy(&tides, side) == TidePolicy::Ebb && !self.called[Self::index(side)]
+                tides.policy(position) == TidePolicy::Ebb && !self.called.contains(&position)
             })
         };
         CenterAnchor {
             column,
             min_column,
             thread: self.thread,
-            ebb_left: may_ebb(Side::Left),
-            ebb_right: may_ebb(Side::Right),
+            ebb_left: may_ebb(DockPosition::Left),
+            ebb_right: may_ebb(DockPosition::Right),
         }
     }
 
@@ -246,24 +258,26 @@ impl DeskLayout {
         self.chat = Some((chat.downgrade(), subscription));
     }
 
-    fn tides_active(&self, cx: &App) -> Option<TidesSettings> {
-        let tides = ThockSettings::get_global(cx).tides?;
-        let workspace = self.workspace.upgrade()?;
-        workspace.read(cx).is_page_anchored(cx).then_some(tides)
+    fn is_anchored(&self, cx: &App) -> bool {
+        self.workspace
+            .upgrade()
+            .is_some_and(|workspace| workspace.read(cx).is_page_anchored(cx))
     }
 
     /// You typed in the note (§5.3): the sides that may ebb do, and the
     /// pause before they come back starts over.
     fn typed(&mut self, cx: &mut Context<Self>) {
-        let Some(tides) = self.tides_active(cx) else {
+        let Some(tides) = ThockSettings::get_global(cx).tides else {
             return;
         };
+        if !self.is_anchored(cx) {
+            return;
+        }
         let mut changed = false;
-        for side in SIDES {
-            if Self::policy(&tides, side) == TidePolicy::Ebb {
-                self.dock(side)
-                    .update(cx, |dock, cx| dock.set_ebbed(true, cx));
-                changed |= std::mem::take(&mut self.called[Self::index(side)]);
+        for position in SIDE_DOCKS {
+            if tides.policy(position) == TidePolicy::Ebb {
+                self.set_ebbed(position, true, cx);
+                changed |= self.set_called(position, false);
             }
         }
         if changed {
@@ -281,18 +295,27 @@ impl DeskLayout {
     /// fit stays a mark; it would only cover the page.
     fn paused(&mut self, cx: &mut Context<Self>) {
         self.flow_back = None;
-        for side in SIDES {
-            self.dock(side)
-                .update(cx, |dock, cx| dock.set_ebbed(false, cx));
+        for position in SIDE_DOCKS {
+            self.set_ebbed(position, false, cx);
         }
     }
 
-    /// Brings back every side drawn as its mark, ebbed to fit included.
-    /// Returns whether any was.
+    /// Whether the side is tucked away: ebbed, or ebbed to fit in the
+    /// workspace's last row.
+    fn is_tucked(&self, position: DockPosition, cx: &App) -> bool {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return false;
+        };
+        let workspace = workspace.read(cx);
+        let dock = workspace.dock_at_position(position).read(cx);
+        dock.is_open() && (dock.is_ebbed() || workspace.center_row().ebbs_to_fit(position))
+    }
+
+    /// Brings every tucked-away side back. Returns whether any was.
     fn flow_all(&mut self, cx: &mut Context<Self>) -> bool {
         let mut flowed = false;
-        for side in SIDES {
-            flowed |= self.flow(side, cx);
+        for position in SIDE_DOCKS {
+            flowed |= self.flow(position, cx);
         }
         if flowed {
             self.flow_back = None;
@@ -301,42 +324,76 @@ impl DeskLayout {
         flowed
     }
 
-    fn flow(&mut self, side: Side, cx: &mut Context<Self>) -> bool {
-        let dock = self.dock(side).clone();
-        if !dock.read(cx).is_tide_mark_shown() {
+    /// Brings a tucked-away side back as a dock: one ebbed to fit is called,
+    /// so the page makes room for it instead.
+    fn flow(&mut self, position: DockPosition, cx: &mut Context<Self>) -> bool {
+        if !self.is_tucked(position, cx) {
             return false;
         }
-        dock.update(cx, |dock, cx| dock.set_ebbed(false, cx));
-        self.called[Self::index(side)] = true;
+        self.set_ebbed(position, false, cx);
+        self.set_called(position, true);
         true
     }
 
     /// Focus went into a dock by any route (§5.4 rule 1): it comes back.
-    fn focus_entered(&mut self, side: Side, cx: &mut Context<Self>) {
-        if self.flow(side, cx) {
+    fn focus_entered(&mut self, position: DockPosition, cx: &mut Context<Self>) {
+        if self.flow(position, cx) {
             self.sync(cx);
         }
     }
 
     /// `thock::ToggleTide` (§5.4 rule 2): brings every tucked-away side
     /// back, or tucks away every side that may ebb when none is. Focus
-    /// stays where it is.
-    fn toggle_tide(&mut self, anchored: bool, cx: &mut Context<Self>) {
+    /// stays where it is, and a side holding it never ebbs (§5.5).
+    fn toggle_tide(&mut self, focused: &[DockPosition], cx: &mut Context<Self>) {
+        if self.flow_all(cx) {
+            return;
+        }
         let Some(tides) = ThockSettings::get_global(cx).tides else {
             return;
         };
-        if !anchored || self.flow_all(cx) {
+        if !self.is_anchored(cx) {
             return;
         }
         self.flow_back = None;
-        for side in SIDES {
-            if Self::policy(&tides, side) == TidePolicy::Ebb {
-                self.dock(side)
-                    .update(cx, |dock, cx| dock.set_ebbed(true, cx));
-                self.called[Self::index(side)] = false;
+        for position in SIDE_DOCKS {
+            if tides.policy(position) == TidePolicy::Ebb && !focused.contains(&position) {
+                self.set_ebbed(position, true, cx);
+                self.set_called(position, false);
             }
         }
         self.sync(cx);
+    }
+
+    /// Settings changed: a side that may no longer ebb (`"tides": false`, or
+    /// `"stay"`) comes back, and the page is measured again.
+    fn settings_changed(&mut self, cx: &mut Context<Self>) {
+        let tides = ThockSettings::get_global(cx).tides;
+        for position in SIDE_DOCKS {
+            if tides.is_none_or(|tides| tides.policy(position) == TidePolicy::Stay) {
+                self.set_ebbed(position, false, cx);
+                self.set_called(position, false);
+            }
+        }
+        self.sync(cx);
+    }
+
+    /// The page stopped being anchored (centred layout off, a split, nothing
+    /// open): every side flows (§5.6), so nothing reappears ebbed later.
+    fn anchoring_changed(&mut self, cx: &mut Context<Self>) {
+        let anchored = self.is_anchored(cx);
+        if self.anchored == anchored {
+            return;
+        }
+        self.anchored = anchored;
+        if !anchored {
+            self.flow_back = None;
+            self.called.clear();
+            for position in SIDE_DOCKS {
+                self.set_ebbed(position, false, cx);
+            }
+            self.sync(cx);
+        }
     }
 
     /// The page went away (§5.4 rule 4): another item, or a split. Every
@@ -356,46 +413,53 @@ impl DeskLayout {
         }
         self.page = page;
         self.track_editor(cx);
+        self.anchoring_changed(cx);
         self.flow_all(cx);
     }
 
-    fn dock_changed(&mut self, side: Side, cx: &mut Context<Self>) {
-        let dock = self.dock(side).clone();
-        if !dock.read(cx).is_open() && std::mem::take(&mut self.called[Self::index(side)]) {
+    fn dock_changed(
+        &mut self,
+        position: DockPosition,
+        dock: &Entity<Dock>,
+        cx: &mut Context<Self>,
+    ) {
+        if !dock.read(cx).is_open() && self.set_called(position, false) {
             self.sync(cx);
         }
-        self.track_desk(side, &dock, cx);
+        self.track_desk(position, dock, cx);
     }
 
     /// Follows the Desk when it is the dock's panel, so its tide mark
     /// lights up while something waits (§5.2).
-    fn track_desk(&mut self, side: Side, dock: &Entity<Dock>, cx: &mut Context<Self>) {
+    fn track_desk(&mut self, position: DockPosition, dock: &Entity<Dock>, cx: &mut Context<Self>) {
         let desk = dock
             .read(cx)
             .active_panel()
             .and_then(|panel| panel.to_any().downcast::<DeskPanel>().ok());
-        let slot = &mut self.desks[Self::index(side)];
-        match desk {
-            Some(desk) if slot.as_ref().is_some_and(|(id, _)| *id == desk.entity_id()) => {}
-            Some(desk) => {
-                let subscription = cx.observe(&desk, {
-                    let dock = dock.downgrade();
-                    move |_, desk, cx| {
-                        let waiting = desk.read(cx).has_waiting(cx);
-                        dock.update(cx, |dock, cx| dock.set_tide_waiting(waiting, cx))
-                            .log_err();
-                    }
-                });
-                *slot = Some((desk.entity_id(), subscription));
-                let waiting = desk.read(cx).has_waiting(cx);
-                dock.update(cx, |dock, cx| dock.set_tide_waiting(waiting, cx));
-            }
-            None => {
-                if slot.take().is_some() {
-                    dock.update(cx, |dock, cx| dock.set_tide_waiting(false, cx));
-                }
-            }
+        let tracked = self
+            .desks
+            .iter()
+            .find(|(side, _, _)| *side == position)
+            .map(|(_, id, _)| *id);
+        if desk.as_ref().map(|desk| desk.entity_id()) == tracked {
+            return;
         }
+        self.desks.retain(|(side, _, _)| *side != position);
+        let Some(desk) = desk else {
+            dock.update(cx, |dock, cx| dock.set_tide_waiting(false, cx));
+            return;
+        };
+        let subscription = cx.observe(&desk, {
+            let dock = dock.downgrade();
+            move |_, desk, cx| {
+                let waiting = desk.read(cx).has_waiting();
+                dock.update(cx, |dock, cx| dock.set_tide_waiting(waiting, cx))
+                    .log_err();
+            }
+        });
+        self.desks.push((position, desk.entity_id(), subscription));
+        let waiting = desk.read(cx).has_waiting();
+        dock.update(cx, |dock, cx| dock.set_tide_waiting(waiting, cx));
     }
 }
 
@@ -458,7 +522,6 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use workspace::MultiWorkspace;
-    use workspace::dock::DockPosition;
     use workspace::dock::test::TestPanel;
 
     const NOTE: &str = "# Day planner\n- [ ] Workout\n- [ ] 15:00 – 15:30 Standup\n";
@@ -505,6 +568,14 @@ mod tests {
     /// the left and the Desk on the right, and `open` in the centre with
     /// the focus in it.
     async fn setup_with(cx: &mut TestAppContext, open: &str) -> Setup {
+        setup_with_rail(cx, open, |cx| TestPanel::new(DockPosition::Left, 100, cx)).await
+    }
+
+    async fn setup_with_rail(
+        cx: &mut TestAppContext,
+        open: &str,
+        rail: impl FnOnce(&mut App) -> TestPanel,
+    ) -> Setup {
         init_test(cx);
         let vault_dir = tempfile::tempdir().unwrap();
         let root = vault_dir.path().to_path_buf();
@@ -531,7 +602,7 @@ mod tests {
         let mut cx = cx.clone();
         let workspace = multi_workspace.read_with(&cx, |multi, _| multi.workspace().clone());
         let desk = workspace.update_in(&mut cx, |workspace, window, cx| {
-            let rail = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
+            let rail = cx.new(|cx| rail(cx));
             workspace.add_panel(rail, window, cx);
             workspace.open_panel::<TestPanel>(window, cx);
             let desk = DeskPanel::new(workspace, BacklogFolds::default(), window, cx);
@@ -578,20 +649,20 @@ mod tests {
         )
     }
 
-    fn dock(setup: &Setup, side: Side) -> Entity<Dock> {
-        setup
-            .workspace
-            .read_with(&setup.cx, |workspace, _| match side {
-                Side::Left => workspace.left_dock().clone(),
-                Side::Right => workspace.right_dock().clone(),
-            })
+    fn dock(setup: &Setup, position: DockPosition) -> Entity<Dock> {
+        setup.workspace.read_with(&setup.cx, |workspace, _| {
+            workspace.dock_at_position(position).clone()
+        })
     }
 
-    /// Drawn as its tide mark this frame, while still open.
-    fn ebbed(setup: &Setup, side: Side) -> bool {
-        dock(setup, side).read_with(&setup.cx, |dock, _| {
-            assert!(dock.is_open(), "an ebbed dock stays open");
-            dock.is_tide_mark_shown()
+    /// Drawn as its tide mark in the last frame, while still open.
+    fn ebbed(setup: &Setup, position: DockPosition) -> bool {
+        setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            assert!(
+                workspace.dock_at_position(position).read(cx).is_open(),
+                "an ebbed dock stays open"
+            );
+            workspace.dock_shows_tide_mark(position, cx)
         })
     }
 
@@ -672,11 +743,11 @@ mod tests {
         assert_eq!(page_left(&setup), left, "opening it again");
 
         type_in_note(&mut setup, "a");
-        assert!(ebbed(&setup, Side::Right));
+        assert!(ebbed(&setup, DockPosition::Right));
         assert_eq!(page_left(&setup), left, "ebbing it");
 
         advance(&mut setup, Duration::from_secs(9));
-        assert!(!ebbed(&setup, Side::Right));
+        assert!(!ebbed(&setup, DockPosition::Right));
         setup
             .workspace
             .update_in(&mut setup.cx, |workspace, window, cx| {
@@ -691,22 +762,25 @@ mod tests {
     #[gpui::test]
     async fn typing_ebbs_both_sides_and_a_pause_brings_them_back(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
-        assert!(!ebbed(&setup, Side::Left) && !ebbed(&setup, Side::Right));
+        assert!(!ebbed(&setup, DockPosition::Left) && !ebbed(&setup, DockPosition::Right));
 
         type_in_note(&mut setup, "a b c");
-        assert!(ebbed(&setup, Side::Left), "the rail ebbs");
-        assert!(ebbed(&setup, Side::Right), "the Desk ebbs");
+        assert!(ebbed(&setup, DockPosition::Left), "the rail ebbs");
+        assert!(ebbed(&setup, DockPosition::Right), "the Desk ebbs");
         let editor = setup.editor.clone();
         assert!(is_focused(&mut setup, &editor));
 
         advance(&mut setup, Duration::from_secs(5));
         type_in_note(&mut setup, "d");
         advance(&mut setup, Duration::from_secs(5));
-        assert!(ebbed(&setup, Side::Right), "typing restarts the pause");
-        advance(&mut setup, Duration::from_secs(4));
-        assert!(!ebbed(&setup, Side::Left));
         assert!(
-            !ebbed(&setup, Side::Right),
+            ebbed(&setup, DockPosition::Right),
+            "typing restarts the pause"
+        );
+        advance(&mut setup, Duration::from_secs(4));
+        assert!(!ebbed(&setup, DockPosition::Left));
+        assert!(
+            !ebbed(&setup, DockPosition::Right),
             "eight quiet seconds bring it back"
         );
     }
@@ -723,10 +797,10 @@ mod tests {
         );
         type_in_note(&mut setup, "a");
         advance(&mut setup, Duration::from_secs(120));
-        assert!(ebbed(&setup, Side::Right), "null never flows back");
+        assert!(ebbed(&setup, DockPosition::Right), "null never flows back");
         setup.cx.simulate_keystrokes("ctrl-alt-\\");
         setup.cx.run_until_parked();
-        assert!(!ebbed(&setup, Side::Right));
+        assert!(!ebbed(&setup, DockPosition::Right));
     }
 
     #[gpui::test]
@@ -776,7 +850,7 @@ mod tests {
             thock.tides = Some(TidesContent::Enabled(false))
         });
         type_in_note(&mut setup, "a b");
-        assert!(!ebbed(&setup, Side::Left) && !ebbed(&setup, Side::Right));
+        assert!(!ebbed(&setup, DockPosition::Left) && !ebbed(&setup, DockPosition::Right));
     }
 
     #[gpui::test]
@@ -788,10 +862,13 @@ mod tests {
         let editor = setup.editor.clone();
         editor.update(&mut setup.cx, |editor, _| editor.set_input_enabled(false));
         type_in_note(&mut setup, "j j k");
-        assert!(!ebbed(&setup, Side::Right), "normal mode is reading");
+        assert!(
+            !ebbed(&setup, DockPosition::Right),
+            "normal mode is reading"
+        );
         editor.update(&mut setup.cx, |editor, _| editor.set_input_enabled(true));
         type_in_note(&mut setup, "a");
-        assert!(ebbed(&setup, Side::Right), "insert mode is writing");
+        assert!(ebbed(&setup, DockPosition::Right), "insert mode is writing");
     }
 
     #[gpui::test]
@@ -809,7 +886,7 @@ mod tests {
             .editor
             .read_with(&setup.cx, |editor, cx| editor.text(cx));
         assert!(page.contains("- [x] Write the report"), "into the page");
-        assert!(!ebbed(&setup, Side::Left) && !ebbed(&setup, Side::Right));
+        assert!(!ebbed(&setup, DockPosition::Left) && !ebbed(&setup, DockPosition::Right));
     }
 
     #[gpui::test]
@@ -826,15 +903,18 @@ mod tests {
         assert!(before.is_some());
         setup.cx.focus(&setup.editor);
         type_in_note(&mut setup, "a");
-        assert!(ebbed(&setup, Side::Right));
+        assert!(ebbed(&setup, DockPosition::Right));
 
         setup.cx.simulate_keystrokes("ctrl-alt-u");
         setup.cx.run_until_parked();
-        assert!(!ebbed(&setup, Side::Right), "one key brings it back");
+        assert!(
+            !ebbed(&setup, DockPosition::Right),
+            "one key brings it back"
+        );
         assert!(is_focused(&mut setup, &backlog), "and focuses it");
         assert_eq!(selected(&setup), before, "where you left it");
         assert!(
-            ebbed(&setup, Side::Left),
+            ebbed(&setup, DockPosition::Left),
             "the other side stays tucked away"
         );
     }
@@ -846,16 +926,16 @@ mod tests {
         let mut setup = setup(cx).await;
         let editor = setup.editor.clone();
         type_in_note(&mut setup, "a");
-        assert!(ebbed(&setup, Side::Left) && ebbed(&setup, Side::Right));
+        assert!(ebbed(&setup, DockPosition::Left) && ebbed(&setup, DockPosition::Right));
 
         setup.cx.simulate_keystrokes("ctrl-alt-\\");
         setup.cx.run_until_parked();
-        assert!(!ebbed(&setup, Side::Left) && !ebbed(&setup, Side::Right));
+        assert!(!ebbed(&setup, DockPosition::Left) && !ebbed(&setup, DockPosition::Right));
         assert!(is_focused(&mut setup, &editor));
 
         setup.cx.simulate_keystrokes("ctrl-alt-\\");
         setup.cx.run_until_parked();
-        assert!(ebbed(&setup, Side::Left) && ebbed(&setup, Side::Right));
+        assert!(ebbed(&setup, DockPosition::Left) && ebbed(&setup, DockPosition::Right));
         assert!(is_focused(&mut setup, &editor));
     }
 
@@ -870,11 +950,11 @@ mod tests {
             },
         );
         type_in_note(&mut setup, "a");
-        assert!(ebbed(&setup, Side::Left));
-        assert!(!ebbed(&setup, Side::Right), "a staying Desk stays");
+        assert!(ebbed(&setup, DockPosition::Left));
+        assert!(!ebbed(&setup, DockPosition::Right), "a staying Desk stays");
         setup.cx.simulate_keystrokes("ctrl-alt-\\ ctrl-alt-\\");
         setup.cx.run_until_parked();
-        assert!(!ebbed(&setup, Side::Right), "even for the tide key");
+        assert!(!ebbed(&setup, DockPosition::Right), "even for the tide key");
 
         // Nor does it ebb to fit: on the 14-inch window with a wide Desk,
         // the page shifts instead.
@@ -887,7 +967,7 @@ mod tests {
                 })
             });
         setup.cx.run_until_parked();
-        assert!(!ebbed(&setup, Side::Right));
+        assert!(!ebbed(&setup, DockPosition::Right));
     }
 
     #[gpui::test]
@@ -903,28 +983,28 @@ mod tests {
             });
         setup.cx.run_until_parked();
         let left = page_left(&setup);
-        assert!(ebbed(&setup, Side::Right), "it ebbs to fit");
+        assert!(ebbed(&setup, DockPosition::Right), "it ebbs to fit");
         let ebbed_by_hand =
-            dock(&setup, Side::Right).read_with(&setup.cx, |dock, _| dock.is_ebbed());
+            dock(&setup, DockPosition::Right).read_with(&setup.cx, |dock, _| dock.is_ebbed());
         assert!(!ebbed_by_hand, "decided on each render, never stored");
 
         type_in_note(&mut setup, "a");
         advance(&mut setup, Duration::from_secs(9));
         assert!(
-            ebbed(&setup, Side::Right),
+            ebbed(&setup, DockPosition::Right),
             "a pause doesn't bring it over the page"
         );
 
         setup.cx.simulate_keystrokes("ctrl-alt-\\");
         setup.cx.run_until_parked();
         assert!(
-            !ebbed(&setup, Side::Right),
+            !ebbed(&setup, DockPosition::Right),
             "called, it comes back as a dock"
         );
         assert!(page_left(&setup) < left, "and the page shifts to make room");
 
         type_in_note(&mut setup, "b");
-        assert!(ebbed(&setup, Side::Right));
+        assert!(ebbed(&setup, DockPosition::Right));
         assert_eq!(page_left(&setup), left, "ebbing again centres the page");
     }
 
@@ -938,7 +1018,7 @@ mod tests {
             .read_with(&setup.cx, |workspace, _| workspace.panes().len());
         assert_eq!(panes, 2);
         type_in_note(&mut setup, "a b");
-        assert!(!ebbed(&setup, Side::Left) && !ebbed(&setup, Side::Right));
+        assert!(!ebbed(&setup, DockPosition::Left) && !ebbed(&setup, DockPosition::Right));
         let anchored = setup
             .workspace
             .read_with(&setup.cx, |workspace, _| workspace.anchor_layout());
@@ -949,7 +1029,7 @@ mod tests {
     async fn another_note_brings_the_sides_back(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
         type_in_note(&mut setup, "a");
-        assert!(ebbed(&setup, Side::Right));
+        assert!(ebbed(&setup, DockPosition::Right));
         let project = setup
             .workspace
             .read_with(&setup.cx, |workspace, _| workspace.project().clone());
@@ -966,14 +1046,14 @@ mod tests {
             .await
             .unwrap();
         setup.cx.run_until_parked();
-        assert!(!ebbed(&setup, Side::Left) && !ebbed(&setup, Side::Right));
+        assert!(!ebbed(&setup, DockPosition::Left) && !ebbed(&setup, DockPosition::Right));
     }
 
     #[gpui::test]
     async fn ebbed_is_not_saved_with_the_workspace(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
         type_in_note(&mut setup, "a");
-        assert!(ebbed(&setup, Side::Right));
+        assert!(ebbed(&setup, DockPosition::Right));
         let docks = setup
             .workspace
             .update_in(&mut setup.cx, |workspace, window, cx| {
@@ -993,7 +1073,7 @@ mod tests {
         setup.cx.focus(&setup.editor);
         setup.cx.run_until_parked();
         assert!(
-            !ebbed(&setup, Side::Right),
+            !ebbed(&setup, DockPosition::Right),
             "it comes back open and flowing"
         );
     }
@@ -1002,7 +1082,7 @@ mod tests {
     async fn the_desk_mark_lights_up_when_an_entry_is_about_to_start(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
         let waiting = |setup: &Setup| {
-            dock(setup, Side::Right).read_with(&setup.cx, |dock, _| dock.tide_waiting())
+            dock(setup, DockPosition::Right).read_with(&setup.cx, |dock, _| dock.tide_waiting())
         };
         let today = chrono::Local::now().date_naive();
         let at = |hour, minute| today.and_hms_opt(hour, minute, 0).unwrap();
@@ -1018,6 +1098,163 @@ mod tests {
         setup.cx.run_until_parked();
         assert!(waiting(&setup), "eight minutes away is");
         type_in_note(&mut setup, "a");
-        assert!(ebbed(&setup, Side::Right), "and the mark carries it");
+        assert!(
+            ebbed(&setup, DockPosition::Right),
+            "and the mark carries it"
+        );
+    }
+
+    fn column(setup: &Setup) -> Pixels {
+        setup
+            .workspace
+            .read_with(&setup.cx, |workspace, _| workspace.anchor_layout())
+            .expect("the page is anchored")
+            .column
+    }
+
+    /// The page's left edge sits where a centred column starts, give or
+    /// take layout's rounding to half pixels.
+    fn assert_centred(setup: &Setup) {
+        let left = page_left(setup);
+        let centred = (px(1920.) - column(setup)) / 2.;
+        assert!(
+            (left - centred).abs() < px(1.),
+            "{left:?} against {centred:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_page_is_centred_beside_a_flexible_rail(cx: &mut TestAppContext) {
+        let setup = setup_with_rail(cx, &today_note(), |cx| {
+            TestPanel::new_flexible(DockPosition::Left, 100, cx)
+        })
+        .await;
+        assert_centred(&setup);
+    }
+
+    #[gpui::test]
+    async fn the_page_is_centred_beside_a_rail_held_at_its_minimum(cx: &mut TestAppContext) {
+        let setup = setup_with_rail(cx, &today_note(), |cx| TestPanel {
+            min_size: Some(px(420.)),
+            ..TestPanel::new(DockPosition::Left, 100, cx)
+        })
+        .await;
+        assert_centred(&setup);
+    }
+
+    #[gpui::test]
+    async fn the_tide_key_never_tucks_away_the_panel_you_are_in(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let backlog = setup
+            .desk
+            .read_with(&setup.cx, |desk, _| desk.backlog().clone());
+        setup.cx.simulate_keystrokes("ctrl-alt-u");
+        setup.cx.run_until_parked();
+        assert!(is_focused(&mut setup, &backlog));
+
+        setup.cx.simulate_keystrokes("ctrl-alt-\\");
+        setup.cx.run_until_parked();
+        assert!(
+            !ebbed(&setup, DockPosition::Right),
+            "the Desk you are in stays"
+        );
+        assert!(is_focused(&mut setup, &backlog), "and keeps the focus");
+        assert!(ebbed(&setup, DockPosition::Left), "the rail tucks away");
+    }
+
+    #[gpui::test]
+    async fn a_focused_desk_never_ebbs_to_fit(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let backlog = setup
+            .desk
+            .read_with(&setup.cx, |desk, _| desk.backlog().clone());
+        setup.cx.simulate_keystrokes("ctrl-alt-u");
+        setup.cx.run_until_parked();
+        setup.cx.simulate_resize(size(px(1512.), px(982.)));
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.right_dock().update(cx, |dock, cx| {
+                    dock.resize_active_panel(Some(px(440.)), None, window, cx)
+                })
+            });
+        setup.cx.run_until_parked();
+        assert!(
+            !ebbed(&setup, DockPosition::Right),
+            "it would trap the focus"
+        );
+        assert!(is_focused(&mut setup, &backlog));
+
+        setup.cx.focus(&setup.editor);
+        setup.cx.run_until_parked();
+        assert!(
+            ebbed(&setup, DockPosition::Right),
+            "back in the note, it ebbs to fit again"
+        );
+    }
+
+    #[gpui::test]
+    async fn turning_tides_off_brings_every_side_back(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        type_in_note(&mut setup, "a");
+        assert!(ebbed(&setup, DockPosition::Left) && ebbed(&setup, DockPosition::Right));
+        update_thock(&mut setup, |thock| {
+            thock.tides = Some(TidesContent::Enabled(false))
+        });
+        assert!(!ebbed(&setup, DockPosition::Left) && !ebbed(&setup, DockPosition::Right));
+        setup.cx.simulate_keystrokes("ctrl-alt-\\");
+        setup.cx.run_until_parked();
+        assert!(
+            !ebbed(&setup, DockPosition::Left) && !ebbed(&setup, DockPosition::Right),
+            "the tide key tucks nothing away with tides off"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_side_switched_to_stay_comes_back(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        type_in_note(&mut setup, "a");
+        assert!(ebbed(&setup, DockPosition::Right));
+        tides(
+            &mut setup,
+            TidesSettingsContent {
+                right: Some(TidePolicy::Stay),
+                flow_back_after: Some(FlowBackAfter::Never),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !ebbed(&setup, DockPosition::Right),
+            "a staying side comes back"
+        );
+        assert!(ebbed(&setup, DockPosition::Left), "the other one waits");
+    }
+
+    #[gpui::test]
+    async fn centred_layout_off_brings_every_side_back_for_good(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        type_in_note(&mut setup, "a");
+        assert!(ebbed(&setup, DockPosition::Right));
+        let toggle = |setup: &mut Setup| {
+            setup
+                .workspace
+                .update_in(&mut setup.cx, |workspace, window, cx| {
+                    workspace.toggle_centered_layout(&workspace::ToggleCenteredLayout, window, cx)
+                });
+            setup.cx.run_until_parked();
+        };
+        toggle(&mut setup);
+        assert!(!ebbed(&setup, DockPosition::Right));
+        let still_ebbed =
+            dock(&setup, DockPosition::Right).read_with(&setup.cx, |dock, _| dock.is_ebbed());
+        assert!(
+            !still_ebbed,
+            "every side flows while the page isn't anchored"
+        );
+        toggle(&mut setup);
+        assert!(
+            !ebbed(&setup, DockPosition::Left) && !ebbed(&setup, DockPosition::Right),
+            "and nothing comes back ebbed"
+        );
     }
 }

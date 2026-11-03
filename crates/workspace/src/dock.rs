@@ -296,9 +296,6 @@ pub struct Dock {
     ebbed: bool,
     /// The panel has something waiting, drawn as a line on the tide mark.
     tide_waiting: bool,
-    /// Whether this frame draws the tide mark, as the workspace's render
-    /// decided it.
-    tide_mark_shown: bool,
     _subscriptions: [Subscription; 2],
 }
 
@@ -469,7 +466,6 @@ impl Dock {
                 modal_layer,
                 ebbed: false,
                 tide_waiting: false,
-                tide_mark_shown: false,
             }
         });
 
@@ -540,14 +536,21 @@ impl Dock {
         }
     }
 
-    /// Whether this frame draws the dock as its tide mark: ebbed, or ebbed
-    /// by the workspace to fit the page.
-    pub fn is_tide_mark_shown(&self) -> bool {
-        self.tide_mark_shown
-    }
-
-    pub(crate) fn show_tide_mark(&mut self, shown: bool) {
-        self.tide_mark_shown = shown;
+    /// The width the dock takes beside an anchored page: its panel's
+    /// stored or default size, never under the panel's minimum. A flexible
+    /// panel takes it too, since the page, not the dock, gets what is left.
+    pub fn anchored_width(&self, window: &Window, cx: &App) -> Option<Pixels> {
+        let entry = self.visible_entry()?;
+        let size = entry
+            .size_state
+            .size
+            .unwrap_or_else(|| entry.panel.default_size(window, cx));
+        Some(
+            entry
+                .panel
+                .min_size(window, cx)
+                .map_or(size, |min| size.max(min)),
+        )
     }
 
     /// Marks the tide mark with a line while the panel has something waiting.
@@ -1303,14 +1306,17 @@ impl Dock {
 impl Render for Dock {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
-        if self.tide_mark_shown
-            && let Some(entry) = self.visible_entry()
-        {
+        // The workspace placed this frame's row before its docks draw.
+        let tide_mark_shown = self.workspace.upgrade().is_some_and(|workspace| {
+            workspace
+                .read(cx)
+                .center_row()
+                .shows_tide_mark(self.position, self.is_open, self.ebbed)
+        });
+        if tide_mark_shown && let Some(entry) = self.visible_entry() {
             // The panel stays laid out at its own width behind the mark, so
             // its focus, selection and scroll position carry on untouched.
-            let width = self
-                .stored_active_panel_size(window, cx)
-                .unwrap_or_default();
+            let width = self.anchored_width(window, cx).unwrap_or_default();
             let panel = entry
                 .panel
                 .to_any()
@@ -1677,6 +1683,7 @@ pub mod test {
         pub activation_focus_handle: Option<FocusHandle>,
         pub default_size: Pixels,
         pub flexible: bool,
+        pub min_size: Option<Pixels>,
         pub activation_priority: u32,
     }
     actions!(test_only, [ToggleTestPanel]);
@@ -1693,6 +1700,7 @@ pub mod test {
                 activation_focus_handle: None,
                 default_size: px(300.),
                 flexible: false,
+                min_size: None,
                 activation_priority,
             }
         }
@@ -1761,6 +1769,10 @@ pub mod test {
 
         fn default_size(&self, _window: &Window, _: &App) -> Pixels {
             self.default_size
+        }
+
+        fn min_size(&self, _window: &Window, _: &App) -> Option<Pixels> {
+            self.min_size
         }
 
         fn initial_size_state(&self, _window: &Window, _: &App) -> PanelSizeState {

@@ -2026,18 +2026,19 @@ impl ChatPanel {
     }
 
     /// Whether the open thread's column has anything above the composer:
-    /// the ways in, a kickoff, a message or a failed turn.
+    /// the ways in, a kickoff, a message or a failed turn. Asked on every
+    /// notify, so it looks at the session's entries rather than building
+    /// the chat's items.
     fn shows_messages(&self, cx: &App) -> bool {
         match &self.view {
             PanelView::Connect(_) => true,
             PanelView::Chat if !matches!(self.connection, PlusConnection::Connected { .. }) => true,
             PanelView::Chat => {
-                self.opening_request(cx).is_some()
-                    || !self.items(cx).is_empty()
-                    || self
-                        .session
-                        .as_ref()
-                        .is_some_and(|session| session.turn_failure.is_some())
+                self.opening.is_some()
+                    || self.session.as_ref().is_some_and(|session| {
+                        session.turn_failure.is_some()
+                            || !session.thread.read(cx).entries().is_empty()
+                    })
             }
         }
     }
@@ -6512,7 +6513,7 @@ mod tests {
 
     fn desk_mark_shown(setup: &Setup) -> bool {
         setup.workspace.read_with(&setup.cx, |workspace, cx| {
-            workspace.right_dock().read(cx).is_tide_mark_shown()
+            workspace.dock_shows_tide_mark(workspace::dock::DockPosition::Right, cx)
         })
     }
 
@@ -7634,6 +7635,63 @@ mod tests {
         advance(&mut setup, Duration::from_secs(3));
         assert!(!bubble_up(&setup));
         assert_eq!(waiting(&setup), Some(Waiting::Reply), "then the dot");
+    }
+
+    #[gpui::test]
+    async fn without_centred_layout_the_desk_ebbs_only_when_the_thread_cannot_fit(
+        cx: &mut TestAppContext,
+    ) {
+        // V54 §4.3 with centred layout off, on the V44 numbers: at 1440 the
+        // centre holds the thread beside the Desk; a 704 centre gets it from
+        // the Desk ebbing, not closing; at 760 the thread floats.
+        let mut setup = setup(cx).await;
+        connect(&mut setup);
+        add_desk(&mut setup);
+        open_note(&mut setup).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        start_wrap_today(&mut setup, connection, None, vec![says("Seven of eleven.")]).await;
+        let open = |setup: &mut Setup| {
+            setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+                panel.open_thread(window, cx)
+            });
+            setup.cx.run_until_parked();
+        };
+        let fold = |setup: &mut Setup| {
+            setup.cx.simulate_keystrokes("escape");
+            setup.cx.run_until_parked();
+        };
+        let thread_kept = |setup: &Setup| {
+            setup.workspace.read_with(&setup.cx, |workspace, _| {
+                matches!(
+                    workspace.center_row(),
+                    workspace::CenterRow::Ordinary {
+                        thread: Some(_),
+                        ..
+                    }
+                )
+            })
+        };
+
+        resize(&mut setup, 1440., 900.);
+        open(&mut setup);
+        assert_eq!(room(&setup), Some(px(INSET)));
+        assert!(thread_kept(&setup), "the thread has its room");
+        assert!(!desk_mark_shown(&setup), "beside the Desk");
+        fold(&mut setup);
+
+        resize(&mut setup, 1024., 900.);
+        open(&mut setup);
+        assert!(thread_kept(&setup));
+        assert!(desk_mark_shown(&setup), "the Desk ebbs for it");
+        assert!(desk_open(&setup), "ebbed, not closed");
+        fold(&mut setup);
+        assert!(!desk_mark_shown(&setup), "and flows back on fold");
+        assert!(desk_open(&setup));
+
+        resize(&mut setup, 760., 600.);
+        open(&mut setup);
+        assert!(!thread_kept(&setup), "too narrow: the thread floats");
+        assert!(!desk_mark_shown(&setup));
     }
 
     #[gpui::test]

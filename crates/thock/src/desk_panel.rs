@@ -276,6 +276,9 @@ pub struct DeskPanel {
     now: Arc<dyn Fn() -> NaiveDateTime + Send + Sync>,
     /// The vault's reminders service, followed once it appears.
     reminder_subscription: Option<Subscription>,
+    /// Whether something waits, for the tide mark (V54 §5.2). Kept on the
+    /// minute tick and on plan or reminder changes, not on every notify.
+    waiting: bool,
     _tick: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -332,6 +335,7 @@ impl DeskPanel {
                 if reminders.read(cx).has_selection() {
                     this.card_selected = false;
                 }
+                this.refresh_waiting(cx);
                 cx.notify();
             }));
             // The card's minutes count down, and "today" moves at midnight.
@@ -342,6 +346,7 @@ impl DeskPanel {
                         .await;
                     let tick = this.update(cx, |this, cx| {
                         this.refresh_today(cx);
+                        this.refresh_waiting(cx);
                         cx.notify();
                     });
                     if tick.is_err() {
@@ -363,6 +368,7 @@ impl DeskPanel {
                 card_selected: false,
                 now: Arc::new(|| Local::now().naive_local()),
                 reminder_subscription: None,
+                waiting: false,
                 _tick: tick,
                 _subscriptions: subscriptions,
             };
@@ -393,6 +399,7 @@ impl DeskPanel {
     pub(crate) fn set_now(&mut self, now: NaiveDateTime, cx: &mut Context<Self>) {
         self.now = Arc::new(move || now);
         self.refresh_today(cx);
+        self.refresh_waiting(cx);
         cx.notify();
     }
 
@@ -555,6 +562,7 @@ impl DeskPanel {
             today.plan = plan;
             cx.notify();
         }
+        self.refresh_waiting(cx);
     }
 
     fn card(&self) -> Option<NextCard> {
@@ -566,12 +574,16 @@ impl DeskPanel {
     /// Whether the Desk has something waiting, for its tide mark (V54 §5.2):
     /// a timed entry starts within ten minutes, or a reminder is ringing
     /// (its time has come and it is still open).
-    pub fn has_waiting(&self, cx: &App) -> bool {
+    pub fn has_waiting(&self) -> bool {
+        self.waiting
+    }
+
+    fn refresh_waiting(&mut self, cx: &App) {
         let starts_soon = self.card().is_some_and(|card| {
             card.starts_in
                 .is_some_and(|minutes| minutes <= crate::desk_layout::WAITING_WITHIN_MINUTES)
         });
-        starts_soon || self.reminders.read(cx).overdue_count(cx) > 0
+        self.waiting = starts_soon || self.reminders.read(cx).overdue_count(cx) > 0;
     }
 
     /// Up from a view's first row lands here only when the view released

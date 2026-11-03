@@ -131,6 +131,16 @@ impl settings::Settings for ThockSettings {
 }
 
 impl TidesSettings {
+    /// What the dock at `position` does while you type. The bottom dock
+    /// always stays.
+    pub fn policy(&self, position: workspace::dock::DockPosition) -> settings::TidePolicy {
+        match position {
+            workspace::dock::DockPosition::Left => self.left,
+            workspace::dock::DockPosition::Right => self.right,
+            workspace::dock::DockPosition::Bottom => settings::TidePolicy::Stay,
+        }
+    }
+
     fn from_content(tides: settings::TidesSettingsContent) -> Self {
         Self {
             left: tides.left.unwrap_or_default(),

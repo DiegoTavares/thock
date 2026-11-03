@@ -30,7 +30,7 @@ pub mod welcome;
 pub mod workspace_error;
 mod workspace_settings;
 
-pub use center_anchor::{AnchorLayout, CenterAnchor};
+pub use center_anchor::{AnchorLayout, CenterAnchor, CenterRow};
 pub use dock::Panel;
 pub use multi_workspace::{
     CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MoveProjectToNewWindow,
@@ -46,7 +46,7 @@ pub use remote::{
 pub use toast_layer::{ToastAction, ToastLayer, ToastView};
 
 use anyhow::{Context as _, Result, anyhow};
-use center_anchor::{AnchorInput, AnchorSide, TIDE_MARK_WIDTH, anchor};
+use center_anchor::{AnchorInput, AnchorSide, TIDE_MARK_WIDTH, anchor, ordinary_row};
 use client::{
     ChannelId, Client, ErrorExt, ParticipantIndex, Status, TypedEnvelope, User, UserStore,
     proto::{self, ErrorCode, PanelId, PeerId},
@@ -1396,8 +1396,8 @@ pub struct Workspace {
     /// The page a view asked for while centred layout is on, and room
     /// beside it in the right margin.
     center_anchor: Option<CenterAnchor>,
-    /// The row the last render placed, while the page was anchored.
-    anchor_layout: Option<AnchorLayout>,
+    /// The row the last render placed; docks read it while they draw.
+    center_row: CenterRow,
     titlebar_focus_handle: FocusHandle,
     region_focus_handles: RegionFocusHandles,
     notifications: Notifications,
@@ -1853,7 +1853,7 @@ impl Workspace {
             titlebar_item: None,
             center_overlay: None,
             center_anchor: None,
-            anchor_layout: None,
+            center_row: CenterRow::default(),
             titlebar_focus_handle: cx.focus_handle(),
             region_focus_handles: RegionFocusHandles::new(cx),
             notifications: Notifications::default(),
@@ -3032,7 +3032,20 @@ impl Workspace {
     /// The row the last render placed while the page was anchored, or
     /// `None` when it wasn't.
     pub fn anchor_layout(&self) -> Option<AnchorLayout> {
-        self.anchor_layout
+        self.center_row.anchored()
+    }
+
+    /// The row the last render placed.
+    pub fn center_row(&self) -> CenterRow {
+        self.center_row
+    }
+
+    /// Whether the dock at `position` was drawn as its tide mark in the
+    /// last render.
+    pub fn dock_shows_tide_mark(&self, position: DockPosition, cx: &App) -> bool {
+        let dock = self.dock_at_position(position).read(cx);
+        self.center_row
+            .shows_tide_mark(position, dock.is_open(), dock.is_ebbed())
     }
 
     /// Whether the page is anchored: centred layout on, one pane in the
@@ -8127,31 +8140,40 @@ impl Workspace {
         self.maximized_pane.is_some()
     }
 
-    /// The width a side dock takes this frame when drawn in full, or `None`
-    /// when it is closed or zoomed away.
+    /// The width a side dock takes beside an anchored page, or `None` when
+    /// it is closed or zoomed away. `render_dock` draws it at exactly this.
     fn dock_width(&self, dock: &Entity<Dock>, window: &Window, cx: &App) -> Option<Pixels> {
         let dock = dock.read(cx);
         if self.zoomed_position == Some(dock.position()) {
             return None;
         }
-        dock.stored_active_panel_size(window, cx)
+        dock.anchored_width(window, cx)
     }
 
-    /// Places the centre's row for this frame (`center_anchor::anchor`) and
-    /// tells each side dock whether it draws its tide mark.
-    fn layout_center_row(&mut self, window: &Window, cx: &mut Context<Self>) -> CenterRow {
+    /// Places the centre's row for this frame (`center_anchor::anchor`, or
+    /// `ordinary_row` when the page isn't anchored). Docks read it back
+    /// while they draw.
+    fn layout_center_row(&mut self, window: &Window, cx: &App) -> CenterRow {
         let left_width = self.dock_width(&self.left_dock, window, cx);
         let right_width = self.dock_width(&self.right_dock, window, cx);
-        let anchored = self.is_page_anchored(cx);
+        // A dock holding the focus never ebbs to fit: focus must never sit in
+        // a panel drawn as a mark.
+        let side = |dock: &Entity<Dock>, open_width, may_ebb: bool| {
+            let dock = dock.read(cx);
+            AnchorSide {
+                open_width,
+                ebbed: dock.is_ebbed(),
+                may_ebb: may_ebb && !dock.focus_handle(cx).contains_focused(window, cx),
+            }
+        };
+        let row_width = {
+            let (left, right) = client_side_insets(window.window_decorations());
+            window.viewport_size().width - left - right
+        };
         let row = match self.center_anchor {
-            Some(center_anchor) if anchored => {
-                let side = |dock: &Entity<Dock>, open_width, may_ebb| AnchorSide {
-                    open_width,
-                    ebbed: dock.read(cx).is_ebbed(),
-                    may_ebb,
-                };
+            Some(center_anchor) if self.is_page_anchored(cx) => {
                 CenterRow::Anchored(anchor(AnchorInput {
-                    window: window.viewport_size().width,
+                    window: row_width,
                     left: side(&self.left_dock, left_width, center_anchor.ebb_left),
                     right: side(&self.right_dock, right_width, center_anchor.ebb_right),
                     column: center_anchor.column,
@@ -8159,34 +8181,19 @@ impl Workspace {
                     thread: center_anchor.thread,
                 }))
             }
-            _ => {
-                let thread = self.center_anchor.and_then(|center_anchor| {
-                    let thread = center_anchor.thread?;
-                    let center = window.viewport_size().width
-                        - left_width.unwrap_or_default()
-                        - right_width.unwrap_or_default();
-                    (center - thread >= center_anchor.min_column).then_some(thread)
-                });
-                CenterRow::Ordinary { thread }
-            }
-        };
-        let (left_mark, right_mark) = match &row {
-            CenterRow::Anchored(layout) => (
-                left_width.is_some()
-                    && (layout.left_ebbs_to_fit || self.left_dock.read(cx).is_ebbed()),
-                right_width.is_some()
-                    && (layout.right_ebbs_to_fit || self.right_dock.read(cx).is_ebbed()),
+            Some(center_anchor) => ordinary_row(
+                row_width,
+                left_width,
+                AnchorSide {
+                    ebbed: false,
+                    ..side(&self.right_dock, right_width, center_anchor.ebb_right)
+                },
+                center_anchor.min_column,
+                center_anchor.thread,
             ),
-            CenterRow::Ordinary { .. } => (false, false),
+            None => CenterRow::default(),
         };
-        self.left_dock
-            .update(cx, |dock, _| dock.show_tide_mark(left_mark));
-        self.right_dock
-            .update(cx, |dock, _| dock.show_tide_mark(right_mark));
-        self.anchor_layout = match &row {
-            CenterRow::Anchored(layout) => Some(*layout),
-            CenterRow::Ordinary { .. } => None,
-        };
+        self.center_row = row;
         row
     }
 
@@ -8241,8 +8248,18 @@ impl Workspace {
         // included in the element tree so its focus handle remains mounted — without
         // this, toggle_panel_focus cannot focus the panel when the dock is closed.
         let dock = dock.read(cx);
-        if dock.is_tide_mark_shown() {
+        if self
+            .center_row
+            .shows_tide_mark(position, dock.is_open(), dock.is_ebbed())
+        {
             return Some(container.w(TIDE_MARK_WIDTH).flex_shrink_0());
+        }
+        // Beside an anchored page a dock is exactly the width the row was
+        // placed with, or the page would sit off the window's centre.
+        if self.center_row.anchored().is_some()
+            && let Some(width) = dock.anchored_width(window, cx)
+        {
+            return Some(container.w(width).flex_none());
         }
         if let Some(panel) = dock.visible_panel() {
             let size_state = dock.stored_panel_size_state(panel.as_ref());
@@ -8457,7 +8474,7 @@ impl Workspace {
                     }),
                 )
             }
-            CenterRow::Ordinary { thread } => (None, thread.map(strip)),
+            CenterRow::Ordinary { thread, .. } => (None, thread.map(strip)),
         };
         h_flex()
             .relative()
@@ -9157,14 +9174,6 @@ impl Render for DraggedDock {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         gpui::Empty
     }
-}
-
-/// How the centre's row is laid out this frame.
-enum CenterRow {
-    /// Zed's own layout, with room for the thread on the right when it fits.
-    Ordinary { thread: Option<Pixels> },
-    /// The page pinned to the window's centre.
-    Anchored(AnchorLayout),
 }
 
 impl Render for Workspace {
@@ -11417,6 +11426,26 @@ fn parse_pixel_size_env_var(value: &str) -> Option<Size<Pixels>> {
     let height: usize = parts.next()?.parse().ok()?;
     Some(size(px(width as f32), px(height as f32)))
 }
+
+/// The width `client_side_decorations` takes on the left and on the right
+/// of what it wraps: its shadow and border on each side that isn't tiled.
+fn client_side_insets(decorations: Decorations) -> (Pixels, Pixels) {
+    match decorations {
+        Decorations::Server => (Pixels::ZERO, Pixels::ZERO),
+        Decorations::Client { tiling } => {
+            let inset = |tiled: bool| {
+                if tiled {
+                    Pixels::ZERO
+                } else {
+                    theme::CLIENT_SIDE_DECORATION_SHADOW + CLIENT_SIDE_DECORATION_BORDER
+                }
+            };
+            (inset(tiling.left), inset(tiling.right))
+        }
+    }
+}
+
+const CLIENT_SIDE_DECORATION_BORDER: Pixels = px(1.0);
 
 /// Add client-side decorations (rounded corners, shadows, resize handling) when
 /// appropriate.
@@ -18364,5 +18393,35 @@ mod tests {
         fn set_zoomed(&mut self, zoomed: bool, _: &mut Window, _: &mut Context<Self>) {
             self.zoomed = zoomed;
         }
+    }
+}
+
+#[cfg(test)]
+mod center_row_tests {
+    use super::*;
+
+    #[test]
+    fn the_row_leaves_out_the_client_side_decorations() {
+        let edge = theme::CLIENT_SIDE_DECORATION_SHADOW + CLIENT_SIDE_DECORATION_BORDER;
+        assert_eq!(
+            client_side_insets(Decorations::Server),
+            (Pixels::ZERO, Pixels::ZERO)
+        );
+        assert_eq!(
+            client_side_insets(Decorations::Client {
+                tiling: Tiling::default()
+            }),
+            (edge, edge)
+        );
+        assert_eq!(
+            client_side_insets(Decorations::Client {
+                tiling: Tiling {
+                    left: true,
+                    ..Tiling::default()
+                }
+            }),
+            (Pixels::ZERO, edge),
+            "a side tiled against the screen edge has no shadow"
+        );
     }
 }
