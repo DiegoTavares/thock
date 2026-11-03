@@ -118,7 +118,8 @@ V44's `room_for` cascade and its Desk collapse are replaced by §4.2:
   margin.
 - **It is requested only when the thread has at least one message to show.** With only the
   composer open, the composer and the pebble float in the bottom-right of the centre, as a
-  Needs-you bubble does today.
+  Needs-you bubble does today. A bubble that can't clear the caret's line takes the room only
+  when it is free; it never ebbs the Desk.
 - V44's "collapse the Desk" becomes step 2: the Desk *ebbs*, which is not persisted, and flows back
   when the thread folds.
 - A right dock with policy `stay` never ebbs for the thread. The column shifts or narrows, and the
@@ -252,15 +253,23 @@ exactly what G1 forbids. So it belongs in `crates/workspace/src/workspace.rs`, e
 V44 added (§7.2 there):
 
 1. **`set_center_anchor(Option<CenterAnchor>)`** replaces `set_center_inset`. `CenterAnchor { column,
-   min_column, thread: Option<Pixels>, ebb_left, ebb_right }`; the two flags carry each side's
-   policy into step 2, off for a `stay` side and for a side you called back. `render_center_group` calls `anchor()` with
-   `window.viewport_size().width` and the docks' current widths, and renders absolute-width
-   paddings in place of the fractional ones. The `center_overlay` slot is unchanged.
-2. **Ebbed docks.** `Dock` gains a render-only `ebbed` flag, with `set_ebbed` and `is_ebbed`. An
-   ebbed dock renders its tide mark instead of the panel, keeps `is_open`, isn't serialized, and
-   reports its width as the mark's to `anchor()`. Docks ebbed to fit are decided inside `anchor()`
-   on each render and never stored. The dock also takes a render-only `tide_waiting` flag for the
-   mark's accent line, which `desk_layout.rs` sets from the Desk's `has_waiting()`.
+   min_column, thread: Option<ThreadRoom>, ebb_left, ebb_right }`; the flags carry each side's
+   policy into step 2 (off for `stay`), and `ThreadRoom` says whether the room may ebb a dock (a
+   thread with messages) or only take free room (a bubble). The workspace calls `anchor()` on each
+   render with the workspace's own width and the window's centre within it (so a sidebar or
+   window decorations are left out), and the docks at the width they are drawn at: their stored
+   size, a flexible panel's flex resolved to a width, never under the panel's minimum. Beside an
+   anchored page each side dock is drawn at exactly the width `anchor()` gives it, and docks that
+   can't ebb shrink together when even they don't fit the window. The row it placed
+   (`CenterRow`) is kept so the docks and Thock read the same decision back. The
+   `center_overlay` slot is unchanged.
+2. **Ebbed docks.** `Dock` gains a `Tide` (`Flowing`, `Ebbed`, `Held`), never serialized. An ebbed
+   dock renders its tide mark over its panel, which stays laid out at its own width, keeps
+   `is_open`, and reports its width as the mark's to `anchor()`. `Held` is a dock you brought back
+   beside an anchored page: the row makes room for it instead of ebbing it to fit, until it ebbs
+   again. A dock holding the focus is never drawn as a mark. Docks ebbed to fit are decided inside
+   `anchor()` on each render. The dock also takes a `tide_waiting` flag for the mark's accent
+   line, which `desk_layout.rs` sets from the Desk's `has_waiting()`.
 3. `adjust_padding` and the fractional settings go.
 
 `anchor()` is a pure function in the workspace crate with its own table tests (§9). The PR calls
