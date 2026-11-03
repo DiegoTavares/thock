@@ -50,7 +50,7 @@ use text::{Bias, Point};
 use ui::prelude::*;
 use ui::{IconButton, KeyBinding, Label, ProgressBar, SpinnerLabel, Tooltip};
 use util::ResultExt as _;
-use workspace::{OpenOptions, OpenVisible, Workspace};
+use workspace::{OpenOptions, OpenVisible, ThreadRoom, Workspace};
 
 use crate::ThockSettings;
 use crate::agent::{self, ConnectionMode, ModelTier};
@@ -2020,15 +2020,26 @@ impl ChatPanel {
     /// The room the thread asks the page for (V54 §4.3): its column while
     /// it shows a message, or while a bubble can't clear the caret's line.
     /// The composer alone floats over the page and takes none.
-    pub fn thread_room(&self, cx: &App) -> Option<Pixels> {
-        let shows_messages = self.thread_open && self.shows_messages(cx);
-        (shows_messages || self.bubble_needs_room).then_some(px(INSET))
+    pub fn thread_room(&self, cx: &App) -> Option<ThreadRoom> {
+        if self.thread_open && self.shows_messages(cx) {
+            Some(ThreadRoom {
+                width: px(INSET),
+                ebbs_docks: true,
+            })
+        } else {
+            // A bubble takes the room only when it's free; it never ebbs the
+            // Desk (§4.3).
+            self.bubble_needs_room.then_some(ThreadRoom {
+                width: px(INSET),
+                ebbs_docks: false,
+            })
+        }
     }
 
     /// Whether the open thread's column has anything above the composer:
     /// the ways in, a kickoff, a message or a failed turn. Asked on every
-    /// notify, so it looks at the session's entries rather than building
-    /// the chat's items.
+    /// notify, so rather than build the chat's items it asks what they
+    /// start from: nothing renders before the first message you sent.
     fn shows_messages(&self, cx: &App) -> bool {
         match &self.view {
             PanelView::Connect(_) => true,
@@ -2037,7 +2048,12 @@ impl ChatPanel {
                 self.opening.is_some()
                     || self.session.as_ref().is_some_and(|session| {
                         session.turn_failure.is_some()
-                            || !session.thread.read(cx).entries().is_empty()
+                            || session
+                                .thread
+                                .read(cx)
+                                .entries()
+                                .iter()
+                                .any(|entry| matches!(entry, AgentThreadEntry::UserMessage(_)))
                     })
             }
         }
@@ -6507,13 +6523,16 @@ mod tests {
     /// The thread's room as the workspace was last asked to keep it.
     fn room(setup: &Setup) -> Option<Pixels> {
         setup.workspace.read_with(&setup.cx, |workspace, _| {
-            workspace.center_anchor().and_then(|anchor| anchor.thread)
+            workspace
+                .center_anchor()
+                .and_then(|anchor| anchor.thread)
+                .map(|thread| thread.width)
         })
     }
 
     fn desk_mark_shown(setup: &Setup) -> bool {
-        setup.workspace.read_with(&setup.cx, |workspace, cx| {
-            workspace.dock_shows_tide_mark(workspace::dock::DockPosition::Right, cx)
+        setup.workspace.read_with(&setup.cx, |workspace, _| {
+            workspace.dock_shows_tide_mark(workspace::dock::DockPosition::Right)
         })
     }
 
@@ -7692,6 +7711,81 @@ mod tests {
         open(&mut setup);
         assert!(!thread_kept(&setup), "too narrow: the thread floats");
         assert!(!desk_mark_shown(&setup));
+    }
+
+    #[gpui::test]
+    async fn a_thread_with_nothing_shown_takes_no_room(cx: &mut TestAppContext) {
+        // A conversation that hasn't started: the agent's notice comes in
+        // before any message of yours, which the thread doesn't show.
+        let mut setup = setup(cx).await;
+        connect(&mut setup);
+        open_note(&mut setup).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        let work_dirs = setup
+            .project
+            .read_with(&setup.cx, |project, cx| project.default_path_list(cx));
+        let thread = setup
+            .cx
+            .update(|_, cx| {
+                connection
+                    .clone()
+                    .new_session(setup.project.clone(), work_dirs, cx)
+            })
+            .await
+            .unwrap();
+        let session_id = thread.read_with(&setup.cx, |thread, _| thread.session_id().clone());
+        setup.cx.update(|_, cx| {
+            connection.send_update(session_id, says("A notice before you speak."), cx);
+        });
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            panel.attach_session(
+                LaunchRequest::conversation(),
+                connection,
+                thread,
+                PathBuf::from("/data/pi/default/answers"),
+                0,
+                window,
+                cx,
+            );
+            panel.open_thread(window, cx);
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
+        assert_eq!(visible(&setup), "", "nothing renders yet");
+        assert_eq!(room(&setup), None, "so nothing asks for room");
+    }
+
+    #[gpui::test]
+    async fn without_centred_layout_a_desk_you_visited_still_ebbs_for_the_thread(
+        cx: &mut TestAppContext,
+    ) {
+        let mut setup = setup(cx).await;
+        connect(&mut setup);
+        add_desk(&mut setup);
+        let editor = open_note(&mut setup).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        start_wrap_today(&mut setup, connection, None, vec![says("Seven of eleven.")]).await;
+        resize(&mut setup, 1024., 900.);
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            panel.open_thread(window, cx)
+        });
+        setup.cx.run_until_parked();
+        assert!(desk_mark_shown(&setup));
+
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.focus_panel::<DeskPanel>(window, cx);
+            });
+        setup.cx.run_until_parked();
+        assert!(!desk_mark_shown(&setup), "the Desk you are in is whole");
+        setup.cx.focus(&editor);
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
+        assert!(
+            desk_mark_shown(&setup),
+            "back in the note, the Desk ebbs for the thread again"
+        );
     }
 
     #[gpui::test]

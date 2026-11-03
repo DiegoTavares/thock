@@ -346,7 +346,6 @@ impl DeskPanel {
                         .await;
                     let tick = this.update(cx, |this, cx| {
                         this.refresh_today(cx);
-                        this.refresh_waiting(cx);
                         cx.notify();
                     });
                     if tick.is_err() {
@@ -399,7 +398,6 @@ impl DeskPanel {
     pub(crate) fn set_now(&mut self, now: NaiveDateTime, cx: &mut Context<Self>) {
         self.now = Arc::new(move || now);
         self.refresh_today(cx);
-        self.refresh_waiting(cx);
         cx.notify();
     }
 
@@ -455,6 +453,11 @@ impl DeskPanel {
     /// the day the planner may not be showing; a note that does not exist
     /// yet parses as an empty day.
     fn refresh_today(&mut self, cx: &mut Context<Self>) {
+        self.open_today(cx);
+        self.refresh_waiting(cx);
+    }
+
+    fn open_today(&mut self, cx: &mut Context<Self>) {
         let today = self.now().date();
         let Some(vault) = &self.vault else {
             self.today = None;
@@ -578,12 +581,18 @@ impl DeskPanel {
         self.waiting
     }
 
-    fn refresh_waiting(&mut self, cx: &App) {
+    /// Recomputes `waiting`, and notifies when it changed so the tide mark
+    /// follows.
+    fn refresh_waiting(&mut self, cx: &mut Context<Self>) {
         let starts_soon = self.card().is_some_and(|card| {
             card.starts_in
                 .is_some_and(|minutes| minutes <= crate::desk_layout::WAITING_WITHIN_MINUTES)
         });
-        self.waiting = starts_soon || self.reminders.read(cx).overdue_count(cx) > 0;
+        let waiting = starts_soon || self.reminders.read(cx).overdue_count(cx) > 0;
+        if self.waiting != waiting {
+            self.waiting = waiting;
+            cx.notify();
+        }
     }
 
     /// Up from a view's first row lands here only when the view released
@@ -903,7 +912,9 @@ mod tests {
     use menu::{SelectNext, SelectPrevious};
     use serde_json::json;
     use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
+    use std::cell::Cell;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use text::Point;
     use workspace::MultiWorkspace;
 
@@ -1267,6 +1278,40 @@ mod tests {
             Some(("completed", 0)),
             "one completed task"
         );
+    }
+
+    #[gpui::test]
+    async fn the_waiting_line_follows_the_day_going_away(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        let today = Local::now().date_naive();
+        setup.desk.update(&mut setup.cx, |desk, cx| {
+            desk.set_now(today.and_hms_opt(14, 52, 0).unwrap(), cx)
+        });
+        setup.cx.run_until_parked();
+        assert!(
+            setup
+                .desk
+                .read_with(&setup.cx, |desk, _| desk.has_waiting()),
+            "15:00 is eight minutes away"
+        );
+        let notified = Rc::new(Cell::new(false));
+        let _subscription = setup.cx.update(|_, cx| {
+            let notified = notified.clone();
+            cx.observe(&setup.desk, move |_, _| notified.set(true))
+        });
+        // The vault goes away: there is no today any more, so nothing waits,
+        // and the Desk says so for the tide mark to follow.
+        setup.desk.update(&mut setup.cx, |desk, cx| {
+            desk.vault = None;
+            desk.refresh_today(cx);
+        });
+        setup.cx.run_until_parked();
+        assert!(
+            !setup
+                .desk
+                .read_with(&setup.cx, |desk, _| desk.has_waiting())
+        );
+        assert!(notified.get());
     }
 
     #[gpui::test]

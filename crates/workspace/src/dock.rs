@@ -291,9 +291,8 @@ pub struct Dock {
     restoration: DockRestoreState,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
-    /// Tucked away while you write: still open, drawn as its tide mark
-    /// while the page is anchored. Never serialized.
-    ebbed: bool,
+    /// Whether the dock is tucked away while you write. Never serialized.
+    tide: Tide,
     /// The panel has something waiting, drawn as a line on the tide mark.
     tide_waiting: bool,
     _subscriptions: [Subscription; 2],
@@ -323,6 +322,20 @@ impl Focusable for Dock {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+/// How a side dock rides the tides (V54).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Tide {
+    /// Drawn whole, or ebbed by the row when it and the page don't fit.
+    #[default]
+    Flowing,
+    /// Tucked away while you write, drawn as its tide mark beside an
+    /// anchored page.
+    Ebbed,
+    /// Brought back by hand: the row makes room for it rather than ebb it,
+    /// until it ebbs again or the row's reason for ebbing it goes away.
+    Held,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -464,7 +477,7 @@ impl Dock {
                 restoration: DockRestoreState::Restoring { pending: None },
                 zoom_layer_open: false,
                 modal_layer,
-                ebbed: false,
+                tide: Tide::Flowing,
                 tide_waiting: false,
             }
         });
@@ -524,33 +537,20 @@ impl Dock {
     /// Whether the dock is ebbed: open, but tucked away at the window's edge
     /// while the page is anchored.
     pub fn is_ebbed(&self) -> bool {
-        self.ebbed
+        self.tide == Tide::Ebbed
     }
 
-    /// Ebbs the dock, or lets it flow back. A closed dock doesn't ebb.
-    pub fn set_ebbed(&mut self, ebbed: bool, cx: &mut Context<Self>) {
-        let ebbed = ebbed && self.is_open;
-        if self.ebbed != ebbed {
-            self.ebbed = ebbed;
+    pub fn tide(&self) -> Tide {
+        self.tide
+    }
+
+    /// Sets how the dock rides the tides. A closed dock only flows.
+    pub fn set_tide(&mut self, tide: Tide, cx: &mut Context<Self>) {
+        let tide = if self.is_open { tide } else { Tide::Flowing };
+        if self.tide != tide {
+            self.tide = tide;
             cx.notify();
         }
-    }
-
-    /// The width the dock takes beside an anchored page: its panel's
-    /// stored or default size, never under the panel's minimum. A flexible
-    /// panel takes it too, since the page, not the dock, gets what is left.
-    pub fn anchored_width(&self, window: &Window, cx: &App) -> Option<Pixels> {
-        let entry = self.visible_entry()?;
-        let size = entry
-            .size_state
-            .size
-            .unwrap_or_else(|| entry.panel.default_size(window, cx));
-        Some(
-            entry
-                .panel
-                .min_size(window, cx)
-                .map_or(size, |min| size.max(min)),
-        )
     }
 
     /// Marks the tide mark with a line while the panel has something waiting.
@@ -590,7 +590,7 @@ impl Dock {
             .cursor_pointer()
             .occlude()
             .on_click(cx.listener(|dock, _, window, cx| {
-                dock.set_ebbed(false, cx);
+                dock.set_tide(Tide::Held, cx);
                 if let Some(panel) = dock.active_panel() {
                     panel.activation_focus_handle(cx).focus(window, cx);
                 }
@@ -665,7 +665,7 @@ impl Dock {
         if open != self.is_open {
             self.is_open = open;
             if !open {
-                self.ebbed = false;
+                self.tide = Tide::Flowing;
             }
             if let Some(active_panel) = self.active_panel_entry() {
                 active_panel.panel.set_active(open, window, cx);
@@ -1304,19 +1304,20 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
         // The workspace placed this frame's row before its docks draw.
-        let tide_mark_shown = self.workspace.upgrade().is_some_and(|workspace| {
-            workspace
-                .read(cx)
-                .center_row()
-                .shows_tide_mark(self.position, self.is_open, self.ebbed)
-        });
-        if tide_mark_shown && let Some(entry) = self.visible_entry() {
+        let row = self
+            .workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).center_row())
+            .unwrap_or_default();
+        if row.tide_mark(self.position)
+            && let Some(entry) = self.visible_entry()
+        {
             // The panel stays laid out at its own width behind the mark, so
             // its focus, selection and scroll position carry on untouched.
-            let width = self.anchored_width(window, cx).unwrap_or_default();
+            let width = row.open_width(self.position);
             let panel = entry
                 .panel
                 .to_any()
@@ -1732,6 +1733,8 @@ pub mod test {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .id("test")
+                .debug_selector(|| "test-panel".into())
+                .size_full()
                 .track_focus(&self.focus_handle(cx))
                 .children(self.activation_focus_handle.iter().map(|focus_handle| {
                     div().id("test-activation-child").track_focus(focus_handle)
