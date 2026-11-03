@@ -424,7 +424,7 @@ func TestAdminEndpointsNeedTheToken(t *testing.T) {
 func TestEveryTableHasRowLevelSecurity(t *testing.T) {
 	h := newHarness(t)
 	rows, err := h.server.store.pool.Query(context.Background(),
-		"select relname from pg_class where relnamespace = 'public'::regnamespace and relkind = 'r' and not relrowsecurity")
+		"select relname from pg_class where relnamespace = 'public'::regnamespace and relkind in ('r', 'p') and not relrowsecurity")
 	if err != nil {
 		t.Fatal(err)
 	}
