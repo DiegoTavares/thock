@@ -106,9 +106,10 @@ the column fits:
 5. **Float.** The thread floats over the page as in V44, and the column takes what's left, even
    below `min_column`.
 
-A dock you bring back while step 2 is in force flows back *as a dock*. While it is open, steps 3
-and 4 make room for it. When it ebbs again, the page returns to the centre. You're looking at the
-panel at that moment, not the page, so the shift doesn't break G1's promise while writing.
+A dock you bring back while step 2 is in force, or that comes back after a typing pause (§5.4),
+flows back *as a dock*. While it is open, steps 3 and 4 make room for it. When it ebbs again (you
+type), the page returns to the centre. You aren't writing at that moment, so the shift doesn't
+break G1's promise while writing (decision 18).
 
 ### 4.3 The thread
 
@@ -153,8 +154,9 @@ Each side (left, right) of a window with an anchored page is **flowing**, **ebbe
 
 - **Flowing:** drawn whole, or as its mark when it and the page don't fit (§4.2 step 2).
 - **Ebbed:** tucked away while you write, drawn as its mark.
-- **Held:** brought back by hand while it was a mark. The page makes room for it (§4.2 steps 3
-  and 4) instead of tucking it away to fit, until you type again or the page goes away.
+- **Held:** brought back while it was a mark, by hand or by a typing pause. The page makes room
+  for it (§4.2 steps 3 and 4) instead of tucking it away to fit, until you type again or the page
+  goes away.
 
 Ebbed and held are render states of an open dock: the dock is still open and its panel entity,
 selection and scroll position are untouched. They are not persisted, so after a restart every open
@@ -194,9 +196,13 @@ A side flows back when any of these happens:
    to `null` turns this off, so panels come back only when asked.
 4. **The page goes away:** the active centre item changes or the centre splits.
 
-A dock ebbed to fit (§4.2 step 2) doesn't flow back on a pause; it would only cover the page.
-Triggers 1 and 2 bring it back, held. Trigger 4 sets every side flowing, so a new page opens
-centred with a dock too wide for it waiting at the edge.
+Triggers 1, 2 and 3 bring a side back held, so a dock too wide to sit beside the page (§4.2 step 2)
+comes back too and the page gives way until you type again (decision 18). The one exception is a
+thread with messages: while it is open, a pause brings the right side back only as far as the
+thread's room allows, so the Desk stays tucked away for it rather than floating the thread over
+the page. Calling the Desk by its key or the tide key still brings it back, and then the thread
+floats. Trigger 4 sets every side flowing, so a new page opens centred with a dock too wide for
+it waiting at the edge.
 
 ### 5.5 Focus and escape
 
@@ -361,7 +367,11 @@ Each step ships on its own: Anchor without Tides is already the main fix.
   thread, and one press from inside a panel tucks away the other side; two presses before a
   repaint both count. A Desk ebbed to fit or for the thread and called by its key or a click
   stays whole after `escape`. A new page opens centred with a wide Desk waiting at the edge,
-  even after it was held. A burst of tide changes reaches the workspace in one anchor.
+  even after it was held. A burst of tide changes reaches the workspace in one anchor. With a
+  258 rail, a 439 Desk and a monospace page, at 1512 one press of the tide key brings the Desk
+  back (macOS keys under the JetBrains keymap too), and at 1920 it tucks both sides away. After a
+  pause a Desk ebbed to fit comes back with the page giving way, and typing centres it again;
+  with a thread with messages open, the pause leaves the Desk tucked away for the thread.
 - **Policies:** a `stay` side never ebbs on typing or for the thread.
 - **Thread:** composer-only requests no room; the first message requests 408; at 1512 the Desk ebbs
   and flows back when the thread folds. With centred layout off the thread keeps its room at 1440
@@ -425,3 +435,9 @@ None.
 17. **One owner of tide state:** `DeskLayout` in `crates/thock` owns each side's tide and sends it
     to the workspace in the anchor. The workspace places the row as a pure function of the
     anchor, the docks' widths and the focus, and never writes tide state; the dock keeps none.
+18. **A pause brings back a side ebbed to fit, too** (Diego, after the MacBook round). A pause
+    holds every side that typing ebbed, so a Desk too wide for the margin comes back and the page
+    shifts, then narrows toward `min_column`, until you type again. `Held` already means exactly
+    that, so no new state. While a thread with messages is open, the thread's room wins: the
+    right side only flows on a pause, so the Desk stays tucked away for the thread you're reading,
+    and calling it back by hand floats the thread instead.
