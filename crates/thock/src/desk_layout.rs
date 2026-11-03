@@ -102,6 +102,7 @@ impl DeskLayout {
                     },
                 ),
                 cx.observe_global::<SettingsStore>(|this, cx| this.sync(cx)),
+                theme_settings::observe_buffer_font_size_adjustment(cx, |this, cx| this.sync(cx)),
                 cx.on_focus_in(&left_focus, window, |this, _, cx| {
                     this.focus_entered(Side::Left, cx)
                 }),
@@ -749,6 +750,23 @@ mod tests {
             assert_eq!(tides.right, TidePolicy::Ebb);
             assert_eq!(tides.flow_back_after, Some(Duration::from_secs(8)));
         });
+    }
+
+    #[gpui::test]
+    async fn a_larger_font_widens_the_page_and_keeps_its_measure(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let column = |setup: &Setup| {
+            setup.workspace.read_with(&setup.cx, |workspace, _| {
+                workspace.center_anchor().map(|anchor| anchor.column)
+            })
+        };
+        let before = column(&setup).expect("the page is anchored");
+        setup
+            .cx
+            .update(|_, cx| theme_settings::increase_buffer_font_size(cx));
+        setup.cx.run_until_parked();
+        let after = column(&setup).expect("the page is anchored");
+        assert!(after > before, "{after:?} should be wider than {before:?}");
     }
 
     #[gpui::test]
