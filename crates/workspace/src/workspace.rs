@@ -8534,22 +8534,12 @@ impl Workspace {
                 .w(width)
                 .flex_shrink_0()
                 .bg(colors.editor_background)
-                .border_color(colors.pane_group_border)
         };
         let (left, right) = match row {
-            CenterRow::Anchored(layout) => {
-                let right_border = layout.thread_floats
-                    || self
-                        .center_anchor
-                        .is_none_or(|anchor| anchor.thread.is_none());
-                (
-                    (layout.left_padding > Pixels::ZERO)
-                        .then(|| strip(layout.left_padding).border_r_1()),
-                    (layout.right_padding > Pixels::ZERO).then(|| {
-                        strip(layout.right_padding).when(right_border, |this| this.border_l_1())
-                    }),
-                )
-            }
+            CenterRow::Anchored(layout) => (
+                (layout.left_padding > Pixels::ZERO).then(|| strip(layout.left_padding)),
+                (layout.right_padding > Pixels::ZERO).then(|| strip(layout.right_padding)),
+            ),
             CenterRow::Ordinary { thread, .. } => (None, thread.map(strip)),
         };
         h_flex()

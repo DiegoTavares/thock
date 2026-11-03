@@ -21,9 +21,10 @@ centre of the screen.
 
 V54 changes two rules:
 
-- **Anchor.** The page is a column of a fixed number of characters, pinned to the centre of the
-  *window*, not to the space between the docks. Whatever is left on each side is margin, and the
-  docks and the thread live in it. Opening or closing a panel changes the margin, never the page.
+- **Anchor.** The page is a column measured in characters, centred on the *window*, not on the
+  space between the docks. It fills the room the docks leave, up to its measure of 80, and
+  whatever is left on each side is margin. Opening or closing a panel may widen or narrow the
+  page; tucking one away while you write never moves it (decision 19).
 - **Tides.** While you type in a note, side panels *ebb*: they shrink to a 6px tide mark at the
   window's edge. They flow back when you pause, when you go to a panel from the keyboard, or when
   you ask. Because of Anchor, neither ebb nor flow moves a single word on the page.
@@ -33,14 +34,15 @@ without modes or setup. They also replace V44's room cascade with one placement 
 
 ## 2. Goals & success criteria
 
-- **G1: The page doesn't move.** With one pane in the centre, opening, closing, ebbing or resizing a
-  dock leaves every glyph of the note where it was. Only an agent thread with messages may push
-  the page, and only when the margin can't hold it (§4.3).
+- **G1: The page doesn't move while you write.** With one pane in the centre, a dock ebbing or
+  flowing back leaves every glyph of the note where it was. Opening, closing or resizing a dock
+  may widen, narrow or shift the page, because the page fills the room the docks leave
+  (decision 19).
 - **G2: Centred on the screen.** The page's centre is the window's centre whenever the margins
   allow it, with or without the rail. Keeping a panel open as a counterweight is no longer needed.
-- **G3: Measured in characters.** The page's width is a character count of the body font at the
-  current size. A larger font gives a wider page, not fewer characters per line, and the decision
-  to tuck panels away is made in characters too.
+- **G3: Measured in characters.** The page's widest and narrowest are character counts of the body
+  font at the current size. A larger font gives a wider page, not fewer characters per line, and
+  the decision to tuck panels away is made in characters too.
 - **G4: One thing at a time while writing.** Typing in a note tucks away the side panels the person
   allowed to ebb. Nothing else does.
 - **G5: Yours to arrange.** Each side is `ebb` or `stay`, and docks keep their usual open, closed
@@ -65,20 +67,31 @@ without modes or setup. They also replace V44's room cascade with one placement 
 
 ### 4.1 The page
 
-The page is the centre pane: its tab bar, breadcrumb and editor together. Its width is
+The page is the centre pane: its tab bar, breadcrumb and editor together. Its widest is
 
 ```
 column = measure × advance("0") + editor padding
 ```
 
+and its narrowest `min_column` is the same with `min_measure`. Between the two, it takes whatever
+room the docks leave (§4.2).
+
 with `advance("0")` taken from the body font (V43: Plex Sans, or the buffer font when `"body_font":
 "buffer"`) at the current buffer font size. The `0` advance is the CSS `ch` unit and a stable
-stand-in for an average character. `measure` defaults to **68**, `min_measure` to **48** (§6).
+stand-in for an average character. `measure` defaults to **80**, `min_measure` to **48** (§6).
 
-Soft wrap stays `editor_width` (V43 §7.1). The editor *is* the column, so it wraps at the measure.
+Soft wrap stays `editor_width` (V43 §7.1). The editor *is* the column, so it wraps at the page's
+width.
 
 For a non-note item in the centre (the Inbox view, settings JSON, an image) the column is the same
 width (decision 13).
+
+The page has no header row and no lines at its sides (decision 20). Breadcrumbs are off by default,
+since the title bar already names the note, so the toolbar is left with only its buttons (preview,
+search, selections, editor settings). A toolbar with only right-side buttons and no search row floats
+faintly over the item's top-right corner, brightening on hover, instead of taking a row. Opening
+the search bar brings the row back while it's open. The margins beside the page are plain editor
+background, with no border.
 
 ### 4.2 Placement
 
@@ -92,24 +105,25 @@ fn anchor(input: AnchorInput) -> AnchorLayout
 //               whether the thread floats
 ```
 
-`G` is a 24pt minimum gap between the column and anything beside it. Steps run in order until
-the column fits:
+`G` is a 24pt minimum gap between the column and anything beside it. The room is what the window
+leaves between the open left dock plus `G` and the open right dock plus the thread room plus `G`.
+A side ebbed while you type counts at its open width, so ebbing and flowing never move the page.
+Steps run in order:
 
-1. **Centred.** Column at `(window - column) / 2`. It fits if it clears the open left dock by `G`
-   and the open right dock plus the thread room by `G`.
-2. **Ebb to fit.** Docks with policy `ebb` on a side that doesn't fit ebb (§5.2), right side first
-   while a thread is open, otherwise the side that overflows more. This is the compact rule,
-   measured in characters: on a window too narrow for the page and the panel, the panel waits at
-   the edge until you call it.
-3. **Shift.** The column moves toward the side with room, as little as needed.
-4. **Narrow.** The column shrinks toward `min_column`.
-5. **Float.** The thread floats over the page as in V44, and the column takes what's left, even
+1. **Fill.** The column takes the room, up to `column`, as long as that is at least `min_column`.
+2. **Centre, else shift.** The column sits at the window's centre when the margins allow it, and
+   otherwise moves toward the side with room, as little as needed.
+3. **Ebb to fit.** When not even `min_column` fits, docks with policy `ebb` ebb to their mark
+   (§5.2): one side first (the right while a thread is open, otherwise the wider), then both. This
+   is the compact rule, measured in characters: on a window too narrow for the page's narrowest
+   and the panel, the panel waits at the edge until you call it.
+4. **Float.** The thread floats over the page as in V44, and the column takes what's left, even
    below `min_column`.
 
-A dock you bring back while step 2 is in force, or that comes back after a typing pause (§5.4),
-flows back *as a dock*. While it is open, steps 3 and 4 make room for it. When it ebbs again (you
-type), the page returns to the centre. You aren't writing at that moment, so the shift doesn't
-break G1's promise while writing (decision 18).
+A dock you bring back while step 3 is in force, or that comes back after a typing pause (§5.4),
+flows back *as a dock*. While it is open, the other side ebbs to fit if it may, and otherwise the
+page narrows below `min_column`. When it ebbs again (you type), the page returns to where it was.
+You aren't writing at that moment, so this doesn't break G1 (decision 18).
 
 ### 4.3 The thread
 
@@ -132,19 +146,19 @@ V44's `room_for` cascade and its Desk collapse are replaced by §4.2:
 
 ### 4.4 Worked numbers
 
-These are approximate: Plex Sans at the shipped 17px gives a `0` of about 10px, so 68 characters
-plus padding is about 740pt.
+These are approximate: Plex Sans at the shipped 17px gives a `0` of about 10px, so 80 characters
+plus padding is about 860pt and 48 about 540pt.
 
 | Window | Panels | Result |
 | --- | --- | --- |
-| 1512 (14″ MacBook) | rail 255, Desk 320 | Margins ≈ 386 each. Both fit: centred. |
-| 1512 | rail 255, Desk 440 (resized) | Desk overflows: it ebbs to fit (step 2) until called. |
-| 1512 | rail, Desk, thread with messages | Desk ebbs; mark + thread + gap ≈ 438 > 386, so the column shifts left ≈ 52pt (step 3). |
-| 1920 (24″ 1080p) | rail, Desk, thread | Margins ≈ 590. Desk ebbs for the thread; centred. |
-| 1920 | Desk set to `stay`, thread | Desk 320 + thread 408 + gap ≈ 752 > 590: shift ≈ 162pt; the rail still clears, so no narrowing. |
+| 1512 (14″ MacBook) | rail 255, Desk 320 | Room 889: the full 80 characters, shifted left ≈ 18pt. |
+| 1512 | rail 255, Desk 440 (resized) | Room 769: the page takes it all (≈ 71 characters), 24pt from each dock. |
+| 1512 | rail, Desk, thread with messages | Room 481 < 540: the Desk ebbs (step 3), and the page takes the 795 left. |
+| 1920 (24″ 1080p) | rail, Desk | Centred at 80 characters. |
+| 1920 | rail, Desk, thread | Room 889: the Desk stays, and the page shifts left ≈ 222pt. |
 
-Shift before narrow keeps the line length and costs the centre only while a thread with messages
-is open (decision 10).
+Shift before narrow keeps the line length (decision 10), and narrowing before ebbing keeps the
+panels you opened in view (decision 19).
 
 ## 5. Tides
 
@@ -152,10 +166,11 @@ is open (decision 10).
 
 Each side (left, right) of a window with an anchored page is **flowing**, **ebbed** or **held**:
 
-- **Flowing:** drawn whole, or as its mark when it and the page don't fit (§4.2 step 2).
+- **Flowing:** drawn whole, or as its mark when it and the page's narrowest don't fit (§4.2
+  step 3).
 - **Ebbed:** tucked away while you write, drawn as its mark.
-- **Held:** brought back while it was a mark, by hand or by a typing pause. The page makes room
-  for it (§4.2 steps 3 and 4) instead of tucking it away to fit, until you type again or the page
+- **Held:** brought back while it was a mark, by hand or by a typing pause. It is never ebbed to
+  fit, so the other side or the page makes room for it (§4.2), until you type again or the page
   goes away.
 
 Ebbed and held are render states of an open dock: the dock is still open and its panel entity,
@@ -196,7 +211,7 @@ A side flows back when any of these happens:
    to `null` turns this off, so panels come back only when asked.
 4. **The page goes away:** the active centre item changes or the centre splits.
 
-Triggers 1, 2 and 3 bring a side back held, so a dock too wide to sit beside the page (§4.2 step 2)
+Triggers 1, 2 and 3 bring a side back held, so a dock too wide to sit beside the page (§4.2 step 3)
 comes back too and the page gives way until you type again (decision 18). The one exception is a
 thread with messages: while it is open, a pause brings the right side back only as far as the
 thread's room allows, so the Desk stays tucked away for it rather than floating the thread over
@@ -225,9 +240,11 @@ property of the vault:
 ```jsonc
 "thock": {
   "page": {
-    // Characters per line of the page, in the body font.
-    "measure": 68,
-    // The page narrows to this before an agent thread floats over it.
+    // The page's widest, in characters per line of the body font. It fills
+    // the room between the side panels up to this.
+    "measure": 80,
+    // The page narrows to this before a side panel tucks away to fit or an
+    // agent thread floats over it.
     "min_measure": 48
   },
   "tides": {
@@ -347,16 +364,17 @@ Each step ships on its own: Anchor without Tides is already the main fix.
 
 - **`anchor()` table** (workspace): windows of 1280, 1512 and 1920; rail and Desk open, closed,
   `stay` and `ebb`; flowing, ebbed, held and focused; thread none, a bubble and with messages.
-  Assert centred column, which docks ebb to fit, shift amount, narrowing to `min_column`, and
-  float. A held dock is never ebbed to fit; an ebbed one is a mark even where it fits, unless it
+  Assert the column filling the room up to `column`, centred or shifted, which docks ebb to fit
+  and only below `min_column`, and float. An ebbed side places the page where it was flowing. A held dock is never ebbed to fit; an ebbed one is a mark even where it fits, unless it
   holds the focus; a bubble never moves the page; marks keep their width when the window
   squeezes the docks. Without an anchored page the thread takes its room or floats.
 - **Flexible panels** (workspace and thock): beside an anchored page a flexible panel is drawn at
   its default size, and resizes to the pixel size its handle or the dock size keys give it.
   Without an anchored page the thread's room is decided from the docks of the same frame, a
   flexible one by its flex.
-- **Page doesn't move** (thock, `VisualTestContext`): record the editor's text origin; toggle the
-  right dock, ebb it, resize it; the origin is unchanged each time.
+- **Page doesn't move while you write** (thock, `VisualTestContext`): record the editor's text
+  origin; ebb the docks and let them flow back; the origin and width are unchanged each time. On
+  the MacBook with a 258 rail and a 439 Desk the page fills the room between them.
 - **Ebb on typing:** `simulate_keystrokes` text into a note, and the right dock is ebbed while
   `is_open()` stays true. Vim normal-mode `j j k` doesn't ebb. Ticking a task from the Desk
   (`x` in `ThockBacklogPanel`) doesn't ebb.
@@ -405,13 +423,14 @@ None.
 1. **Anchor plus Tides** chosen from five round-2 ideas; Marginalia stays a candidate for later.
 2. **Per-screen text size** is its own spec. V54 only reads the font size.
 3. **The page is pinned to the window's centre,** not to the centre pane's.
-4. **The compact rule is in characters:** a panel ebbs to fit when it and a full measure don't fit.
+4. **The compact rule is in characters:** a panel ebbs to fit when it and the page's narrowest
+   don't fit (decision 19; it was the full measure).
 5. **Ebbed isn't closed:** render-only, not persisted, selection and scroll kept.
 6. **Only typed text ebbs.** Motions, panel edits and sync don't.
 7. **An empty thread takes no room.**
 8. **No animation in V54;** Anchor removes the motion that animation would hide.
 9. **Zed's fractional centred-layout paddings are deleted,** not kept behind a setting.
-10. **Shift before narrow:** when the margin can't hold a thread, the page keeps its 68 characters
+10. **Shift before narrow:** when the margin can't hold a thread, the page keeps its width
     and moves off-centre.
 11. **Both sides default to `ebb`,** the rail included: with Anchor it no longer has to centre the
     page.
@@ -441,3 +460,17 @@ None.
     that, so no new state. While a thread with messages is open, the thread's room wins: the
     right side only flows on a pause, so the Desk stays tucked away for the thread you're reading,
     and calling it back by hand floats the thread instead.
+19. **The page fills the room, up to 80 characters** (Diego, 2026-11-03, after the MacBook round:
+    the fixed 68-character page left dead bands between it and the docks). `measure` becomes the
+    page's widest and defaults to 80; between it and `min_measure` the page takes whatever the
+    docks leave, centred when the margins allow it. A panel ebbs to fit only when not even
+    `min_measure` fits, so on the MacBook the rail and the Desk stay in view beside a ≈ 71
+    character page. Ebbing while you type still moves nothing: an ebbed side counts at its open
+    width, so the tucked-away panel leaves its room empty rather than reflow the note under the
+    caret. Opening, closing or resizing a dock now resizes the page, which G1 gives up.
+20. **No header, no side lines** (Diego, 2026-11-03). The breadcrumb row repeated the note's path,
+    which the title bar shows, and the heading, which the page shows. Breadcrumbs are off by
+    default, and a toolbar left with only its right-side buttons floats over the page at low
+    contrast rather than taking a row (`Toolbar::floats`, in the inherited `workspace` crate,
+    because the pane draws its toolbar). They stay visible while you type, faint rather than
+    hidden, so they are always there to find. The borders at the page's edges went with it.

@@ -559,7 +559,10 @@ impl Pane {
             None
         };
 
+        let toolbar = cx.new(|_| Toolbar::new());
         let subscriptions = vec![
+            // Whether the toolbar floats decides where the pane draws it.
+            cx.observe(&toolbar, |_, _, cx| cx.notify()),
             cx.on_focus(&focus_handle, window, Pane::focus_in),
             cx.on_focus_in(&focus_handle, window, Pane::focus_in),
             cx.on_focus_out(&focus_handle, window, Pane::focus_out),
@@ -594,7 +597,7 @@ impl Pane {
                 next_timestamp,
                 preview_item_id: None,
             }))),
-            toolbar: cx.new(|_| Toolbar::new()),
+            toolbar,
             tab_bar_scroll_handle: ScrollHandle::new(),
             suppress_scroll: false,
             drag_split_direction: None,
@@ -4497,12 +4500,16 @@ impl Render for Pane {
                     })
                     .map(|div| {
                         if let Some(item) = self.active_item() {
+                            // A floating toolbar is drawn after the item so
+                            // it sits over it rather than under it.
+                            let floats = self.toolbar.read(cx).floats();
                             div.id("pane_placeholder")
                                 .v_flex()
                                 .size_full()
                                 .overflow_hidden()
-                                .child(self.toolbar.clone())
+                                .when(!floats, |this| this.child(self.toolbar.clone()))
                                 .child(item.to_any_view())
+                                .when(floats, |this| this.child(self.toolbar.clone()))
                         } else {
                             let placeholder = div
                                 .id("pane_placeholder")

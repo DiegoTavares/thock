@@ -75,6 +75,14 @@ impl Toolbar {
             .any(|(_item, location)| *location != ToolbarItemLocation::Hidden)
     }
 
+    /// Only buttons on the right and no search row: they float faintly
+    /// over the item's top-right corner instead of taking a header row.
+    pub fn floats(&self) -> bool {
+        self.right_items().next().is_some()
+            && self.left_items().next().is_none()
+            && self.secondary_items().next().is_none()
+    }
+
     fn left_items(&self) -> impl Iterator<Item = &dyn ToolbarItemViewHandle> {
         self.items.iter().filter_map(|(item, location)| {
             if *location == ToolbarItemLocation::PrimaryLeft {
@@ -109,7 +117,27 @@ impl Toolbar {
 impl Render for Toolbar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.has_any_visible_items() {
-            return div();
+            return div().into_any_element();
+        }
+
+        if self.floats() {
+            return div()
+                .id("floating-toolbar")
+                .absolute()
+                .top_2()
+                .right_4()
+                .p_0p5()
+                .rounded_md()
+                .bg(cx.theme().colors().editor_background)
+                .opacity(0.45)
+                .hover(|style| style.opacity(1.))
+                .child(
+                    h_flex()
+                        .h_8()
+                        .flex_row_reverse()
+                        .children(self.right_items().map(|item| item.to_any())),
+                )
+                .into_any_element();
         }
 
         let secondary_items = self.secondary_items().map(|item| item.to_any());
@@ -157,6 +185,7 @@ impl Render for Toolbar {
                 )
             })
             .children(secondary_items)
+            .into_any_element()
     }
 }
 
@@ -283,5 +312,62 @@ impl<T: ToolbarItemView> ToolbarItemViewHandle for Entity<T> {
 
     fn contribute_context(&self, context: &mut KeyContext, cx: &App) {
         self.read(cx).contribute_context(context, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    struct Button(ToolbarItemLocation);
+
+    impl Render for Button {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    impl EventEmitter<ToolbarItemEvent> for Button {}
+
+    impl ToolbarItemView for Button {
+        fn set_active_pane_item(
+            &mut self,
+            _active_pane_item: Option<&dyn ItemHandle>,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> ToolbarItemLocation {
+            self.0
+        }
+    }
+
+    #[gpui::test]
+    fn only_buttons_on_the_right_float(cx: &mut TestAppContext) {
+        crate::tests::init_test(cx);
+        let (toolbar, cx) = cx.add_window_view(|_, _| Toolbar::new());
+        let add = |location, cx: &mut gpui::VisualTestContext| {
+            toolbar.update_in(cx, |toolbar, window, cx| {
+                let item = cx.new(|_| Button(location));
+                toolbar.add_item(item.clone(), window, cx);
+                item
+            })
+        };
+        let floats = |cx: &mut gpui::VisualTestContext| toolbar.read_with(cx, |t, _| t.floats());
+        assert!(!floats(cx), "nothing to float");
+
+        add(ToolbarItemLocation::PrimaryRight, cx);
+        assert!(floats(cx));
+
+        let search = add(ToolbarItemLocation::Secondary, cx);
+        assert!(!floats(cx), "an open search bar brings the row back");
+        search.update(cx, |_, cx| {
+            cx.emit(ToolbarItemEvent::ChangeLocation(
+                ToolbarItemLocation::Hidden,
+            ))
+        });
+        assert!(floats(cx), "and closing it floats the buttons again");
+
+        add(ToolbarItemLocation::PrimaryLeft, cx);
+        assert!(!floats(cx), "breadcrumbs keep the header row");
     }
 }

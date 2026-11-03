@@ -519,9 +519,11 @@
   },
   // Toolbar related settings
   "toolbar": {
-    // Whether to show breadcrumbs.
-    "breadcrumbs": true,
-    // Whether to show quick action buttons.
+    // Whether to show breadcrumbs. Off in Thock: the title bar already names
+    // the note, and with the page's buttons floating there is no header row.
+    "breadcrumbs": false,
+    // Whether to show quick action buttons. With breadcrumbs off they float
+    // faintly over the page's top-right corner.
     "quick_actions": true,
     // Whether to show the Selections menu in the editor toolbar.
     "selections_menu": true,
@@ -541,9 +543,11 @@
     // How often Thock may start a conversation on its own: "rare" or "off".
     "openers": "rare",
     "page": {
-      // Characters per line of the page, in the body font.
-      "measure": 68,
-      // The page narrows to this before an agent thread floats over it.
+      // The page's widest, in characters per line of the body font. It fills
+      // the room between the side panels up to this.
+      "measure": 80,
+      // The page narrows to this before a side panel tucks away to fit or an
+      // agent thread floats over it.
       "min_measure": 48,
     },
     // While you type in a note, the side panels tuck away to a thin mark at
