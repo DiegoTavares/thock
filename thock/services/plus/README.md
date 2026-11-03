@@ -27,7 +27,9 @@ No Dockerfile: Cloud Run buildpacks build it from source.
 migration in `migrations/` that `schema_migrations` doesn't list yet (each in its own
 transaction), and only then serves traffic. `go run . migrate` does the same and exits, for
 running a migration ahead of a deploy. Add a migration by adding `migrations/000N_<what>.sql`;
-never edit an applied file.
+never edit an applied file. A new table must `enable row level security` in the migration that
+creates it, or Supabase's REST API serves it to anyone with the anon key
+(`TestEveryTableHasRowLevelSecurity` fails until it does).
 
 The pool runs pgx in exec mode, which needs no server-side prepared statements, so a
 transaction-mode pooler (Supabase's port 6543) works as the URL. The gateway key secrets live
