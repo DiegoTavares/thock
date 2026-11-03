@@ -39,7 +39,7 @@ use project::Project;
 use pulldown_cmark::{Event as MarkdownEvent, Parser as MarkdownParser, Tag, TagEnd};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use settings::{CenteredPaddingSettings, OpenerFrequency, Settings as _};
+use settings::{OpenerFrequency, Settings as _};
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -50,7 +50,7 @@ use text::{Bias, Point};
 use ui::prelude::*;
 use ui::{IconButton, KeyBinding, Label, ProgressBar, SpinnerLabel, Tooltip};
 use util::ResultExt as _;
-use workspace::{OpenOptions, OpenVisible, Workspace, WorkspaceSettings};
+use workspace::{OpenOptions, OpenVisible, ThreadRoom, Workspace};
 
 use crate::ThockSettings;
 use crate::agent::{self, ConnectionMode, ModelTier};
@@ -245,8 +245,6 @@ const PEBBLE_BOTTOM: f32 = 20.;
 const THREAD_WIDTH: f32 = 360.;
 const COMPOSER_WIDTH: f32 = 300.;
 const INSET: f32 = 408.;
-/// Below this the note is unreadable, so the thread floats instead (§5.3).
-const MIN_NOTE_WIDTH: f32 = 400.;
 /// How far above the bottom a Needs-you bubble sits (§5.3).
 const BUBBLE_BOTTOM: f32 = 72.;
 /// A bubble leaves this much air above the caret's line (§5.3).
@@ -260,8 +258,6 @@ const REPLY_LINGER: Duration = Duration::from_secs(8);
 /// alone for the second it folds into the dot (§5.8).
 const OPENER_PAUSE: Duration = Duration::from_secs(8);
 const OPENER_LINGER: Duration = Duration::from_secs(60);
-/// The Desk's width when the dock doesn't say (V43 §8.1).
-const DESK_DEFAULT_WIDTH: f32 = 320.;
 /// The highlight slots the underlines take (§7.3), above the conceal
 /// layer's so it never touches them: the latest message's lines, and the
 /// earlier messages' at 35%.
@@ -424,57 +420,6 @@ fn resolve_line(words: Option<&str>, line: u32, text: &str) -> Option<u32> {
 fn is_block_heading(line: &str) -> bool {
     let line = line.trim_start();
     line.starts_with("# ") || line.starts_with("## ")
-}
-
-/// What the page gives the thread (§5.3).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-struct Room {
-    /// The inset to ask the page for; `None` floats over it.
-    inset: Option<Pixels>,
-    /// Whether the Desk has to collapse for the note to keep 400px.
-    collapse_desk: bool,
-}
-
-/// The room cascade (§5.3): the right margin first, then the note down to
-/// 400px, then the Desk, then nothing and the thread floats. `margins` are
-/// the centred layout's fractions when it is on, and `desk` the width the
-/// open right dock would give back.
-fn room_for(centre: Pixels, margins: Option<(f32, f32)>, desk: Option<Pixels>) -> Room {
-    let note_with = |centre: Pixels| -> Pixels {
-        match margins {
-            Some((left, right)) => {
-                let right_strip = (centre * right).max(px(INSET));
-                centre - centre * left - right_strip
-            }
-            None => centre - px(INSET),
-        }
-    };
-    if note_with(centre) >= px(MIN_NOTE_WIDTH) {
-        Room {
-            inset: Some(px(INSET)),
-            collapse_desk: false,
-        }
-    } else if desk.is_some_and(|desk| note_with(centre + desk) >= px(MIN_NOTE_WIDTH)) {
-        Room {
-            inset: Some(px(INSET)),
-            collapse_desk: true,
-        }
-    } else {
-        Room::default()
-    }
-}
-
-/// The centred layout's margins as fractions of the centre, clamped the
-/// way the workspace clamps them.
-fn centred_margins(cx: &App) -> (f32, f32) {
-    let settings = &WorkspaceSettings::get_global(cx).centered_layout;
-    let clamp = |padding: Option<CenteredPaddingSettings>| {
-        padding.unwrap_or_default().0.clamp(
-            CenteredPaddingSettings::MIN_PADDING,
-            CenteredPaddingSettings::MAX_PADDING,
-        )
-    };
-    (clamp(settings.left_padding), clamp(settings.right_padding))
 }
 
 /// Where a Needs-you bubble sits (§5.3).
@@ -1310,8 +1255,6 @@ pub struct ChatPanel {
     /// The bubble couldn't clear the caret's line and took the thread's
     /// room (§5.3).
     bubble_needs_room: bool,
-    /// The Desk was collapsed for the thread and comes back on fold (§5.3).
-    collapsed_desk: bool,
     /// The lines the thread is about (§5.6), from every reply and change.
     mentions: Vec<Mention>,
     /// Where those lines are in the open notes.
@@ -1474,7 +1417,6 @@ impl ChatPanel {
                 window_active: window.is_window_active(),
                 bubble_height: px(160.),
                 bubble_needs_room: false,
-                collapsed_desk: false,
                 mentions: Vec::new(),
                 underlines: Vec::new(),
                 open_notes: HashSet::default(),
@@ -1959,8 +1901,9 @@ impl ChatPanel {
         }
     }
 
-    /// Opens the thread (Talking): the page makes room (§5.3) and the keys
-    /// land where they are useful, on a waiting question or in the composer.
+    /// Opens the thread (Talking): the page makes room once it shows a
+    /// message (V54 §4.3), and the keys land where they are useful, on a
+    /// waiting question or in the composer.
     pub fn open_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_focus(window, cx);
         self.thread_open = true;
@@ -1974,7 +1917,6 @@ impl ChatPanel {
         ) {
             self.waiting = None;
         }
-        self.sync_room(cx);
         self.focus_thread(window, cx);
         self.scroll_handle.scroll_to_bottom();
         cx.notify();
@@ -2034,7 +1976,6 @@ impl ChatPanel {
         if self.waiting == Some(Waiting::Connect) {
             self.waiting = None;
         }
-        self.sync_room(cx);
         cx.notify();
     }
 
@@ -2076,60 +2017,46 @@ impl ChatPanel {
         cx.notify();
     }
 
-    /// Asks the page for the thread's room (§5.3): the inset, and the Desk
-    /// collapsed when the note would otherwise drop under 400px. Deferred,
-    /// because the workspace may be mid-update when a chat action reaches
-    /// it, so everything it needs is read inside the deferral.
-    fn sync_room(&self, cx: &mut Context<Self>) {
-        let want_room = self.thread_open || self.bubble_needs_room;
-        let centre = self.centre_bounds.size.width;
-        let workspace = self.workspace.clone();
-        let window_handle = self.window_handle;
-        let this = cx.weak_entity();
-        cx.defer(move |cx| {
-            window_handle
-                .update(cx, |_, window, cx| {
-                    let Some(workspace) = workspace.upgrade() else {
-                        return;
-                    };
-                    let collapsed = this
-                        .read_with(cx, |this, _| this.collapsed_desk)
-                        .unwrap_or(false);
-                    let (margins, desk) = workspace.read_with(cx, |workspace, cx| {
-                        let margins = workspace.centered_layout.then(|| centred_margins(cx));
-                        let dock = workspace.right_dock().read(cx);
-                        let desk = dock.is_open().then(|| {
-                            dock.active_panel_size()
-                                .and_then(|size| size.size)
-                                .unwrap_or(px(DESK_DEFAULT_WIDTH))
-                        });
-                        (margins, desk)
-                    });
-                    let room = if want_room {
-                        let mut room = room_for(centre, margins, desk);
-                        // A Desk the chat collapsed stays collapsed while the
-                        // room is in use.
-                        room.collapse_desk |= collapsed;
-                        room
-                    } else {
-                        Room::default()
-                    };
-                    workspace.update(cx, |workspace, cx| {
-                        if workspace.center_inset() != room.inset {
-                            workspace.set_center_inset(room.inset, cx);
-                        }
-                        if room.collapse_desk != collapsed {
-                            let dock = workspace.right_dock().clone();
-                            dock.update(cx, |dock, cx| {
-                                dock.set_open(!room.collapse_desk, window, cx)
-                            });
-                        }
-                    });
-                    this.update(cx, |this, _| this.collapsed_desk = room.collapse_desk)
-                        .ok();
-                })
-                .log_err();
-        });
+    /// The room the thread asks the page for (V54 §4.3): its column while
+    /// it shows a message, or while a bubble can't clear the caret's line.
+    /// The composer alone floats over the page and takes none.
+    pub fn thread_room(&self, cx: &App) -> Option<ThreadRoom> {
+        if self.thread_open && self.shows_messages(cx) {
+            Some(ThreadRoom {
+                width: px(INSET),
+                moves_page: true,
+            })
+        } else {
+            // A bubble takes the room only when it's free; it never moves
+            // the page or ebbs the Desk (§4.3).
+            self.bubble_needs_room.then_some(ThreadRoom {
+                width: px(INSET),
+                moves_page: false,
+            })
+        }
+    }
+
+    /// Whether the open thread's column has anything above the composer:
+    /// the ways in, a kickoff, a message or a failed turn. Asked on every
+    /// notify, so rather than build the chat's items it asks what they
+    /// start from: nothing renders before the first message you sent.
+    fn shows_messages(&self, cx: &App) -> bool {
+        match &self.view {
+            PanelView::Connect(_) => true,
+            PanelView::Chat if !matches!(self.connection, PlusConnection::Connected { .. }) => true,
+            PanelView::Chat => {
+                self.opening.is_some()
+                    || self.session.as_ref().is_some_and(|session| {
+                        session.turn_failure.is_some()
+                            || session
+                                .thread
+                                .read(cx)
+                                .entries()
+                                .iter()
+                                .any(|entry| matches!(entry, AgentThreadEntry::UserMessage(_)))
+                    })
+            }
+        }
     }
 
     fn vault(&self) -> Option<&Vault> {
@@ -6036,7 +5963,7 @@ impl Render for ChatPanel {
         let needs_room = placement == Placement::Room;
         if needs_room != self.bubble_needs_room {
             self.bubble_needs_room = needs_room;
-            self.sync_room(cx);
+            cx.notify();
         }
         // The underlines follow the selection, the hover and the presence
         // (§5.6); the notes are told after this frame, not during it.
@@ -6208,31 +6135,6 @@ mod tests {
         assert!(is_block_heading("## Calendar"));
         assert!(!is_block_heading("### Smaller"));
         assert!(!is_block_heading("#hashtag"));
-    }
-
-    #[test]
-    fn the_room_cascade_matches_the_spec_numbers() {
-        // §5.3 at the shipped defaults: at 1440px with the rail and the Desk
-        // open the centre is 880px, so the Desk collapses; from about 1570px
-        // it stays.
-        let margins = Some((0.2, 0.2));
-        let with_inset = |collapse_desk| Room {
-            inset: Some(px(INSET)),
-            collapse_desk,
-        };
-        assert_eq!(
-            room_for(px(880.), margins, Some(px(320.))),
-            with_inset(true)
-        );
-        assert_eq!(
-            room_for(px(1020.), margins, Some(px(320.))),
-            with_inset(false)
-        );
-        // Without centred margins the note is the whole centre.
-        assert_eq!(room_for(px(704.), None, Some(px(320.))), with_inset(true));
-        // When even the Desk's width isn't enough, the thread floats.
-        assert_eq!(room_for(px(440.), None, Some(px(320.))), Room::default());
-        assert_eq!(room_for(px(500.), None, None), Room::default());
     }
 
     #[test]
@@ -6456,6 +6358,7 @@ mod tests {
             editor::init(cx);
             crate::agent_panel::init(cx);
             init(cx);
+            crate::desk_layout::init(cx);
             // The shipped keymap, so a missing or shadowed binding fails here.
             let bindings = match KeymapFile::load(
                 include_str!("../../../assets/keymaps/default-linux.json"),
@@ -6617,10 +6520,22 @@ mod tests {
         });
     }
 
-    fn inset(setup: &Setup) -> Option<Pixels> {
-        setup
-            .workspace
-            .read_with(&setup.cx, |workspace, _| workspace.center_inset())
+    /// The thread's room as the workspace was last asked to keep it.
+    fn room(setup: &Setup) -> Option<Pixels> {
+        setup.workspace.read_with(&setup.cx, |workspace, _| {
+            workspace
+                .center_anchor()
+                .and_then(|anchor| anchor.thread)
+                .map(|thread| thread.width)
+        })
+    }
+
+    fn desk_mark_shown(setup: &Setup) -> bool {
+        setup.workspace.read_with(&setup.cx, |workspace, _| {
+            workspace
+                .center_row()
+                .tide_mark(workspace::dock::DockPosition::Right)
+        })
     }
 
     fn editor_width(setup: &Setup, editor: &Entity<Editor>) -> Pixels {
@@ -7452,7 +7367,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_summon_key_opens_the_thread_and_the_page_makes_room(cx: &mut TestAppContext) {
+    async fn the_summon_key_opens_the_composer_over_the_page(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
         connect(&mut setup);
         let editor = open_note(&mut setup).await;
@@ -7466,8 +7381,8 @@ mod tests {
             .panel
             .read_with(&setup.cx, |panel, _| panel.message_editor.clone());
         assert!(is_focused(&mut setup, &composer), "the composer has focus");
-        assert_eq!(inset(&setup), Some(px(INSET)));
-        assert_eq!(editor_width(&setup, &editor), width_before - px(INSET));
+        assert_eq!(room(&setup), None, "the composer alone takes no room");
+        assert_eq!(editor_width(&setup, &editor), width_before);
 
         setup.cx.simulate_keystrokes("escape");
         setup.cx.run_until_parked();
@@ -7476,7 +7391,7 @@ mod tests {
             is_focused(&mut setup, &editor),
             "focus goes back to the note"
         );
-        assert_eq!(inset(&setup), None);
+        assert_eq!(room(&setup), None);
         assert_eq!(editor_width(&setup, &editor), width_before);
     }
 
@@ -7536,7 +7451,6 @@ mod tests {
             Presence::Talking,
             "focus leaving keeps it"
         );
-        assert_eq!(inset(&setup), Some(px(INSET)));
         setup.cx.simulate_keystrokes("a b c");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking, "typing keeps it");
@@ -7554,7 +7468,6 @@ mod tests {
             is_focused(&mut setup, &editor),
             "focus goes back to the note"
         );
-        assert_eq!(inset(&setup), None);
     }
 
     #[gpui::test]
@@ -7746,36 +7659,143 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_desk_collapses_only_when_the_window_cannot_fit_both(cx: &mut TestAppContext) {
-        // §5.3, on a window without the rail: 1440px fits both, 1100px gives
-        // the Desk's width to the thread, 760px floats the thread.
+    async fn without_an_anchored_page_the_thread_takes_its_room_or_floats(cx: &mut TestAppContext) {
+        // V54 §4.3 with centred layout off, on the V44 numbers: at 1440 the
+        // centre holds the thread beside the Desk; at 760 the thread floats.
+        // The Desk is left alone either way.
         let mut setup = setup(cx).await;
         connect(&mut setup);
         add_desk(&mut setup);
         open_note(&mut setup).await;
+        setup.workspace.update(&mut setup.cx, |workspace, cx| {
+            workspace.centered_layout = false;
+            cx.notify();
+        });
+        let connection = Rc::new(StubAgentConnection::new());
+        start_wrap_today(&mut setup, connection, None, vec![says("Seven of eleven.")]).await;
+        let open = |setup: &mut Setup| {
+            setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+                panel.open_thread(window, cx)
+            });
+            setup.cx.run_until_parked();
+        };
+        let fold = |setup: &mut Setup| {
+            setup.cx.simulate_keystrokes("escape");
+            setup.cx.run_until_parked();
+        };
+        let thread_kept = |setup: &Setup| {
+            setup.workspace.read_with(&setup.cx, |workspace, _| {
+                matches!(
+                    workspace.center_row(),
+                    workspace::CenterRow::Ordinary { thread: Some(_) }
+                )
+            })
+        };
 
         resize(&mut setup, 1440., 900.);
+        open(&mut setup);
+        assert_eq!(room(&setup), Some(px(INSET)));
+        assert!(thread_kept(&setup), "the thread has its room");
+        assert!(!desk_mark_shown(&setup), "beside the Desk");
+        fold(&mut setup);
+
+        resize(&mut setup, 760., 600.);
+        open(&mut setup);
+        assert!(!thread_kept(&setup), "too narrow: the thread floats");
+        assert!(!desk_mark_shown(&setup), "over the page, not the Desk");
+        assert!(desk_open(&setup));
+    }
+
+    #[gpui::test]
+    async fn a_thread_with_nothing_shown_takes_no_room(cx: &mut TestAppContext) {
+        // A conversation that hasn't started: the agent's notice comes in
+        // before any message of yours, which the thread doesn't show.
+        let mut setup = setup(cx).await;
+        connect(&mut setup);
+        open_note(&mut setup).await;
+        let connection = Rc::new(StubAgentConnection::new());
+        let work_dirs = setup
+            .project
+            .read_with(&setup.cx, |project, cx| project.default_path_list(cx));
+        let thread = setup
+            .cx
+            .update(|_, cx| {
+                connection
+                    .clone()
+                    .new_session(setup.project.clone(), work_dirs, cx)
+            })
+            .await
+            .unwrap();
+        let session_id = thread.read_with(&setup.cx, |thread, _| thread.session_id().clone());
+        setup.cx.update(|_, cx| {
+            connection.send_update(session_id, says("A notice before you speak."), cx);
+        });
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            panel.attach_session(
+                LaunchRequest::conversation(),
+                connection,
+                thread,
+                PathBuf::from("/data/pi/default/answers"),
+                0,
+                window,
+                cx,
+            );
+            panel.open_thread(window, cx);
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(presence(&setup), Presence::Talking);
+        assert_eq!(visible(&setup), "", "nothing renders yet");
+        assert_eq!(room(&setup), None, "so nothing asks for room");
+    }
+
+    #[gpui::test]
+    async fn a_thread_with_messages_ebbs_the_desk_until_it_folds(cx: &mut TestAppContext) {
+        // V54 §4.3 on a window too narrow for the thread beside the Desk
+        // and the page's narrowest: the thread's room comes from the Desk
+        // ebbing, not from closing it, and the Desk is back on fold.
+        let mut setup = setup(cx).await;
+        connect(&mut setup);
+        add_desk(&mut setup);
+        open_note(&mut setup).await;
+        setup.workspace.update(&mut setup.cx, |workspace, cx| {
+            workspace.centered_layout = true;
+            cx.notify();
+        });
+        resize(&mut setup, 1100., 982.);
+
         setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();
         assert_eq!(presence(&setup), Presence::Talking);
-        assert_eq!(inset(&setup), Some(px(INSET)));
-        assert!(desk_open(&setup), "at 1440px the Desk stays");
+        assert_eq!(room(&setup), None, "nothing to show yet");
+        assert!(!desk_mark_shown(&setup));
         setup.cx.simulate_keystrokes("escape");
         setup.cx.run_until_parked();
 
-        resize(&mut setup, 1100., 900.);
-        setup.cx.simulate_keystrokes("ctrl-?");
+        let connection = Rc::new(StubAgentConnection::new());
+        start_wrap_today(&mut setup, connection, None, vec![says("Seven of eleven.")]).await;
+        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
+            panel.open_thread(window, cx)
+        });
         setup.cx.run_until_parked();
-        assert_eq!(inset(&setup), Some(px(INSET)));
-        assert!(!desk_open(&setup), "at 1100px the Desk gives its width");
+        assert_eq!(
+            room(&setup),
+            Some(px(INSET)),
+            "the first message asks for room"
+        );
+        assert!(desk_mark_shown(&setup), "the Desk ebbs to make it");
+        assert!(desk_open(&setup), "ebbed, not closed");
+        let layout = setup
+            .workspace
+            .read_with(&setup.cx, |workspace, _| workspace.anchor_layout())
+            .expect("the page is anchored");
+        assert!(!layout.thread_floats);
+        assert!(layout.right_padding >= px(INSET));
+
         setup.cx.simulate_keystrokes("escape");
         setup.cx.run_until_parked();
-        assert!(desk_open(&setup), "and comes back on fold");
-
-        resize(&mut setup, 760., 600.);
-        setup.cx.simulate_keystrokes("ctrl-?");
-        setup.cx.run_until_parked();
-        assert_eq!(inset(&setup), None, "at 760px the thread floats");
+        assert_eq!(presence(&setup), Presence::Resting);
+        assert_eq!(room(&setup), None);
+        assert!(!desk_mark_shown(&setup), "and the Desk flows back on fold");
         assert!(desk_open(&setup));
     }
 

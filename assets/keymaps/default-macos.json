@@ -496,6 +496,7 @@
       "cmd-1": ["workspace::ActivatePane", 0],
       "cmd-2": "thock::ToggleFocus",
       "cmd-alt-u": "thock::ToggleBacklogFocus",
+      "ctrl-cmd-\\": "thock::ToggleTide",
       "ctrl-cmd-[": "thock::OpenPreviousDay",
       "ctrl-cmd-]": "thock::OpenNextDay",
       "ctrl-cmd-t": "thock::OpenToday",

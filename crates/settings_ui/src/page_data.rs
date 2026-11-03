@@ -4431,7 +4431,7 @@ fn window_and_layout_page() -> SettingsPage {
         ]
     }
 
-    fn layout_section() -> [SettingsPageItem; 6] {
+    fn layout_section() -> [SettingsPageItem; 4] {
         [
             SettingsPageItem::SectionHeader("Layout"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -4447,56 +4447,6 @@ fn window_and_layout_page() -> SettingsPage {
                 }),
                 metadata: None,
                 files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                files: USER,
-                title: "Centered Layout Left Padding",
-                description: "Left padding for centered layout.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("centered_layout.left_padding"),
-                    pick: |settings_content| {
-                        settings_content
-                            .workspace
-                            .centered_layout
-                            .as_ref()?
-                            .left_padding
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .workspace
-                            .centered_layout
-                            .get_or_insert_default()
-                            .left_padding = value;
-                    },
-                }),
-                metadata: None,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                files: USER,
-                title: "Centered Layout Right Padding",
-                description: "Right padding for centered layout.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("centered_layout.right_padding"),
-                    pick: |settings_content| {
-                        settings_content
-                            .workspace
-                            .centered_layout
-                            .as_ref()?
-                            .right_padding
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .workspace
-                            .centered_layout
-                            .get_or_insert_default()
-                            .right_padding = value;
-                    },
-                }),
-                metadata: None,
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Focus Follows Mouse",

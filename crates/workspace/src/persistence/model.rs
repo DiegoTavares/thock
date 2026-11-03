@@ -139,7 +139,8 @@ pub(crate) struct SerializedWorkspace {
     pub(crate) identity_paths: Option<PathList>,
     pub(crate) center_group: SerializedPaneGroup,
     pub(crate) window_bounds: Option<SerializedWindowBounds>,
-    pub(crate) centered_layout: bool,
+    /// `None` until the person toggles centred layout for this workspace.
+    pub(crate) centered_layout: Option<bool>,
     pub(crate) display: Option<Uuid>,
     pub(crate) docks: DockStructure,
     pub(crate) session_id: Option<String>,

@@ -1197,7 +1197,7 @@ impl WorkspaceDb {
                 .context("Getting center group")
                 .log_err()?,
             window_bounds,
-            centered_layout: centered_layout.unwrap_or(false),
+            centered_layout,
             display,
             docks,
             session_id: None,
@@ -1301,7 +1301,7 @@ impl WorkspaceDb {
                 .context("Getting center group")
                 .log_err()?,
             window_bounds,
-            centered_layout: centered_layout.unwrap_or(false),
+            centered_layout,
             display,
             docks,
             session_id: None,
@@ -1600,9 +1600,10 @@ impl WorkspaceDb {
                         bottom_dock_zoom,
                         session_id,
                         window_id,
+                        centered_layout,
                         timestamp
                     )
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, CURRENT_TIMESTAMP)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, CURRENT_TIMESTAMP)
                     ON CONFLICT DO
                     UPDATE SET
                         paths = ?2,
@@ -1621,6 +1622,7 @@ impl WorkspaceDb {
                         bottom_dock_zoom = ?15,
                         session_id = ?16,
                         window_id = ?17,
+                        centered_layout = COALESCE(?18, centered_layout),
                         timestamp = CURRENT_TIMESTAMP
                 );
                 let mut prepared_query = conn.exec_bound(query)?;
@@ -1634,6 +1636,7 @@ impl WorkspaceDb {
                     workspace.docks,
                     workspace.session_id,
                     workspace.window_id,
+                    workspace.centered_layout,
                 );
 
                 prepared_query(args).context("Updating workspace")?;
@@ -2921,7 +2924,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             bookmarks: Default::default(),
             breakpoints: {
                 let mut map = collections::BTreeMap::default();
@@ -3078,7 +3081,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             bookmarks: Default::default(),
             breakpoints: {
                 let mut map = collections::BTreeMap::default();
@@ -3128,7 +3131,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             bookmarks: Default::default(),
             breakpoints: collections::BTreeMap::default(),
             session_id: None,
@@ -3220,7 +3223,7 @@ mod tests {
             docks: Default::default(),
             bookmarks: Default::default(),
             breakpoints: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: None,
             window_id: None,
             user_toolchains: Default::default(),
@@ -3299,7 +3302,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             bookmarks: Default::default(),
             breakpoints: Default::default(),
             session_id: None,
@@ -3316,7 +3319,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             bookmarks: Default::default(),
             breakpoints: Default::default(),
             session_id: None,
@@ -3427,7 +3430,7 @@ mod tests {
             breakpoints: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: None,
             window_id: Some(999),
             user_toolchains: Default::default(),
@@ -3463,7 +3466,7 @@ mod tests {
             breakpoints: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: None,
             window_id: Some(1),
             user_toolchains: Default::default(),
@@ -3478,7 +3481,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             bookmarks: Default::default(),
             breakpoints: Default::default(),
             session_id: None,
@@ -3524,7 +3527,7 @@ mod tests {
             breakpoints: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: None,
             window_id: Some(3),
             user_toolchains: Default::default(),
@@ -3562,7 +3565,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             bookmarks: Default::default(),
             breakpoints: Default::default(),
             session_id: Some("session-id-1".to_owned()),
@@ -3579,7 +3582,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             bookmarks: Default::default(),
             breakpoints: Default::default(),
             session_id: Some("session-id-1".to_owned()),
@@ -3596,7 +3599,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             bookmarks: Default::default(),
             breakpoints: Default::default(),
             session_id: Some("session-id-2".to_owned()),
@@ -3613,7 +3616,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             bookmarks: Default::default(),
             breakpoints: Default::default(),
             session_id: None,
@@ -3641,7 +3644,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             bookmarks: Default::default(),
             breakpoints: Default::default(),
             session_id: Some("session-id-2".to_owned()),
@@ -3660,7 +3663,7 @@ mod tests {
             breakpoints: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: Some("session-id-3".to_owned()),
             window_id: Some(60),
             user_toolchains: Default::default(),
@@ -3719,7 +3722,7 @@ mod tests {
             docks: Default::default(),
             bookmarks: Default::default(),
             breakpoints: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: None,
             window_id: None,
             user_toolchains: Default::default(),
@@ -3760,7 +3763,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: Some("one-session".to_owned()),
             bookmarks: Default::default(),
             breakpoints: Default::default(),
@@ -3861,7 +3864,7 @@ mod tests {
             docks: Default::default(),
             bookmarks: Default::default(),
             breakpoints: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: session_id.map(|s| s.to_owned()),
             window_id: Some(id),
             user_toolchains: Default::default(),
@@ -3885,7 +3888,7 @@ mod tests {
             docks: Default::default(),
             bookmarks: Default::default(),
             breakpoints: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: None,
             window_id: Some(id),
             user_toolchains: Default::default(),
@@ -4141,7 +4144,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: Some("one-session".to_owned()),
             bookmarks: Default::default(),
             breakpoints: Default::default(),
@@ -4506,7 +4509,7 @@ mod tests {
             docks: Default::default(),
             bookmarks: Default::default(),
             breakpoints: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: None,
             window_id: None,
             user_toolchains: Default::default(),
@@ -4582,7 +4585,7 @@ mod tests {
                 window_bounds: Default::default(),
                 display: Default::default(),
                 docks: Default::default(),
-                centered_layout: false,
+                centered_layout: None,
                 session_id: Some("test-session".to_owned()),
                 bookmarks: Default::default(),
                 breakpoints: Default::default(),
@@ -4731,6 +4734,76 @@ mod tests {
         assert_eq!(group_none.active_workspace.workspace_id, WorkspaceId(4));
         assert_eq!(group_none.state.active_workspace_id, None);
         assert_eq!(group_none.state.sidebar_open, false);
+    }
+
+    #[gpui::test]
+    async fn test_centered_layout_is_unset_until_toggled(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs.clone(), [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        let db = cx.update(|_, cx| WorkspaceDb::global(cx));
+        let workspace_id = db.next_id().await.unwrap();
+        workspace.update(cx, |workspace, _| workspace.set_database_id(workspace_id));
+        let flush = |cx: &mut gpui::VisualTestContext| {
+            multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    workspace.flush_serialization(window, cx)
+                })
+            })
+        };
+
+        flush(cx).await;
+        let serialized = db.workspace_for_id(workspace_id).expect("saved");
+        assert_eq!(serialized.centered_layout, None, "never toggled");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_centered_layout(&crate::ToggleCenteredLayout, window, cx);
+            workspace.toggle_centered_layout(&crate::ToggleCenteredLayout, window, cx);
+        });
+        cx.run_until_parked();
+        flush(cx).await;
+        let serialized = db.workspace_for_id(workspace_id).expect("saved");
+        assert_eq!(
+            serialized.centered_layout,
+            Some(false),
+            "turned off by hand"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_centered_layout_chosen_before_the_workspace_has_an_id_is_saved(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs.clone(), [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.database_id().is_none());
+            workspace.toggle_centered_layout(&crate::ToggleCenteredLayout, window, cx);
+        });
+        cx.run_until_parked();
+
+        let db = cx.update(|_, cx| WorkspaceDb::global(cx));
+        let workspace_id = db.next_id().await.unwrap();
+        workspace.update(cx, |workspace, _| workspace.set_database_id(workspace_id));
+        let flush = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+            multi_workspace.workspace().update(cx, |workspace, cx| {
+                workspace.flush_serialization(window, cx)
+            })
+        });
+        flush.await;
+        let serialized = db.workspace_for_id(workspace_id).expect("saved");
+        assert_eq!(serialized.centered_layout, Some(true));
     }
 
     #[gpui::test]
@@ -4920,7 +4993,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: Some(session_id.clone()),
             bookmarks: Default::default(),
             breakpoints: Default::default(),
@@ -5017,7 +5090,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: Some(session_id.to_owned()),
             bookmarks: Default::default(),
             breakpoints: Default::default(),
@@ -5035,7 +5108,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: Some(session_id.to_owned()),
             bookmarks: Default::default(),
             breakpoints: Default::default(),
@@ -5115,7 +5188,7 @@ mod tests {
             window_bounds: Default::default(),
             display: Default::default(),
             docks: Default::default(),
-            centered_layout: false,
+            centered_layout: None,
             session_id: Some(session_id.clone()),
             bookmarks: Default::default(),
             breakpoints: Default::default(),

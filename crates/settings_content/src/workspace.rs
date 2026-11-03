@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use settings_macros::{MergeFrom, with_fallible_options};
 
 use crate::{
-    CenteredPaddingSettings, CommandAliasTarget, DelayMs, DockPosition, DockSide, InactiveOpacity,
-    ShowIndentGuides, ShowScrollbar, serialize_optional_f32_with_two_decimal_places,
+    CommandAliasTarget, DelayMs, DockPosition, DockSide, InactiveOpacity, ShowIndentGuides,
+    ShowScrollbar, serialize_optional_f32_with_two_decimal_places,
 };
 
 #[with_fallible_options]
@@ -31,8 +31,6 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: "left"
     pub pane_split_direction_vertical: Option<PaneSplitDirectionVertical>,
-    /// Centered layout related settings.
-    pub centered_layout: Option<CenteredLayoutSettings>,
     /// Whether or not to prompt the user to confirm before closing the application.
     ///
     /// Default: false
@@ -630,22 +628,6 @@ pub enum PaneSplitDirectionHorizontal {
 pub enum PaneSplitDirectionVertical {
     Left,
     Right,
-}
-
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Default)]
-#[serde(rename_all = "snake_case")]
-#[with_fallible_options]
-pub struct CenteredLayoutSettings {
-    /// The relative width of the left padding of the central pane from the
-    /// workspace when the centered layout is used.
-    ///
-    /// Default: 0.2
-    pub left_padding: Option<CenteredPaddingSettings>,
-    // The relative width of the right padding of the central pane from the
-    // workspace when the centered layout is used.
-    ///
-    /// Default: 0.2
-    pub right_padding: Option<CenteredPaddingSettings>,
 }
 
 #[derive(

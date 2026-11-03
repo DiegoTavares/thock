@@ -9,6 +9,7 @@ pub mod chat_panel;
 pub mod connect_phone;
 pub mod day_plan;
 pub mod day_planner_panel;
+pub mod desk_layout;
 pub mod desk_panel;
 pub mod getting_started;
 pub mod gmail;
@@ -76,6 +77,27 @@ pub struct ThockSettings {
     pub heading_font: String,
     /// How often the chat may start a conversation on its own (V44 §5.8).
     pub openers: settings::OpenerFrequency,
+    /// The page's measure in characters (V54 §6).
+    pub page: PageSettings,
+    /// How the side panels tuck away while you type, or `None` when they
+    /// stay (V54 §6).
+    pub tides: Option<TidesSettings>,
+}
+
+/// The page's measure, in characters of the body font.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageSettings {
+    pub measure: u32,
+    pub min_measure: u32,
+}
+
+/// What each side does while you type, and when it comes back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TidesSettings {
+    pub left: settings::TidePolicy,
+    pub right: settings::TidePolicy,
+    /// `None` brings panels back only when asked.
+    pub flow_back_after: Option<std::time::Duration>,
 }
 
 impl settings::Settings for ThockSettings {
@@ -87,6 +109,49 @@ impl settings::Settings for ThockSettings {
                 .unwrap_or_else(|| "IBM Plex Sans".to_string()),
             heading_font: thock.heading_font.unwrap_or_else(|| "Petrona".to_string()),
             openers: thock.openers.unwrap_or_default(),
+            page: {
+                let page = thock.page.unwrap_or_default();
+                let measure = page.measure.unwrap_or(80).max(1);
+                PageSettings {
+                    measure,
+                    min_measure: page.min_measure.unwrap_or(48).clamp(1, measure),
+                }
+            },
+            tides: match thock.tides {
+                Some(settings::TidesContent::Enabled(false)) => None,
+                Some(settings::TidesContent::Enabled(true)) | None => {
+                    Some(TidesSettings::from_content(Default::default()))
+                }
+                Some(settings::TidesContent::Settings(tides)) => {
+                    Some(TidesSettings::from_content(tides))
+                }
+            },
+        }
+    }
+}
+
+impl TidesSettings {
+    /// What the dock at `position` does while you type. The bottom dock
+    /// always stays.
+    pub fn policy(&self, position: workspace::dock::DockPosition) -> settings::TidePolicy {
+        match position {
+            workspace::dock::DockPosition::Left => self.left,
+            workspace::dock::DockPosition::Right => self.right,
+            workspace::dock::DockPosition::Bottom => settings::TidePolicy::Stay,
+        }
+    }
+
+    fn from_content(tides: settings::TidesSettingsContent) -> Self {
+        Self {
+            left: tides.left.unwrap_or_default(),
+            right: tides.right.unwrap_or_default(),
+            flow_back_after: match tides.flow_back_after {
+                Some(settings::FlowBackAfter::Seconds(seconds)) => {
+                    Some(std::time::Duration::from_secs(seconds))
+                }
+                Some(settings::FlowBackAfter::Never) => None,
+                None => Some(std::time::Duration::from_secs(8)),
+            },
         }
     }
 }
@@ -123,6 +188,7 @@ pub fn init(cx: &mut App) {
     desk_panel::init(cx);
     agent_panel::init(cx);
     chat_panel::init(cx);
+    desk_layout::init(cx);
     calendar_service::init(cx);
     gmail_service::init(cx);
     inbox_service::init(cx);

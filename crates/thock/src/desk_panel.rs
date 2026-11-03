@@ -192,6 +192,8 @@ pub struct NextCard {
     pub line: String,
     /// The entry's row in today's note.
     pub row: u32,
+    /// Minutes until the entry starts; `None` while it is happening.
+    pub starts_in: Option<u32>,
 }
 
 /// The card for today's plan at `now` (minutes since midnight): an entry
@@ -215,6 +217,7 @@ pub fn next_card(plan: &DayPlan, now: u32) -> Option<NextCard> {
             label: format!("NOW · UNTIL {}", format_time(end)),
             line: line(start, &item.label),
             row: item.row,
+            starts_in: None,
         });
     }
     let points = plan
@@ -231,6 +234,7 @@ pub fn next_card(plan: &DayPlan, now: u32) -> Option<NextCard> {
         label: format!("NEXT · IN {}", format_wait(start - now)),
         line: line(start, &item.label),
         row: item.row,
+        starts_in: Some(start - now),
     })
 }
 
@@ -272,6 +276,9 @@ pub struct DeskPanel {
     now: Arc<dyn Fn() -> NaiveDateTime + Send + Sync>,
     /// The vault's reminders service, followed once it appears.
     reminder_subscription: Option<Subscription>,
+    /// Whether something waits, for the tide mark (V54 §5.2). Kept on the
+    /// minute tick and on plan or reminder changes, not on every notify.
+    waiting: bool,
     _tick: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -328,6 +335,7 @@ impl DeskPanel {
                 if reminders.read(cx).has_selection() {
                     this.card_selected = false;
                 }
+                this.refresh_waiting(cx);
                 cx.notify();
             }));
             // The card's minutes count down, and "today" moves at midnight.
@@ -359,6 +367,7 @@ impl DeskPanel {
                 card_selected: false,
                 now: Arc::new(|| Local::now().naive_local()),
                 reminder_subscription: None,
+                waiting: false,
                 _tick: tick,
                 _subscriptions: subscriptions,
             };
@@ -444,6 +453,11 @@ impl DeskPanel {
     /// the day the planner may not be showing; a note that does not exist
     /// yet parses as an empty day.
     fn refresh_today(&mut self, cx: &mut Context<Self>) {
+        self.open_today(cx);
+        self.refresh_waiting(cx);
+    }
+
+    fn open_today(&mut self, cx: &mut Context<Self>) {
         let today = self.now().date();
         let Some(vault) = &self.vault else {
             self.today = None;
@@ -551,12 +565,34 @@ impl DeskPanel {
             today.plan = plan;
             cx.notify();
         }
+        self.refresh_waiting(cx);
     }
 
     fn card(&self) -> Option<NextCard> {
         let now = self.now();
         let minutes = now.hour() * 60 + now.minute();
         next_card(&self.today.as_ref()?.plan, minutes)
+    }
+
+    /// Whether the Desk has something waiting, for its tide mark (V54 §5.2):
+    /// a timed entry starts within ten minutes, or a reminder is ringing
+    /// (its time has come and it is still open).
+    pub fn has_waiting(&self) -> bool {
+        self.waiting
+    }
+
+    /// Recomputes `waiting`, and notifies when it changed so the tide mark
+    /// follows.
+    fn refresh_waiting(&mut self, cx: &mut Context<Self>) {
+        let starts_soon = self.card().is_some_and(|card| {
+            card.starts_in
+                .is_some_and(|minutes| minutes <= crate::desk_layout::WAITING_WITHIN_MINUTES)
+        });
+        let waiting = starts_soon || self.reminders.read(cx).overdue_count(cx) > 0;
+        if self.waiting != waiting {
+            self.waiting = waiting;
+            cx.notify();
+        }
     }
 
     /// Up from a view's first row lands here only when the view released
@@ -876,7 +912,9 @@ mod tests {
     use menu::{SelectNext, SelectPrevious};
     use serde_json::json;
     use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
+    use std::cell::Cell;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use text::Point;
     use workspace::MultiWorkspace;
 
@@ -1240,6 +1278,40 @@ mod tests {
             Some(("completed", 0)),
             "one completed task"
         );
+    }
+
+    #[gpui::test]
+    async fn the_waiting_line_follows_the_day_going_away(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        let today = Local::now().date_naive();
+        setup.desk.update(&mut setup.cx, |desk, cx| {
+            desk.set_now(today.and_hms_opt(14, 52, 0).unwrap(), cx)
+        });
+        setup.cx.run_until_parked();
+        assert!(
+            setup
+                .desk
+                .read_with(&setup.cx, |desk, _| desk.has_waiting()),
+            "15:00 is eight minutes away"
+        );
+        let notified = Rc::new(Cell::new(false));
+        let _subscription = setup.cx.update(|_, cx| {
+            let notified = notified.clone();
+            cx.observe(&setup.desk, move |_, _| notified.set(true))
+        });
+        // The vault goes away: there is no today any more, so nothing waits,
+        // and the Desk says so for the tide mark to follow.
+        setup.desk.update(&mut setup.cx, |desk, cx| {
+            desk.vault = None;
+            desk.refresh_today(cx);
+        });
+        setup.cx.run_until_parked();
+        assert!(
+            !setup
+                .desk
+                .read_with(&setup.cx, |desk, _| desk.has_waiting())
+        );
+        assert!(notified.get());
     }
 
     #[gpui::test]

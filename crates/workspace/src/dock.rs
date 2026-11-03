@@ -10,8 +10,8 @@ use db::kvp::KeyValueStore;
 use gpui::{
     Action, Anchor, AnyView, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, IntoElement, KeyContext, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window, deferred, div,
-    px,
+    Render, SharedString, Stateful, StyleRefinement, Styled, Subscription, WeakEntity, Window,
+    deferred, div, px,
 };
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore, TerminalDockPosition};
@@ -291,6 +291,8 @@ pub struct Dock {
     restoration: DockRestoreState,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
+    /// The panel has something waiting, drawn as a line on the tide mark.
+    tide_waiting: bool,
     _subscriptions: [Subscription; 2],
 }
 
@@ -459,6 +461,7 @@ impl Dock {
                 restoration: DockRestoreState::Restoring { pending: None },
                 zoom_layer_open: false,
                 modal_layer,
+                tide_waiting: false,
             }
         });
 
@@ -512,6 +515,51 @@ impl Dock {
 
     pub fn is_open(&self) -> bool {
         self.is_open
+    }
+
+    /// Marks the tide mark with a line while the panel has something waiting.
+    pub fn set_tide_waiting(&mut self, waiting: bool, cx: &mut Context<Self>) {
+        if self.tide_waiting != waiting {
+            self.tide_waiting = waiting;
+            cx.notify();
+        }
+    }
+
+    pub fn tide_waiting(&self) -> bool {
+        self.tide_waiting
+    }
+
+    /// The tide mark: a strip of the panel's background at the window's
+    /// edge, with a line on its inner edge while something waits. A click
+    /// focuses the panel, which brings it back.
+    fn render_tide_mark(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let colors = cx.theme().colors();
+        let waiting_line = self.tide_waiting.then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .w(px(2.))
+                .bg(colors.text_accent)
+                .map(|this| match self.position {
+                    DockPosition::Left => this.right_0(),
+                    _ => this.left_0(),
+                })
+        });
+        div()
+            .id("tide-mark")
+            .debug_selector(|| "tide-mark".into())
+            .absolute()
+            .inset_0()
+            .bg(colors.panel_background)
+            .cursor_pointer()
+            .occlude()
+            .on_click(cx.listener(|dock, _, window, cx| {
+                if let Some(panel) = dock.active_panel() {
+                    panel.activation_focus_handle(cx).focus(window, cx);
+                }
+            }))
+            .children(waiting_line)
     }
 
     fn resizable(&self, cx: &App) -> bool {
@@ -1111,6 +1159,41 @@ impl Dock {
         }
     }
 
+    /// Resizes the active panel, or with `all` every panel in the dock, to
+    /// `size` in pixels, keeping a flexible panel's flex for Zed's own row:
+    /// beside an anchored page every side panel is drawn at its size.
+    pub fn resize_by_pixels(
+        &mut self,
+        all: bool,
+        size: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active_panel_index) = self.active_panel_index else {
+            return;
+        };
+        let size = size.max(RESIZE_HANDLE_SIZE).round();
+        let mut size_states_to_persist = Vec::new();
+        for (index, entry) in self.panel_entries.iter_mut().enumerate() {
+            if all || index == active_panel_index {
+                entry.size_state.size = Some(size);
+                entry.panel.size_state_changed(window, cx);
+                size_states_to_persist.push((entry.panel.panel_key(), entry.size_state));
+            }
+        }
+        let workspace = self.workspace.clone();
+        cx.defer(move |cx| {
+            if let Some(workspace) = workspace.upgrade() {
+                workspace.update(cx, |workspace, cx| {
+                    for (panel_key, size_state) in size_states_to_persist {
+                        workspace.persist_panel_size_state(panel_key, size_state, cx);
+                    }
+                });
+            }
+        });
+        cx.notify();
+    }
+
     pub fn resize_all_panels(
         &mut self,
         size: Option<Pixels>,
@@ -1219,6 +1302,40 @@ impl Dock {
 impl Render for Dock {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
+        // The workspace placed this frame's row before its docks draw.
+        let row = self
+            .workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).center_row())
+            .unwrap_or_default();
+        if row.tide_mark(self.position)
+            && let Some(entry) = self.visible_entry()
+        {
+            // The panel stays laid out at its own width behind the mark, so
+            // its focus, selection and scroll position carry on untouched.
+            let width = row.open_width(self.position);
+            let panel = entry
+                .panel
+                .to_any()
+                .cached(StyleRefinement::default().v_flex().size_full());
+            return div()
+                .id("dock-panel")
+                .key_context(dispatch_context)
+                .track_focus(&self.focus_handle(cx))
+                .relative()
+                .size_full()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .h_full()
+                        .w(width)
+                        .child(panel),
+                )
+                .child(self.render_tide_mark(cx));
+        }
         if let Some(entry) = self.visible_entry() {
             let position = self.position;
             let create_resize_handle = || {
@@ -1563,6 +1680,7 @@ pub mod test {
         pub activation_focus_handle: Option<FocusHandle>,
         pub default_size: Pixels,
         pub flexible: bool,
+        pub min_size: Option<Pixels>,
         pub activation_priority: u32,
     }
     actions!(test_only, [ToggleTestPanel]);
@@ -1579,6 +1697,7 @@ pub mod test {
                 activation_focus_handle: None,
                 default_size: px(300.),
                 flexible: false,
+                min_size: None,
                 activation_priority,
             }
         }
@@ -1610,6 +1729,8 @@ pub mod test {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .id("test")
+                .debug_selector(|| "test-panel".into())
+                .size_full()
                 .track_focus(&self.focus_handle(cx))
                 .children(self.activation_focus_handle.iter().map(|focus_handle| {
                     div().id("test-activation-child").track_focus(focus_handle)
@@ -1647,6 +1768,10 @@ pub mod test {
 
         fn default_size(&self, _window: &Window, _: &App) -> Pixels {
             self.default_size
+        }
+
+        fn min_size(&self, _window: &Window, _: &App) -> Option<Pixels> {
+            self.min_size
         }
 
         fn initial_size_state(&self, _window: &Window, _: &App) -> PanelSizeState {
