@@ -5,17 +5,19 @@
 //! this component tells it how wide the page is, how much room the agent's
 //! thread needs, and which sides may ebb, and it ebbs and flows the docks.
 
+use db::kvp::KeyValueStore;
 use editor::{Editor, EditorEvent, EditorSettings};
 use gpui::{
     App, AppContext as _, Context, Entity, EntityId, Focusable as _, Font, Pixels, Subscription,
-    Task, WeakEntity, Window, actions,
+    Task, TaskExt as _, WeakEntity, Window, actions,
 };
 use settings::{Settings as _, SettingsStore, TidePolicy};
 use theme_settings::ThemeSettings;
 use util::ResultExt as _;
 use workspace::dock::{Dock, DockPosition};
-use workspace::{CenterAnchor, ThreadRoom, Tide, TideSide, Workspace};
+use workspace::{CenterAnchor, ThreadRoom, Tide, TideSide, ToggleCenteredLayout, Workspace};
 
+use crate::vault::{Vault, VaultStatus};
 use crate::{ChatPanel, DeskPanel, PageSettings, ThockSettings};
 
 actions!(
@@ -71,7 +73,43 @@ fn follow(
             });
         }
     });
+    // After the restored workspace has its own centred layout.
+    cx.defer_in(window, default_to_centred);
     layout
+}
+
+/// Turns centred layout on the first time a vault opens (§6): the anchored
+/// page is Thock's layout. A key per vault records that it was done, so
+/// turning centred layout off afterwards sticks.
+fn default_to_centred(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let root = workspace
+        .project()
+        .read(cx)
+        .visible_worktrees(cx)
+        .next()
+        .map(|worktree| worktree.read(cx).abs_path().to_path_buf());
+    let Some(VaultStatus::Valid(vault)) = root.as_deref().map(Vault::detect) else {
+        return;
+    };
+    let key = centred_layout_key(&vault);
+    let store = KeyValueStore::global(cx);
+    match store.read_kvp(&key) {
+        Ok(None) => {}
+        Ok(Some(_)) => return,
+        Err(error) => {
+            log::error!("couldn't read whether the page was centred before: {error:#}");
+            return;
+        }
+    }
+    if !workspace.centered_layout {
+        workspace.toggle_centered_layout(&ToggleCenteredLayout, window, cx);
+    }
+    cx.background_spawn(async move { store.write_kvp(key, "1".to_string()).await })
+        .detach_and_log_err(cx);
+}
+
+fn centred_layout_key(vault: &Vault) -> String {
+    format!("thock-centred-layout:{}", vault.root.display())
 }
 
 /// The docks that ebb; the bottom dock never does (§3).
@@ -1521,5 +1559,50 @@ mod tests {
         assert!(!ebbed(&setup, DockPosition::Right), "it comes back");
         let desk = setup.desk.clone();
         assert!(is_focused(&mut setup, &desk), "focused");
+    }
+
+    /// A new window on the vault at `root`, as it opens before any setup.
+    async fn open_vault(
+        root: &std::path::Path,
+        cx: &mut TestAppContext,
+    ) -> (Entity<Workspace>, Entity<Project>, VisualTestContext) {
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            root,
+            json!({ ".thock": { "config.toml": "schema = 1\n" }, "note.md": "Hi" }),
+        )
+        .await;
+        let project = Project::test(fs, [root], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        cx.run_until_parked();
+        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
+        (workspace, project, cx.clone())
+    }
+
+    #[gpui::test]
+    async fn centred_layout_is_on_for_a_vault_by_default(cx: &mut TestAppContext) {
+        init_test(cx);
+        let vault_dir = vault_dir();
+        let root = vault_dir.path().to_path_buf();
+        let (workspace, project, mut window) = open_vault(&root, cx).await;
+        assert!(workspace.read_with(&window, |workspace, _| workspace.centered_layout));
+        let project_path = project
+            .read_with(&window, |project, cx| {
+                project.find_project_path(root.join("note.md"), cx)
+            })
+            .expect("the note is in the vault");
+        workspace
+            .update_in(&mut window, |workspace, window, cx| {
+                workspace.open_path(project_path, None, true, window, cx)
+            })
+            .await
+            .unwrap();
+        window.run_until_parked();
+        assert!(workspace.read_with(&window, |workspace, cx| workspace.is_page_anchored(cx)));
+
+        // Done once per vault: the next window is left as it opens.
+        let (workspace, _, window) = open_vault(&root, cx).await;
+        assert!(!workspace.read_with(&window, |workspace, _| workspace.centered_layout));
     }
 }
