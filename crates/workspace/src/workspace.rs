@@ -1,4 +1,5 @@
 pub mod active_file_name;
+pub mod center_anchor;
 pub mod dock;
 pub mod history_manager;
 pub mod invalid_item_view;
@@ -29,6 +30,7 @@ pub mod welcome;
 pub mod workspace_error;
 mod workspace_settings;
 
+pub use center_anchor::{AnchorLayout, CenterAnchor};
 pub use dock::Panel;
 pub use multi_workspace::{
     CloseWorkspaceSidebar, DraggedSidebar, FocusWorkspaceSidebar, MoveProjectToNewWindow,
@@ -44,6 +46,7 @@ pub use remote::{
 pub use toast_layer::{ToastAction, ToastLayer, ToastView};
 
 use anyhow::{Context as _, Result, anyhow};
+use center_anchor::{AnchorInput, AnchorSide, TIDE_MARK_WIDTH, anchor};
 use client::{
     ChannelId, Client, ErrorExt, ParticipantIndex, Status, TypedEnvelope, User, UserStore,
     proto::{self, ErrorCode, PanelId, PeerId},
@@ -112,8 +115,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use session::AppSession;
 use settings::{
-    CenteredPaddingSettings, DefaultOpenBehavior, Settings, SettingsLocation, SettingsStore,
-    update_settings_file,
+    DefaultOpenBehavior, Settings, SettingsLocation, SettingsStore, update_settings_file,
 };
 
 use sqlez::{
@@ -330,7 +332,7 @@ actions!(
         SuppressNotification,
         /// Toggles the bottom dock.
         ToggleBottomDock,
-        /// Toggles centered layout mode.
+        /// Keep the page centred.
         ToggleCenteredLayout,
         /// Toggles edit prediction feature globally for all files.
         ToggleEditPrediction,
@@ -1391,10 +1393,11 @@ pub struct Workspace {
     /// A view drawn over the centre pane group, between the docks: never
     /// over a dock, the title bar or the status bar.
     center_overlay: Option<AnyView>,
-    /// Width reserved on the right of the centre pane group, drawn as a
-    /// plain strip of the editor background, so something can float there
-    /// without covering the panes.
-    center_inset: Option<Pixels>,
+    /// The page a view asked for while centred layout is on, and room
+    /// beside it in the right margin.
+    center_anchor: Option<CenterAnchor>,
+    /// The row the last render placed, while the page was anchored.
+    anchor_layout: Option<AnchorLayout>,
     titlebar_focus_handle: FocusHandle,
     region_focus_handles: RegionFocusHandles,
     notifications: Notifications,
@@ -1849,7 +1852,8 @@ impl Workspace {
             toast_layer,
             titlebar_item: None,
             center_overlay: None,
-            center_inset: None,
+            center_anchor: None,
+            anchor_layout: None,
             titlebar_focus_handle: cx.focus_handle(),
             region_focus_handles: RegionFocusHandles::new(cx),
             notifications: Notifications::default(),
@@ -3008,16 +3012,33 @@ impl Workspace {
         self.center_overlay.clone()
     }
 
-    /// Reserves `inset` on the right of the centre pane group, or gives the
-    /// width back with `None`. With centred layout on, the inset is taken
-    /// from the right padding first.
-    pub fn set_center_inset(&mut self, inset: Option<Pixels>, cx: &mut Context<Self>) {
-        self.center_inset = inset;
-        cx.notify();
+    /// Sets the page centred layout keeps, or removes it with `None`. While
+    /// the page is anchored (centred layout on, one pane, an item open) its
+    /// column stays pinned to the window's centre and the docks live in the
+    /// margins beside it (`center_anchor::anchor`). Without an anchor,
+    /// centred layout leaves the centre as it is. The anchor's thread room
+    /// is kept on the right of the centre in either case, when it fits.
+    pub fn set_center_anchor(&mut self, anchor: Option<CenterAnchor>, cx: &mut Context<Self>) {
+        if self.center_anchor != anchor {
+            self.center_anchor = anchor;
+            cx.notify();
+        }
     }
 
-    pub fn center_inset(&self) -> Option<Pixels> {
-        self.center_inset
+    pub fn center_anchor(&self) -> Option<CenterAnchor> {
+        self.center_anchor
+    }
+
+    /// The row the last render placed while the page was anchored, or
+    /// `None` when it wasn't.
+    pub fn anchor_layout(&self) -> Option<AnchorLayout> {
+        self.anchor_layout
+    }
+
+    /// Whether the page is anchored: centred layout on, one pane in the
+    /// centre, and an item open in it.
+    pub fn is_page_anchored(&self, cx: &App) -> bool {
+        self.centered_layout && self.center.panes().len() == 1 && self.active_item(cx).is_some()
     }
 
     pub fn set_prompt_for_new_path(&mut self, prompt: PromptForNewPath) {
@@ -8106,13 +8127,67 @@ impl Workspace {
         self.maximized_pane.is_some()
     }
 
-    fn adjust_padding(padding: Option<f32>) -> f32 {
-        padding
-            .unwrap_or(CenteredPaddingSettings::default().0)
-            .clamp(
-                CenteredPaddingSettings::MIN_PADDING,
-                CenteredPaddingSettings::MAX_PADDING,
-            )
+    /// The width a side dock takes this frame when drawn in full, or `None`
+    /// when it is closed or zoomed away.
+    fn dock_width(&self, dock: &Entity<Dock>, window: &Window, cx: &App) -> Option<Pixels> {
+        let dock = dock.read(cx);
+        if self.zoomed_position == Some(dock.position()) {
+            return None;
+        }
+        dock.stored_active_panel_size(window, cx)
+    }
+
+    /// Places the centre's row for this frame (`center_anchor::anchor`) and
+    /// tells each side dock whether it draws its tide mark.
+    fn layout_center_row(&mut self, window: &Window, cx: &mut Context<Self>) -> CenterRow {
+        let left_width = self.dock_width(&self.left_dock, window, cx);
+        let right_width = self.dock_width(&self.right_dock, window, cx);
+        let anchored = self.is_page_anchored(cx);
+        let row = match self.center_anchor {
+            Some(center_anchor) if anchored => {
+                let side = |dock: &Entity<Dock>, open_width, may_ebb| AnchorSide {
+                    open_width,
+                    ebbed: dock.read(cx).is_ebbed(),
+                    may_ebb,
+                };
+                CenterRow::Anchored(anchor(AnchorInput {
+                    window: window.viewport_size().width,
+                    left: side(&self.left_dock, left_width, center_anchor.ebb_left),
+                    right: side(&self.right_dock, right_width, center_anchor.ebb_right),
+                    column: center_anchor.column,
+                    min_column: center_anchor.min_column,
+                    thread: center_anchor.thread,
+                }))
+            }
+            _ => {
+                let thread = self.center_anchor.and_then(|center_anchor| {
+                    let thread = center_anchor.thread?;
+                    let center = window.viewport_size().width
+                        - left_width.unwrap_or_default()
+                        - right_width.unwrap_or_default();
+                    (center - thread >= center_anchor.min_column).then_some(thread)
+                });
+                CenterRow::Ordinary { thread }
+            }
+        };
+        let (left_mark, right_mark) = match &row {
+            CenterRow::Anchored(layout) => (
+                left_width.is_some()
+                    && (layout.left_ebbs_to_fit || self.left_dock.read(cx).is_ebbed()),
+                right_width.is_some()
+                    && (layout.right_ebbs_to_fit || self.right_dock.read(cx).is_ebbed()),
+            ),
+            CenterRow::Ordinary { .. } => (false, false),
+        };
+        self.left_dock
+            .update(cx, |dock, _| dock.show_tide_mark(left_mark));
+        self.right_dock
+            .update(cx, |dock, _| dock.show_tide_mark(right_mark));
+        self.anchor_layout = match &row {
+            CenterRow::Anchored(layout) => Some(*layout),
+            CenterRow::Ordinary { .. } => None,
+        };
+        row
     }
 
     fn render_dock(
@@ -8166,6 +8241,9 @@ impl Workspace {
         // included in the element tree so its focus handle remains mounted — without
         // this, toggle_panel_focus cannot focus the panel when the dock is closed.
         let dock = dock.read(cx);
+        if dock.is_tide_mark_shown() {
+            return Some(container.w(TIDE_MARK_WIDTH).flex_shrink_0());
+        }
         if let Some(panel) = dock.visible_panel() {
             let size_state = dock.stored_panel_size_state(panel.as_ref());
             let min_size = panel.min_size(window, cx);
@@ -8345,39 +8423,48 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The centre pane group between its centred-layout paddings, with the
-    /// inset strip and the overlay a view asked for (`set_center_inset`,
-    /// `set_center_overlay`). The inset widens the right padding's element,
-    /// so it is taken from the padding first without measuring anything.
+    /// The centre pane group in this frame's row (`layout_center_row`),
+    /// with the overlay a view asked for (`set_center_overlay`). The
+    /// paddings and the thread's room are plain strips of the editor
+    /// background, so something can float there without covering the page.
     fn render_center_group(
         &self,
-        paddings: (Option<Div>, Option<Div>),
+        row: &CenterRow,
         render_cx: &PaneRenderContext,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        let (left_padding, right_padding) = paddings;
-        let inset = self.center_inset;
-        let editor_background = cx.theme().colors().editor_background;
+        let colors = cx.theme().colors();
+        let strip = |width: Pixels| {
+            div()
+                .h_full()
+                .w(width)
+                .flex_shrink_0()
+                .bg(colors.editor_background)
+                .border_color(colors.pane_group_border)
+        };
+        let (left, right) = match row {
+            CenterRow::Anchored(layout) => {
+                let right_border = layout.thread_floats
+                    || self
+                        .center_anchor
+                        .is_none_or(|anchor| anchor.thread.is_none());
+                (
+                    (layout.left_padding > Pixels::ZERO)
+                        .then(|| strip(layout.left_padding).border_r_1()),
+                    (layout.right_padding > Pixels::ZERO).then(|| {
+                        strip(layout.right_padding).when(right_border, |this| this.border_l_1())
+                    }),
+                )
+            }
+            CenterRow::Ordinary { thread } => (None, thread.map(strip)),
+        };
         h_flex()
             .relative()
             .flex_1()
-            .when_some(left_padding, |this, padding| {
-                this.child(padding.border_r_1())
-            })
+            .children(left)
             .child(self.render_center(render_cx, window, cx))
-            .map(|this| match (right_padding, inset) {
-                (Some(padding), Some(inset)) => this.child(padding.min_w(inset)),
-                (Some(padding), None) => this.child(padding.border_l_1()),
-                (None, Some(inset)) => this.child(
-                    div()
-                        .h_full()
-                        .w(inset)
-                        .flex_shrink_0()
-                        .bg(editor_background),
-                ),
-                (None, None) => this,
-            })
+            .children(right)
             .children(
                 self.center_overlay
                     .clone()
@@ -9072,6 +9159,14 @@ impl Render for DraggedDock {
     }
 }
 
+/// How the centre's row is laid out this frame.
+enum CenterRow {
+    /// Zed's own layout, with room for the thread on the right when it fits.
+    Ordinary { thread: Option<Pixels> },
+    /// The page pinned to the window's centre.
+    Anchored(AnchorLayout),
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         static FIRST_PAINT: AtomicBool = AtomicBool::new(true);
@@ -9079,31 +9174,7 @@ impl Render for Workspace {
             log::info!("Rendered first frame");
         }
 
-        let centered_layout = self.centered_layout
-            && self.center.panes().len() == 1
-            && self.active_item(cx).is_some();
-        let render_padding = |size| {
-            (size > 0.0).then(|| {
-                div()
-                    .h_full()
-                    .w(relative(size))
-                    .bg(cx.theme().colors().editor_background)
-                    .border_color(cx.theme().colors().pane_group_border)
-            })
-        };
-        let paddings = if centered_layout {
-            let settings = WorkspaceSettings::get_global(cx).centered_layout;
-            (
-                render_padding(Self::adjust_padding(
-                    settings.left_padding.map(|padding| padding.0),
-                )),
-                render_padding(Self::adjust_padding(
-                    settings.right_padding.map(|padding| padding.0),
-                )),
-            )
-        } else {
-            (None, None)
-        };
+        let center_row = self.layout_center_row(window, cx);
         let ui_font = theme_settings::setup_ui_font(window, cx);
 
         let theme = cx.theme().clone();
@@ -9301,7 +9372,7 @@ impl Render for Workspace {
                                                         .flex_1()
                                                         .overflow_hidden()
                                                         .child(self.render_center_group(
-                                                            paddings,
+                                                            &center_row,
                                                             &pane_render_context,
                                                             window,
                                                             cx,
@@ -9349,7 +9420,7 @@ impl Render for Workspace {
                                                                 .flex_1()
                                                                 .overflow_hidden()
                                                                 .child(self.render_center_group(
-                                                                    paddings,
+                                                                    &center_row,
                                                                     &pane_render_context,
                                                                     window,
                                                                     cx,
@@ -9397,7 +9468,7 @@ impl Render for Workspace {
                                                                 .flex_1()
                                                                 .overflow_hidden()
                                                                 .child(self.render_center_group(
-                                                                    paddings,
+                                                                    &center_row,
                                                                     &pane_render_context,
                                                                     window,
                                                                     cx,
@@ -9434,7 +9505,7 @@ impl Render for Workspace {
                                                 .flex_1()
                                                 .overflow_hidden()
                                                 .child(self.render_center_group(
-                                                    paddings,
+                                                    &center_row,
                                                     &pane_render_context,
                                                     window,
                                                     cx,

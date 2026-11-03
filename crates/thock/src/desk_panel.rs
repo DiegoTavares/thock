@@ -192,6 +192,8 @@ pub struct NextCard {
     pub line: String,
     /// The entry's row in today's note.
     pub row: u32,
+    /// Minutes until the entry starts; `None` while it is happening.
+    pub starts_in: Option<u32>,
 }
 
 /// The card for today's plan at `now` (minutes since midnight): an entry
@@ -215,6 +217,7 @@ pub fn next_card(plan: &DayPlan, now: u32) -> Option<NextCard> {
             label: format!("NOW · UNTIL {}", format_time(end)),
             line: line(start, &item.label),
             row: item.row,
+            starts_in: None,
         });
     }
     let points = plan
@@ -231,6 +234,7 @@ pub fn next_card(plan: &DayPlan, now: u32) -> Option<NextCard> {
         label: format!("NEXT · IN {}", format_wait(start - now)),
         line: line(start, &item.label),
         row: item.row,
+        starts_in: Some(start - now),
     })
 }
 
@@ -557,6 +561,17 @@ impl DeskPanel {
         let now = self.now();
         let minutes = now.hour() * 60 + now.minute();
         next_card(&self.today.as_ref()?.plan, minutes)
+    }
+
+    /// Whether the Desk has something waiting, for its tide mark (V54 §5.2):
+    /// a timed entry starts within ten minutes, or a reminder is ringing
+    /// (its time has come and it is still open).
+    pub fn has_waiting(&self, cx: &App) -> bool {
+        let starts_soon = self.card().is_some_and(|card| {
+            card.starts_in
+                .is_some_and(|minutes| minutes <= crate::desk_layout::WAITING_WITHIN_MINUTES)
+        });
+        starts_soon || self.reminders.read(cx).overdue_count(cx) > 0
     }
 
     /// Up from a view's first row lands here only when the view released

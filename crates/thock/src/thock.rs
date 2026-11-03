@@ -9,6 +9,7 @@ pub mod chat_panel;
 pub mod connect_phone;
 pub mod day_plan;
 pub mod day_planner_panel;
+pub mod desk_layout;
 pub mod desk_panel;
 pub mod getting_started;
 pub mod gmail;
@@ -177,6 +178,7 @@ pub fn init(cx: &mut App) {
     desk_panel::init(cx);
     agent_panel::init(cx);
     chat_panel::init(cx);
+    desk_layout::init(cx);
     calendar_service::init(cx);
     gmail_service::init(cx);
     inbox_service::init(cx);

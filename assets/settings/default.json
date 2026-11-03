@@ -102,15 +102,6 @@
   "pane_split_direction_horizontal": "down",
   // The direction that you want to split panes vertically. Defaults to "right"
   "pane_split_direction_vertical": "right",
-  // Centered layout related settings.
-  "centered_layout": {
-    // The relative width of the left padding of the central pane from the
-    // workspace when the centered layout is used.
-    "left_padding": 0.2,
-    // The relative width of the right padding of the central pane from the
-    // workspace when the centered layout is used.
-    "right_padding": 0.2,
-  },
   // Image viewer settings
   "image_viewer": {
     // The unit for image file sizes: "binary" (KiB, MiB) or decimal (KB, MB)

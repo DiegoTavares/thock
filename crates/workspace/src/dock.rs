@@ -10,8 +10,8 @@ use db::kvp::KeyValueStore;
 use gpui::{
     Action, Anchor, AnyView, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, IntoElement, KeyContext, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window, deferred, div,
-    px,
+    Render, SharedString, Stateful, StyleRefinement, Styled, Subscription, WeakEntity, Window,
+    deferred, div, px,
 };
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore, TerminalDockPosition};
@@ -291,6 +291,14 @@ pub struct Dock {
     restoration: DockRestoreState,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
+    /// Tucked away while you write: still open, drawn as its tide mark
+    /// while the page is anchored. Never serialized.
+    ebbed: bool,
+    /// The panel has something waiting, drawn as a line on the tide mark.
+    tide_waiting: bool,
+    /// Whether this frame draws the tide mark, as the workspace's render
+    /// decided it.
+    tide_mark_shown: bool,
     _subscriptions: [Subscription; 2],
 }
 
@@ -459,6 +467,9 @@ impl Dock {
                 restoration: DockRestoreState::Restoring { pending: None },
                 zoom_layer_open: false,
                 modal_layer,
+                ebbed: false,
+                tide_waiting: false,
+                tide_mark_shown: false,
             }
         });
 
@@ -512,6 +523,76 @@ impl Dock {
 
     pub fn is_open(&self) -> bool {
         self.is_open
+    }
+
+    /// Whether the dock is ebbed: open, but tucked away at the window's edge
+    /// while the page is anchored.
+    pub fn is_ebbed(&self) -> bool {
+        self.ebbed
+    }
+
+    /// Ebbs the dock, or lets it flow back. A closed dock doesn't ebb.
+    pub fn set_ebbed(&mut self, ebbed: bool, cx: &mut Context<Self>) {
+        let ebbed = ebbed && self.is_open;
+        if self.ebbed != ebbed {
+            self.ebbed = ebbed;
+            cx.notify();
+        }
+    }
+
+    /// Whether this frame draws the dock as its tide mark: ebbed, or ebbed
+    /// by the workspace to fit the page.
+    pub fn is_tide_mark_shown(&self) -> bool {
+        self.tide_mark_shown
+    }
+
+    pub(crate) fn show_tide_mark(&mut self, shown: bool) {
+        self.tide_mark_shown = shown;
+    }
+
+    /// Marks the tide mark with a line while the panel has something waiting.
+    pub fn set_tide_waiting(&mut self, waiting: bool, cx: &mut Context<Self>) {
+        if self.tide_waiting != waiting {
+            self.tide_waiting = waiting;
+            cx.notify();
+        }
+    }
+
+    pub fn tide_waiting(&self) -> bool {
+        self.tide_waiting
+    }
+
+    /// The tide mark: a strip of the panel's background at the window's
+    /// edge, with a line on its inner edge while something waits. A click
+    /// brings the panel back and focuses it.
+    fn render_tide_mark(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let colors = cx.theme().colors();
+        let waiting_line = self.tide_waiting.then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .w(px(2.))
+                .bg(colors.text_accent)
+                .map(|this| match self.position {
+                    DockPosition::Left => this.right_0(),
+                    _ => this.left_0(),
+                })
+        });
+        div()
+            .id("tide-mark")
+            .absolute()
+            .inset_0()
+            .bg(colors.panel_background)
+            .cursor_pointer()
+            .occlude()
+            .on_click(cx.listener(|dock, _, window, cx| {
+                dock.set_ebbed(false, cx);
+                if let Some(panel) = dock.active_panel() {
+                    panel.activation_focus_handle(cx).focus(window, cx);
+                }
+            }))
+            .children(waiting_line)
     }
 
     fn resizable(&self, cx: &App) -> bool {
@@ -580,6 +661,9 @@ impl Dock {
     fn set_open_internal(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         if open != self.is_open {
             self.is_open = open;
+            if !open {
+                self.ebbed = false;
+            }
             if let Some(active_panel) = self.active_panel_entry() {
                 active_panel.panel.set_active(open, window, cx);
             }
@@ -1217,8 +1301,38 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
+        if self.tide_mark_shown
+            && let Some(entry) = self.visible_entry()
+        {
+            // The panel stays laid out at its own width behind the mark, so
+            // its focus, selection and scroll position carry on untouched.
+            let width = self
+                .stored_active_panel_size(window, cx)
+                .unwrap_or_default();
+            let panel = entry
+                .panel
+                .to_any()
+                .cached(StyleRefinement::default().v_flex().size_full());
+            return div()
+                .id("dock-panel")
+                .key_context(dispatch_context)
+                .track_focus(&self.focus_handle(cx))
+                .relative()
+                .size_full()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .h_full()
+                        .w(width)
+                        .child(panel),
+                )
+                .child(self.render_tide_mark(cx));
+        }
         if let Some(entry) = self.visible_entry() {
             let position = self.position;
             let create_resize_handle = || {

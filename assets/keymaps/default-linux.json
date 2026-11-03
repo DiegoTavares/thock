@@ -484,6 +484,7 @@
       "ctrl-shift-b": "outline_panel::ToggleFocus",
       "ctrl-2": "thock::ToggleFocus",
       "ctrl-alt-u": "thock::ToggleBacklogFocus",
+      "ctrl-alt-\\": "thock::ToggleTide",
       "ctrl-alt-[": "thock::OpenPreviousDay",
       "ctrl-alt-]": "thock::OpenNextDay",
       "ctrl-alt-home": "thock::OpenToday",
