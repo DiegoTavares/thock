@@ -92,7 +92,7 @@ Everything here is a **top-level** key in that object.
 | "keys like VS Code / Sublime / JetBrains" | `"base_keymap": "VSCode"` \| `"Atom"` \| `"JetBrains"` \| `"SublimeText"` \| `"TextMate"` \| `"Emacs"` \| `"None"` |
 | "wrap my long lines" | `"soft_wrap": "editor_width"` \| `"bounded"` \| `"none"`, with `"preferred_line_length": 80` for `bounded` |
 | "stop the cursor blinking" | `"cursor_blink": false` |
-| "a thinner / wider writing column" | `"centered_layout": { "left_padding": 0.2, "right_padding": 0.2 }` (0.0–0.4 each) — only once **workspace: toggle centered layout** is on |
+| "a thinner / wider writing column" | `"thock": { "page": { "measure": 68 } }` — characters per line of the centred page (`"min_measure": 48` is how far it narrows for the agent's thread); **workspace: toggle centered layout** turns the centred page off and on |
 | "stop saving constantly" | `"autosave": "off"` — Thock ships `"on_focus_change"` on purpose; warn that the agent reads what's on disk |
 | "ask before quitting" | `"confirm_quit": true` |
 | "don't reopen my last vault" | `"restore_on_startup": "none"` \| `"last_workspace"` \| `"last_session"` |

@@ -119,16 +119,14 @@ V44's `room_for` cascade and its Desk collapse are replaced by §4.2:
 - **It is requested only when the thread has at least one message to show.** With only the
   composer open, the composer and the pebble float in the bottom-right of the centre, as a
   Needs-you bubble does today. A bubble that can't clear the caret's line takes the room only
-  when it is free; it never ebbs the Desk.
+  when the right margin already has it free; it never ebbs the Desk or moves the page.
 - V44's "collapse the Desk" becomes step 2: the Desk *ebbs*, which is not persisted, and flows back
   when the thread folds.
 - A right dock with policy `stay` never ebbs for the thread. The column shifts or narrows, and the
   thread floats as a last resort.
-- With centred layout off (or a split centre) there is no page to anchor, but the thread follows
-  the same idea: it keeps its room on the right when the centre still holds `min_column` beside
-  it; otherwise the right dock ebbs for it (unless it is `stay`) and flows back when the thread
-  folds; and only when even that isn't enough does the thread float (decision by Diego, review of
-  the first implementation).
+- With centred layout off (or a split centre) there is no page to anchor and nothing ebbs: the
+  thread keeps its room on the right of the centre when the centre still holds `min_column`
+  beside it, and floats otherwise. The docks are left as they are (decision 15).
 
 ### 4.4 Worked numbers
 
@@ -150,9 +148,16 @@ is open (decision 10).
 
 ### 5.1 States
 
-Each side (left, right) of a window with an anchored page is **flowing** or **ebbed**. Ebbed is a
-render state of an open dock: the dock is still open and its panel entity, selection and scroll
-position are untouched. It is not persisted, so after a restart every open dock starts flowing.
+Each side (left, right) of a window with an anchored page is **flowing**, **ebbed** or **held**:
+
+- **Flowing:** drawn whole, or as its mark when it and the page don't fit (§4.2 step 2).
+- **Ebbed:** tucked away while you write, drawn as its mark.
+- **Held:** brought back by hand while it was a mark. The page makes room for it (§4.2 steps 3
+  and 4) instead of tucking it away to fit, until you type again or the page goes away.
+
+Ebbed and held are render states of an open dock: the dock is still open and its panel entity,
+selection and scroll position are untouched. They are not persisted, so after a restart every open
+dock starts flowing. A side holding the focus is always drawn whole, whatever its state.
 
 A closed dock (`cmd-b`, `cmd-r`, or a panel's toggle) is unaffected by Tides. Hiding stays what it
 is today.
@@ -189,7 +194,8 @@ A side flows back when any of these happens:
 4. **The page goes away:** the active centre item changes or the centre splits.
 
 A dock ebbed to fit (§4.2 step 2) doesn't flow back on a pause; it would only cover the page.
-Triggers 1, 2 and 4 bring it back.
+Triggers 1 and 2 bring it back, held. Trigger 4 sets every side flowing, so a new page opens
+centred with a dock too wide for it waiting at the edge.
 
 ### 5.5 Focus and escape
 
@@ -202,8 +208,7 @@ flows it first (§5.4 rule 1).
 Tides is active only while the page is anchored: centred layout on, one pane in the centre, an
 item open. With splits or centred layout off, typing ebbs nothing and every side is flowing:
 Tides would reflow the panes, which breaks G1. A side ebbed while the page was anchored flows
-when the page stops being anchored, so it never comes back ebbed. The one exception is the
-thread's room (§4.3): the right dock still ebbs for a thread with messages that can't fit.
+when the page stops being anchored, so it never comes back ebbed.
 
 ## 6. Settings
 
@@ -232,6 +237,10 @@ property of the vault:
 in Thock *means* the anchored page. Zed's fractional `centered_layout.left_padding` /
 `right_padding` settings are deleted (fork discipline: delete what Thock doesn't use).
 
+Centred layout is **on by default** for a vault (decision 14). The first time a vault opens, Thock
+turns it on and records that in the key-value store under a key for the vault's folder, so a
+person who turns it off afterwards stays off, in that window and every later one.
+
 ## 7. Keys and actions
 
 | Action | macOS | Linux | Palette text |
@@ -253,23 +262,27 @@ exactly what G1 forbids. So it belongs in `crates/workspace/src/workspace.rs`, e
 V44 added (§7.2 there):
 
 1. **`set_center_anchor(Option<CenterAnchor>)`** replaces `set_center_inset`. `CenterAnchor { column,
-   min_column, thread: Option<ThreadRoom>, ebb_left, ebb_right }`; the flags carry each side's
-   policy into step 2 (off for `stay`), and `ThreadRoom` says whether the room may ebb a dock (a
-   thread with messages) or only take free room (a bubble). The workspace calls `anchor()` on each
-   render with the workspace's own width and the window's centre within it (so a sidebar or
-   window decorations are left out), and the docks at the width they are drawn at: their stored
-   size, a flexible panel's flex resolved to a width, never under the panel's minimum. Beside an
-   anchored page each side dock is drawn at exactly the width `anchor()` gives it, and docks that
-   can't ebb shrink together when even they don't fit the window. The row it placed
-   (`CenterRow`) is kept so the docks and Thock read the same decision back. The
-   `center_overlay` slot is unchanged.
-2. **Ebbed docks.** `Dock` gains a `Tide` (`Flowing`, `Ebbed`, `Held`), never serialized. An ebbed
-   dock renders its tide mark over its panel, which stays laid out at its own width, keeps
-   `is_open`, and reports its width as the mark's to `anchor()`. `Held` is a dock you brought back
-   beside an anchored page: the row makes room for it instead of ebbing it to fit, until it ebbs
-   again. A dock holding the focus is never drawn as a mark. Docks ebbed to fit are decided inside
-   `anchor()` on each render. The dock also takes a `tide_waiting` flag for the mark's accent
-   line, which `desk_layout.rs` sets from the Desk's `has_waiting()`.
+   min_column, thread: Option<ThreadRoom>, left: TideSide, right: TideSide }`; each `TideSide`
+   carries the side's policy into step 2 (`may_ebb`, off for `stay`) and its `Tide` (§5.1), and
+   `ThreadRoom` says whether the room may move the page or ebb a dock (a thread with messages) or
+   only take free room (a bubble). The workspace calls `anchor()` on each render with the
+   workspace's own width and the window's centre within it (so a sidebar or window decorations
+   are left out), and the docks at their stored size or their panel's default, never under the
+   panel's minimum. A flexible panel is drawn at that size too beside an anchored page, not from
+   its flex (decision 16). Beside an anchored page each side dock is drawn at exactly the width
+   `anchor()` gives it, marks included, and docks drawn whole shrink together when even they
+   don't fit the window. The row it placed (`CenterRow`) is kept for the docks to draw their
+   marks and for Thock to see which sides are marks; it is never an input to placement. The row
+   width is the workspace's bounds as last painted, so on a resize the first frame is placed with
+   the old width and corrected on the next (the bounds canvas notifies). The `center_overlay` slot
+   is unchanged.
+2. **Tide marks.** `Dock` keeps no tide (decision 17): Thock's `DeskLayout` owns each side's
+   `Tide` and sends it in the anchor. A side drawn as a mark renders its tide mark over its
+   panel, which stays laid out at its own width and keeps `is_open`. A dock holding the focus is
+   never drawn as a mark. Docks ebbed to fit are decided inside `anchor()` on each render. A click
+   on the mark only focuses the panel; focus entering the dock brings it back (§5.4 rule 1). The
+   dock also takes a `tide_waiting` flag for the mark's accent line, which `desk_layout.rs` sets
+   from the Desk's `has_waiting()`.
 3. `adjust_padding` and the fractional settings go.
 
 `anchor()` is a pure function in the workspace crate with its own table tests (§9). The PR calls
@@ -286,10 +299,16 @@ A new `desk_layout.rs` owns both rules on the Thock side. It's one logical compo
   shown) instead of running `room_for` and collapsing the Desk. `room_for`, `centred_margins`,
   `collapsed_desk` and `MIN_NOTE_WIDTH` leave `chat_panel.rs`, along with their tests, which are
   rewritten against `anchor()`.
-- **Tides:** subscribes to `InputHandled` on the active centre editor (re-subscribing on active-item
-  change), keeps the pause timer as a stored task (replacing it is the intended cancel), handles
-  `thock::ToggleTide`, and flows a side when focus enters its dock. Focus actions run while the
-  workspace is being updated, so dock changes go through `cx.defer` (CLAUDE.md, GPUI panels).
+- **Tides:** owns each side's `Tide` and every transition between them (§5.1, §5.4). It subscribes
+  to `InputHandled` on the active centre editor (re-subscribing on active-item change), keeps the
+  pause timer as a stored task (replacing it is the intended cancel), handles `thock::ToggleTide`,
+  holds a side when focus enters its dock while it was tucked away, and sets a side flowing when
+  its dock closes. `ToggleTide` brings back every side drawn as a mark in the last frame, and
+  tucks away every open `ebb` side not holding the focus when none is. Focus actions run while
+  the workspace is being updated, so the anchor reaches the workspace through `cx.defer`
+  (CLAUDE.md, GPUI panels).
+- **Centred by default:** turns centred layout on the first time a vault opens (§6), deferred
+  so it runs after the restored workspace has its own setting.
 - **Waiting signal:** a `has_waiting()` hook the Desk implements for the tide mark's accent line.
 
 ### 8.3 Order of work
@@ -305,8 +324,13 @@ Each step ships on its own: Anchor without Tides is already the main fix.
 ## 9. Tests
 
 - **`anchor()` table** (workspace): windows of 1280, 1512 and 1920; rail and Desk open, closed,
-  `stay` and `ebb`; thread none, composer-only (no room) and with messages. Assert centred column,
-  which docks ebb to fit, shift amount, narrowing to `min_column`, and float.
+  `stay` and `ebb`; flowing, ebbed, held and focused; thread none, a bubble and with messages.
+  Assert centred column, which docks ebb to fit, shift amount, narrowing to `min_column`, and
+  float. A held dock is never ebbed to fit; an ebbed one is a mark even where it fits, unless it
+  holds the focus; a bubble never moves the page; marks keep their width when the window
+  squeezes the docks. Without an anchored page the thread takes its room or floats.
+- **Flexible panels** (workspace and thock): beside an anchored page a flexible panel is drawn at
+  its default size, and resizing its flex doesn't change that.
 - **Page doesn't move** (thock, `VisualTestContext`): record the editor's text origin; toggle the
   right dock, ebb it, resize it; the origin is unchanged each time.
 - **Ebb on typing:** `simulate_keystrokes` text into a note, and the right dock is ebbed while
@@ -314,10 +338,16 @@ Each step ships on its own: Anchor without Tides is already the main fix.
   (`x` in `ThockBacklogPanel`) doesn't ebb.
 - **Flow:** advance the executor timer past `flow_back_after`, and the dock flows. `null` never
   flows. `cmd-alt-u` while ebbed flows the right side, focuses the Backlog, and keeps its selection.
-  `ctrl-cmd-\` flows both sides and leaves focus in the editor; pressed again, it ebbs them.
+  Clicking the tide mark brings the Desk back focused. `ctrl-cmd-\` flows both sides and leaves
+  focus in the editor; pressed again, it ebbs them. One press brings back a Desk ebbed for the
+  thread, and one press from inside a panel tucks away the other side. A new page opens centred
+  with a wide Desk waiting at the edge, even after it was held.
 - **Policies:** a `stay` side never ebbs on typing or for the thread.
 - **Thread:** composer-only requests no room; the first message requests 408; at 1512 the Desk ebbs
-  and flows back when the thread folds.
+  and flows back when the thread folds. With centred layout off the thread keeps its room at 1440
+  and floats at 760, with the Desk left alone.
+- **Centred by default:** a vault's first window opens with the page anchored; the next one is
+  left as it opens.
 - **Inactive:** with a split centre, typing doesn't ebb.
 - **Not persisted:** serialize the workspace while ebbed and restore it; the dock is open and
   flowing.
@@ -357,3 +387,17 @@ None.
     page is measured in characters.
 13. **Same measure everywhere:** the Inbox view, settings and any other single item use the page's
     column too.
+14. **Centred layout is on by default** for a vault, once, recorded per vault so turning it off
+    sticks. The anchored page is the normal state and the uncentred row the opt-out; without
+    this most people would never see Anchor or Tides.
+15. **No tides without an anchored page.** With centred layout off or a split, the thread keeps
+    its room when the centre holds `min_column` beside it and floats otherwise; no dock ebbs or
+    closes for it. V44's Desk collapse needed a persisted dock change and a second placement
+    rule for a case that is now an opt-out on a small window.
+16. **Flexible panels beside an anchored page are drawn at their stored or default size,** never
+    from their flex. The flex depends on the other dock's width, which depends on whether it
+    ebbs, which depends on this width. The cost: a flexible panel (only the terminal, if docked
+    on a side) can't be drag-resized beside an anchored page.
+17. **One owner of tide state:** `DeskLayout` in `crates/thock` owns each side's tide and sends it
+    to the workspace in the anchor. The workspace places the row as a pure function of the
+    anchor, the docks' widths and the focus, and never writes tide state; the dock keeps none.
