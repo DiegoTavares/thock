@@ -7750,8 +7750,9 @@ mod tests {
 
     #[gpui::test]
     async fn a_thread_with_messages_ebbs_the_desk_until_it_folds(cx: &mut TestAppContext) {
-        // V54 §4.3 on a 14-inch window: the thread's room comes from the
-        // Desk ebbing, not from closing it, and the Desk is back on fold.
+        // V54 §4.3 on a window too narrow for the thread beside the Desk
+        // and the page's narrowest: the thread's room comes from the Desk
+        // ebbing, not from closing it, and the Desk is back on fold.
         let mut setup = setup(cx).await;
         connect(&mut setup);
         add_desk(&mut setup);
@@ -7760,7 +7761,7 @@ mod tests {
             workspace.centered_layout = true;
             cx.notify();
         });
-        resize(&mut setup, 1512., 982.);
+        resize(&mut setup, 1100., 982.);
 
         setup.cx.simulate_keystrokes("ctrl-?");
         setup.cx.run_until_parked();

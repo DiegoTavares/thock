@@ -33,11 +33,13 @@ pub struct ThockSettingsContent {
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct PageSettingsContent {
-    /// Characters per line of the page, in the body font.
+    /// The page's widest, in characters per line of the body font. It
+    /// fills the room between the side panels up to this.
     ///
-    /// Default: 68
+    /// Default: 80
     pub measure: Option<u32>,
-    /// The page narrows to this before an agent thread floats over it.
+    /// The page narrows to this before a side panel tucks away to fit or
+    /// an agent thread floats over it.
     ///
     /// Default: 48
     pub min_measure: Option<u32>,

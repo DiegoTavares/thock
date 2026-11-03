@@ -111,7 +111,7 @@ impl settings::Settings for ThockSettings {
             openers: thock.openers.unwrap_or_default(),
             page: {
                 let page = thock.page.unwrap_or_default();
-                let measure = page.measure.unwrap_or(68).max(1);
+                let measure = page.measure.unwrap_or(80).max(1);
                 PageSettings {
                     measure,
                     min_measure: page.min_measure.unwrap_or(48).clamp(1, measure),

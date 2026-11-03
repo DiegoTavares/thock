@@ -1,8 +1,8 @@
 //! Where the centre's page sits between the docks when centred layout is on.
 //!
-//! The page is a column of fixed width pinned to the middle of the window,
-//! so opening, closing or resizing a dock changes the margins beside it and
-//! never the page itself. [`anchor`] decides the whole row on every render,
+//! The page fills the room between the docks up to its measure, centred on
+//! the window when the margins allow it. Tucking a dock away while you type
+//! never moves it. [`anchor`] decides the whole row on every render,
 //! from the docks' widths and each side's [`Tide`], which the view that sets
 //! the anchor owns.
 
@@ -19,7 +19,8 @@ pub const TIDE_MARK_WIDTH: Pixels = px(6.);
 /// serialized.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum Tide {
-    /// Drawn whole, or as its mark when it and the page don't fit.
+    /// Drawn whole, or as its mark when not even the page's narrowest fits
+    /// beside it.
     #[default]
     Flowing,
     /// Tucked away while you write: drawn as its tide mark.
@@ -41,9 +42,10 @@ pub struct TideSide {
 /// ([`crate::Workspace::set_center_anchor`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CenterAnchor {
-    /// The page's width.
+    /// The page's widest.
     pub column: Pixels,
-    /// How far the page may narrow before something floats over it.
+    /// How far the page may narrow before a dock ebbs to fit or something
+    /// floats over it.
     pub min_column: Pixels,
     /// Room to keep in the right margin beside the page, if any.
     pub thread: Option<ThreadRoom>,
@@ -86,8 +88,20 @@ impl AnchorSide {
         }
     }
 
+    /// What the side takes from the page's room: its open width, or its
+    /// mark when ebbed to fit. A side ebbed while you type keeps its open
+    /// width here, so the page doesn't move when it ebbs.
+    fn room(&self, ebbs_to_fit: bool) -> Pixels {
+        match self.open_width {
+            Some(_) if ebbs_to_fit => TIDE_MARK_WIDTH,
+            Some(width) => width,
+            None => Pixels::ZERO,
+        }
+    }
+
+    /// Held docks stay whole; an ebbed one is placed as if it still flowed.
     fn can_ebb_to_fit(&self) -> bool {
-        self.open_width.is_some() && !self.focused && self.may_ebb && self.tide == Tide::Flowing
+        self.open_width.is_some() && !self.focused && self.may_ebb && self.tide != Tide::Held
     }
 
     fn drawn(&self, ebbs_to_fit: bool, width: Pixels) -> SideLayout {
@@ -196,11 +210,12 @@ pub fn ordinary_row(centre: Pixels, min_column: Pixels, thread: Option<ThreadRoo
     }
 }
 
-/// Places the page: centred on the window when the margins allow it; else
-/// the docks that may ebb do; else the page shifts toward the side with
-/// room; else it narrows toward `min_column`; else the thread floats and the
-/// page takes what is left. A thread without messages never moves the page:
-/// it takes the room only when the right margin already has it free.
+/// Places the page: as wide as the room between the docks allows, up to
+/// `column`, and centred on the window when the margins allow it, else
+/// shifted toward the side with room. When not even `min_column` fits, the
+/// docks that may ebb do; else the thread floats and the page takes what is
+/// left. A thread without messages never moves the page: it takes the room
+/// only when the right margin already has it free.
 pub fn anchor(input: AnchorInput) -> AnchorLayout {
     let without_thread = || place(&input, Pixels::ZERO).unwrap_or_else(|| squeeze(&input));
     let Some(thread) = input.thread else {
@@ -216,44 +231,54 @@ pub fn anchor(input: AnchorInput) -> AnchorLayout {
     layout
 }
 
-/// Steps 1 to 4 with `room` kept in the right margin, or `None` when the
-/// page can't keep `min_column` beside it.
+/// Steps 1 to 3 with `room` kept in the right margin, or `None` when the
+/// page can't keep `min_column` beside it even with the docks that may ebb
+/// tucked away. A side ebbed while you type is placed as if it were open,
+/// so tucking it away never moves the page.
 fn place(input: &AnchorInput, room: Pixels) -> Option<AnchorLayout> {
     let row = input.row;
-    let column = input.column.min(row);
-    let centred = (input.centre - column / 2.).clamp(Pixels::ZERO, row - column);
-    let left_room = centred;
-    let right_room = row - centred - column;
-
-    let left_overflows = input.left.width(false) + ANCHOR_GAP > left_room;
-    let right_overflows = input.right.width(false) + room + ANCHOR_GAP > right_room;
-    let left_ebbs = left_overflows && input.left.can_ebb_to_fit();
-    let right_ebbs = right_overflows && input.right.can_ebb_to_fit();
-    let left_width = input.left.width(left_ebbs);
-    let right_width = input.right.width(right_ebbs);
-    let left = left_width + ANCHOR_GAP;
-    let right = right_width + room + ANCHOR_GAP;
-    let at = |x: Pixels, column: Pixels| AnchorLayout {
-        left: input.left.drawn(left_ebbs, left_width),
-        left_padding: x - left_width,
-        column,
-        right_padding: row - right_width - x - column,
-        right: input.right.drawn(right_ebbs, right_width),
-        thread_floats: false,
+    let at = |left_ebbs: bool, right_ebbs: bool| {
+        let left = input.left.room(left_ebbs) + ANCHOR_GAP;
+        let right = input.right.room(right_ebbs) + room + ANCHOR_GAP;
+        let free = row - left - right;
+        if free < input.min_column.min(input.column) {
+            return None;
+        }
+        let column = input.column.min(free);
+        let x = (input.centre - column / 2.)
+            .max(left)
+            .min(row - right - column);
+        let left_width = input.left.width(left_ebbs);
+        let right_width = input.right.width(right_ebbs);
+        Some(AnchorLayout {
+            left: input.left.drawn(left_ebbs, left_width),
+            left_padding: x - left_width,
+            column,
+            right_padding: row - right_width - x - column,
+            right: input.right.drawn(right_ebbs, right_width),
+            thread_floats: false,
+        })
     };
 
-    if left <= left_room && right <= right_room {
-        return Some(at(centred, column));
-    }
-    let free = row - left - right;
-    if column <= free {
-        let x = centred.max(left).min(row - right - column);
-        return Some(at(x, column));
-    }
-    (free >= input.min_column.min(column)).then(|| at(left, free))
+    // One side first: the right while the thread asks for room there, else
+    // the wider one.
+    let right_first = room > Pixels::ZERO || input.right.room(false) >= input.left.room(false);
+    let one_side = if right_first {
+        [(false, true), (true, false)]
+    } else {
+        [(true, false), (false, true)]
+    };
+    [(false, false)]
+        .into_iter()
+        .chain(one_side)
+        .chain([(true, true)])
+        .filter(|(left, right)| {
+            (!left || input.left.can_ebb_to_fit()) && (!right || input.right.can_ebb_to_fit())
+        })
+        .find_map(|(left, right)| at(left, right))
 }
 
-/// Step 5's last resort: no thread, and the page takes whatever is between
+/// The last resort: no thread, and the page takes whatever is between
 /// the docks' gaps, even below `min_column`. Docks drawn whole shrink
 /// together when even they don't fit, so neither runs off the window;
 /// marks keep their width.
@@ -292,7 +317,7 @@ fn squeeze(input: &AnchorInput) -> AnchorLayout {
 mod tests {
     use super::*;
 
-    const COLUMN: Pixels = px(740.);
+    const COLUMN: Pixels = px(870.);
     const MIN_COLUMN: Pixels = px(530.);
     const THREAD: Pixels = px(408.);
     const MESSAGES: ThreadRoom = ThreadRoom {
@@ -364,69 +389,92 @@ mod tests {
     }
 
     #[test]
-    fn the_page_is_centred_on_the_window_whatever_the_docks_are() {
-        let layout = row(1280., closed(), closed(), false);
-        assert_eq!(layout.column, COLUMN);
-        assert_eq!(page_x(&layout), centred(1280.));
-        for window in [1512., 1920.] {
-            for (left, right) in [
-                (closed(), closed()),
-                (open(255.), closed()),
-                (closed(), open(320.)),
-                (open(255.), open(320.)),
-                (stay(255.), stay(320.)),
-            ] {
-                let layout = row(window, left, right, false);
-                assert_eq!(layout.column, COLUMN, "{window}: {left:?} {right:?}");
-                assert_eq!(page_x(&layout), centred(window));
-                assert!(!layout.left.mark && !layout.right.mark);
-            }
+    fn the_page_is_centred_on_the_window_when_the_margins_allow() {
+        for (window, left, right) in [
+            (1280., closed(), closed()),
+            (1512., closed(), closed()),
+            (1512., open(255.), closed()),
+            (1920., open(255.), closed()),
+            (1920., closed(), open(320.)),
+            (1920., open(255.), open(320.)),
+            (1920., stay(255.), stay(320.)),
+        ] {
+            let layout = row(window, left, right, false);
+            assert_eq!(layout.column, COLUMN, "{window}: {left:?} {right:?}");
+            assert_eq!(page_x(&layout), centred(window));
+            assert!(!layout.left.mark && !layout.right.mark);
         }
     }
 
     #[test]
-    fn the_macbook_holds_the_rail_and_the_desk_beside_a_centred_page() {
-        // §4.4: margins of about 386 hold the rail at 255 and the Desk at 320.
+    fn the_page_shifts_toward_the_side_with_room_before_it_narrows() {
+        // 255 + 24 on the left, 320 + 24 on the right: 889 between them.
         let layout = row(1512., open(255.), open(320.), false);
-        assert_eq!(page_x(&layout), centred(1512.));
         assert_eq!(layout.column, COLUMN);
-        assert_eq!(layout.left_padding, centred(1512.) - px(255.));
-        assert_eq!(layout.right_padding, centred(1512.) - px(320.));
+        assert_eq!(page_x(&layout), px(1512.) - px(320.) - ANCHOR_GAP - COLUMN);
+        assert_eq!(layout.right_padding, ANCHOR_GAP);
     }
 
     #[test]
-    fn a_wide_desk_ebbs_to_fit_and_a_staying_one_shifts_the_page() {
+    fn the_page_fills_the_room_between_the_docks_up_to_its_measure() {
+        // A 440 Desk on the MacBook leaves 769 between the gaps.
         let layout = row(1512., open(255.), open(440.), false);
-        assert!(layout.right.mark);
-        assert!(!layout.left.mark);
-        assert_eq!(page_x(&layout), centred(1512.));
-
-        // A Desk that stays pushes the page left, as little as needed.
-        let layout = row(1512., open(255.), stay(440.), false);
-        assert!(!layout.right.mark);
-        assert_eq!(layout.column, COLUMN);
-        assert_eq!(page_x(&layout), px(1512.) - px(440.) - ANCHOR_GAP - COLUMN);
+        assert!(!layout.left.mark && !layout.right.mark);
+        assert_eq!(
+            layout.column,
+            px(1512.) - px(255.) - px(440.) - ANCHOR_GAP * 2.
+        );
+        assert_eq!(layout.left_padding, ANCHOR_GAP);
+        assert_eq!(layout.right_padding, ANCHOR_GAP);
     }
 
     #[test]
-    fn a_held_dock_is_never_ebbed_to_fit_and_the_page_makes_room() {
-        let layout = row(1512., open(255.), with_tide(Tide::Held, open(440.)), false);
-        assert!(!layout.right.mark);
-        assert_eq!(layout.right.width, px(440.));
+    fn a_dock_ebbs_to_fit_only_when_not_even_min_column_fits() {
+        // 1100 leaves 477 beside both docks: the wider one ebbs.
+        let layout = row(1100., open(255.), open(320.), false);
+        assert!(layout.right.mark && !layout.left.mark);
         assert_eq!(
-            page_x(&layout),
-            px(1512.) - px(440.) - ANCHOR_GAP - COLUMN,
-            "the page shifts for it"
+            layout.column,
+            px(1100.) - px(255.) - TIDE_MARK_WIDTH - ANCHOR_GAP * 2.
+        );
+
+        // A Desk that stays leaves it to the rail.
+        let layout = row(1100., open(255.), stay(320.), false);
+        assert!(layout.left.mark && !layout.right.mark);
+
+        // Not even one is enough at 700: both ebb.
+        let layout = row(700., open(255.), open(320.), false);
+        assert!(layout.left.mark && layout.right.mark);
+        assert_eq!(
+            layout.column,
+            px(700.) - (TIDE_MARK_WIDTH + ANCHOR_GAP) * 2.
         );
     }
 
     #[test]
-    fn an_ebbed_dock_is_a_mark_even_where_it_fits() {
-        let layout = row(1920., open(255.), with_tide(Tide::Ebbed, open(320.)), false);
-        assert!(layout.right.mark);
-        assert_eq!(layout.right.width, TIDE_MARK_WIDTH);
-        assert_eq!(layout.right.open_width, px(320.));
-        assert_eq!(page_x(&layout), centred(1920.));
+    fn a_held_dock_is_never_ebbed_to_fit() {
+        let layout = row(1100., open(255.), with_tide(Tide::Held, open(320.)), false);
+        assert!(!layout.right.mark);
+        assert_eq!(layout.right.width, px(320.));
+        assert!(layout.left.mark, "the other side makes room for it");
+    }
+
+    #[test]
+    fn an_ebbed_dock_is_a_mark_and_the_page_stays_where_it_was() {
+        for (window, width) in [(1512., 440.), (1920., 320.), (1100., 320.)] {
+            let flowing = row(window, open(255.), open(width), false);
+            let ebbed = row(
+                window,
+                open(255.),
+                with_tide(Tide::Ebbed, open(width)),
+                false,
+            );
+            assert!(ebbed.right.mark);
+            assert_eq!(ebbed.right.width, TIDE_MARK_WIDTH);
+            assert_eq!(ebbed.right.open_width, px(width));
+            assert_eq!(ebbed.column, flowing.column, "{window}");
+            assert_eq!(page_x(&ebbed), page_x(&flowing), "{window}");
+        }
     }
 
     #[test]
@@ -443,40 +491,45 @@ mod tests {
     }
 
     #[test]
+    fn a_focused_dock_is_kept_whole_where_it_would_ebb() {
+        let layout = row(1100., open(255.), focused(open(320.)), false);
+        assert!(!layout.right.mark);
+        assert_eq!(layout.right.width, px(320.));
+        assert!(layout.left.mark);
+    }
+
+    #[test]
     fn only_a_thread_with_room_ebbs_the_desk() {
         assert!(!row(1512., open(255.), open(320.), false).right.mark);
         assert!(row(1512., open(255.), open(320.), true).right.mark);
     }
 
     #[test]
-    fn a_thread_at_1512_ebbs_the_desk_and_shifts_the_page_left() {
-        // §4.4: mark + thread + gap ≈ 438 against a 386 margin.
+    fn a_thread_at_1512_ebbs_the_desk_and_the_page_fills_what_is_left() {
+        // 255 + 320 + 408 and the gaps leave 481 < min_column, so the Desk
+        // ebbs, and the page takes the 795 left.
         let layout = row(1512., open(255.), open(320.), true);
         assert!(layout.right.mark);
         assert!(!layout.thread_floats);
-        assert_eq!(layout.column, COLUMN);
-        let shift = centred(1512.) - page_x(&layout);
         assert_eq!(
-            shift,
-            TIDE_MARK_WIDTH + THREAD + ANCHOR_GAP - centred(1512.)
+            layout.column,
+            px(1512.) - px(255.) - TIDE_MARK_WIDTH - THREAD - ANCHOR_GAP * 2.
         );
         assert!(layout.right_padding >= THREAD + ANCHOR_GAP);
     }
 
     #[test]
-    fn a_thread_at_1920_ebbs_the_desk_and_keeps_the_page_centred() {
-        let layout = row(1920., open(255.), open(320.), true);
-        assert!(layout.right.mark);
-        assert_eq!(page_x(&layout), centred(1920.));
-    }
-
-    #[test]
-    fn a_staying_desk_shifts_the_page_for_the_thread_without_narrowing() {
-        // §4.4: 320 + 408 + 24 = 752 against a 590 margin: shift by 162.
-        let layout = row(1920., open(255.), stay(320.), true);
-        assert!(!layout.right.mark);
-        assert_eq!(layout.column, COLUMN);
-        assert_eq!(centred(1920.) - page_x(&layout), px(162.));
+    fn a_thread_at_1920_keeps_the_desk_and_shifts_the_page_left() {
+        for right in [open(320.), stay(320.)] {
+            let layout = row(1920., open(255.), right, true);
+            assert!(!layout.right.mark);
+            assert!(!layout.thread_floats);
+            assert_eq!(layout.column, COLUMN);
+            assert_eq!(
+                page_x(&layout),
+                px(1920.) - px(320.) - THREAD - ANCHOR_GAP - COLUMN
+            );
+        }
     }
 
     #[test]
@@ -495,24 +548,6 @@ mod tests {
         assert_eq!(
             layout.column,
             px(1280.) - px(255.) - px(320.) - ANCHOR_GAP * 2.
-        );
-    }
-
-    #[test]
-    fn at_1280_both_docks_ebb_to_keep_the_page_centred() {
-        let layout = row(1280., open(255.), open(320.), false);
-        assert!(layout.left.mark && layout.right.mark);
-        assert_eq!(layout.column, COLUMN);
-        assert_eq!(page_x(&layout), centred(1280.));
-    }
-
-    #[test]
-    fn an_ebbed_dock_takes_only_its_mark() {
-        let layout = row(1512., open(255.), with_tide(Tide::Ebbed, open(440.)), false);
-        assert!(layout.right.mark);
-        assert_eq!(
-            layout.right_padding,
-            px(1512.) - centred(1512.) - COLUMN - TIDE_MARK_WIDTH
         );
     }
 
@@ -587,14 +622,6 @@ mod tests {
         assert!(layout.left.mark);
         assert_eq!(layout.left.width, TIDE_MARK_WIDTH);
         assert_eq!(layout.right.width, px(300.) - TIDE_MARK_WIDTH);
-    }
-
-    #[test]
-    fn a_focused_dock_is_kept_whole_where_it_would_ebb() {
-        let layout = row(1512., open(255.), focused(open(440.)), false);
-        assert!(!layout.right.mark);
-        assert_eq!(layout.right.width, px(440.));
-        assert!(page_x(&layout) < centred(1512.), "the page shifts for it");
     }
 
     #[test]

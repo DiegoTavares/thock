@@ -656,6 +656,7 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
     use workspace::MultiWorkspace;
+    use workspace::center_anchor::ANCHOR_GAP;
     use workspace::dock::test::TestPanel;
 
     const NOTE: &str = "# Day planner\n- [ ] Workout\n- [ ] 15:00 – 15:30 Standup\n";
@@ -841,6 +842,10 @@ mod tests {
         })
     }
 
+    /// Too narrow for the page's narrowest beside the 300 rail and a 440
+    /// Desk, so the Desk ebbs to fit.
+    const SMALL_WINDOW: f32 = 1100.;
+
     fn advance(setup: &mut Setup, duration: Duration) {
         setup.cx.executor().advance_clock(duration);
         setup.cx.run_until_parked();
@@ -983,7 +988,7 @@ mod tests {
             let store = SettingsStore::test(cx);
             cx.set_global(store);
             let settings = ThockSettings::get_global(cx);
-            assert_eq!(settings.page.measure, 68);
+            assert_eq!(settings.page.measure, 80);
             assert_eq!(settings.page.min_measure, 48);
             let tides = settings.tides.expect("tides are on by default");
             assert_eq!(tides.left, TidePolicy::Ebb);
@@ -1122,9 +1127,9 @@ mod tests {
         setup.cx.run_until_parked();
         assert!(!ebbed(&setup, DockPosition::Right), "even for the tide key");
 
-        // Nor does it ebb to fit: on the 14-inch window with a wide Desk,
-        // the page shifts instead.
-        setup.cx.simulate_resize(size(px(1512.), px(982.)));
+        // Nor does it ebb to fit: on a small window with a wide Desk, the
+        // rail tucks away instead.
+        setup.cx.simulate_resize(size(px(SMALL_WINDOW), px(982.)));
         setup
             .workspace
             .update_in(&mut setup.cx, |workspace, window, cx| {
@@ -1141,7 +1146,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let mut setup = setup(cx).await;
-        setup.cx.simulate_resize(size(px(1512.), px(982.)));
+        setup.cx.simulate_resize(size(px(SMALL_WINDOW), px(982.)));
         setup
             .workspace
             .update_in(&mut setup.cx, |workspace, window, cx| {
@@ -1151,6 +1156,7 @@ mod tests {
             });
         setup.cx.run_until_parked();
         let left = page_left(&setup);
+        let width = column(&setup);
         assert!(ebbed(&setup, DockPosition::Right), "it ebbs to fit");
         assert_eq!(
             tide(&setup, DockPosition::Right),
@@ -1164,17 +1170,18 @@ mod tests {
             !ebbed(&setup, DockPosition::Right),
             "called, it comes back as a dock"
         );
-        assert!(page_left(&setup) < left, "and the page shifts to make room");
+        assert!(ebbed(&setup, DockPosition::Left), "the rail makes room");
+        assert!(page_left(&setup) < left, "and the page shifts into it");
 
         type_in_note(&mut setup, "b");
         assert!(ebbed(&setup, DockPosition::Right));
-        assert_eq!(page_left(&setup), left, "ebbing again centres the page");
+        assert_eq!(page_left(&setup), left, "ebbing again puts the page back");
 
         // Decision 18: a pause brings it back too.
         advance(&mut setup, Duration::from_secs(9));
         assert!(!ebbed(&setup, DockPosition::Right), "back after a pause");
         assert_eq!(tide(&setup, DockPosition::Right), Tide::Held);
-        assert!(page_left(&setup) < left, "with the page making room");
+        assert!(column(&setup) < width, "with the page giving way");
 
         type_in_note(&mut setup, "c");
         assert!(ebbed(&setup, DockPosition::Right));
@@ -1359,7 +1366,7 @@ mod tests {
             .read_with(&setup.cx, |desk, _| desk.backlog().clone());
         setup.cx.simulate_keystrokes("ctrl-alt-u");
         setup.cx.run_until_parked();
-        setup.cx.simulate_resize(size(px(1512.), px(982.)));
+        setup.cx.simulate_resize(size(px(SMALL_WINDOW), px(982.)));
         setup
             .workspace
             .update_in(&mut setup.cx, |workspace, window, cx| {
@@ -1449,7 +1456,7 @@ mod tests {
     #[gpui::test]
     async fn a_split_leaves_nothing_held_once_it_closes(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
-        setup.cx.simulate_resize(size(px(1512.), px(982.)));
+        setup.cx.simulate_resize(size(px(SMALL_WINDOW), px(982.)));
         setup
             .workspace
             .update_in(&mut setup.cx, |workspace, window, cx| {
@@ -1497,10 +1504,10 @@ mod tests {
         assert_eq!(rail_width(&setup), px(300.));
     }
 
-    /// The 14-inch window with a Desk too wide to sit beside the page, so
-    /// it waits at the edge as a mark.
+    /// A small window with a Desk too wide to sit beside the page's
+    /// narrowest, so it waits at the edge as a mark.
     fn wide_desk_on_a_small_window(setup: &mut Setup) {
-        setup.cx.simulate_resize(size(px(1512.), px(982.)));
+        setup.cx.simulate_resize(size(px(SMALL_WINDOW), px(982.)));
         setup
             .workspace
             .update_in(&mut setup.cx, |workspace, window, cx| {
@@ -1596,8 +1603,10 @@ mod tests {
         assert_eq!(syncs(&setup), before + 1, "both sides in one anchor");
     }
 
-    /// A thread with messages, as the chat would ask for it.
+    /// A thread with messages, as the chat would ask for it, on a window
+    /// too narrow for it beside the Desk and the page's narrowest.
     fn open_thread(setup: &mut Setup) {
+        setup.cx.simulate_resize(size(px(1400.), px(982.)));
         setup
             .layout
             .update(&mut setup.cx, |layout, cx| {
@@ -1624,6 +1633,7 @@ mod tests {
             !ebbed(&setup, DockPosition::Right),
             "one press brings it back"
         );
+        assert!(ebbed(&setup, DockPosition::Left), "the rail makes room");
         assert!(
             page_left(&setup) < centred,
             "and the page shifts to keep the thread's room"
@@ -1666,7 +1676,7 @@ mod tests {
     #[gpui::test]
     async fn a_new_page_opens_centred_with_a_wide_desk_waiting(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
-        setup.cx.simulate_resize(size(px(1512.), px(982.)));
+        setup.cx.simulate_resize(size(px(SMALL_WINDOW), px(982.)));
         setup
             .workspace
             .update_in(&mut setup.cx, |workspace, window, cx| {
@@ -1675,6 +1685,9 @@ mod tests {
                 })
             });
         setup.cx.run_until_parked();
+        let waiting = setup
+            .workspace
+            .read_with(&setup.cx, |workspace, _| workspace.anchor_layout());
         setup.cx.simulate_keystrokes("ctrl-alt-\\");
         setup.cx.run_until_parked();
         assert!(!ebbed(&setup, DockPosition::Right), "held by hand");
@@ -1700,13 +1713,9 @@ mod tests {
         assert!(ebbed(&setup, DockPosition::Right), "it waits at the edge");
         let layout = setup
             .workspace
-            .read_with(&setup.cx, |workspace, _| workspace.anchor_layout())
-            .expect("the page is anchored");
-        assert_eq!(
-            layout.left.width + layout.left_padding,
-            (px(1512.) - layout.column) / 2.,
-            "the new page is centred"
-        );
+            .read_with(&setup.cx, |workspace, _| workspace.anchor_layout());
+        assert!(layout.is_some(), "the page is anchored");
+        assert_eq!(layout, waiting, "where the first page was");
     }
 
     #[gpui::test]
@@ -1744,11 +1753,11 @@ mod tests {
         })
         .await;
         // The test font's `0` is 8.4 wide with 35 of padding: these measures
-        // give his 745 page and 540 narrowest from Plex Mono at 17.
+        // give his 866 widest and 540 narrowest from Plex Mono at 17.
         update_thock(&mut setup, |thock| {
             thock.body_font = Some("buffer".into());
             thock.page = Some(settings::PageSettingsContent {
-                measure: Some(85),
+                measure: Some(99),
                 min_measure: Some(60),
             });
         });
@@ -1767,7 +1776,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_macos_tide_key_brings_back_a_desk_ebbed_to_fit(cx: &mut TestAppContext) {
+    async fn the_macos_tide_key_tucks_both_sides_away_on_the_macbook(cx: &mut TestAppContext) {
         let mut setup = macbook_with_a_wide_desk(cx, 1512.).await;
         // His keys: the macOS defaults under the JetBrains base keymap.
         setup.cx.update(|_, cx| {
@@ -1781,33 +1790,42 @@ mod tests {
                 cx,
             );
         });
-        assert!(ebbed(&setup, DockPosition::Right));
+        assert!(!ebbed(&setup, DockPosition::Right) && !ebbed(&setup, DockPosition::Left));
+        setup.cx.simulate_keystrokes("ctrl-cmd-\\");
+        setup.cx.run_until_parked();
+        assert!(ebbed(&setup, DockPosition::Right) && ebbed(&setup, DockPosition::Left));
         setup.cx.simulate_keystrokes("ctrl-cmd-\\");
         setup.cx.run_until_parked();
         assert!(!ebbed(&setup, DockPosition::Right) && !ebbed(&setup, DockPosition::Left));
-        assert_eq!(tide(&setup, DockPosition::Right), Tide::Held);
     }
 
     #[gpui::test]
-    async fn on_the_macbook_a_pause_brings_the_wide_desk_back(cx: &mut TestAppContext) {
+    async fn on_the_macbook_the_page_fills_the_gap_and_holds_still_while_you_type(
+        cx: &mut TestAppContext,
+    ) {
         let mut setup = macbook_with_a_wide_desk(cx, 1512.).await;
-        assert!(ebbed(&setup, DockPosition::Right));
-        let centred = page_left(&setup);
-        type_in_note(&mut setup, "a");
-        assert!(ebbed(&setup, DockPosition::Left) && ebbed(&setup, DockPosition::Right));
-
-        advance(&mut setup, Duration::from_secs(9));
-        assert!(!ebbed(&setup, DockPosition::Left) && !ebbed(&setup, DockPosition::Right));
         let layout = setup
             .workspace
             .read_with(&setup.cx, |workspace, _| workspace.anchor_layout())
             .expect("the page is anchored");
-        assert_eq!(layout.right.width, px(439.), "the Desk whole");
-        assert!(page_left(&setup) < centred, "the page gives way");
+        assert!(!layout.left.mark && !layout.right.mark, "both sides whole");
+        assert_eq!(
+            layout.column,
+            px(1512.) - px(258.) - px(439.) - ANCHOR_GAP * 2.,
+            "the page takes the room between them"
+        );
+        assert_eq!(layout.left_padding, ANCHOR_GAP);
+        assert_eq!(layout.right_padding, ANCHOR_GAP);
+        let left = page_left(&setup);
 
-        type_in_note(&mut setup, "b");
-        assert!(ebbed(&setup, DockPosition::Right));
-        assert_eq!(page_left(&setup), centred, "and is centred again");
+        type_in_note(&mut setup, "a");
+        assert!(ebbed(&setup, DockPosition::Left) && ebbed(&setup, DockPosition::Right));
+        assert_eq!(page_left(&setup), left, "tucking them away moves nothing");
+        assert_eq!(column(&setup), layout.column);
+
+        advance(&mut setup, Duration::from_secs(9));
+        assert!(!ebbed(&setup, DockPosition::Left) && !ebbed(&setup, DockPosition::Right));
+        assert_eq!(page_left(&setup), left, "nor does a pause");
     }
 
     #[gpui::test]
@@ -1844,8 +1862,10 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_tide_key_brings_back_a_desk_ebbed_to_fit_on_the_macbook(cx: &mut TestAppContext) {
-        let mut setup = macbook_with_a_wide_desk(cx, 1512.).await;
+    async fn the_tide_key_brings_back_a_desk_ebbed_to_fit_on_a_small_window(
+        cx: &mut TestAppContext,
+    ) {
+        let mut setup = macbook_with_a_wide_desk(cx, SMALL_WINDOW).await;
         assert!(
             ebbed(&setup, DockPosition::Right),
             "the Desk waits at the edge"
@@ -1857,9 +1877,13 @@ mod tests {
             !ebbed(&setup, DockPosition::Right),
             "one press brings it back"
         );
-        assert!(!ebbed(&setup, DockPosition::Left), "and tucks nothing away");
+        assert!(ebbed(&setup, DockPosition::Left), "and the rail makes room");
+        let mark = setup
+            .cx
+            .debug_bounds("tide-mark")
+            .expect("the rail's mark is drawn");
         assert!(
-            setup.cx.debug_bounds("tide-mark").is_none(),
+            mark.origin.x < px(SMALL_WINDOW) / 2.,
             "and the Desk draws no mark over itself"
         );
     }
