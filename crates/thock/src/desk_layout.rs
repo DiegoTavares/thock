@@ -381,13 +381,21 @@ impl DeskLayout {
         });
     }
 
-    /// A pause (§5.4 rule 3): what typing ebbed comes back. A side ebbed to
-    /// fit stays a mark; it would only cover the page.
+    /// A pause (§5.4 rule 3): what typing ebbed comes back held, so a side
+    /// too wide to sit beside the page comes back too and the page gives
+    /// way until you type again (decision 18). While a thread with messages
+    /// is open the right side only flows, so the thread keeps its room.
     fn paused(&mut self, cx: &mut Context<Self>) {
         self.flow_back = None;
+        let thread_takes_the_right = self.thread.is_some_and(|thread| thread.moves_page);
         for position in SIDE_DOCKS {
             if self.tide(position) == Tide::Ebbed {
-                self.set_tide(position, Tide::Flowing, cx);
+                let tide = if position == DockPosition::Right && thread_takes_the_right {
+                    Tide::Flowing
+                } else {
+                    Tide::Held
+                };
+                self.set_tide(position, tide, cx);
             }
         }
     }
@@ -1129,7 +1137,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn a_wide_desk_on_a_small_window_waits_at_the_edge_until_called(cx: &mut TestAppContext) {
+    async fn a_wide_desk_on_a_small_window_comes_back_when_called_or_after_a_pause(
+        cx: &mut TestAppContext,
+    ) {
         let mut setup = setup(cx).await;
         setup.cx.simulate_resize(size(px(1512.), px(982.)));
         setup
@@ -1148,13 +1158,6 @@ mod tests {
             "decided on each render, never stored"
         );
 
-        type_in_note(&mut setup, "a");
-        advance(&mut setup, Duration::from_secs(9));
-        assert!(
-            ebbed(&setup, DockPosition::Right),
-            "a pause doesn't bring it over the page"
-        );
-
         setup.cx.simulate_keystrokes("ctrl-alt-\\");
         setup.cx.run_until_parked();
         assert!(
@@ -1166,6 +1169,16 @@ mod tests {
         type_in_note(&mut setup, "b");
         assert!(ebbed(&setup, DockPosition::Right));
         assert_eq!(page_left(&setup), left, "ebbing again centres the page");
+
+        // Decision 18: a pause brings it back too.
+        advance(&mut setup, Duration::from_secs(9));
+        assert!(!ebbed(&setup, DockPosition::Right), "back after a pause");
+        assert_eq!(tide(&setup, DockPosition::Right), Tide::Held);
+        assert!(page_left(&setup) < left, "with the page making room");
+
+        type_in_note(&mut setup, "c");
+        assert!(ebbed(&setup, DockPosition::Right));
+        assert_eq!(page_left(&setup), left);
     }
 
     #[gpui::test]
@@ -1720,6 +1733,135 @@ mod tests {
         assert!(!ebbed(&setup, DockPosition::Right), "it comes back");
         let desk = setup.desk.clone();
         assert!(is_focused(&mut setup, &desk), "focused");
+    }
+
+    /// Diego's MacBook: a 258 rail, a 439 Desk and monospace notes, on
+    /// `window` wide.
+    async fn macbook_with_a_wide_desk(cx: &mut TestAppContext, window: f32) -> Setup {
+        let mut setup = setup_with_rail(cx, &today_note(), |cx| TestPanel {
+            default_size: px(258.),
+            ..TestPanel::new(DockPosition::Left, 100, cx)
+        })
+        .await;
+        // The test font's `0` is 8.4 wide with 35 of padding: these measures
+        // give his 745 page and 540 narrowest from Plex Mono at 17.
+        update_thock(&mut setup, |thock| {
+            thock.body_font = Some("buffer".into());
+            thock.page = Some(settings::PageSettingsContent {
+                measure: Some(85),
+                min_measure: Some(60),
+            });
+        });
+        setup.cx.simulate_resize(size(px(window), px(982.)));
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.right_dock().update(cx, |dock, cx| {
+                    dock.resize_active_panel(Some(px(439.)), None, window, cx)
+                })
+            });
+        setup.cx.run_until_parked();
+        setup.cx.focus(&setup.editor);
+        setup.cx.run_until_parked();
+        setup
+    }
+
+    #[gpui::test]
+    async fn the_macos_tide_key_brings_back_a_desk_ebbed_to_fit(cx: &mut TestAppContext) {
+        let mut setup = macbook_with_a_wide_desk(cx, 1512.).await;
+        // His keys: the macOS defaults under the JetBrains base keymap.
+        setup.cx.update(|_, cx| {
+            cx.clear_key_bindings();
+            bind(
+                include_str!("../../../assets/keymaps/default-macos.json"),
+                cx,
+            );
+            bind(
+                include_str!("../../../assets/keymaps/macos/jetbrains.json"),
+                cx,
+            );
+        });
+        assert!(ebbed(&setup, DockPosition::Right));
+        setup.cx.simulate_keystrokes("ctrl-cmd-\\");
+        setup.cx.run_until_parked();
+        assert!(!ebbed(&setup, DockPosition::Right) && !ebbed(&setup, DockPosition::Left));
+        assert_eq!(tide(&setup, DockPosition::Right), Tide::Held);
+    }
+
+    #[gpui::test]
+    async fn on_the_macbook_a_pause_brings_the_wide_desk_back(cx: &mut TestAppContext) {
+        let mut setup = macbook_with_a_wide_desk(cx, 1512.).await;
+        assert!(ebbed(&setup, DockPosition::Right));
+        let centred = page_left(&setup);
+        type_in_note(&mut setup, "a");
+        assert!(ebbed(&setup, DockPosition::Left) && ebbed(&setup, DockPosition::Right));
+
+        advance(&mut setup, Duration::from_secs(9));
+        assert!(!ebbed(&setup, DockPosition::Left) && !ebbed(&setup, DockPosition::Right));
+        let layout = setup
+            .workspace
+            .read_with(&setup.cx, |workspace, _| workspace.anchor_layout())
+            .expect("the page is anchored");
+        assert_eq!(layout.right.width, px(439.), "the Desk whole");
+        assert!(page_left(&setup) < centred, "the page gives way");
+
+        type_in_note(&mut setup, "b");
+        assert!(ebbed(&setup, DockPosition::Right));
+        assert_eq!(page_left(&setup), centred, "and is centred again");
+    }
+
+    #[gpui::test]
+    async fn a_pause_leaves_the_thread_its_room(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        open_thread(&mut setup);
+        assert!(ebbed(&setup, DockPosition::Right), "the Desk makes room");
+        type_in_note(&mut setup, "a");
+        advance(&mut setup, Duration::from_secs(9));
+        assert!(!ebbed(&setup, DockPosition::Left), "the rail comes back");
+        assert_eq!(tide(&setup, DockPosition::Left), Tide::Held);
+        assert_eq!(tide(&setup, DockPosition::Right), Tide::Flowing);
+        assert!(
+            ebbed(&setup, DockPosition::Right),
+            "the Desk stays tucked away for the thread"
+        );
+        let layout = setup
+            .workspace
+            .read_with(&setup.cx, |workspace, _| workspace.anchor_layout())
+            .expect("the page is anchored");
+        assert!(!layout.thread_floats);
+    }
+
+    #[gpui::test]
+    async fn the_tide_key_on_the_24_inch_tucks_both_sides_away(cx: &mut TestAppContext) {
+        let mut setup = macbook_with_a_wide_desk(cx, 1920.).await;
+        assert!(!ebbed(&setup, DockPosition::Right) && !ebbed(&setup, DockPosition::Left));
+        setup.cx.simulate_keystrokes("ctrl-alt-\\");
+        setup.cx.run_until_parked();
+        assert!(ebbed(&setup, DockPosition::Right) && ebbed(&setup, DockPosition::Left));
+        setup.cx.simulate_keystrokes("ctrl-alt-\\");
+        setup.cx.run_until_parked();
+        assert!(!ebbed(&setup, DockPosition::Right) && !ebbed(&setup, DockPosition::Left));
+    }
+
+    #[gpui::test]
+    async fn the_tide_key_brings_back_a_desk_ebbed_to_fit_on_the_macbook(cx: &mut TestAppContext) {
+        let mut setup = macbook_with_a_wide_desk(cx, 1512.).await;
+        assert!(
+            ebbed(&setup, DockPosition::Right),
+            "the Desk waits at the edge"
+        );
+        assert!(!ebbed(&setup, DockPosition::Left));
+        setup.cx.simulate_keystrokes("ctrl-alt-\\");
+        setup.cx.run_until_parked();
+        assert!(
+            !ebbed(&setup, DockPosition::Right),
+            "one press brings it back"
+        );
+        assert!(!ebbed(&setup, DockPosition::Left), "and tucks nothing away");
+        assert!(
+            setup.cx.debug_bounds("tide-mark").is_none(),
+            "and the Desk draws no mark over itself"
+        );
     }
 
     /// A new window on the folder at `root` of `fs`, as it stands once the
