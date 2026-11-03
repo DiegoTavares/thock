@@ -1159,6 +1159,41 @@ impl Dock {
         }
     }
 
+    /// Resizes the active panel, or with `all` every panel in the dock, to
+    /// `size` in pixels, keeping a flexible panel's flex for Zed's own row:
+    /// beside an anchored page every side panel is drawn at its size.
+    pub fn resize_by_pixels(
+        &mut self,
+        all: bool,
+        size: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active_panel_index) = self.active_panel_index else {
+            return;
+        };
+        let size = size.max(RESIZE_HANDLE_SIZE).round();
+        let mut size_states_to_persist = Vec::new();
+        for (index, entry) in self.panel_entries.iter_mut().enumerate() {
+            if all || index == active_panel_index {
+                entry.size_state.size = Some(size);
+                entry.panel.size_state_changed(window, cx);
+                size_states_to_persist.push((entry.panel.panel_key(), entry.size_state));
+            }
+        }
+        let workspace = self.workspace.clone();
+        cx.defer(move |cx| {
+            if let Some(workspace) = workspace.upgrade() {
+                workspace.update(cx, |workspace, cx| {
+                    for (panel_key, size_state) in size_states_to_persist {
+                        workspace.persist_panel_size_state(panel_key, size_state, cx);
+                    }
+                });
+            }
+        });
+        cx.notify();
+    }
+
     pub fn resize_all_panels(
         &mut self,
         size: Option<Pixels>,
@@ -1265,7 +1300,7 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
         // The workspace placed this frame's row before its docks draw.
         let row = self
@@ -1303,14 +1338,9 @@ impl Render for Dock {
         }
         if let Some(entry) = self.visible_entry() {
             let position = self.position;
-            // Beside an anchored page a flexible panel is drawn at its size,
-            // not the flex a drag would change, so it has no handle there.
-            let flexible_beside_page = row.anchored().is_some()
-                && panel_uses_flexible_width(position, entry.panel.as_ref(), window, cx);
             let create_resize_handle = || {
                 let handle = div()
                     .id("resize-handle")
-                    .debug_selector(|| "resize-handle".into())
                     .on_drag(DraggedDock(position), |dock, _, _, cx| {
                         cx.stop_propagation();
                         cx.new(|_| dock.clone())
@@ -1400,7 +1430,7 @@ impl Render for Dock {
                                 .cached(StyleRefinement::default().v_flex().size_full()),
                         ),
                 )
-                .when(self.resizable(cx) && !flexible_beside_page, |this| {
+                .when(self.resizable(cx), |this| {
                     this.child(create_resize_handle())
                 })
         } else {

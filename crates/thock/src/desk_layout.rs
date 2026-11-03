@@ -8,15 +8,16 @@
 use editor::{Editor, EditorEvent, EditorSettings};
 use gpui::{
     App, AppContext as _, Context, Entity, EntityId, Focusable as _, Font, Pixels, Subscription,
-    Task, TaskExt as _, WeakEntity, Window, actions,
+    Task, WeakEntity, Window, actions,
 };
 use settings::{Settings as _, SettingsStore, TidePolicy};
 use theme_settings::ThemeSettings;
 use util::ResultExt as _;
+use util::rel_path::RelPath;
 use workspace::dock::{Dock, DockPosition};
 use workspace::{CenterAnchor, CenterRow, ThreadRoom, Tide, TideSide, Workspace};
 
-use crate::vault::{Vault, VaultStatus};
+use crate::vault::{VAULT_CONFIG_FILE, VAULT_MARKER_DIR};
 use crate::{ChatPanel, DeskPanel, PageSettings, ThockSettings};
 
 actions!(
@@ -82,6 +83,8 @@ pub struct DeskLayout {
     sync_pending: bool,
     #[cfg(test)]
     syncs: usize,
+    #[cfg(test)]
+    vault_checks: usize,
     /// The thread's room as last asked for.
     thread: Option<ThreadRoom>,
     /// The note in the centre whose typing ebbs the sides.
@@ -133,15 +136,18 @@ impl DeskLayout {
                     this.measure(cx);
                     this.sync(cx);
                 }),
-                // A folder can become a vault while it is open.
-                cx.subscribe(&project, |this: &mut Self, _, event, cx| {
-                    if matches!(
-                        event,
-                        project::Event::WorktreeAdded(_)
-                            | project::Event::WorktreeUpdatedEntries(..)
-                    ) {
-                        this.default_to_centred(cx);
+                // A folder can become a vault while it is open, and a vault's
+                // marker can come in with the worktree's first scan.
+                cx.subscribe(&project, |this: &mut Self, _, event, cx| match event {
+                    project::Event::WorktreeAdded(_) => this.default_to_centred(cx),
+                    project::Event::WorktreeUpdatedEntries(_, changes)
+                        if changes
+                            .iter()
+                            .any(|(path, _, _)| is_vault_marker(path.as_unix_str())) =>
+                    {
+                        this.default_to_centred(cx)
                     }
+                    _ => {}
                 }),
             ];
             for (position, dock, focus) in docks {
@@ -173,6 +179,8 @@ impl DeskLayout {
                 sync_pending: false,
                 #[cfg(test)]
                 syncs: 0,
+                #[cfg(test)]
+                vault_checks: 0,
                 thread: None,
                 editor: None,
                 page: None,
@@ -389,7 +397,7 @@ impl DeskLayout {
     /// so the page makes room for it rather than tuck it away again when
     /// the focus leaves (§4.2).
     fn focus_entered(&mut self, position: DockPosition, window: &Window, cx: &mut Context<Self>) {
-        if self.is_anchored(cx) && self.place(Some(position), window, cx).tide_mark(position) {
+        if self.place(Some(position), window, cx).tide_mark(position) {
             self.set_tide(position, Tide::Held, cx);
         }
     }
@@ -421,7 +429,8 @@ impl DeskLayout {
         let Some(tides) = ThockSettings::get_global(cx).tides else {
             return;
         };
-        if !self.is_anchored(cx) {
+        // Nothing ebbs without an anchored page (§5.6).
+        if row.anchored().is_none() {
             return;
         }
         for position in SIDE_DOCKS {
@@ -495,39 +504,46 @@ impl DeskLayout {
     }
 
     /// Turns centred layout on for a vault whose workspace never chose it
-    /// (§6): the anchored page is Thock's layout. Runs when the workspace
-    /// opens and when its folder changes, so a folder that becomes a vault
-    /// is centred too. Once the person toggles it, it is theirs.
+    /// (§6): the anchored page is Thock's layout. It is saved as the
+    /// workspace's choice, so the next launch restores it before the first
+    /// frame and a later toggle wins. Runs once the restored workspace has
+    /// its own setting and again when the vault's marker appears, so a
+    /// folder that becomes a vault is centred too. Remote projects are left
+    /// alone.
     fn default_to_centred(&mut self, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
+        #[cfg(test)]
+        {
+            self.vault_checks += 1;
+        }
         let workspace_ref = workspace.read(cx);
-        if workspace_ref.centered_layout || workspace_ref.centered_layout_chosen() {
+        if workspace_ref.centered_layout_chosen() {
             return;
         }
         let project = workspace_ref.project().read(cx);
-        let Some(root) = project
-            .visible_worktrees(cx)
-            .next()
-            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
-        else {
+        if !project.is_local() {
+            return;
+        }
+        // The worktree already holds the marker, so this needs no file read
+        // and lands before the window's first frame once it is scanned.
+        let config_path = format!("{VAULT_MARKER_DIR}/{VAULT_CONFIG_FILE}");
+        let Some(config) = RelPath::from_unix_str(&config_path).log_err() else {
             return;
         };
-        let fs = project.fs().clone();
-        let workspace = workspace.downgrade();
-        cx.spawn(async move |_, cx| {
-            if let VaultStatus::Valid(_) = Vault::detect_in(fs.as_ref(), &root).await {
-                workspace.update(cx, |workspace, cx| {
-                    if !workspace.centered_layout && !workspace.centered_layout_chosen() {
-                        workspace.centered_layout = true;
-                        cx.notify();
-                    }
-                })?;
-            }
-            anyhow::Ok(())
-        })
-        .detach_and_log_err(cx);
+        let is_vault = project
+            .visible_worktrees(cx)
+            .next()
+            .is_some_and(|worktree| {
+                worktree
+                    .read(cx)
+                    .entry_for_path(config)
+                    .is_some_and(|entry| entry.is_file())
+            });
+        if is_vault {
+            workspace.update(cx, |workspace, cx| workspace.set_centered_layout(true, cx));
+        }
     }
 
     /// Follows the Desk when it is the dock's panel, so its tide mark
@@ -562,6 +578,13 @@ impl DeskLayout {
         let waiting = desk.read(cx).has_waiting();
         dock.update(cx, |dock, cx| dock.set_tide_waiting(waiting, cx));
     }
+}
+
+/// Whether a changed path is the vault's marker folder or inside it.
+fn is_vault_marker(unix_path: &str) -> bool {
+    unix_path
+        .strip_prefix(VAULT_MARKER_DIR)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 /// The page's column and the narrowest it may get (§4.1): the measure in
@@ -1699,19 +1722,27 @@ mod tests {
         assert!(is_focused(&mut setup, &desk), "focused");
     }
 
-    /// A new window on the folder at `root` of `fs`, as it opens before any
-    /// setup. Only the project's file system has it, not the disk.
+    /// A new window on the folder at `root` of `fs`, as it stands once the
+    /// window is built and before anything else runs. Only the project's
+    /// file system has the folder, not the disk.
     async fn open_folder(
         fs: &std::sync::Arc<FakeFs>,
         root: &str,
         cx: &mut TestAppContext,
     ) -> (Entity<Workspace>, Entity<Project>, VisualTestContext) {
         let project = Project::test(fs.clone(), [std::path::Path::new(root)], cx).await;
-        let (multi_workspace, cx) =
-            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-        cx.run_until_parked();
-        let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
-        (workspace, project, cx.clone())
+        // `add_window` runs no task before it returns, so whatever the
+        // workspace looks like here is what its first frame draws.
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window
+            .read_with(cx, |multi, _| multi.workspace().clone())
+            .expect("the window is open");
+        (
+            workspace,
+            project,
+            VisualTestContext::from_window(window.into(), cx),
+        )
     }
 
     fn centred(workspace: &Entity<Workspace>, window: &VisualTestContext) -> bool {
@@ -1728,7 +1759,15 @@ mod tests {
         )
         .await;
         let (workspace, project, mut window) = open_folder(&fs, "/vault", cx).await;
-        assert!(centred(&workspace, &window), "never chosen, so on");
+        assert!(
+            centred(&workspace, &window),
+            "on before the window's first frame"
+        );
+        assert!(
+            workspace.read_with(&window, |workspace, _| workspace.centered_layout_chosen()),
+            "and saved, so the next launch restores it"
+        );
+        window.run_until_parked();
         let project_path = project
             .read_with(&window, |project, cx| {
                 project.find_project_path("/vault/note.md", cx)
@@ -1747,18 +1786,34 @@ mod tests {
         workspace.update_in(&mut window, |workspace, window, cx| {
             workspace.toggle_centered_layout(&workspace::ToggleCenteredLayout, window, cx)
         });
-        fs.insert_file("/vault/other.md", b"More".to_vec()).await;
+        fs.insert_file(
+            "/vault/.thock/config.toml",
+            b"schema = 1\n# edited\n".to_vec(),
+        )
+        .await;
         window.run_until_parked();
         assert!(!centred(&workspace, &window));
     }
 
     #[gpui::test]
     async fn a_folder_that_becomes_a_vault_is_centred(cx: &mut TestAppContext) {
-        init_test(cx);
+        let layouts = init_test(cx);
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree("/notes", json!({ "note.md": "Hi" })).await;
         let (workspace, _, window) = open_folder(&fs, "/notes", cx).await;
+        window.run_until_parked();
         assert!(!centred(&workspace, &window), "not a vault yet");
+        let layout = layouts.borrow().clone().expect("the workspace is followed");
+        let checks = |window: &VisualTestContext| {
+            layout
+                .read_with(window, |layout, _| layout.vault_checks)
+                .expect("the layout lives as long as the workspace")
+        };
+        let before = checks(&window);
+
+        fs.insert_file("/notes/other.md", b"More".to_vec()).await;
+        window.run_until_parked();
+        assert_eq!(checks(&window), before, "a note is no reason to look");
 
         fs.insert_tree(
             "/notes",
@@ -1767,5 +1822,13 @@ mod tests {
         .await;
         window.run_until_parked();
         assert!(centred(&workspace, &window));
+    }
+
+    #[test]
+    fn only_the_marker_folder_is_the_vault_marker() {
+        assert!(is_vault_marker(".thock"));
+        assert!(is_vault_marker(".thock/config.toml"));
+        assert!(!is_vault_marker(".thocks/config.toml"));
+        assert!(!is_vault_marker("notes/.thock"));
     }
 }

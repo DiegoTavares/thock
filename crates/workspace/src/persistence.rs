@@ -1600,9 +1600,10 @@ impl WorkspaceDb {
                         bottom_dock_zoom,
                         session_id,
                         window_id,
+                        centered_layout,
                         timestamp
                     )
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, CURRENT_TIMESTAMP)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, CURRENT_TIMESTAMP)
                     ON CONFLICT DO
                     UPDATE SET
                         paths = ?2,
@@ -1621,6 +1622,7 @@ impl WorkspaceDb {
                         bottom_dock_zoom = ?15,
                         session_id = ?16,
                         window_id = ?17,
+                        centered_layout = COALESCE(?18, centered_layout),
                         timestamp = CURRENT_TIMESTAMP
                 );
                 let mut prepared_query = conn.exec_bound(query)?;
@@ -1634,6 +1636,7 @@ impl WorkspaceDb {
                     workspace.docks,
                     workspace.session_id,
                     workspace.window_id,
+                    workspace.centered_layout,
                 );
 
                 prepared_query(args).context("Updating workspace")?;
@@ -4741,13 +4744,14 @@ mod tests {
         let project = Project::test(fs.clone(), [], cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
         let db = cx.update(|_, cx| WorkspaceDb::global(cx));
         let workspace_id = db.next_id().await.unwrap();
         workspace.update(cx, |workspace, _| workspace.set_database_id(workspace_id));
         let flush = |cx: &mut gpui::VisualTestContext| {
-            multi_workspace.update_in(cx, |mw, window, cx| {
-                mw.workspace().update(cx, |workspace, cx| {
+            multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
                     workspace.flush_serialization(window, cx)
                 })
             })
@@ -4769,6 +4773,37 @@ mod tests {
             Some(false),
             "turned off by hand"
         );
+    }
+
+    #[gpui::test]
+    async fn test_centered_layout_chosen_before_the_workspace_has_an_id_is_saved(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs.clone(), [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.database_id().is_none());
+            workspace.toggle_centered_layout(&crate::ToggleCenteredLayout, window, cx);
+        });
+        cx.run_until_parked();
+
+        let db = cx.update(|_, cx| WorkspaceDb::global(cx));
+        let workspace_id = db.next_id().await.unwrap();
+        workspace.update(cx, |workspace, _| workspace.set_database_id(workspace_id));
+        let flush = multi_workspace.update_in(cx, |multi_workspace, window, cx| {
+            multi_workspace.workspace().update(cx, |workspace, cx| {
+                workspace.flush_serialization(window, cx)
+            })
+        });
+        flush.await;
+        let serialized = db.workspace_for_id(workspace_id).expect("saved");
+        assert_eq!(serialized.centered_layout, Some(true));
     }
 
     #[gpui::test]

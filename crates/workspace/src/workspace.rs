@@ -1398,9 +1398,6 @@ pub struct Workspace {
     center_anchor: Option<CenterAnchor>,
     /// The row the last render placed; docks read it while they draw.
     center_row: CenterRow,
-    /// The centre pane group's width as last drawn, which is what Zed's own
-    /// row leaves between the docks.
-    center_width: Pixels,
     titlebar_focus_handle: FocusHandle,
     region_focus_handles: RegionFocusHandles,
     notifications: Notifications,
@@ -1860,7 +1857,6 @@ impl Workspace {
             center_overlay: None,
             center_anchor: None,
             center_row: CenterRow::default(),
-            center_width: Pixels::ZERO,
             titlebar_focus_handle: cx.focus_handle(),
             region_focus_handles: RegionFocusHandles::new(cx),
             notifications: Notifications::default(),
@@ -2474,6 +2470,9 @@ impl Workspace {
             .stored_panel_size_state(panel.as_ref())
             .unwrap_or_default();
         let position = dock.position();
+        if position.axis() == Axis::Horizontal && self.sizes_docks_by_pixels(cx) {
+            return self.dock_width(position, window, cx);
+        }
 
         let use_flex = panel.has_flexible_size(window, cx);
 
@@ -2507,6 +2506,12 @@ impl Workspace {
                 .size
                 .unwrap_or_else(|| panel.default_size(window, cx)),
         )
+    }
+
+    /// Whether the side docks are drawn at their pixel size, flexible ones
+    /// included: beside an anchored page (`center_anchor`).
+    fn sizes_docks_by_pixels(&self, cx: &App) -> bool {
+        self.center_anchor.is_some() && self.is_page_anchored(cx)
     }
 
     pub fn dock_flex_for_size(
@@ -8097,11 +8102,16 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.centered_layout = !self.centered_layout;
+        self.set_centered_layout(!self.centered_layout, cx);
+    }
+
+    /// Turns centred layout on or off and saves it as this workspace's
+    /// choice, which a later restore keeps.
+    pub fn set_centered_layout(&mut self, centered_layout: bool, cx: &mut Context<Self>) {
+        self.centered_layout = centered_layout;
         self.centered_layout_chosen = true;
         if let Some(database_id) = self.database_id() {
             let db = WorkspaceDb::global(cx);
-            let centered_layout = self.centered_layout;
             cx.background_spawn(async move {
                 db.set_centered_layout(database_id, centered_layout).await
             })
@@ -8200,7 +8210,7 @@ impl Workspace {
         };
         if !self.is_page_anchored(cx) {
             return ordinary_row(
-                self.center_width,
+                self.ordinary_center_width(window, cx),
                 center_anchor.min_column,
                 center_anchor.thread,
             );
@@ -8234,6 +8244,23 @@ impl Workspace {
             min_column: center_anchor.min_column,
             thread: center_anchor.thread,
         }))
+    }
+
+    /// What Zed's own row leaves between the side docks this frame: the
+    /// row less each open dock as `render_dock` sizes it, a flexible one by
+    /// its flex (`dock_size`), never under the panel's minimum.
+    fn ordinary_center_width(&self, window: &Window, cx: &App) -> Pixels {
+        let dock_width = |position: DockPosition| {
+            let dock = self.dock_at_position(position).read(cx);
+            if self.zoomed_position == Some(position) || !dock.is_open() {
+                return Pixels::ZERO;
+            }
+            let width = self.dock_size(dock, window, cx).unwrap_or_default();
+            dock.visible_panel()
+                .and_then(|panel| panel.min_size(window, cx))
+                .map_or(width, |min| width.max(min))
+        };
+        self.row_width(window) - dock_width(DockPosition::Left) - dock_width(DockPosition::Right)
     }
 
     /// Places this frame's row; docks read it back while they draw.
@@ -8530,26 +8557,6 @@ impl Workspace {
             .children(left)
             .child(self.render_center(render_cx, window, cx))
             .children(right)
-            .child({
-                let this = cx.entity();
-                canvas(
-                    move |bounds, _, cx| {
-                        this.update(cx, |this, cx| {
-                            if this.center_width != bounds.size.width {
-                                this.center_width = bounds.size.width;
-                                // The thread's room outside an anchored page
-                                // is decided with this width.
-                                if this.center_anchor.is_some() {
-                                    cx.notify();
-                                }
-                            }
-                        })
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full()
-            })
             .children(
                 self.center_overlay
                     .clone()
@@ -8682,11 +8689,14 @@ impl Workspace {
         });
 
         let flex_grow = self.dock_flex_for_size(DockPosition::Left, size, window, cx);
+        let by_pixels = self.sizes_docks_by_pixels(cx);
         self.left_dock.update(cx, |left_dock, cx| {
-            if WorkspaceSettings::get_global(cx)
+            let all = WorkspaceSettings::get_global(cx)
                 .resize_all_panels_in_dock
-                .contains(&DockPosition::Left)
-            {
+                .contains(&DockPosition::Left);
+            if by_pixels {
+                left_dock.resize_by_pixels(all, size, window, cx);
+            } else if all {
                 left_dock.resize_all_panels(Some(size), flex_grow, window, cx);
             } else {
                 left_dock.resize_active_panel(Some(size), flex_grow, window, cx);
@@ -8706,11 +8716,14 @@ impl Workspace {
             }
         });
         let flex_grow = self.dock_flex_for_size(DockPosition::Right, size, window, cx);
+        let by_pixels = self.sizes_docks_by_pixels(cx);
         self.right_dock.update(cx, |right_dock, cx| {
-            if WorkspaceSettings::get_global(cx)
+            let all = WorkspaceSettings::get_global(cx)
                 .resize_all_panels_in_dock
-                .contains(&DockPosition::Right)
-            {
+                .contains(&DockPosition::Right);
+            if by_pixels {
+                right_dock.resize_by_pixels(all, size, window, cx);
+            } else if all {
                 right_dock.resize_all_panels(Some(size), flex_grow, window, cx);
             } else {
                 right_dock.resize_active_panel(Some(size), flex_grow, window, cx);
@@ -13852,7 +13865,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_uncentred_thread_room_is_measured_on_the_drawn_centre(
+    async fn test_uncentred_thread_room_is_decided_from_this_frames_docks(
         cx: &mut gpui::TestAppContext,
     ) {
         init_test(cx);
@@ -13861,8 +13874,21 @@ mod tests {
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
         cx.simulate_resize(size(px(1600.), px(1000.)));
-        let rail = workspace.update_in(cx, |workspace, window, cx| {
-            let rail = cx.new(|cx| TestPanel::new_flexible(DockPosition::Left, 100, cx));
+        cx.run_until_parked();
+        let anchor = CenterAnchor {
+            column: px(700.),
+            min_column: px(500.),
+            thread: Some(ThreadRoom {
+                width: px(408.),
+                moves_page: true,
+            }),
+            left: TideSide::default(),
+            right: TideSide::default(),
+        };
+        // Docks opened and the room asked for in one update: the row is
+        // decided before anything is drawn with them.
+        let (rail, row) = workspace.update_in(cx, |workspace, window, cx| {
+            let rail = cx.new(|cx| TestPanel::new(DockPosition::Left, 100, cx));
             workspace.add_panel(rail.clone(), window, cx);
             let desk = cx.new(|cx| TestPanel {
                 default_size: px(320.),
@@ -13878,64 +13904,54 @@ mod tests {
                     dock.set_open(true, window, cx);
                 });
             }
-            workspace.set_center_anchor(
-                Some(CenterAnchor {
-                    column: px(700.),
-                    min_column: px(500.),
-                    thread: Some(ThreadRoom {
-                        width: px(408.),
-                        moves_page: true,
-                    }),
-                    left: TideSide::default(),
-                    right: TideSide::default(),
-                }),
-                cx,
-            );
-            rail
+            workspace.set_center_anchor(Some(anchor), cx);
+            let row = workspace.place_center_row(Some(anchor), None, window, cx);
+            (rail, row)
         });
-        let settle = |cx: &mut gpui::VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, _| window.refresh());
-            cx.run_until_parked();
-        };
-        settle(cx);
-        // The flexible rail takes half of what the Desk leaves, not its 300
-        // default: a 640 centre can't keep the thread's room.
-        let centre = workspace.read_with(cx, |workspace, _| workspace.center_width);
-        assert!(
-            centre < px(700.),
-            "the rail is drawn by its flex: {centre:?}"
-        );
-        let row = workspace.read_with(cx, |workspace, _| workspace.center_row());
-        assert_eq!(row, CenterRow::Ordinary { thread: None });
-
-        // A rail at a fixed 300 leaves 980, which holds it.
-        rail.update(cx, |rail, _| rail.flexible = false);
-        workspace.update(cx, |_, cx| cx.notify());
-        settle(cx);
-        let row = workspace.read_with(cx, |workspace, _| workspace.center_row());
+        // 1600 less a 300 rail and a 320 Desk leaves 980, which holds it.
         assert_eq!(
             row,
             CenterRow::Ordinary {
                 thread: Some(px(408.))
-            }
+            },
+            "room on the first frame"
+        );
+
+        // A flexible rail takes half of what the Desk leaves: 640, and a
+        // 640 centre can't keep the room.
+        let row = workspace.update_in(cx, |workspace, window, cx| {
+            rail.update(cx, |rail, _| rail.flexible = true);
+            workspace.place_center_row(Some(anchor), None, window, cx)
+        });
+        assert_eq!(row, CenterRow::Ordinary { thread: None });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.center_row()),
+            row,
+            "and the frame drawn agrees"
         );
     }
 
     #[gpui::test]
-    async fn test_a_flexible_panel_beside_an_anchored_page_has_no_resize_handle(
+    async fn test_a_flexible_panel_resizes_by_mouse_and_keys_beside_an_anchored_page(
         cx: &mut gpui::TestAppContext,
     ) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         let project = Project::test(fs, [], cx).await;
-        let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        // The dock size actions are registered by the multi-workspace.
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
         cx.simulate_resize(size(px(1600.), px(1000.)));
         let rail = workspace.update_in(cx, |workspace, window, cx| {
             let rail = cx.new(|cx| TestPanel::new_flexible(DockPosition::Left, 100, cx));
             workspace.add_panel(rail.clone(), window, cx);
             workspace.open_panel::<TestPanel>(window, cx);
+            workspace.centered_layout = true;
             workspace.set_center_anchor(
                 Some(CenterAnchor {
                     column: px(700.),
@@ -13953,35 +13969,28 @@ mod tests {
             let item = cx.new(TestItem::new);
             pane.add_item(Box::new(item), true, true, None, window, cx);
         });
-        let settle = |cx: &mut gpui::VisualTestContext| {
+        let rail_width = |cx: &mut gpui::VisualTestContext| {
             cx.run_until_parked();
             cx.update(|window, _| window.refresh());
             cx.run_until_parked();
+            workspace
+                .read_with(cx, |workspace, _| workspace.anchor_layout())
+                .expect("the page is anchored")
+                .left
+                .width
         };
-        settle(cx);
-        assert!(
-            cx.debug_bounds("resize-handle").is_some(),
-            "Zed's own row resizes it by its flex"
-        );
+        assert_eq!(rail_width(cx), px(300.));
 
-        workspace.update(cx, |workspace, cx| {
-            workspace.centered_layout = true;
-            cx.notify();
+        // What dragging its edge does.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.resize_left_dock(px(360.), window, cx)
         });
-        settle(cx);
-        assert!(workspace.read_with(cx, |workspace, _| workspace.anchor_layout().is_some()));
-        assert!(
-            cx.debug_bounds("resize-handle").is_none(),
-            "a drag would change a flex the page doesn't draw"
-        );
+        assert_eq!(rail_width(cx), px(360.), "the mouse");
 
-        rail.update(cx, |rail, _| rail.flexible = false);
-        workspace.update(cx, |_, cx| cx.notify());
-        settle(cx);
-        assert!(
-            cx.debug_bounds("resize-handle").is_some(),
-            "a fixed panel resizes beside the page"
-        );
+        cx.update(|window, cx| window.focus(&rail.read(cx).focus_handle(cx), cx));
+        cx.run_until_parked();
+        cx.dispatch_action(IncreaseActiveDockSize { px: 20 });
+        assert_eq!(rail_width(cx), px(380.), "the keys");
     }
 
     #[gpui::test]

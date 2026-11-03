@@ -919,25 +919,7 @@ impl Vault {
         if !config_path.is_file() {
             return VaultStatus::NotAVault;
         }
-        Self::from_config(root, &config_path, fs::read_to_string(&config_path))
-    }
-
-    /// [`Vault::detect`] through `fs`, so a vault on the project's file
-    /// system (or a test's `FakeFs`) is seen the way the project sees it.
-    pub async fn detect_in(fs: &dyn ::fs::Fs, root: &Path) -> VaultStatus {
-        let config_path = root.join(VAULT_MARKER_DIR).join(VAULT_CONFIG_FILE);
-        if !fs.is_file(&config_path).await {
-            return VaultStatus::NotAVault;
-        }
-        Self::from_config(root, &config_path, fs.load(&config_path).await)
-    }
-
-    fn from_config(
-        root: &Path,
-        config_path: &Path,
-        contents: Result<String, impl std::fmt::Display>,
-    ) -> VaultStatus {
-        match contents {
+        match fs::read_to_string(&config_path) {
             Ok(contents) => match toml::from_str::<VaultConfigContent>(&contents) {
                 Ok(content) => VaultStatus::Valid(Vault {
                     root: root.to_path_buf(),
