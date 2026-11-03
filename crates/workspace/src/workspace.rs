@@ -1398,6 +1398,9 @@ pub struct Workspace {
     center_anchor: Option<CenterAnchor>,
     /// The row the last render placed; docks read it while they draw.
     center_row: CenterRow,
+    /// The centre pane group's width as last drawn, which is what Zed's own
+    /// row leaves between the docks.
+    center_width: Pixels,
     titlebar_focus_handle: FocusHandle,
     region_focus_handles: RegionFocusHandles,
     notifications: Notifications,
@@ -1423,6 +1426,9 @@ pub struct Workspace {
     pane_history_timestamp: Arc<AtomicUsize>,
     bounds: Bounds<Pixels>,
     pub centered_layout: bool,
+    /// Whether centred layout was toggled for this workspace, rather than
+    /// left at what it opened with.
+    centered_layout_chosen: bool,
     bounds_save_task_queued: Option<Task<()>>,
     on_prompt_for_new_path: Option<PromptForNewPath>,
     on_prompt_for_open_path: Option<PromptForOpenPath>,
@@ -1854,6 +1860,7 @@ impl Workspace {
             center_overlay: None,
             center_anchor: None,
             center_row: CenterRow::default(),
+            center_width: Pixels::ZERO,
             titlebar_focus_handle: cx.focus_handle(),
             region_focus_handles: RegionFocusHandles::new(cx),
             notifications: Notifications::default(),
@@ -1885,6 +1892,7 @@ impl Workspace {
             // This data will be incorrect, but it will be overwritten by the time it needs to be used.
             bounds: Default::default(),
             centered_layout: false,
+            centered_layout_chosen: false,
             bounds_save_task_queued: None,
             on_prompt_for_new_path: None,
             on_prompt_for_open_path: None,
@@ -2015,8 +2023,7 @@ impl Workspace {
                 if let Some(window) = window_to_replace {
                     let centered_layout = serialized_workspace
                         .as_ref()
-                        .map(|w| w.centered_layout)
-                        .unwrap_or(false);
+                        .and_then(|w| w.centered_layout);
 
                     let workspace = window.update(cx, |multi_workspace, window, cx| {
                         let workspace = cx.new(|cx| {
@@ -2028,7 +2035,7 @@ impl Workspace {
                                 cx,
                             );
 
-                            workspace.centered_layout = centered_layout;
+                            workspace.restore_centered_layout(centered_layout);
 
                             // Call init callback to add items before window renders
                             if let Some(init) = init {
@@ -2077,8 +2084,7 @@ impl Workspace {
                     options.window_bounds = window_bounds;
                     let centered_layout = serialized_workspace
                         .as_ref()
-                        .map(|w| w.centered_layout)
-                        .unwrap_or(false);
+                        .and_then(|w| w.centered_layout);
                     let window = cx.open_window(options, {
                         let app_state = app_state.clone();
                         let project_handle = project_handle.clone();
@@ -2091,7 +2097,7 @@ impl Workspace {
                                     window,
                                     cx,
                                 );
-                                workspace.centered_layout = centered_layout;
+                                workspace.restore_centered_layout(centered_layout);
 
                                 // Call init callback to add items before window renders
                                 if let Some(init) = init {
@@ -7245,7 +7251,7 @@ impl Workspace {
                     window_bounds,
                     display: Default::default(),
                     docks,
-                    centered_layout: self.centered_layout,
+                    centered_layout: self.centered_layout_chosen.then_some(self.centered_layout),
                     session_id: self.session_id.clone(),
                     bookmarks,
                     breakpoints,
@@ -8074,6 +8080,17 @@ impl Workspace {
             .update(cx, |toast_layer, cx| toast_layer.toggle_toast(cx, entity))
     }
 
+    /// Whether centred layout was toggled for this workspace, now or in an
+    /// earlier session, rather than left at what it opened with.
+    pub fn centered_layout_chosen(&self) -> bool {
+        self.centered_layout_chosen
+    }
+
+    fn restore_centered_layout(&mut self, centered_layout: Option<bool>) {
+        self.centered_layout = centered_layout.unwrap_or(false);
+        self.centered_layout_chosen = centered_layout.is_some();
+    }
+
     pub fn toggle_centered_layout(
         &mut self,
         _: &ToggleCenteredLayout,
@@ -8081,6 +8098,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.centered_layout = !self.centered_layout;
+        self.centered_layout_chosen = true;
         if let Some(database_id) = self.database_id() {
             let db = WorkspaceDb::global(cx);
             let centered_layout = self.centered_layout;
@@ -8165,19 +8183,40 @@ impl Workspace {
         }
     }
 
-    /// Places the centre's row for this frame (`center_anchor::anchor`, or
-    /// `ordinary_row` when the page isn't anchored). Docks read it back
-    /// while they draw.
-    fn layout_center_row(&mut self, window: &Window, cx: &App) -> CenterRow {
-        let left_width = self.dock_width(DockPosition::Left, window, cx);
-        let right_width = self.dock_width(DockPosition::Right, window, cx);
+    /// Places the centre's row for `center_anchor` against the window and
+    /// the docks as they are now (`center_anchor::anchor`, or `ordinary_row`
+    /// when the page isn't anchored). The side at `unfocused` is placed as
+    /// if it didn't hold the focus, to tell whether it would be a mark.
+    /// Rendering places the row the same way.
+    pub fn place_center_row(
+        &self,
+        center_anchor: Option<CenterAnchor>,
+        unfocused: Option<DockPosition>,
+        window: &Window,
+        cx: &App,
+    ) -> CenterRow {
+        let Some(center_anchor) = center_anchor else {
+            return CenterRow::default();
+        };
+        if !self.is_page_anchored(cx) {
+            return ordinary_row(
+                self.center_width,
+                center_anchor.min_column,
+                center_anchor.thread,
+            );
+        }
         // A dock holding the focus is drawn whole: focus must never sit in a
         // panel drawn as a mark.
-        let side = |dock: &Entity<Dock>, open_width, tide: TideSide| AnchorSide {
-            open_width,
+        let side = |position: DockPosition, tide: TideSide| AnchorSide {
+            open_width: self.dock_width(position, window, cx),
             tide: tide.tide,
             may_ebb: tide.may_ebb,
-            focused: dock.read(cx).focus_handle(cx).contains_focused(window, cx),
+            focused: unfocused != Some(position)
+                && self
+                    .dock_at_position(position)
+                    .read(cx)
+                    .focus_handle(cx)
+                    .contains_focused(window, cx),
         };
         let row = self.row_width(window);
         // The page centres on the window, wherever the workspace sits in it.
@@ -8186,27 +8225,20 @@ impl Workspace {
         } else {
             row / 2.
         };
-        let center_row = match self.center_anchor {
-            Some(center_anchor) if self.is_page_anchored(cx) => {
-                CenterRow::Anchored(anchor(AnchorInput {
-                    row,
-                    centre,
-                    left: side(&self.left_dock, left_width, center_anchor.left),
-                    right: side(&self.right_dock, right_width, center_anchor.right),
-                    column: center_anchor.column,
-                    min_column: center_anchor.min_column,
-                    thread: center_anchor.thread,
-                }))
-            }
-            Some(center_anchor) => ordinary_row(
-                row,
-                left_width,
-                right_width,
-                center_anchor.min_column,
-                center_anchor.thread,
-            ),
-            None => CenterRow::default(),
-        };
+        CenterRow::Anchored(anchor(AnchorInput {
+            row,
+            centre,
+            left: side(DockPosition::Left, center_anchor.left),
+            right: side(DockPosition::Right, center_anchor.right),
+            column: center_anchor.column,
+            min_column: center_anchor.min_column,
+            thread: center_anchor.thread,
+        }))
+    }
+
+    /// Places this frame's row; docks read it back while they draw.
+    fn layout_center_row(&mut self, window: &Window, cx: &App) -> CenterRow {
+        let center_row = self.place_center_row(self.center_anchor, None, window, cx);
         self.center_row = center_row;
         center_row
     }
@@ -8498,6 +8530,26 @@ impl Workspace {
             .children(left)
             .child(self.render_center(render_cx, window, cx))
             .children(right)
+            .child({
+                let this = cx.entity();
+                canvas(
+                    move |bounds, _, cx| {
+                        this.update(cx, |this, cx| {
+                            if this.center_width != bounds.size.width {
+                                this.center_width = bounds.size.width;
+                                // The thread's room outside an anchored page
+                                // is decided with this width.
+                                if this.center_anchor.is_some() {
+                                    cx.notify();
+                                }
+                            }
+                        })
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full()
+            })
             .children(
                 self.center_overlay
                     .clone()
@@ -10581,7 +10633,7 @@ pub fn open_workspace_by_id(
                         window,
                         cx,
                     );
-                    workspace.centered_layout = centered_layout;
+                    workspace.restore_centered_layout(centered_layout);
                     workspace
                 });
                 multi_workspace.add(workspace.clone(), &*window, cx);
@@ -10621,7 +10673,7 @@ pub fn open_workspace_by_id(
                             window,
                             cx,
                         );
-                        workspace.centered_layout = centered_layout;
+                        workspace.restore_centered_layout(centered_layout);
                         workspace
                     });
                     cx.new(|cx| MultiWorkspace::new(workspace, window, cx))
@@ -11065,7 +11117,7 @@ async fn open_remote_project_inner(
             workspace.update_history(cx);
 
             if let Some(ref serialized) = serialized_workspace {
-                workspace.centered_layout = serialized.centered_layout;
+                workspace.restore_centered_layout(serialized.centered_layout);
             }
 
             workspace
@@ -11867,7 +11919,7 @@ pub fn remote_workspace_position_from_db(
 
         let centered_layout = serialized_workspace
             .as_ref()
-            .map(|w| w.centered_layout)
+            .and_then(|w| w.centered_layout)
             .unwrap_or(false);
 
         Ok(WorkspacePosition {
@@ -13780,6 +13832,155 @@ mod tests {
         assert!(
             (bounds.size.width - px(300.)).abs() < px(2.),
             "its default, not its flex's share of the row: {bounds:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_a_restored_centered_layout_counts_as_chosen(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        workspace.update(cx, |workspace, _| {
+            assert!(!workspace.centered_layout_chosen(), "a new workspace");
+            workspace.restore_centered_layout(None);
+            assert!(!workspace.centered_layout && !workspace.centered_layout_chosen());
+            workspace.restore_centered_layout(Some(false));
+            assert!(!workspace.centered_layout && workspace.centered_layout_chosen());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_uncentred_thread_room_is_measured_on_the_drawn_centre(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        cx.simulate_resize(size(px(1600.), px(1000.)));
+        let rail = workspace.update_in(cx, |workspace, window, cx| {
+            let rail = cx.new(|cx| TestPanel::new_flexible(DockPosition::Left, 100, cx));
+            workspace.add_panel(rail.clone(), window, cx);
+            let desk = cx.new(|cx| TestPanel {
+                default_size: px(320.),
+                ..TestPanel::new(DockPosition::Right, 101, cx)
+            });
+            workspace.add_panel(desk, window, cx);
+            for dock in [
+                workspace.left_dock().clone(),
+                workspace.right_dock().clone(),
+            ] {
+                dock.update(cx, |dock, cx| {
+                    dock.activate_panel(0, window, cx);
+                    dock.set_open(true, window, cx);
+                });
+            }
+            workspace.set_center_anchor(
+                Some(CenterAnchor {
+                    column: px(700.),
+                    min_column: px(500.),
+                    thread: Some(ThreadRoom {
+                        width: px(408.),
+                        moves_page: true,
+                    }),
+                    left: TideSide::default(),
+                    right: TideSide::default(),
+                }),
+                cx,
+            );
+            rail
+        });
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        };
+        settle(cx);
+        // The flexible rail takes half of what the Desk leaves, not its 300
+        // default: a 640 centre can't keep the thread's room.
+        let centre = workspace.read_with(cx, |workspace, _| workspace.center_width);
+        assert!(
+            centre < px(700.),
+            "the rail is drawn by its flex: {centre:?}"
+        );
+        let row = workspace.read_with(cx, |workspace, _| workspace.center_row());
+        assert_eq!(row, CenterRow::Ordinary { thread: None });
+
+        // A rail at a fixed 300 leaves 980, which holds it.
+        rail.update(cx, |rail, _| rail.flexible = false);
+        workspace.update(cx, |_, cx| cx.notify());
+        settle(cx);
+        let row = workspace.read_with(cx, |workspace, _| workspace.center_row());
+        assert_eq!(
+            row,
+            CenterRow::Ordinary {
+                thread: Some(px(408.))
+            }
+        );
+    }
+
+    #[gpui::test]
+    async fn test_a_flexible_panel_beside_an_anchored_page_has_no_resize_handle(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        cx.simulate_resize(size(px(1600.), px(1000.)));
+        let rail = workspace.update_in(cx, |workspace, window, cx| {
+            let rail = cx.new(|cx| TestPanel::new_flexible(DockPosition::Left, 100, cx));
+            workspace.add_panel(rail.clone(), window, cx);
+            workspace.open_panel::<TestPanel>(window, cx);
+            workspace.set_center_anchor(
+                Some(CenterAnchor {
+                    column: px(700.),
+                    min_column: px(500.),
+                    thread: None,
+                    left: TideSide::default(),
+                    right: TideSide::default(),
+                }),
+                cx,
+            );
+            rail
+        });
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        pane.update_in(cx, |pane, window, cx| {
+            let item = cx.new(TestItem::new);
+            pane.add_item(Box::new(item), true, true, None, window, cx);
+        });
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        };
+        settle(cx);
+        assert!(
+            cx.debug_bounds("resize-handle").is_some(),
+            "Zed's own row resizes it by its flex"
+        );
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.centered_layout = true;
+            cx.notify();
+        });
+        settle(cx);
+        assert!(workspace.read_with(cx, |workspace, _| workspace.anchor_layout().is_some()));
+        assert!(
+            cx.debug_bounds("resize-handle").is_none(),
+            "a drag would change a flex the page doesn't draw"
+        );
+
+        rail.update(cx, |rail, _| rail.flexible = false);
+        workspace.update(cx, |_, cx| cx.notify());
+        settle(cx);
+        assert!(
+            cx.debug_bounds("resize-handle").is_some(),
+            "a fixed panel resizes beside the page"
         );
     }
 

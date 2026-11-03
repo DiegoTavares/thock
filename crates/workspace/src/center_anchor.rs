@@ -185,16 +185,10 @@ impl CenterRow {
 }
 
 /// The row without an anchored page: the thread keeps its room on the
-/// right when the centre still holds `min_column` beside it, and floats
-/// otherwise. The docks are left as they are.
-pub fn ordinary_row(
-    row: Pixels,
-    left_width: Option<Pixels>,
-    right_width: Option<Pixels>,
-    min_column: Pixels,
-    thread: Option<ThreadRoom>,
-) -> CenterRow {
-    let centre = row - left_width.unwrap_or_default() - right_width.unwrap_or_default();
+/// right when `centre`, the width Zed's own row leaves between the docks,
+/// still holds `min_column` beside it, and floats otherwise. The docks are
+/// left as they are.
+pub fn ordinary_row(centre: Pixels, min_column: Pixels, thread: Option<ThreadRoom>) -> CenterRow {
     CenterRow::Ordinary {
         thread: thread
             .filter(|thread| centre - thread.width >= min_column)
@@ -525,9 +519,8 @@ mod tests {
     #[test]
     fn without_an_anchored_page_the_thread_takes_its_room_or_floats() {
         // The V44 numbers, with the thread's room asked for and no rail.
-        let room = |window: f32, thread| {
-            ordinary_row(px(window), None, Some(px(320.)), MIN_COLUMN, thread)
-        };
+        // The centre is what the window leaves beside a 320 Desk.
+        let room = |window: f32, thread| ordinary_row(px(window - 320.), MIN_COLUMN, thread);
         assert_eq!(
             room(1440., Some(MESSAGES)),
             CenterRow::Ordinary {

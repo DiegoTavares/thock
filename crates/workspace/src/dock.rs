@@ -1265,7 +1265,7 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
         // The workspace placed this frame's row before its docks draw.
         let row = self
@@ -1303,9 +1303,14 @@ impl Render for Dock {
         }
         if let Some(entry) = self.visible_entry() {
             let position = self.position;
+            // Beside an anchored page a flexible panel is drawn at its size,
+            // not the flex a drag would change, so it has no handle there.
+            let flexible_beside_page = row.anchored().is_some()
+                && panel_uses_flexible_width(position, entry.panel.as_ref(), window, cx);
             let create_resize_handle = || {
                 let handle = div()
                     .id("resize-handle")
+                    .debug_selector(|| "resize-handle".into())
                     .on_drag(DraggedDock(position), |dock, _, _, cx| {
                         cx.stop_propagation();
                         cx.new(|_| dock.clone())
@@ -1395,7 +1400,7 @@ impl Render for Dock {
                                 .cached(StyleRefinement::default().v_flex().size_full()),
                         ),
                 )
-                .when(self.resizable(cx), |this| {
+                .when(self.resizable(cx) && !flexible_beside_page, |this| {
                     this.child(create_resize_handle())
                 })
         } else {

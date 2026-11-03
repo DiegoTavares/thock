@@ -5,7 +5,6 @@
 //! this component tells it how wide the page is, how much room the agent's
 //! thread needs, and which sides may ebb, and it ebbs and flows the docks.
 
-use db::kvp::KeyValueStore;
 use editor::{Editor, EditorEvent, EditorSettings};
 use gpui::{
     App, AppContext as _, Context, Entity, EntityId, Focusable as _, Font, Pixels, Subscription,
@@ -15,7 +14,7 @@ use settings::{Settings as _, SettingsStore, TidePolicy};
 use theme_settings::ThemeSettings;
 use util::ResultExt as _;
 use workspace::dock::{Dock, DockPosition};
-use workspace::{CenterAnchor, ThreadRoom, Tide, TideSide, ToggleCenteredLayout, Workspace};
+use workspace::{CenterAnchor, CenterRow, ThreadRoom, Tide, TideSide, Workspace};
 
 use crate::vault::{Vault, VaultStatus};
 use crate::{ChatPanel, DeskPanel, PageSettings, ThockSettings};
@@ -51,65 +50,18 @@ fn follow(
     // The action handler keeps the layout alive as long as the workspace.
     workspace.register_action({
         let layout = layout.clone();
-        move |workspace, _: &ToggleTide, window, cx| {
-            // Read here, where the window is at hand: a side holding the
-            // focus never ebbs (§5.5).
-            let focused: Vec<DockPosition> = SIDE_DOCKS
-                .into_iter()
-                .filter(|position| {
-                    workspace
-                        .dock_at_position(*position)
-                        .read(cx)
-                        .focus_handle(cx)
-                        .contains_focused(window, cx)
-                })
-                .collect();
+        move |_, _: &ToggleTide, window, cx| {
             let layout = layout.downgrade();
-            // The workspace is leased while its action runs.
-            cx.defer(move |cx| {
+            // The workspace is leased while its action runs. Each press is
+            // decided once the presses before it are done.
+            window.defer(cx, move |window, cx| {
                 layout
-                    .update(cx, |layout, cx| layout.toggle_tide(&focused, cx))
+                    .update(cx, |layout, cx| layout.toggle_tide(window, cx))
                     .log_err();
             });
         }
     });
-    // After the restored workspace has its own centred layout.
-    cx.defer_in(window, default_to_centred);
     layout
-}
-
-/// Turns centred layout on the first time a vault opens (§6): the anchored
-/// page is Thock's layout. A key per vault records that it was done, so
-/// turning centred layout off afterwards sticks.
-fn default_to_centred(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    let root = workspace
-        .project()
-        .read(cx)
-        .visible_worktrees(cx)
-        .next()
-        .map(|worktree| worktree.read(cx).abs_path().to_path_buf());
-    let Some(VaultStatus::Valid(vault)) = root.as_deref().map(Vault::detect) else {
-        return;
-    };
-    let key = centred_layout_key(&vault);
-    let store = KeyValueStore::global(cx);
-    match store.read_kvp(&key) {
-        Ok(None) => {}
-        Ok(Some(_)) => return,
-        Err(error) => {
-            log::error!("couldn't read whether the page was centred before: {error:#}");
-            return;
-        }
-    }
-    if !workspace.centered_layout {
-        workspace.toggle_centered_layout(&ToggleCenteredLayout, window, cx);
-    }
-    cx.background_spawn(async move { store.write_kvp(key, "1".to_string()).await })
-        .detach_and_log_err(cx);
-}
-
-fn centred_layout_key(vault: &Vault) -> String {
-    format!("thock-centred-layout:{}", vault.root.display())
 }
 
 /// The docks that ebb; the bottom dock never does (§3).
@@ -122,6 +74,14 @@ pub struct DeskLayout {
     workspace: WeakEntity<Workspace>,
     left: Tide,
     right: Tide,
+    /// The page's column and its narrowest, measured when the settings or
+    /// the font size change.
+    columns: (Pixels, Pixels),
+    /// A sync is on its way to the workspace and will carry every change
+    /// made before it runs.
+    sync_pending: bool,
+    #[cfg(test)]
+    syncs: usize,
     /// The thread's room as last asked for.
     thread: Option<ThreadRoom>,
     /// The note in the centre whose typing ebbs the sides.
@@ -149,6 +109,7 @@ impl DeskLayout {
     ) -> Entity<Self> {
         let weak_workspace = workspace.weak_handle();
         let workspace_entity = cx.entity();
+        let project = workspace.project().clone();
         let docks = SIDE_DOCKS.map(|position| {
             let dock = workspace.dock_at_position(position).clone();
             let focus = dock.read(cx).focus_handle(cx);
@@ -168,23 +129,38 @@ impl DeskLayout {
                 // Centred layout has no event of its own.
                 cx.observe(&workspace_entity, |this, _, cx| this.anchoring_changed(cx)),
                 cx.observe_global::<SettingsStore>(|this, cx| this.settings_changed(cx)),
-                theme_settings::observe_buffer_font_size_adjustment(cx, |this, cx| this.sync(cx)),
+                theme_settings::observe_buffer_font_size_adjustment(cx, |this, cx| {
+                    this.measure(cx);
+                    this.sync(cx);
+                }),
+                // A folder can become a vault while it is open.
+                cx.subscribe(&project, |this: &mut Self, _, event, cx| {
+                    if matches!(
+                        event,
+                        project::Event::WorktreeAdded(_)
+                            | project::Event::WorktreeUpdatedEntries(..)
+                    ) {
+                        this.default_to_centred(cx);
+                    }
+                }),
             ];
             for (position, dock, focus) in docks {
-                subscriptions.push(cx.on_focus_in(&focus, window, move |this, _, cx| {
-                    this.focus_entered(position, cx)
+                subscriptions.push(cx.on_focus_in(&focus, window, move |this, window, cx| {
+                    this.focus_entered(position, window, cx)
                 }));
                 subscriptions.push(cx.observe(&dock, move |this, dock, cx| {
                     this.dock_changed(position, &dock, cx)
                 }));
             }
             // The workspace is leased by the observer constructing this; look
-            // at its centre and its chat once the lease is returned.
+            // at its centre and its chat once the lease is returned, which
+            // is also after a restored workspace has its centred layout.
             let this = cx.weak_entity();
             cx.defer(move |cx| {
                 this.update(cx, |this, cx| {
                     this.page_changed(cx);
                     this.track_chat(cx);
+                    this.default_to_centred(cx);
                     this.sync(cx);
                 })
                 .log_err();
@@ -193,6 +169,10 @@ impl DeskLayout {
                 workspace: weak_workspace,
                 left: Tide::Flowing,
                 right: Tide::Flowing,
+                columns: page_columns(ThockSettings::get_global(cx).page, cx),
+                sync_pending: false,
+                #[cfg(test)]
+                syncs: 0,
                 thread: None,
                 editor: None,
                 page: None,
@@ -243,11 +223,21 @@ impl DeskLayout {
         }
     }
 
-    /// Whether the side was drawn as its tide mark in the last frame.
-    fn shows_mark(&self, position: DockPosition, cx: &App) -> bool {
+    /// The row as the workspace would place it now with this layout's
+    /// tides, `unfocused` placed as if it didn't hold the focus.
+    fn place(&self, unfocused: Option<DockPosition>, window: &Window, cx: &App) -> CenterRow {
         self.workspace
             .upgrade()
-            .is_some_and(|workspace| workspace.read(cx).center_row().tide_mark(position))
+            .map(|workspace| {
+                workspace
+                    .read(cx)
+                    .place_center_row(Some(self.anchor(cx)), unfocused, window, cx)
+            })
+            .unwrap_or_default()
+    }
+
+    fn measure(&mut self, cx: &App) {
+        self.columns = page_columns(ThockSettings::get_global(cx).page, cx);
     }
 
     fn is_open(&self, position: DockPosition, cx: &App) -> bool {
@@ -258,7 +248,7 @@ impl DeskLayout {
     /// What the workspace should keep for the page right now.
     fn anchor(&self, cx: &App) -> CenterAnchor {
         let settings = ThockSettings::get_global(cx);
-        let (column, min_column) = page_columns(settings.page, cx);
+        let (column, min_column) = self.columns;
         let side = |position: DockPosition| TideSide {
             may_ebb: settings
                 .tides
@@ -275,15 +265,30 @@ impl DeskLayout {
     }
 
     /// Hands the workspace the current anchor. Deferred, because the
-    /// workspace may be mid-update when a dock or an action gets here.
+    /// workspace may be mid-update when a dock or an action gets here, and
+    /// once for every change made before it runs.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        if self.sync_pending {
+            return;
+        }
+        self.sync_pending = true;
         let workspace = self.workspace.clone();
         let this = cx.weak_entity();
         cx.defer(move |cx| {
             let Some(workspace) = workspace.upgrade() else {
                 return;
             };
-            let Some(anchor) = this.read_with(cx, |this, cx| this.anchor(cx)).log_err() else {
+            let Some(anchor) = this
+                .update(cx, |this, cx| {
+                    this.sync_pending = false;
+                    #[cfg(test)]
+                    {
+                        this.syncs += 1;
+                    }
+                    this.anchor(cx)
+                })
+                .log_err()
+            else {
                 return;
             };
             workspace.update(cx, |workspace, cx| {
@@ -379,26 +384,26 @@ impl DeskLayout {
         }
     }
 
-    /// Focus went into a dock by any route (§5.4 rule 1). A side that was
-    /// tucked away comes back held, so the page makes room for it rather
-    /// than tuck it away to fit again (§4.2).
-    fn focus_entered(&mut self, position: DockPosition, cx: &mut Context<Self>) {
-        if !self.is_anchored(cx) {
-            return;
-        }
-        if self.tide(position) == Tide::Ebbed || self.shows_mark(position, cx) {
+    /// Focus went into a dock by any route (§5.4 rule 1). A side that would
+    /// be a mark without the focus, ebbed or ebbed to fit, comes back held,
+    /// so the page makes room for it rather than tuck it away again when
+    /// the focus leaves (§4.2).
+    fn focus_entered(&mut self, position: DockPosition, window: &Window, cx: &mut Context<Self>) {
+        if self.is_anchored(cx) && self.place(Some(position), window, cx).tide_mark(position) {
             self.set_tide(position, Tide::Held, cx);
         }
     }
 
-    /// `thock::ToggleTide` (§5.4 rule 2): brings back every side drawn as
-    /// its mark, or tucks away every open side that may ebb when none is.
+    /// `thock::ToggleTide` (§5.4 rule 2): brings back the sides that are
+    /// marks, or tucks away every open side that may ebb when none is. It
+    /// decides from the tides as they are now, not the last frame drawn.
     /// Focus stays where it is, and a side holding it never ebbs (§5.5).
-    fn toggle_tide(&mut self, focused: &[DockPosition], cx: &mut Context<Self>) {
+    fn toggle_tide(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.flow_back = None;
+        let row = self.place(None, window, cx);
         let marked: Vec<DockPosition> = SIDE_DOCKS
             .into_iter()
-            .filter(|position| self.shows_mark(*position, cx))
+            .filter(|position| row.tide_mark(*position))
             .collect();
         if !marked.is_empty() {
             for position in marked {
@@ -406,6 +411,13 @@ impl DeskLayout {
             }
             return;
         }
+        let focused: Vec<DockPosition> = SIDE_DOCKS
+            .into_iter()
+            .filter(|position| {
+                self.dock(*position, cx)
+                    .is_some_and(|dock| dock.read(cx).focus_handle(cx).contains_focused(window, cx))
+            })
+            .collect();
         let Some(tides) = ThockSettings::get_global(cx).tides else {
             return;
         };
@@ -431,6 +443,7 @@ impl DeskLayout {
                 self.set_tide(position, Tide::Flowing, cx);
             }
         }
+        self.measure(cx);
         self.sync(cx);
     }
 
@@ -479,6 +492,42 @@ impl DeskLayout {
             self.set_tide(position, Tide::Flowing, cx);
         }
         self.track_desk(position, dock, cx);
+    }
+
+    /// Turns centred layout on for a vault whose workspace never chose it
+    /// (§6): the anchored page is Thock's layout. Runs when the workspace
+    /// opens and when its folder changes, so a folder that becomes a vault
+    /// is centred too. Once the person toggles it, it is theirs.
+    fn default_to_centred(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let workspace_ref = workspace.read(cx);
+        if workspace_ref.centered_layout || workspace_ref.centered_layout_chosen() {
+            return;
+        }
+        let project = workspace_ref.project().read(cx);
+        let Some(root) = project
+            .visible_worktrees(cx)
+            .next()
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+        else {
+            return;
+        };
+        let fs = project.fs().clone();
+        let workspace = workspace.downgrade();
+        cx.spawn(async move |_, cx| {
+            if let VaultStatus::Valid(_) = Vault::detect_in(fs.as_ref(), &root).await {
+                workspace.update(cx, |workspace, cx| {
+                    if !workspace.centered_layout && !workspace.centered_layout_chosen() {
+                        workspace.centered_layout = true;
+                        cx.notify();
+                    }
+                })?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     /// Follows the Desk when it is the dock's panel, so its tide mark
@@ -1401,25 +1450,114 @@ mod tests {
     async fn a_flexible_rail_is_drawn_at_its_default_size_beside_an_anchored_page(
         cx: &mut TestAppContext,
     ) {
-        // Dragging a flexible panel changes only its flex, which Zed's own
-        // row resolves; beside the page it keeps its size (decision 16).
-        let mut setup = setup_with_rail(cx, &today_note(), |cx| {
+        // Its flex is only resolved by Zed's own row (decision 16).
+        let setup = setup_with_rail(cx, &today_note(), |cx| {
             TestPanel::new_flexible(DockPosition::Left, 100, cx)
         })
         .await;
         setup.cx.simulate_resize(size(px(2560.), px(1440.)));
         setup.cx.run_until_parked();
+        assert!(!ebbed(&setup, DockPosition::Left));
+        assert_eq!(rail_width(&setup), px(300.));
+    }
+
+    /// The 14-inch window with a Desk too wide to sit beside the page, so
+    /// it waits at the edge as a mark.
+    fn wide_desk_on_a_small_window(setup: &mut Setup) {
+        setup.cx.simulate_resize(size(px(1512.), px(982.)));
         setup
             .workspace
             .update_in(&mut setup.cx, |workspace, window, cx| {
-                let flex = workspace.dock_flex_for_size(DockPosition::Left, px(400.), window, cx);
-                workspace.left_dock().update(cx, |dock, cx| {
-                    dock.resize_active_panel(Some(px(400.)), flex, window, cx)
+                workspace.right_dock().update(cx, |dock, cx| {
+                    dock.resize_active_panel(Some(px(440.)), None, window, cx)
                 })
             });
         setup.cx.run_until_parked();
-        assert!(!ebbed(&setup, DockPosition::Left));
-        assert_eq!(rail_width(&setup), px(300.));
+        assert!(ebbed(setup, DockPosition::Right), "it ebbs to fit");
+        assert_eq!(tide(setup, DockPosition::Right), Tide::Flowing);
+    }
+
+    #[gpui::test]
+    async fn a_desk_ebbed_to_fit_and_called_by_its_key_stays_after_escape(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        wide_desk_on_a_small_window(&mut setup);
+        setup.cx.simulate_keystrokes("ctrl-alt-u");
+        setup.cx.run_until_parked();
+        assert_eq!(tide(&setup, DockPosition::Right), Tide::Held);
+
+        setup.cx.simulate_keystrokes("escape");
+        setup.cx.run_until_parked();
+        let editor = setup.editor.clone();
+        assert!(is_focused(&mut setup, &editor), "back in the note");
+        assert!(
+            !ebbed(&setup, DockPosition::Right),
+            "the Desk you called stays until you type"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_desk_ebbed_to_fit_and_clicked_stays_after_the_focus_leaves(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        wide_desk_on_a_small_window(&mut setup);
+        let mark = setup
+            .cx
+            .debug_bounds("tide-mark")
+            .expect("the mark is drawn");
+        setup
+            .cx
+            .simulate_click(mark.center(), gpui::Modifiers::none());
+        setup.cx.run_until_parked();
+        let desk = setup.desk.clone();
+        assert!(is_focused(&mut setup, &desk));
+
+        setup.cx.focus(&setup.editor);
+        setup.cx.run_until_parked();
+        assert!(!ebbed(&setup, DockPosition::Right));
+    }
+
+    #[gpui::test]
+    async fn a_desk_ebbed_for_the_thread_and_called_stays_after_escape(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        open_thread(&mut setup);
+        assert!(ebbed(&setup, DockPosition::Right), "the Desk makes room");
+        assert_eq!(tide(&setup, DockPosition::Right), Tide::Flowing);
+
+        setup.cx.simulate_keystrokes("ctrl-alt-u");
+        setup.cx.run_until_parked();
+        setup.cx.simulate_keystrokes("escape");
+        setup.cx.run_until_parked();
+        assert!(!ebbed(&setup, DockPosition::Right));
+    }
+
+    #[gpui::test]
+    async fn two_presses_of_the_tide_key_before_a_repaint_both_count(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        type_in_note(&mut setup, "a");
+        assert!(ebbed(&setup, DockPosition::Left) && ebbed(&setup, DockPosition::Right));
+
+        setup.cx.update(|window, cx| {
+            window.dispatch_action(Box::new(ToggleTide), cx);
+            window.dispatch_action(Box::new(ToggleTide), cx);
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(tide(&setup, DockPosition::Left), Tide::Ebbed);
+        assert_eq!(tide(&setup, DockPosition::Right), Tide::Ebbed);
+        assert!(ebbed(&setup, DockPosition::Left) && ebbed(&setup, DockPosition::Right));
+    }
+
+    #[gpui::test]
+    async fn a_burst_of_tide_changes_reaches_the_workspace_once(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        let syncs = |setup: &Setup| {
+            setup
+                .layout
+                .read_with(&setup.cx, |layout, _| layout.syncs)
+                .expect("the layout lives as long as the workspace")
+        };
+        let before = syncs(&setup);
+        type_in_note(&mut setup, "a");
+        assert!(ebbed(&setup, DockPosition::Left) && ebbed(&setup, DockPosition::Right));
+        assert_eq!(syncs(&setup), before + 1, "both sides in one anchor");
     }
 
     /// A thread with messages, as the chat would ask for it.
@@ -1561,18 +1699,14 @@ mod tests {
         assert!(is_focused(&mut setup, &desk), "focused");
     }
 
-    /// A new window on the vault at `root`, as it opens before any setup.
-    async fn open_vault(
-        root: &std::path::Path,
+    /// A new window on the folder at `root` of `fs`, as it opens before any
+    /// setup. Only the project's file system has it, not the disk.
+    async fn open_folder(
+        fs: &std::sync::Arc<FakeFs>,
+        root: &str,
         cx: &mut TestAppContext,
     ) -> (Entity<Workspace>, Entity<Project>, VisualTestContext) {
-        let fs = FakeFs::new(cx.executor());
-        fs.insert_tree(
-            root,
-            json!({ ".thock": { "config.toml": "schema = 1\n" }, "note.md": "Hi" }),
-        )
-        .await;
-        let project = Project::test(fs, [root], cx).await;
+        let project = Project::test(fs.clone(), [std::path::Path::new(root)], cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         cx.run_until_parked();
@@ -1580,16 +1714,24 @@ mod tests {
         (workspace, project, cx.clone())
     }
 
+    fn centred(workspace: &Entity<Workspace>, window: &VisualTestContext) -> bool {
+        workspace.read_with(window, |workspace, _| workspace.centered_layout)
+    }
+
     #[gpui::test]
     async fn centred_layout_is_on_for_a_vault_by_default(cx: &mut TestAppContext) {
         init_test(cx);
-        let vault_dir = vault_dir();
-        let root = vault_dir.path().to_path_buf();
-        let (workspace, project, mut window) = open_vault(&root, cx).await;
-        assert!(workspace.read_with(&window, |workspace, _| workspace.centered_layout));
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            json!({ ".thock": { "config.toml": "schema = 1\n" }, "note.md": "Hi" }),
+        )
+        .await;
+        let (workspace, project, mut window) = open_folder(&fs, "/vault", cx).await;
+        assert!(centred(&workspace, &window), "never chosen, so on");
         let project_path = project
             .read_with(&window, |project, cx| {
-                project.find_project_path(root.join("note.md"), cx)
+                project.find_project_path("/vault/note.md", cx)
             })
             .expect("the note is in the vault");
         workspace
@@ -1601,8 +1743,29 @@ mod tests {
         window.run_until_parked();
         assert!(workspace.read_with(&window, |workspace, cx| workspace.is_page_anchored(cx)));
 
-        // Done once per vault: the next window is left as it opens.
-        let (workspace, _, window) = open_vault(&root, cx).await;
-        assert!(!workspace.read_with(&window, |workspace, _| workspace.centered_layout));
+        // Turned off by hand, it stays off whatever the vault does next.
+        workspace.update_in(&mut window, |workspace, window, cx| {
+            workspace.toggle_centered_layout(&workspace::ToggleCenteredLayout, window, cx)
+        });
+        fs.insert_file("/vault/other.md", b"More".to_vec()).await;
+        window.run_until_parked();
+        assert!(!centred(&workspace, &window));
+    }
+
+    #[gpui::test]
+    async fn a_folder_that_becomes_a_vault_is_centred(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/notes", json!({ "note.md": "Hi" })).await;
+        let (workspace, _, window) = open_folder(&fs, "/notes", cx).await;
+        assert!(!centred(&workspace, &window), "not a vault yet");
+
+        fs.insert_tree(
+            "/notes",
+            json!({ ".thock": { "config.toml": "schema = 1\n" }, "welcome.md": "Hello" }),
+        )
+        .await;
+        window.run_until_parked();
+        assert!(centred(&workspace, &window));
     }
 }
