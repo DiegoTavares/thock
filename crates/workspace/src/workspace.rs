@@ -8102,14 +8102,8 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.set_centered_layout(!self.centered_layout, cx);
-    }
-
-    /// Turns centred layout on or off and saves it as this workspace's
-    /// choice, which a later restore keeps.
-    pub fn set_centered_layout(&mut self, centered_layout: bool, cx: &mut Context<Self>) {
-        self.centered_layout = centered_layout;
-        self.centered_layout_chosen = true;
+        let centered_layout = !self.centered_layout;
+        self.set_centered_layout(centered_layout, cx);
         if let Some(database_id) = self.database_id() {
             let db = WorkspaceDb::global(cx);
             cx.background_spawn(async move {
@@ -8117,6 +8111,13 @@ impl Workspace {
             })
             .detach_and_log_err(cx);
         }
+    }
+
+    /// Turns centred layout on or off as this workspace's choice, which
+    /// the workspace's next save keeps for a later restore.
+    pub fn set_centered_layout(&mut self, centered_layout: bool, cx: &mut Context<Self>) {
+        self.centered_layout = centered_layout;
+        self.centered_layout_chosen = true;
         cx.notify();
     }
 
