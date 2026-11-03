@@ -565,6 +565,15 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   across restarts. A nudge exists only while its Routine is installed; the next one is a registry
   entry, not a subsystem. Spec `specs/v52-nudges.md`. _(shipped on `main` with the V52 PR; people
   on their own terminal agent get no nudge yet)_
+- [ ] **A page that stays put:** with centred layout on, the note is a column of 68 characters of
+  the body font pinned to the window's centre, and the panels live in the margins beside it, so
+  opening, closing or resizing one never moves a word. While you type, the side panels ebb to a
+  6pt mark at the window's edge, and they come back after eight quiet seconds, when you reach one
+  with its key or `ctrl-cmd-\`, or when another note opens. A panel too wide for its margin waits
+  at the edge until called, and an agent thread takes room only once it shows a message. Each side
+  can `stay` instead, and `"tides": false` turns it off. Zed's fractional centred-layout paddings
+  are gone. Spec `specs/v54-anchor-and-tides.md`. _(in progress: implemented on the
+  `v54-anchor-and-tides` branch, not yet on `main`)_
 
 ---
 

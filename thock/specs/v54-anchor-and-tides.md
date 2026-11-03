@@ -245,13 +245,15 @@ exactly what G1 forbids. So it belongs in `crates/workspace/src/workspace.rs`, e
 V44 added (§7.2 there):
 
 1. **`set_center_anchor(Option<CenterAnchor>)`** replaces `set_center_inset`. `CenterAnchor { column,
-   min_column, thread: Option<Pixels> }`. `render_center_group` calls `anchor()` with
+   min_column, thread: Option<Pixels>, ebb_left, ebb_right }`; the two flags carry each side's
+   policy into step 2, off for a `stay` side and for a side you called back. `render_center_group` calls `anchor()` with
    `window.viewport_size().width` and the docks' current widths, and renders absolute-width
    paddings in place of the fractional ones. The `center_overlay` slot is unchanged.
 2. **Ebbed docks.** `Dock` gains a render-only `ebbed` flag, with `set_ebbed` and `is_ebbed`. An
    ebbed dock renders its tide mark instead of the panel, keeps `is_open`, isn't serialized, and
    reports its width as the mark's to `anchor()`. Docks ebbed to fit are decided inside `anchor()`
-   on each render and never stored.
+   on each render and never stored. The dock also takes a render-only `tide_waiting` flag for the
+   mark's accent line, which `desk_layout.rs` sets from the Desk's `has_waiting()`.
 3. `adjust_padding` and the fractional settings go.
 
 `anchor()` is a pure function in the workspace crate with its own table tests (§9). The PR calls
