@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // The plan every test connects under, on top of the seeded catalog.
@@ -417,4 +419,20 @@ func TestAdminEndpointsNeedTheToken(t *testing.T) {
 		t.Fatalf("health: %v %v", response, err)
 	}
 	response.Body.Close()
+}
+
+func TestEveryTableHasRowLevelSecurity(t *testing.T) {
+	h := newHarness(t)
+	rows, err := h.server.store.pool.Query(context.Background(),
+		"select relname from pg_class where relnamespace = 'public'::regnamespace and relkind = 'r' and not relrowsecurity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exposed, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exposed) != 0 {
+		t.Fatalf("tables without row-level security are open through Supabase's API: %v", exposed)
+	}
 }
