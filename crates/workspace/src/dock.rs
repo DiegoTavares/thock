@@ -291,8 +291,6 @@ pub struct Dock {
     restoration: DockRestoreState,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
-    /// Whether the dock is tucked away while you write. Never serialized.
-    tide: Tide,
     /// The panel has something waiting, drawn as a line on the tide mark.
     tide_waiting: bool,
     _subscriptions: [Subscription; 2],
@@ -322,20 +320,6 @@ impl Focusable for Dock {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
-}
-
-/// How a side dock rides the tides (V54).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum Tide {
-    /// Drawn whole, or ebbed by the row when it and the page don't fit.
-    #[default]
-    Flowing,
-    /// Tucked away while you write, drawn as its tide mark beside an
-    /// anchored page.
-    Ebbed,
-    /// Brought back by hand: the row makes room for it rather than ebb it,
-    /// until it ebbs again or the row's reason for ebbing it goes away.
-    Held,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -477,7 +461,6 @@ impl Dock {
                 restoration: DockRestoreState::Restoring { pending: None },
                 zoom_layer_open: false,
                 modal_layer,
-                tide: Tide::Flowing,
                 tide_waiting: false,
             }
         });
@@ -534,25 +517,6 @@ impl Dock {
         self.is_open
     }
 
-    /// Whether the dock is ebbed: open, but tucked away at the window's edge
-    /// while the page is anchored.
-    pub fn is_ebbed(&self) -> bool {
-        self.tide == Tide::Ebbed
-    }
-
-    pub fn tide(&self) -> Tide {
-        self.tide
-    }
-
-    /// Sets how the dock rides the tides. A closed dock only flows.
-    pub fn set_tide(&mut self, tide: Tide, cx: &mut Context<Self>) {
-        let tide = if self.is_open { tide } else { Tide::Flowing };
-        if self.tide != tide {
-            self.tide = tide;
-            cx.notify();
-        }
-    }
-
     /// Marks the tide mark with a line while the panel has something waiting.
     pub fn set_tide_waiting(&mut self, waiting: bool, cx: &mut Context<Self>) {
         if self.tide_waiting != waiting {
@@ -567,7 +531,7 @@ impl Dock {
 
     /// The tide mark: a strip of the panel's background at the window's
     /// edge, with a line on its inner edge while something waits. A click
-    /// brings the panel back and focuses it.
+    /// focuses the panel, which brings it back.
     fn render_tide_mark(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let colors = cx.theme().colors();
         let waiting_line = self.tide_waiting.then(|| {
@@ -584,13 +548,13 @@ impl Dock {
         });
         div()
             .id("tide-mark")
+            .debug_selector(|| "tide-mark".into())
             .absolute()
             .inset_0()
             .bg(colors.panel_background)
             .cursor_pointer()
             .occlude()
             .on_click(cx.listener(|dock, _, window, cx| {
-                dock.set_tide(Tide::Held, cx);
                 if let Some(panel) = dock.active_panel() {
                     panel.activation_focus_handle(cx).focus(window, cx);
                 }
@@ -664,9 +628,6 @@ impl Dock {
     fn set_open_internal(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         if open != self.is_open {
             self.is_open = open;
-            if !open {
-                self.tide = Tide::Flowing;
-            }
             if let Some(active_panel) = self.active_panel_entry() {
                 active_panel.panel.set_active(open, window, cx);
             }

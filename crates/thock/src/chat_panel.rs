@@ -2024,14 +2024,14 @@ impl ChatPanel {
         if self.thread_open && self.shows_messages(cx) {
             Some(ThreadRoom {
                 width: px(INSET),
-                ebbs_docks: true,
+                moves_page: true,
             })
         } else {
-            // A bubble takes the room only when it's free; it never ebbs the
-            // Desk (§4.3).
+            // A bubble takes the room only when it's free; it never moves
+            // the page or ebbs the Desk (§4.3).
             self.bubble_needs_room.then_some(ThreadRoom {
                 width: px(INSET),
-                ebbs_docks: false,
+                moves_page: false,
             })
         }
     }
@@ -6532,7 +6532,9 @@ mod tests {
 
     fn desk_mark_shown(setup: &Setup) -> bool {
         setup.workspace.read_with(&setup.cx, |workspace, _| {
-            workspace.dock_shows_tide_mark(workspace::dock::DockPosition::Right)
+            workspace
+                .center_row()
+                .tide_mark(workspace::dock::DockPosition::Right)
         })
     }
 
@@ -7657,16 +7659,18 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn without_centred_layout_the_desk_ebbs_only_when_the_thread_cannot_fit(
-        cx: &mut TestAppContext,
-    ) {
+    async fn without_an_anchored_page_the_thread_takes_its_room_or_floats(cx: &mut TestAppContext) {
         // V54 §4.3 with centred layout off, on the V44 numbers: at 1440 the
-        // centre holds the thread beside the Desk; a 704 centre gets it from
-        // the Desk ebbing, not closing; at 760 the thread floats.
+        // centre holds the thread beside the Desk; at 760 the thread floats.
+        // The Desk is left alone either way.
         let mut setup = setup(cx).await;
         connect(&mut setup);
         add_desk(&mut setup);
         open_note(&mut setup).await;
+        setup.workspace.update(&mut setup.cx, |workspace, cx| {
+            workspace.centered_layout = false;
+            cx.notify();
+        });
         let connection = Rc::new(StubAgentConnection::new());
         start_wrap_today(&mut setup, connection, None, vec![says("Seven of eleven.")]).await;
         let open = |setup: &mut Setup| {
@@ -7683,10 +7687,7 @@ mod tests {
             setup.workspace.read_with(&setup.cx, |workspace, _| {
                 matches!(
                     workspace.center_row(),
-                    workspace::CenterRow::Ordinary {
-                        thread: Some(_),
-                        ..
-                    }
+                    workspace::CenterRow::Ordinary { thread: Some(_) }
                 )
             })
         };
@@ -7698,19 +7699,11 @@ mod tests {
         assert!(!desk_mark_shown(&setup), "beside the Desk");
         fold(&mut setup);
 
-        resize(&mut setup, 1024., 900.);
-        open(&mut setup);
-        assert!(thread_kept(&setup));
-        assert!(desk_mark_shown(&setup), "the Desk ebbs for it");
-        assert!(desk_open(&setup), "ebbed, not closed");
-        fold(&mut setup);
-        assert!(!desk_mark_shown(&setup), "and flows back on fold");
-        assert!(desk_open(&setup));
-
         resize(&mut setup, 760., 600.);
         open(&mut setup);
         assert!(!thread_kept(&setup), "too narrow: the thread floats");
-        assert!(!desk_mark_shown(&setup));
+        assert!(!desk_mark_shown(&setup), "over the page, not the Desk");
+        assert!(desk_open(&setup));
     }
 
     #[gpui::test]
@@ -7753,39 +7746,6 @@ mod tests {
         assert_eq!(presence(&setup), Presence::Talking);
         assert_eq!(visible(&setup), "", "nothing renders yet");
         assert_eq!(room(&setup), None, "so nothing asks for room");
-    }
-
-    #[gpui::test]
-    async fn without_centred_layout_a_desk_you_visited_still_ebbs_for_the_thread(
-        cx: &mut TestAppContext,
-    ) {
-        let mut setup = setup(cx).await;
-        connect(&mut setup);
-        add_desk(&mut setup);
-        let editor = open_note(&mut setup).await;
-        let connection = Rc::new(StubAgentConnection::new());
-        start_wrap_today(&mut setup, connection, None, vec![says("Seven of eleven.")]).await;
-        resize(&mut setup, 1024., 900.);
-        setup.panel.update_in(&mut setup.cx, |panel, window, cx| {
-            panel.open_thread(window, cx)
-        });
-        setup.cx.run_until_parked();
-        assert!(desk_mark_shown(&setup));
-
-        setup
-            .workspace
-            .update_in(&mut setup.cx, |workspace, window, cx| {
-                workspace.focus_panel::<DeskPanel>(window, cx);
-            });
-        setup.cx.run_until_parked();
-        assert!(!desk_mark_shown(&setup), "the Desk you are in is whole");
-        setup.cx.focus(&editor);
-        setup.cx.run_until_parked();
-        assert_eq!(presence(&setup), Presence::Talking);
-        assert!(
-            desk_mark_shown(&setup),
-            "back in the note, the Desk ebbs for the thread again"
-        );
     }
 
     #[gpui::test]
