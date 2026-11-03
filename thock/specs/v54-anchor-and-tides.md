@@ -123,6 +123,11 @@ V44's `room_for` cascade and its Desk collapse are replaced by §4.2:
   when the thread folds.
 - A right dock with policy `stay` never ebbs for the thread. The column shifts or narrows, and the
   thread floats as a last resort.
+- With centred layout off (or a split centre) there is no page to anchor, but the thread follows
+  the same idea: it keeps its room on the right when the centre still holds `min_column` beside
+  it; otherwise the right dock ebbs for it (unless it is `stay`) and flows back when the thread
+  folds; and only when even that isn't enough does the thread float (decision by Diego, review of
+  the first implementation).
 
 ### 4.4 Worked numbers
 
@@ -194,8 +199,10 @@ flows it first (§5.4 rule 1).
 ### 5.6 When Tides is inactive
 
 Tides is active only while the page is anchored: centred layout on, one pane in the centre, an
-item open. With splits or centred layout off, every side is flowing and nothing ebbs. Ebbing
-there would reflow the panes, which breaks G1.
+item open. With splits or centred layout off, typing ebbs nothing and every side is flowing:
+Tides would reflow the panes, which breaks G1. A side ebbed while the page was anchored flows
+when the page stops being anchored, so it never comes back ebbed. The one exception is the
+thread's room (§4.3): the right dock still ebbs for a thread with messages that can't fit.
 
 ## 6. Settings
 
