@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Runs the ThockKit unit tests (the data layer) on the Mac. This is what CI calls.
+# Runs the ThockKit unit tests (the data layer) on the Mac, after the check on the
+# build-number bump of script/testflight. This is what CI calls.
 set -euo pipefail
 
-cd "$(dirname "$0")/../ThockKit"
+cd "$(dirname "$0")"
+./test-testflight
+cd ../ThockKit
 swift test "$@"

@@ -178,6 +178,10 @@ lines are `calendar` and are never ticked, as on the phone.
 - **Activation:** the phone activates `WCSession` in `application(_:didFinishLaunchingWithOptions:)`,
   beside the notification delegate, so a request that launched the app in the background is
   received. The watch activates it in its app delegate.
+- **Background wakes:** a delivery that wakes the watch app arrives with a
+  `WKWatchConnectivityRefreshBackgroundTask`. It is completed once `hasContentPending` is false,
+  and after eight seconds regardless: the system kills the app at fifteen with a task still open,
+  and `hasContentPending` can stay true past that for content that never comes.
 
 ### 6.3 Exactly once
 
@@ -229,8 +233,11 @@ One widget extension, `ThockWatchWidgets`, with two widgets.
     - "now" is an accent line with a dot.
 - **Tinted and monochrome faces:** every distinction above is also made by shape or opacity, not
   only colour, and the accent parts are `widgetAccentable()`.
-- **No SF Symbols:** the glyphs are drawn shapes, because with `Image(systemName:)` in its entry
-  views the complication showed only its redacted placeholder on a real watch.
+- **Cheap to draw:** the glyphs are drawn shapes, not SF Symbols, and the track is two `Canvas`
+  layers (one accentable, for "now") rather than a view per block. Third-party complications are
+  drawn by one shared system process (`WidgetRenderer_Default`), which on a busy face is killed
+  at its memory mark several times a day, and the slot stays blank or half-drawn until it comes
+  back; the less of this complication it has to hold, the less often that is this one.
 - **Inline:** *3 left · 14:00 Dentist*.
 - **Tap:** `thock://day/today`.
 - **Wrist down:** labels are `privacySensitive()`, as in the iPhone widget, so a locked watch shows
@@ -250,8 +257,7 @@ so it never goes stale and spends no refreshes. Tap: `thock://capture?voice=1`.
   minutes for the next four hours, never past midnight (17 entries), each with its four-hour
   window's start, its "next" row, the row after it and the open count the inline face shows. The
   window moves without a reload. WidgetKit renders every entry when a timeline arrives, so the
-  timeline stays short: a whole day of entries, built at midnight, is the suspected cause of the
-  complication showing its redacted placeholder on build 22.
+  timeline stays short.
 - The policy is `.after(reloadDate)`: the last entry, or the next midnight when there is no entry
   after the first. About six reloads a day, well inside the ration. The snapshot already holds
   tomorrow, so the new day draws without the phone.

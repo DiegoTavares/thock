@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Archives the iPhone app (the watch app inside it) and uploads it to
+# TestFlight, or bumps the build number every upload needs. The upload half
+# runs on a Mac signed in to the team; the bump runs anywhere.
+#
+#   script/testflight bump            # CURRENT_PROJECT_VERSION += 1 in every target, prints it
+#   script/testflight upload          # preflight, archive, export to App Store Connect
+#   script/testflight upload --export-only   # re-export the last archive (a failed upload)
+#
+# Signing is automatic for the team. The archive needs the login keychain
+# unlocked and the export needs Xcode signed in to an account with App Store
+# Connect access; the preflight checks what it can and the export's log is
+# read for the rest, so a failure names what to fix.
+set -euo pipefail
+
+ios="$(cd "$(dirname "$0")/.." && pwd)"
+project="${THOCK_PBXPROJ:-$ios/Thock.xcodeproj/project.pbxproj}"
+release="${THOCK_RELEASE_DIR:-$ios/build/release}"
+team=KY338LSPPB
+
+step() { echo "testflight: $*"; }
+fail() {
+    echo "testflight: FAIL: $*" >&2
+    exit 1
+}
+
+current_build() {
+    local numbers
+    numbers="$(sed -n 's/^[[:space:]]*CURRENT_PROJECT_VERSION = \([0-9][0-9]*\);$/\1/p' "$project" | sort -u)"
+    [[ -n "$numbers" ]] || fail "no CURRENT_PROJECT_VERSION in $project"
+    [[ "$(wc -l <<<"$numbers")" -eq 1 ]] || fail "the targets disagree on the build number: $(tr '\n' ' ' <<<"$numbers")"
+    echo "$numbers"
+}
+
+bump() {
+    local from to
+    from="$(current_build)"
+    to=$((from + 1))
+    sed -i.bak "s/^\([[:space:]]*CURRENT_PROJECT_VERSION = \)$from;$/\1$to;/" "$project"
+    rm -f "$project.bak"
+    [[ "$(current_build)" == "$to" ]] || fail "bump did not take"
+    echo "$to"
+}
+
+preflight() {
+    command -v xcodebuild >/dev/null || fail "xcodebuild not found; this half runs on a Mac"
+    if ioreg -n Root -d1 -a 2>/dev/null | grep -q CGSSessionScreenIsLocked; then
+        fail "the screen is locked; signing needs the login keychain, so someone must unlock the Mac"
+    fi
+    if ! security show-keychain-info "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1; then
+        fail "the login keychain is locked; run 'security unlock-keychain' on the Mac (never pass the password through an agent)"
+    fi
+}
+
+write_export_options() {
+    cat >"$release/ExportOptions.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>app-store-connect</string>
+    <key>destination</key>
+    <string>upload</string>
+    <key>teamID</key>
+    <string>$team</string>
+    <key>signingStyle</key>
+    <string>automatic</string>
+    <key>uploadSymbols</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+}
+
+# The export's own log says why Apple refused; xcodebuild's stderr mostly doesn't.
+explain_export_failure() {
+    local log="" newest=0 candidate modified
+    for candidate in "${TMPDIR:-/tmp}"/Thock_*.xcdistributionlogs/IDEDistribution.standard.log; do
+        [[ -f "$candidate" ]] || continue
+        modified="$(stat -f %m "$candidate")"
+        if (( modified > newest )); then
+            newest=$modified
+            log="$candidate"
+        fi
+    done
+    [[ -n "$log" ]] || return 0
+    if grep -q "PLA Update available" "$log"; then
+        echo "testflight: Apple's Program License Agreement changed; the account holder must accept it on developer.apple.com → Agreements, then rerun with --export-only" >&2
+    elif grep -q "Failed to find an account" "$log"; then
+        echo "testflight: Xcode is not signed in to an account with App Store Connect access for team $team (Xcode → Settings → Accounts); rerun with --export-only" >&2
+    else
+        echo "testflight: see $log" >&2
+    fi
+}
+
+upload() {
+    local export_only=0
+    [[ "${1:-}" == "--export-only" ]] && export_only=1
+    preflight
+    mkdir -p "$release"
+    local archive="$release/Thock.xcarchive"
+    if [[ "$export_only" -eq 0 ]]; then
+        step "archiving build $(current_build) (several minutes; archive.log fills meanwhile)"
+        # caffeinate keeps the display awake so the screen can't lock and take
+        # the keychain with it mid-build.
+        caffeinate -dims xcodebuild -project "$ios/Thock.xcodeproj" -scheme Thock -configuration Release \
+            -destination generic/platform=iOS -archivePath "$archive" -allowProvisioningUpdates archive \
+            >"$release/archive.log" 2>&1 || fail "archive failed; see $release/archive.log"
+    else
+        [[ -d "$archive" ]] || fail "no archive at $archive to export"
+    fi
+    write_export_options
+    step "uploading to App Store Connect (export.log)"
+    if ! xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$release/ExportOptions.plist" \
+        -exportPath "$release/export" -allowProvisioningUpdates >"$release/export.log" 2>&1; then
+        explain_export_failure
+        fail "export failed; see $release/export.log"
+    fi
+    step "uploaded build $(current_build); it appears in TestFlight after processing"
+}
+
+case "${1:-}" in
+    bump) bump ;;
+    upload) shift; upload "$@" ;;
+    *) sed -n '2,13p' "$0" >&2; exit 2 ;;
+esac
