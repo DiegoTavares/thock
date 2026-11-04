@@ -4589,6 +4589,7 @@ pub mod tests {
         let token_range =
             MultiBufferOffset(token_start)..MultiBufferOffset(token_start + token.len());
 
+        let mut soft_wrapped = false;
         for wrap_width in (30..300).step_by(3) {
             let buffer = cx.update(|cx| MultiBuffer::build_simple(&text, cx));
             let map = cx.new(|cx| {
@@ -4617,12 +4618,13 @@ pub mod tests {
                 );
                 map.snapshot(cx)
             });
-            cx.run_until_parked();
+            let wrapped_text = snapshot.text();
+            soft_wrapped |= wrapped_text.lines().count() > 2;
             assert!(
-                snapshot.text().contains(label),
-                "wrapped inside the placeholder at width {wrap_width}: {:?}",
-                snapshot.text()
+                wrapped_text.contains(label),
+                "wrapped inside the placeholder at width {wrap_width}: {wrapped_text:?}",
             );
         }
+        assert!(soft_wrapped, "no width soft wrapped the line");
     }
 }
