@@ -382,6 +382,23 @@ impl WrapMap {
     }
 }
 
+/// A rendered chunk is one element even before it has been measured: a wrap
+/// inside a fold placeholder has no buffer position, so the text must only
+/// stand in for its width.
+fn line_fragment<'a>(chunk: &Chunk<'a>, line_wrapper: &mut LineWrapper) -> gpui::LineFragment<'a> {
+    let Some(renderer) = &chunk.renderer else {
+        return gpui::LineFragment::text(chunk.text);
+    };
+    let width = renderer.measured_width.unwrap_or_else(|| {
+        chunk
+            .text
+            .chars()
+            .map(|character| line_wrapper.width_for_char(character))
+            .sum()
+    });
+    gpui::LineFragment::element(width, chunk.text.len())
+}
+
 impl WrapSnapshot {
     #[ztracing::instrument(skip_all)]
     fn new(tab_snapshot: TabSnapshot) -> Self {
@@ -550,22 +567,7 @@ impl WrapSnapshot {
                             });
                             break;
                         } else {
-                            // A rendered chunk is one element even before it has been
-                            // measured: a wrap inside a fold placeholder has no buffer
-                            // position, so the text must only stand in for its width.
-                            if let Some(renderer) = &chunk.renderer {
-                                let width = renderer.measured_width.unwrap_or_else(|| {
-                                    chunk
-                                        .text
-                                        .chars()
-                                        .map(|character| line_wrapper.width_for_char(character))
-                                        .sum()
-                                });
-                                line_fragments
-                                    .push(gpui::LineFragment::element(width, chunk.text.len()));
-                            } else {
-                                line_fragments.push(gpui::LineFragment::text(chunk.text));
-                            }
+                            line_fragments.push(line_fragment(&chunk, line_wrapper));
                             line.push_str(chunk.text);
                         }
                     }
@@ -1389,7 +1391,7 @@ mod tests {
         test::test_font,
     };
     use futures::stream::StreamExt;
-    use gpui::{LineFragment, px, test::observe};
+    use gpui::{px, test::observe};
     use rand::prelude::*;
     use settings::SettingsStore;
     use std::{cmp, env, num::NonZeroU32};
@@ -1717,8 +1719,20 @@ mod tests {
                     wrapped_text.push('\n');
                 }
 
+                let fragments = tab_snapshot
+                    .chunks(
+                        TabPoint::new(row as u32, 0)..TabPoint::new(row as u32, line.len() as u32),
+                        LanguageAwareStyling {
+                            tree_sitter: false,
+                            diagnostics: false,
+                        },
+                        Highlights::default(),
+                    )
+                    .map(|chunk| line_fragment(&chunk, line_wrapper))
+                    .collect::<Vec<_>>();
+
                 let mut prev_ix = 0;
-                for boundary in line_wrapper.wrap_line(&[LineFragment::text(line)], wrap_width) {
+                for boundary in line_wrapper.wrap_line(&fragments, wrap_width) {
                     wrapped_text.push_str(&line[prev_ix..boundary.ix]);
                     wrapped_text.push('\n');
                     wrapped_text.push_str(&" ".repeat(boundary.next_indent as usize));
