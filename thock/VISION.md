@@ -565,7 +565,7 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   across restarts. A nudge exists only while its Routine is installed; the next one is a registry
   entry, not a subsystem. Spec `specs/v52-nudges.md`. _(shipped on `main` with the V52 PR; people
   on their own terminal agent get no nudge yet)_
-- [ ] **A page that stays put:** with centred layout on, the note fills the room between the
+- [x] **A page that stays put:** with centred layout on, the note fills the room between the
   panels, up to 80 characters of the body font, centred on the window when the margins allow it.
   While you type, the side panels ebb to a 6pt mark at the window's edge without moving a word,
   and they come back after eight quiet seconds, when you reach one with its key or `ctrl-cmd-\`,
@@ -573,15 +573,15 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   top-right corner. A panel that leaves the page fewer than 48 characters waits at the edge until
   called, and an agent thread takes room only once it shows a message. Each side
   can `stay` instead, and `"tides": false` turns it off. Zed's fractional centred-layout paddings
-  are gone. Spec `specs/v54-anchor-and-tides.md`. _(in progress: implemented on the
-  `v54-anchor-and-tides` branch, not yet on `main`)_
-- [ ] **Triage an email once:** with Gmail archive turned on, an email labelled `thock/inbox`
+  are gone. Spec `specs/v54-anchor-and-tides.md`. _(shipped 2026-11-03: merged as #180, with the
+  Desk design pass in #183)_
+- [x] **Triage an email once:** with Gmail archive turned on, an email labelled `thock/inbox`
   that is filed from the Inbox (a desk key, a phone swipe, or the ritual) leaves the Gmail inbox
   too; only its `INBOX` label changes, a minute after the decision, and undoing the decision puts
   it back. Opt-in through its own action and Google consent for `gmail.modify`, so a vault that
   never opts in stays read-only toward Google; which decisions count is a list in
   `.thock/gmail.toml`, and nothing decided before the opt-in moves. Spec
-  `specs/v53-gmail-archive-on-triage.md`. _(implemented on the `v53-gmail-archive` branch)_
+  `specs/v53-gmail-archive-on-triage.md`. _(shipped 2026-11-02: merged as #179)_
 
 ---
 

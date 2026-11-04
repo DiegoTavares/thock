@@ -1,6 +1,6 @@
 # Thock V53 - Archive in Gmail: triage once, both inboxes agree
 
-**Status:** Implemented (2026-11-02): PR #179
+**Status:** Shipped (2026-11-02): merged as #179
 **Owner:** Diego · **Date:** 2026-11-02
 **Companion docs:** `v15-unified-gmail-sync.md` (the `thock/inbox` mapping, `.thock/gmail.toml`,
 `imported.jsonl`), `v13-inbox-routine.md` §9.5 (the triage-log format), `v40-phone-inbox-gestures.md`

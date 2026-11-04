@@ -1,6 +1,6 @@
 # Thock V54 - Anchor and Tides: a page that stays put
 
-**Status:** Approved (2026-11-02); implementing
+**Status:** Shipped (2026-11-03): merged as #180, Desk design pass in #183
 **Owner:** Diego · **Date:** 2026-11-02
 **Design reference:** the small-screen desk study, round 2, ideas i (Anchor) and ii (Tides), with
 to-scale mocks on a 14″ MacBook and a 24″ monitor: <https://claude.ai/artifact/2inkiuRBTfCHt6KiBAHRR3>
