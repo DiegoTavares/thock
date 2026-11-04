@@ -846,9 +846,11 @@ pub fn render_inline_banner(statuses: &[ConnectorStatus], cx: &App) -> Option<An
             .on_click(move |_, window, cx| action.dispatch(window, cx))
         });
     Some(
+        // The Backlog's rows' vertical padding, so the banner isn't wedged
+        // under the tabs; `h_flex` centres the button on the text.
         h_flex()
             .px_2()
-            .py_0p5()
+            .py_1()
             .gap_1p5()
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)

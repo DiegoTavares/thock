@@ -1047,8 +1047,8 @@ mod tests {
     async fn ticking_a_task_from_the_desk_does_not_ebb(cx: &mut TestAppContext) {
         // The tick writes the task into today's note, the page in the centre.
         let mut setup = setup(cx).await;
-        // The first row is the Soon section's lane; the second is a task.
-        setup.cx.simulate_keystrokes("ctrl-alt-u down down x");
+        // The Soon lane's title starts selected; the row under it is a task.
+        setup.cx.simulate_keystrokes("ctrl-alt-u down x");
         setup.cx.run_until_parked();
         let open = setup
             .desk

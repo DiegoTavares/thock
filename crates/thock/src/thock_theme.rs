@@ -153,8 +153,8 @@ mod tests {
             let muted = colour(&theme, |theme| &theme.style.colors.text_muted);
             let dim = colour(&theme, |theme| &theme.style.colors.text_placeholder);
             let amber = colour(&theme, |theme| &theme.style.colors.text_accent);
-            // `ink` is also the idle tide grip on the page's ground. `muted`
-            // is the unticked box's edge, a ticked task's text, the Backlog's
+            // `muted` is the idle tide grip on the page's ground, the
+            // unticked box's edge, a ticked task's text, the Backlog's
             // meta line and group labels, and the footer's hint labels; `dim`
             // is the strip's future digits on the masthead, the footer's
             // keycap outlines, and a ticked box's edge and check.

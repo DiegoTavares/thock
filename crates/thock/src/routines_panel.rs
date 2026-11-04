@@ -11,8 +11,8 @@ use chrono::{DateTime, Local, NaiveDate, Utc};
 use fs::Fs;
 use gpui::{
     Action, App, AsyncWindowContext, Context, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, KeyContext, Pixels, PromptLevel, SharedString, Subscription, Task, WeakEntity,
-    Window, actions, px,
+    Focusable, FontWeight, KeyContext, Pixels, PromptLevel, SharedString, Subscription, Task,
+    WeakEntity, Window, actions, px,
 };
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use project::Project;
@@ -24,8 +24,7 @@ use std::str::FromStr as _;
 use std::sync::Arc;
 use ui::prelude::*;
 use ui::{
-    Button, Divider, Icon, IconButton, IconSize, KeyBinding, Label, ListItem, ListSubHeader,
-    Tooltip, rems_from_px,
+    Button, Divider, Icon, IconButton, IconSize, KeyBinding, Label, ListItem, Tooltip, rems_from_px,
 };
 use util::ResultExt as _;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -283,6 +282,10 @@ fn link_icon(link: &RoutineLink) -> RowIcon {
         })
 }
 
+/// A ritual's default glyph: a bolt drawn with the note glyphs' 1.2pt
+/// stroke and extent, so the verbs sit at the same weight as the notes.
+const RITUAL_ICON: &str = "icons/thock/bolt.svg";
+
 /// A skill's icon: the manifest's override, else a glyph that says what the
 /// row *does*. Rituals get the bolt, a run glyph that is not a triangle, so
 /// a verb never reads like a collapsed disclosure or one of the note rows
@@ -292,11 +295,11 @@ fn skill_icon(skill: &RoutineSkill) -> RowIcon {
         .icon
         .as_deref()
         .and_then(manifest_icon)
-        .unwrap_or(RowIcon::Named(if skill.kind.is_setup() {
-            IconName::Settings
+        .unwrap_or(if skill.kind.is_setup() {
+            RowIcon::Named(IconName::Settings)
         } else {
-            IconName::BoltOutlined
-        }))
+            RowIcon::Path(RITUAL_ICON)
+        })
 }
 
 /// A skill row's glyph, in muted ink like every other row's. A ritual's
@@ -576,12 +579,19 @@ fn section_items(
 
 /// A zone caption. Not a row: it takes no selection and can't be collapsed,
 /// which is the whole reason it replaced the old "Skills" folder entry. Its
-/// muted face and the indent of the rows under it are what group them.
-fn render_caption(label: SharedString) -> AnyElement {
+/// muted face and the indent of the rows under it are what group them. It
+/// takes the Backlog's group-caption style, so both panes share one caption.
+fn render_caption(label: SharedString, cx: &App) -> AnyElement {
+    let caption = SharedString::from(label.to_uppercase());
     div()
-        .pl(px(12.))
-        .pt_1()
-        .child(ListSubHeader::new(label))
+        .debug_selector(move || format!("thock-rail-caption-{label}"))
+        .pl(px(14.))
+        .pt_2()
+        .pb_1()
+        .text_size(rems(0.75))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(cx.theme().colors().text_muted)
+        .child(caption)
         .into_any_element()
 }
 
@@ -2233,11 +2243,12 @@ impl RoutinesPanel {
     }
 
     /// The highlighted row: the keyboard cursor if one is set, otherwise the
-    /// row matching the active editor item.
+    /// row matching the active editor item, otherwise the first row, so the
+    /// rail always shows where the keyboard will start.
     fn effective_selected_index(&self, rows: &[NavRow], cx: &App) -> Option<usize> {
-        self.selected_index
-            .filter(|index| *index < rows.len())
-            .or_else(|| self.active_row_index(rows, cx))
+        highlighted_row(self.selected_index, rows.len(), || {
+            self.active_row_index(rows, cx)
+        })
     }
 
     fn select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2471,7 +2482,7 @@ impl RoutinesPanel {
         for item in self.section_items(manifest) {
             let indent = 1 + item.depth;
             let (row, index) = match item.kind {
-                SectionItemKind::Caption(label) => (render_caption(label), None),
+                SectionItemKind::Caption(label) => (render_caption(label, cx), None),
                 SectionItemKind::Link(link) => {
                     let index = next_index();
                     (
@@ -3051,7 +3062,7 @@ impl RoutinesPanel {
         cx: &Context<Self>,
     ) -> AnyElement {
         let (selected_index, dimmed_index) = split_selection(selected_index, self.focused);
-        let mut section = v_flex().child(render_caption("Getting started".into()));
+        let mut section = v_flex().child(render_caption("Getting started".into(), cx));
         for step in GettingStartedStep::ALL {
             let index = *row_index;
             *row_index += 1;
@@ -3231,6 +3242,19 @@ impl Panel for RoutinesPanel {
 
 /// The selection as the rows draw it, `(full, dimmed)`: in full while the
 /// panel has focus, otherwise dimmed, so the cursor stays visible.
+/// The cursor while it points at a row, else the active note's row, else the
+/// first row; `None` only when there are no rows.
+fn highlighted_row(
+    cursor: Option<usize>,
+    row_count: usize,
+    active_row: impl FnOnce() -> Option<usize>,
+) -> Option<usize> {
+    cursor
+        .filter(|index| *index < row_count)
+        .or_else(active_row)
+        .or_else(|| (row_count > 0).then_some(0))
+}
+
 fn split_selection(selected_index: Option<usize>, focused: bool) -> (Option<usize>, Option<usize>) {
     if focused {
         (selected_index, None)
@@ -3303,10 +3327,7 @@ mod tests {
         );
         // A verb reads as a verb: rituals default to the run glyph, setup
         // steps to the settings one.
-        assert_eq!(
-            skill_icon(&skill(None)),
-            RowIcon::Named(IconName::BoltOutlined)
-        );
+        assert_eq!(skill_icon(&skill(None)), RowIcon::Path(RITUAL_ICON));
         assert_eq!(
             skill_icon(&skill_of_kind(SkillKind::Setup, None)),
             RowIcon::Named(IconName::Settings)
@@ -3584,6 +3605,27 @@ mod tests {
     }
 
     #[test]
+    fn the_rail_always_shows_a_selection_when_it_has_rows() {
+        assert_eq!(highlighted_row(None, 5, || None), Some(0), "the first row");
+        assert_eq!(
+            highlighted_row(None, 5, || Some(3)),
+            Some(3),
+            "the open note"
+        );
+        assert_eq!(
+            highlighted_row(Some(2), 5, || Some(3)),
+            Some(2),
+            "the cursor"
+        );
+        assert_eq!(
+            highlighted_row(Some(9), 5, || None),
+            Some(0),
+            "a stale cursor"
+        );
+        assert_eq!(highlighted_row(None, 0, || None), None, "an empty rail");
+    }
+
+    #[test]
     fn toggling_a_group_keeps_the_cursor_on_its_row() {
         let manifest = manifest(
             vec![
@@ -3637,10 +3679,7 @@ mod tests {
             link_icon(&link("finance/plan.md", LinkKind::Editor, Some("hashh"))),
             RowIcon::Named(IconName::Notepad)
         );
-        assert_eq!(
-            skill_icon(&skill(Some("nope"))),
-            RowIcon::Named(IconName::BoltOutlined)
-        );
+        assert_eq!(skill_icon(&skill(Some("nope"))), RowIcon::Path(RITUAL_ICON));
         assert_eq!(routine_icon(Some("nope")), RowIcon::Named(IconName::Blocks));
         assert_eq!(routine_icon(None), RowIcon::Named(IconName::Blocks));
     }

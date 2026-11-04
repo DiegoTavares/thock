@@ -239,6 +239,9 @@ pub struct BacklogPanel {
     folded_lanes: HashSet<SectionKind>,
     pending_serialization: Option<Task<()>>,
     selected: Option<TaskSelection>,
+    /// The cursor was handed up to the row the Desk keeps above the lanes,
+    /// so the view shows no selection of its own until it takes it back.
+    released: bool,
     /// Whether focus was inside the panel at the last render, which decides
     /// how strongly the selection is drawn.
     focused: bool,
@@ -426,6 +429,7 @@ impl BacklogPanel {
                     .unwrap_or_else(|| HashSet::from_iter([SectionKind::Someday])),
                 pending_serialization: None,
                 selected: None,
+                released: false,
                 focused: false,
                 link_folders: HashMap::default(),
                 scroll_handles: std::array::from_fn(|_| ScrollHandle::new()),
@@ -707,6 +711,7 @@ impl BacklogPanel {
         if self.view != view {
             self.view = view;
             self.selected = None;
+            self.released = false;
             self.edit_state = None;
             cx.notify();
         }
@@ -726,6 +731,7 @@ impl BacklogPanel {
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.released = false;
         if self.selected.take().is_some() {
             cx.notify();
         }
@@ -759,9 +765,17 @@ impl BacklogPanel {
 
     /// The selection resolved against the current parse: same column, index
     /// clamped to what that column renders now. `None` once the column is
-    /// empty, so the highlight never points at a row that isn't there.
+    /// empty, so the highlight never points at a row that isn't there. With
+    /// no cursor set, the view's first row, so the dimmed selection always
+    /// shows where the keyboard will start.
     fn selection(&self) -> Option<TaskSelection> {
-        let selected = self.selected?;
+        if self.released && self.row_above {
+            return None;
+        }
+        let selected = self.selected.or_else(|| {
+            self.first_populated_column()
+                .map(|section| TaskSelection { section, index: 0 })
+        })?;
         let len = self.visible_rows(selected.section).len();
         len.checked_sub(1).map(|last| TaskSelection {
             section: selected.section,
@@ -887,6 +901,7 @@ impl BacklogPanel {
             |row| matches!(row, BacklogRow::Category { name: header, .. } if *header == name),
         ) {
             self.selected = Some(TaskSelection { section, index });
+            self.released = false;
             let flat = self.flat_index(TaskSelection { section, index });
             self.scroll_handles[self.view.index()].scroll_to_item(flat);
         }
@@ -927,6 +942,7 @@ impl BacklogPanel {
 
     fn select_row(&mut self, section: SectionKind, index: usize, cx: &mut Context<Self>) {
         self.selected = Some(TaskSelection { section, index });
+        self.released = false;
         let flat = self.flat_index(TaskSelection { section, index });
         self.scroll_handles[self.view.index()].scroll_to_item(flat);
         cx.notify();
@@ -970,6 +986,7 @@ impl BacklogPanel {
                     self.select_row(previous, last, cx);
                 } else if self.row_above {
                     self.selected = None;
+                    self.released = true;
                     cx.notify();
                     cx.propagate();
                 }
@@ -1820,7 +1837,7 @@ impl BacklogPanel {
         }
         if let Some(link) = task_link(&task.text) {
             if let Some(date) = link.date {
-                parts.push(format!("from {}", crate::notes::format_date(date, "MMM D")));
+                parts.push(crate::notes::format_date(date, "MMM D"));
             }
             if let Some(Some(folder)) = self.link_folders.get(&link.target) {
                 parts.push(folder.clone());
@@ -2231,7 +2248,7 @@ impl BacklogPanel {
                 div()
                     .debug_selector(move || count_id)
                     .text_size(rems(0.71875))
-                    .text_color(cx.theme().colors().text_placeholder)
+                    .text_color(cx.theme().colors().text_muted)
                     .child(SharedString::from(count.to_string())),
             )
     }
@@ -2497,7 +2514,7 @@ impl BacklogPanel {
                                 this.child(
                                     div()
                                         .text_size(rems(0.71875))
-                                        .text_color(colors.text_placeholder)
+                                        .text_color(colors.text_muted)
                                         .child(SharedString::from(date.to_string())),
                                 )
                             }),
@@ -2620,7 +2637,7 @@ impl BacklogPanel {
                         this.child(
                             div()
                                 .text_size(rems(0.71875))
-                                .text_color(colors.text_placeholder)
+                                .text_color(colors.text_muted)
                                 .child(SharedString::from(meta)),
                         )
                     }),

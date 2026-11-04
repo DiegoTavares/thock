@@ -547,12 +547,12 @@ impl Dock {
     /// panel; a click focuses it, which brings it back.
     fn render_tide_mark(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let colors = cx.theme().colors();
-        // The full text ink, so the grip is easy to find on a dark ground
-        // and at 1x.
+        // Muted ink at rest, so an idle grip never outshines the page;
+        // accent is kept for "something is waiting".
         let grip_color = if self.tide_waiting {
             colors.text_accent
         } else {
-            colors.text
+            colors.text_muted
         };
         let side = match self.position {
             DockPosition::Left => "left",

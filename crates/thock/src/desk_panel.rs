@@ -633,13 +633,13 @@ impl DeskPanel {
         // The Reminders count is the overdue number, in the warning colour,
         // and nothing when none are (V45 §9.1).
         let counts = [
-            Some((self.backlog.read(cx).open_count(), colors.text_placeholder)),
-            Some((self.planner.read(cx).open_count(), colors.text_placeholder)),
+            Some((self.backlog.read(cx).open_count(), colors.text_muted)),
+            Some((self.planner.read(cx).open_count(), colors.text_muted)),
             (overdue > 0).then(|| (overdue, cx.theme().status().warning)),
             None,
         ];
-        // When the dock is too narrow for every tab, the strip scrolls and the
-        // last visible tab fades out at the edge instead of being cut.
+        // Sized so all four tabs fit the default dock; only a narrower dock
+        // scrolls the strip, with the last visible tab fading at the edge.
         let scroll_offset = self.tab_scroll.offset().x;
         let scroll_max = self.tab_scroll.max_offset().x;
         let overflowing = scroll_max > px(0.) && -scroll_offset < scroll_max - px(1.);
@@ -648,7 +648,7 @@ impl DeskPanel {
             .debug_selector(|| "thock-desk-tabs".into())
             .pt_3()
             .px_3()
-            .gap(px(10.))
+            .gap(px(8.))
             .overflow_x_scroll()
             .track_scroll(&self.tab_scroll)
             .children(DeskTab::ALL.into_iter().zip(counts).map(|(tab, count)| {
@@ -672,7 +672,7 @@ impl DeskPanel {
                     .cursor_pointer()
                     .child(
                         div()
-                            .text_size(rems(0.8125))
+                            .text_size(rems(0.75))
                             .when(active, |this| this.font_weight(FontWeight::SEMIBOLD))
                             .text_color(if active {
                                 colors.text
@@ -774,12 +774,13 @@ impl DeskPanel {
 }
 
 /// The Backlog footer's hints, most used first: when the panel is narrow
-/// the last ones are left out rather than cut off or wrapped.
+/// the last ones are left out rather than cut off or wrapped, so "open",
+/// the primary action, leads and is never the one dropped.
 fn backlog_hints() -> [(Box<dyn Action>, &'static str); 6] {
     [
+        (RevealBacklogTask.boxed_clone(), "open"),
         (AddBacklogTask.boxed_clone(), "add"),
         (CompleteBacklogTask.boxed_clone(), "done"),
-        (RevealBacklogTask.boxed_clone(), "open"),
         (OpenBacklogTaskNote.boxed_clone(), "note"),
         (MoveBacklogTaskRight.boxed_clone(), "someday"),
         (MoveBacklogTaskToToday.boxed_clone(), "today"),
@@ -819,9 +820,6 @@ fn hints_dimmed(focus: &FocusHandle, window: &Window, cx: &App) -> bool {
     !focus.contains_focused(window, cx)
 }
 
-/// How far the hints fade while their view doesn't have focus.
-const HINTS_UNFOCUSED_OPACITY: f32 = 0.55;
-
 /// A hint's label, a step above the Backlog's meta line so it holds up at 1x.
 const HINT_LABEL_SIZE: Rems = rems(0.8125);
 
@@ -829,7 +827,8 @@ const HINT_LABEL_SIZE: Rems = rems(0.8125);
 /// own keycap, and a sequence's keycaps are joined by a small "then" so
 /// `g` `space` never reads as two alternatives. Hints that don't fit the
 /// line are left out, the least used first. The bar dims while the view
-/// it describes doesn't have focus, since its keys don't apply then.
+/// it describes doesn't have focus, since its keys don't apply then: the
+/// keys drop to the labels' muted ink, which still reads at 1x.
 fn render_hints(
     hints: &[(Box<dyn Action>, &'static str)],
     focus: &FocusHandle,
@@ -881,7 +880,7 @@ fn render_hints(
                     .font_weight(FontWeight::NORMAL)
                     .children(render_keybinding_keystroke(
                         keystroke,
-                        Some(Color::Default),
+                        Some(if dimmed { Color::Muted } else { Color::Default }),
                         key_size,
                         PlatformStyle::platform(),
                         vim_mode,
@@ -931,7 +930,6 @@ fn render_hints(
                 .gap_x_3()
                 .gap_y_2()
                 .items_center()
-                .when(dimmed, |this| this.opacity(HINTS_UNFOCUSED_OPACITY))
                 .children(hints),
         )
         .into_any_element()
@@ -1326,7 +1324,7 @@ mod tests {
             row,
             Some((
                 "Study for DNV elections".to_string(),
-                Some(("from Sep 28 · inbox".to_string(), false))
+                Some(("Sep 28 · inbox".to_string(), false))
             )),
             "the slug leaves the text; the link is offered on the meta line"
         );
@@ -1433,9 +1431,14 @@ mod tests {
     #[gpui::test]
     async fn the_cursor_walks_the_stacked_lanes(cx: &mut TestAppContext) {
         let mut setup = setup(cx, true).await;
+        assert_eq!(
+            selected(&setup),
+            Some(("soon", 0)),
+            "the Soon title is selected before any key"
+        );
         setup.cx.simulate_keystrokes("j");
-        assert_eq!(selected(&setup), Some(("soon", 0)), "the Soon title");
-        setup.cx.simulate_keystrokes("j j j");
+        assert_eq!(selected(&setup), Some(("soon", 1)), "down moves off it");
+        setup.cx.simulate_keystrokes("j j");
         assert_eq!(selected(&setup), Some(("soon", 3)), "the SPI caption");
         setup.cx.simulate_keystrokes("j j");
         assert_eq!(
@@ -1530,7 +1533,7 @@ mod tests {
     #[gpui::test]
     async fn marking_done_moves_the_task_to_done(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false).await;
-        setup.cx.simulate_keystrokes("down down");
+        setup.cx.simulate_keystrokes("down");
         assert_eq!(selected(&setup), Some(("soon", 1)));
         setup.cx.simulate_keystrokes("x");
         setup.cx.run_until_parked();
@@ -1545,7 +1548,7 @@ mod tests {
     #[gpui::test]
     async fn the_selection_survives_a_change_on_disk(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false).await;
-        setup.cx.simulate_keystrokes("down down down");
+        setup.cx.simulate_keystrokes("down down");
         assert_eq!(selected(&setup), Some(("soon", 2)));
         setup
             .fs
@@ -1621,13 +1624,17 @@ mod tests {
             card.as_ref().map(|card| card.label.as_str()),
             Some("NEXT · IN 25 MIN")
         );
-        setup.cx.simulate_keystrokes("down");
-        assert_eq!(selected(&setup), Some(("soon", 0)));
+        assert_eq!(
+            selected(&setup),
+            Some(("soon", 0)),
+            "the first row to start"
+        );
         setup.cx.simulate_keystrokes("up");
         assert_eq!(selected(&setup), None);
         assert!(card_selected(&setup));
         setup.cx.simulate_keystrokes("down");
         assert!(!card_selected(&setup), "down returns to the lanes");
+        assert_eq!(selected(&setup), Some(("soon", 0)));
         setup.cx.simulate_keystrokes("up");
         setup.cx.simulate_keystrokes("enter");
         setup.cx.run_until_parked();
@@ -1736,7 +1743,7 @@ mod tests {
         let labels: Vec<_> = hints.iter().map(|(label, _)| *label).collect();
         assert_eq!(
             labels,
-            ["add", "done", "open", "note", "someday", "today"],
+            ["open", "add", "done", "note", "someday", "today"],
             "most used first, so a narrow dock leaves out the least used"
         );
         let open = hints
@@ -1797,7 +1804,7 @@ mod tests {
     #[gpui::test]
     async fn a_key_opens_the_selected_tasks_note(cx: &mut TestAppContext) {
         let mut setup = setup(cx, true).await;
-        setup.cx.simulate_keystrokes("j j");
+        setup.cx.simulate_keystrokes("j");
         assert_eq!(selected(&setup), Some(("soon", 1)));
         setup.cx.simulate_keystrokes("g f");
         setup.cx.run_until_parked();
@@ -1813,7 +1820,7 @@ mod tests {
     #[gpui::test]
     async fn a_key_opens_the_selected_tasks_note_without_vim(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false).await;
-        setup.cx.simulate_keystrokes("down down ctrl-enter");
+        setup.cx.simulate_keystrokes("down ctrl-enter");
         setup.cx.run_until_parked();
         let opened = setup.workspace.read_with(&setup.cx, |workspace, cx| {
             workspace

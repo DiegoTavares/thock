@@ -183,7 +183,7 @@ is today.
 ### 5.2 The tide mark
 
 An ebbed dock renders as a 6pt strip at the window's edge on the page's ground, the full height
-of the dock, with a short grip centred in it: a 3pt by 88pt rounded line in the `text` ink, so it is easy to find on a dark ground and at 1x, so it reads
+of the dock, with a short grip centred in it: a 3pt by 88pt rounded line in the `text.muted` ink, so it is findable without outshining the page, so it reads
 as something to grab rather than the window's frame, and both sides draw the same mark at the same
 inset. The mark answers the pointer 10pt wide: the extra 4pt overlays the page's margin instead
 of taking room from it, so the page never moves (G1). Hovering it names the panel and the

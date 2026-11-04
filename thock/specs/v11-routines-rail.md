@@ -98,9 +98,9 @@ eight rows across one:
 
 Three details carry that layout, and all three were wrong in the first build:
 
-- **A caption is a rule, not a row.** The label is followed by a hairline running to
-  the right edge (`ListSubHeader`'s end slot), so a caption reads as a separator between two zones
-  rather than as another entry in the list.
+- **A caption is a label, not a row.** It takes the Backlog's group-caption style (12px semibold
+  capitals in `text.muted`, with a little room above), so it reads as a separator between two zones
+  rather than as another entry in the list, and both panes share one caption style.
 - **A group's chevron sits in the icon column.** Putting it in `ListItem`'s own disclosure column —
   where the Routine header's chevron lives — hangs the group off to the *left* of the rows it
   contains, which says "sibling of the section" when it needs to say "member of this zone". In the
@@ -136,7 +136,8 @@ kind = "setup"           # "ritual" (default) | "setup"
 
 The distinction only works if the two classes don't look alike:
 
-- A ritual's default icon is the **run** bolt (`bolt_outlined`). It is not a triangle, so it never
+- A ritual's default icon is the **run** bolt (`icons/thock/bolt.svg`, drawn with the note glyphs'
+  1.2pt stroke and extent so it sits at their size and weight). It is not a triangle, so it never
   reads as a collapsed disclosure beside the chevrons. It is muted like every other row's and turns accent while the row
   is selected or hovered, so the rail's colour follows the keys or the pointer instead of sitting
   on every verb. A setup step's is `settings`, muted. Links keep their kind-derived icons, muted;
@@ -153,6 +154,10 @@ The distinction only works if the two classes don't look alike:
 
 Existing bindings are unchanged; `j`/`k`, arrows, `g g`, `shift-g` and `enter` all behave as before,
 now walking the new row list.
+
+The rail always shows a selection: the keyboard cursor if one is set, else the row for the note in
+the editor, else the first row. Unfocused it is drawn dimmed, so the rail shows where the keys will
+start, and the first `down` moves to the second row.
 
 | Key | vim | Action |
 | --- | --- | --- |
@@ -236,9 +241,6 @@ is a primary row.
 4. **`enter` runs a ritual instead of opening it.** Rituals are the reason skills exist; opening the
    Markdown is the inspection path, not the default one. The inspection path keeps a hover button and
    a keybinding, so nothing became unreachable.
-5. **Captions use `ListSubHeader`, not a bespoke label-plus-hairline.** It is the existing Zed idiom
-   for exactly this, and it inherits the theme for free. The rule goes in its end slot rather than
-   into a hand-rolled `h_flex`.
-6. **Captions stay sentence case.** The design mockup set them as letter-spaced small caps, which
-   GPUI's text styling has no way to express; literal `NOTES` without the tracking reads worse than
-   the mockup, not better, so the rule carries the separation instead.
+5. **Captions share the Backlog's caption style** (V43 §8.3): small semibold capitals in the muted
+   ink, rather than `ListSubHeader`'s sentence-case label, so the rail and the Backlog caption their
+   groups the same way and a caption reads apart from the rows under it.

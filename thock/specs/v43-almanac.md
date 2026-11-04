@@ -380,8 +380,9 @@ right dock and is open by default, at 320px. It has three tabs:
 | **Done** | Completed, newest first, dated | `BacklogPanel`'s Completed column |
 
 The counts are open tasks: Backlog counts Soon and Someday, and Today counts unchecked planner
-tasks. The tab bar has 12px top padding, 10px between labels, 3px between a label and its count,
-and a 2px amber underline under the active tab, so all four tabs fit the 320px dock. A narrower
+tasks, in `text.muted`. The tab labels are 12px, and the tab bar has 12px top padding, 8px between
+labels, 3px between a label and its count, and a 2px amber underline under the active tab, so all
+four tabs fit the 320px dock with no fade. A narrower
 dock scrolls the strip sideways, with a fade at its right edge instead of a hard cut, and showing
 a tab scrolls it into view.
 
@@ -429,7 +430,7 @@ Someday                               › + 19    ← a folded lane, one row
 - Soon opens expanded and Someday starts folded. Each lane's fold state is remembered next to the
   category state.
 - The meta line shows only what the line already carries: the date of a linked
-  `[[YYYY-MM-DD-…]]` note ("from Sep 28") and the folder it lives in ("inbox",
+  `[[YYYY-MM-DD-…]]` note ("Sep 28") and the folder it lives in ("inbox",
   "archives/emails" → "email"). A task with no link has no meta line, and nothing is inferred.
 - A trailing `[[note]]` is a pointer, not words: the row leaves the slug out of its text and
   ends the meta line with a muted "↗ name" that opens it: the note's name without its folder or
@@ -437,7 +438,7 @@ Someday                               › + 19    ← a folded lane, one row
   `OpenBacklogTaskNote` (`cmd-enter`, `ctrl-enter` on Linux, `g f` in vim) opens it from the
   keyboard. A link mid-sentence stays in the text.
 - The meta line's tokens are split by one " · ", the same between every pair.
-- Lane and group headers always show their muted count, last, so every count sits in one column
+- Lane and group headers always show their count in `text.muted`, last, so every count sits in one column
   at the row's right edge, where the task text ends; the chevron and `+` appear before it on hover
   or while the header is selected, holding their place otherwise so nothing shifts. The keys (add,
   `left`/`right`) work either way.
@@ -451,6 +452,10 @@ Someday                               › + 19    ← a folded lane, one row
 
 The panel follows CLAUDE.md "Panels". Existing Backlog actions keep their names. Moving from
 three columns to stacked lanes changes what `left`/`right` do, as listed below.
+
+With nothing selected, the view's first row is the selection, drawn dimmed while the panel isn't
+focused, so the Backlog always shows where the keys will start; the first `down` moves to the second
+row. Moving up past the first row onto the Next card hands the selection to the card.
 
 | Keys | Action | Change |
 | --- | --- | --- |
@@ -470,15 +475,16 @@ three columns to stacked lanes changes what `left`/`right` do, as listed below.
 With vim mode on, digits stay tab switches: the Desk's views take no vim count (`3j`), so `1`–`3`
 never turn into one.
 
-The footer has a `border` top and renders the bindings for add, done, open, note, move and today
+The footer has a `border` top and renders the bindings for open, add, done, note, move and today
 from the keymap, so it shows the user's actual keys (and the vim keys when vim mode is on). It
 never hard-codes a key. Each keystroke takes its own 20px keycap with a `text.placeholder` outline
 (3:1), the key in the ink colour; a sequence's keycaps are joined by a small "then" in
 `text.placeholder`, so `g` then `space` never reads as two alternatives. The labels are 13px `text.muted`, a step above the meta line so they hold
 up at 1x. The keycaps sit centred in the footer with equal
 room above and below. When the panel is too narrow the least used hints are left out rather than
-cut off. While the view the hints describe doesn't have focus, the hints dim, since their keys
-don't apply.
+cut off; open, the primary action, leads so it is never the one dropped. While the view the hints
+describe doesn't have focus, the keys drop to the labels' `text.muted` ink (not an opacity fade, so
+they still read), since their keys don't apply.
 
 ## 9. Implementation notes
 
