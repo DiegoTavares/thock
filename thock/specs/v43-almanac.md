@@ -170,8 +170,8 @@ on `title_bar.background`, with a 1px `border` below and 20px side padding. It h
   date block (min 260px)       strip (centred on the window)            path (right)
 ```
 
-- **Date block:** a 24×24 nav button (`IconName::ChevronLeft`, 1px `border`, radius 5,
-  `icon.muted`), the weekday (`masthead.weekday`) above the date line (`masthead.date`), then the
+- **Date block:** a 24×24 borderless nav button (`IconName::ChevronLeft`, `icon.muted`, the
+  `ghost_element_hover` fill on hover like the strip's days), the weekday (`masthead.weekday`) above the date line (`masthead.date`), then the
   forward button, with 16px between each. Both buttons are `IconButton`s with tooltips that name
   their target ("Wed 14", "Fri 16").
 - **Strip:** 14 cells covering two ISO weeks: the viewed date's week and the week before it, or
@@ -346,12 +346,13 @@ family:
   `text.placeholder`.
 - **`TaskTime`:** a task's leading `HH:MM - HH:MM` or `HH:MM`, parsed with the Day Planner's
   parser so the editor and the panel agree. The time is SemiBold `cal`, and the ` - ` is drawn as
-  an en dash (a fold whose placeholder is `–`).
+  an en dash (a fold whose placeholder is `–`). A ticked task's time keeps the dash but not the
+  colour or weight: it takes the done text's muted ink at the regular weight.
 
 Task list items (`- [ ]`) lose their V24 `•`. The checkbox is enough of a marker, and that
-matches the reference. Plain list items keep the `•`. A checked box is filled `text.muted` with
-a tick in the window background, and the ticked task's text, times and links take `text.muted`
-too, so finished work recedes behind what is still open. An unchecked one is a 1px `text.muted`
+matches the reference. Plain list items keep the `•`. A checked box is a 1px `text.placeholder`
+outline with a tick in the same ink, a step quieter than an open box, and the ticked task's text,
+times and links take `text.muted`, so finished work recedes behind what is still open. An unchecked one is a 1px `text.muted`
 outline, the same on the page and in the Backlog, so it holds 4.5:1 on the panels' lighter
 ground too.
 
@@ -402,9 +403,9 @@ selectable row) reveals the entry in today's note.
 The lanes are stacked vertically:
 
 ```
-Soon                                  18 ⌄ +    ← lane.title; count, chevron and + on the right
+Soon                                  18 ⌄ +    ← lane.title; count, then chevron and + on hover
 ▌☐ Study for DNV elections                      ← selected: amberSoft fill, 2px amber left edge
-   from Sep 28 · inbox · ↗ note                 ← row.meta, only when the line carries it
+   from Sep 28 · inbox · ↗ dnv-ballot           ← row.meta, only when the line carries it
  ☐ Apps to try: vorssaint
 SPI                                    5 ⌄ +    ← lane.caption: a V17 category, ends like a lane
  ☐ HD 519673: local cores only used once
@@ -419,11 +420,18 @@ Someday                               19 › +    ← a folded lane, one row
   `[[YYYY-MM-DD-…]]` note ("from Sep 28") and the folder it lives in ("inbox",
   "archives/emails" → "email"). A task with no link has no meta line, and nothing is inferred.
 - A trailing `[[note]]` is a pointer, not words: the row leaves the slug out of its text and
-  ends the meta line with a muted "↗ note" that opens it. A link mid-sentence stays in the text.
+  ends the meta line with a muted "↗ name" that opens it: the note's name without its folder or
+  leading date and time, truncated when the row is narrow, underlined on hover.
+  `OpenBacklogTaskNote` (`cmd-enter`, `ctrl-enter` on Linux, `g f` in vim) opens it from the
+  keyboard. A link mid-sentence stays in the text.
+- The meta line's tokens are split by one " · ", the same between every pair.
+- Lane and group headers always show their muted count; the chevron and `+` appear on hover or
+  while the header is selected, holding their place otherwise so nothing shifts. The keys (add,
+  `left`/`right`) work either way.
 - The checkbox sits centred on the first line's line box. Group captions are 12px SemiBold small
   caps in `text.muted`, a step under the lane titles.
-- Rows wrap to two lines and then truncate with an ellipsis. The full text is in the tooltip and
-  in the inline editor.
+- Every row's text wraps to two lines and then truncates with an ellipsis. The full text is in the
+  tooltip, in the inline editor, and on the selected row, which shows all of it.
 
 ### 8.4 Keys
 
@@ -442,16 +450,18 @@ three columns to stacked lanes changes what `left`/`right` do, as listed below.
 | `enter`, `i` | Edit inline | |
 | `shift-enter`, `o` | `AddBacklogTask` | |
 | `alt-enter`, `g space` | `RevealBacklogTask` | |
+| `cmd-enter` (`ctrl-enter` on Linux), `g f` | `OpenBacklogTaskNote`: open the note the task links to | new |
 | `escape` | Back to the editor | |
 
 With vim mode on, digits stay tab switches: the Desk's views take no vim count (`3j`), so `1`–`3`
 never turn into one.
 
-The footer has a `border` top and renders the bindings for add, done, open, move and today from
-the keymap, so it shows the user's actual keys (and the vim keys when vim mode is on). It never
-hard-codes a key. A binding's keystrokes share one 20px keycap with a `text.placeholder` outline
-(3:1), the keys in the ink colour at one size and weight, separated by a small gap, so `g space`
-reads as one binding before its muted label. The keycaps sit centred in the footer with equal
+The footer has a `border` top and renders the bindings for add, done, open, note, move and today
+from the keymap, so it shows the user's actual keys (and the vim keys when vim mode is on). It
+never hard-codes a key. Each keystroke takes its own 20px keycap with a `text.placeholder` outline
+(3:1), the key in the ink colour; a chord's keycaps sit 4px apart with no `+`, the usual sequence
+notation for `g space`. The labels are 13px `text.muted`, a step above the meta line so they hold
+up at 1x. The keycaps sit centred in the footer with equal
 room above and below. When the panel is too narrow the least used hints are left out rather than
 cut off.
 

@@ -71,7 +71,8 @@ One section per Routine, and within it, in order:
 4. **Rituals** caption.
 5. Every skill with `kind = "ritual"` (the default), in manifest order.
 6. A collapsed **Setup** row when the Routine has `kind = "setup"` skills, same shape as a link
-   group.
+   group, except that it leads with the settings glyph its steps carry and keeps its chevron at
+   the row's end, so it never reads as a ritual or a folder of notes.
 
 The two captions appear only when a section holds both links and skills. With nothing to separate,
 a caption is decoration, and a Routine that is purely a set of bookmarks should render as a set of
@@ -91,7 +92,7 @@ eight rows across one:
     ▶  Wrap Today                           ⌃⌥⏎
     ▶  Wrap Yesterday
     ▶  Week Review
-    ›  Setup
+    ⚙  Setup                                  ›
 ```
 
 Three details carry that layout, and all three were wrong in the first build:

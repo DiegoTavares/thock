@@ -5,7 +5,7 @@
 
 use crate::backlog_panel::{
     AddBacklogTask, CompleteBacklogTask, MoveBacklogTaskRight, MoveBacklogTaskToToday,
-    RevealBacklogTask,
+    OpenBacklogTaskNote, RevealBacklogTask,
 };
 use crate::backlog_panel::{BacklogFolds, BacklogPanel, BacklogView, ToggleBacklogFocus};
 use crate::day_plan::{DayPlan, ItemTiming, ItemWeight, PlanItem};
@@ -34,7 +34,7 @@ use settings::SettingsStore;
 use std::sync::Arc;
 use std::time::Duration;
 use ui::prelude::*;
-use ui::{Label, LabelSize, LineHeightStyle, PlatformStyle, render_keybinding_keystroke};
+use ui::{PlatformStyle, render_keybinding_keystroke};
 use util::ResultExt as _;
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -739,11 +739,12 @@ impl DeskPanel {
 
 /// The Backlog footer's hints, most used first: when the panel is narrow
 /// the last ones are left out rather than cut off or wrapped.
-fn backlog_hints() -> [(Box<dyn Action>, &'static str); 5] {
+fn backlog_hints() -> [(Box<dyn Action>, &'static str); 6] {
     [
         (AddBacklogTask.boxed_clone(), "add"),
         (CompleteBacklogTask.boxed_clone(), "done"),
         (RevealBacklogTask.boxed_clone(), "open"),
+        (OpenBacklogTaskNote.boxed_clone(), "note"),
         (MoveBacklogTaskRight.boxed_clone(), "someday"),
         (MoveBacklogTaskToToday.boxed_clone(), "today"),
     ]
@@ -776,10 +777,13 @@ fn hint_keystrokes(
 /// one line of hints.
 const HINT_KEYCAP_HEIGHT: Pixels = px(20.);
 
-/// A footer of key hints on one line: a binding's keys share one keycap,
-/// split by a gap when it takes more than one stroke, so `g space` reads as
-/// one binding before its label. Hints that don't fit the line are left
-/// out, the least used first.
+/// A hint's label, a step above the Backlog's meta line so it holds up at 1x.
+const HINT_LABEL_SIZE: Rems = rems(0.8125);
+
+/// A footer of key hints on one line: each stroke of a binding takes its
+/// own keycap, a chord's keycaps set a small gap apart, the usual sequence
+/// notation for `g space`. Hints that don't fit the line are left out, the
+/// least used first.
 fn render_hints(
     hints: &[(Box<dyn Action>, &'static str)],
     focus: &FocusHandle,
@@ -798,14 +802,30 @@ fn render_hints(
         if keystrokes.is_empty() {
             return None;
         }
-        let keys = keystrokes.iter().flat_map(|keystroke| {
-            render_keybinding_keystroke(
-                keystroke,
-                Some(Color::Default),
-                key_size,
-                PlatformStyle::platform(),
-                vim_mode,
-            )
+        let keycaps = keystrokes.iter().enumerate().map(|(index, keystroke)| {
+            h_flex()
+                .debug_selector(move || format!("thock-hint-keycap-{label}-{index}"))
+                .flex_none()
+                .h(HINT_KEYCAP_HEIGHT)
+                .min_w(HINT_KEYCAP_HEIGHT)
+                .px_1()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .border_1()
+                // The placeholder ink holds 3:1 on the panel, so the key
+                // reads before its label.
+                .border_color(colors.text_placeholder)
+                .bg(colors.element_background)
+                .text_size(key_size)
+                .font_weight(FontWeight::NORMAL)
+                .children(render_keybinding_keystroke(
+                    keystroke,
+                    Some(Color::Default),
+                    key_size,
+                    PlatformStyle::platform(),
+                    vim_mode,
+                ))
         });
         Some(
             h_flex()
@@ -815,29 +835,17 @@ fn render_hints(
                 .items_center()
                 .child(
                     h_flex()
-                        .debug_selector(move || format!("thock-hint-keycap-{label}"))
+                        .debug_selector(move || format!("thock-hint-keys-{label}"))
                         .flex_none()
-                        .h(HINT_KEYCAP_HEIGHT)
-                        .min_w(HINT_KEYCAP_HEIGHT)
-                        .px_1()
-                        .gap(px(5.))
-                        .items_center()
-                        .justify_center()
-                        .rounded_sm()
-                        .border_1()
-                        // The placeholder ink holds 3:1 on the panel, so the
-                        // key reads before its muted label.
-                        .border_color(colors.text_placeholder)
-                        .bg(colors.element_background)
-                        .text_size(key_size)
-                        .font_weight(FontWeight::NORMAL)
-                        .children(keys),
+                        .gap(px(4.))
+                        .children(keycaps),
                 )
                 .child(
-                    Label::new(*label)
-                        .size(LabelSize::Small)
-                        .line_height_style(LineHeightStyle::UiLabel)
-                        .color(Color::Muted),
+                    div()
+                        .text_size(HINT_LABEL_SIZE)
+                        .line_height(HINT_KEYCAP_HEIGHT)
+                        .text_color(colors.text_muted)
+                        .child(*label),
                 ),
         )
     });
@@ -1646,7 +1654,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_footer_keeps_a_chord_in_one_keycap_on_one_line(cx: &mut TestAppContext) {
+    async fn the_footer_gives_each_stroke_a_keycap_on_one_line(cx: &mut TestAppContext) {
         let mut setup = setup(cx, true).await;
         let desk = setup.desk.clone();
         let hints = setup.cx.update(|window, cx| {
@@ -1665,7 +1673,7 @@ mod tests {
         let labels: Vec<_> = hints.iter().map(|(label, _)| *label).collect();
         assert_eq!(
             labels,
-            ["add", "done", "open", "someday", "today"],
+            ["add", "done", "open", "note", "someday", "today"],
             "most used first, so a narrow dock leaves out the least used"
         );
         let open = hints
@@ -1680,29 +1688,32 @@ mod tests {
 
         setup.cx.update(|window, _| window.refresh());
         setup.cx.run_until_parked();
-        let open = setup
-            .cx
-            .debug_bounds("thock-hint-keycap-open")
-            .expect("the open hint is drawn");
-        let add = setup
-            .cx
-            .debug_bounds("thock-hint-keycap-add")
-            .expect("the add hint is drawn");
-        assert_eq!(open.size.height, add.size.height, "one keycap for g space");
-        assert!(
-            open.size.width > add.size.width * 1.5,
-            "both keys of the chord sit in the one keycap: {open:?} {add:?}"
+        let bounds = |setup: &mut Setup, selector: &'static str| {
+            setup
+                .cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"))
+        };
+        let g = bounds(&mut setup, "thock-hint-keycap-open-0");
+        let space = bounds(&mut setup, "thock-hint-keycap-open-1");
+        let add = bounds(&mut setup, "thock-hint-keycap-add-0");
+        assert_eq!(
+            g.size.height, add.size.height,
+            "one height for every keycap"
         );
-        let bar = setup
-            .cx
-            .debug_bounds("thock-hints")
-            .expect("the footer is drawn");
+        let gap = space.left() - g.right();
+        assert!(
+            gap >= px(3.) && gap <= px(5.),
+            "a chord's strokes are separate keycaps a small gap apart: {g:?} {space:?}"
+        );
+        assert!(
+            setup.cx.debug_bounds("thock-hint-keycap-add-1").is_none(),
+            "a single key is one keycap"
+        );
+        let bar = bounds(&mut setup, "thock-hints");
         assert_eq!(bar.size.height, HINT_KEYCAP_HEIGHT, "one line of hints");
-        let footer = setup
-            .cx
-            .debug_bounds("thock-hints-bar")
-            .expect("the footer is drawn");
-        for keycap in [open, add] {
+        let footer = bounds(&mut setup, "thock-hints-bar");
+        for keycap in [g, space, add] {
             assert!(
                 keycap.top() >= bar.top() && keycap.bottom() <= bar.bottom(),
                 "the whole keycap shows: {keycap:?} in {bar:?}"
@@ -1714,6 +1725,36 @@ mod tests {
                 "the keycap sits in the middle of the footer: {above:?} above, {below:?} below"
             );
         }
+    }
+
+    #[gpui::test]
+    async fn a_key_opens_the_selected_tasks_note(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, true).await;
+        setup.cx.simulate_keystrokes("j j");
+        assert_eq!(selected(&setup), Some(("soon", 1)));
+        setup.cx.simulate_keystrokes("g f");
+        setup.cx.run_until_parked();
+        let opened = setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            workspace
+                .active_item(cx)
+                .and_then(|item| item.project_path(cx))
+                .map(|path| path.path.as_unix_str().to_string())
+        });
+        assert_eq!(opened.as_deref(), Some("inbox/2026-09-28-dnv-ballot.md"));
+    }
+
+    #[gpui::test]
+    async fn a_key_opens_the_selected_tasks_note_without_vim(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        setup.cx.simulate_keystrokes("down down ctrl-enter");
+        setup.cx.run_until_parked();
+        let opened = setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            workspace
+                .active_item(cx)
+                .and_then(|item| item.project_path(cx))
+                .map(|path| path.path.as_unix_str().to_string())
+        });
+        assert_eq!(opened.as_deref(), Some("inbox/2026-09-28-dnv-ballot.md"));
     }
 
     #[gpui::test]

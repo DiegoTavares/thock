@@ -716,12 +716,10 @@ impl Masthead {
         action: fn(&mut Self, &mut Window, &mut Context<Self>),
         cx: &Context<Self>,
     ) -> AnyElement {
-        let colors = cx.theme().colors();
+        // Borderless, with the ghost hover fill the strip's days take, so
+        // nothing in the header chrome is boxed.
         div()
             .size(px(24.))
-            .rounded(px(5.))
-            .border_1()
-            .border_color(colors.border)
             .flex()
             .items_center()
             .justify_center()

@@ -3134,7 +3134,8 @@ mod tests {
             assert_eq!(highlighted(editor, JOURNAL_TIME_SLOT, cx), vec!["20:29"]);
             assert_eq!(
                 highlighted(editor, TASK_TIME_SLOT, cx),
-                vec!["09:00 - 11:00", "15:00"]
+                vec!["09:00 - 11:00"],
+                "a ticked task's time takes the done ink, not the time's"
             );
         });
         move_cursor_to(&editor, 1, &mut cx);
@@ -3393,14 +3394,27 @@ mod tests {
 
     #[gpui::test]
     async fn a_ticked_task_recedes_and_an_open_one_does_not(cx: &mut TestAppContext) {
-        let (editor, mut cx) = setup(cx, "- [x] shipped\n- [ ] still open\n").await;
+        let (editor, mut cx) = setup(
+            cx,
+            "- [x] shipped\n- [ ] still open\n- [x] 10:00 - 11:00 Done call\n- [ ] 12:00 Lunch\n",
+        )
+        .await;
         editor.update_in(&mut cx, |editor, _, cx| {
             let muted = cx.theme().colors().text_muted;
             let (done, ranges) = editor
                 .text_highlights(HighlightKey::ThockMarkdownConceal(DONE_TASK_SLOT), cx)
                 .expect("the ticked task is highlighted");
-            assert_eq!(ranges.len(), 1, "only the ticked line");
+            assert_eq!(ranges.len(), 2, "only the ticked lines");
             assert_eq!(done.color, Some(muted));
+            assert_eq!(done.font_weight, None, "at the text's own weight");
+            let (_, times) = editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(TASK_TIME_SLOT), cx)
+                .expect("the open task's time is highlighted");
+            assert_eq!(
+                times.len(),
+                1,
+                "only the open task's time is bold; the ticked one's recedes"
+            );
         });
     }
 

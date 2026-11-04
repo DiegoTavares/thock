@@ -34,8 +34,9 @@ pub fn unchecked_box_border(cx: &App) -> Hsla {
 }
 
 /// The box a task is ticked with, the same on the page and in the panels:
-/// an outline in [`unchecked_box_border`], or filled with the same muted ink
-/// and checked, so finished work recedes behind what is still open.
+/// an outline in [`unchecked_box_border`], or, once ticked, an outline and
+/// check in the placeholder ink, a step quieter than an open box, so
+/// finished work recedes behind what is still open.
 pub fn task_box(checked: bool, cx: &App) -> Div {
     let colors = cx.theme().colors();
     let task_box = div()
@@ -47,14 +48,11 @@ pub fn task_box(checked: bool, cx: &App) -> Div {
         .rounded_xs()
         .border_1();
     if checked {
-        task_box
-            .border_color(colors.text_muted)
-            .bg(colors.text_muted)
-            .child(
-                Icon::new(IconName::Check)
-                    .size(IconSize::XSmall)
-                    .color(Color::Custom(colors.background)),
-            )
+        task_box.border_color(colors.text_placeholder).child(
+            Icon::new(IconName::Check)
+                .size(IconSize::XSmall)
+                .color(Color::Custom(colors.text_placeholder)),
+        )
     } else {
         task_box.border_color(unchecked_box_border(cx))
     }
@@ -155,11 +153,11 @@ mod tests {
             let muted = colour(&theme, |theme| &theme.style.colors.text_muted);
             let dim = colour(&theme, |theme| &theme.style.colors.text_placeholder);
             let amber = colour(&theme, |theme| &theme.style.colors.text_accent);
-            // `muted` is also the unticked box's edge, the ticked box's
-            // fill (its check is the window background), a ticked task's
-            // text, the Backlog's meta line and group labels, and the tide
-            // mark's grip; `dim` is the strip's future digits on the
-            // masthead and the footer's keycap outlines.
+            // `ink` is also the idle tide grip on the page's ground. `muted`
+            // is the unticked box's edge, a ticked task's text, the Backlog's
+            // meta line and group labels, and the footer's hint labels; `dim`
+            // is the strip's future digits on the masthead, the footer's
+            // keycap outlines, and a ticked box's edge and check.
             for background in [ground, surface, page, title_bar] {
                 assert!(
                     contrast(ink, background) >= 7.0,
@@ -173,14 +171,14 @@ mod tests {
                     contrast(dim, background) >= 3.0,
                     "{name}: dim on {background}"
                 );
+                // A ticked box is quieter than an open one beside it.
+                assert!(
+                    contrast(dim, background) < contrast(muted, background),
+                    "{name}: a ticked box recedes behind an open one on {background}"
+                );
             }
             // `on_accent_color` is the window background (amberInk).
             assert!(contrast(ground, amber) >= 4.5, "{name}: amberInk on amber");
-            // A ticked box's check, the window background on the muted fill.
-            assert!(
-                contrast(ground, muted) >= 4.5,
-                "{name}: the check on a ticked box"
-            );
         }
     }
 

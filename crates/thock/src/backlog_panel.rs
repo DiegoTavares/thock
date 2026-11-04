@@ -58,6 +58,8 @@ const REPARSE_DEBOUNCE: Duration = Duration::from_millis(150);
 /// How long a copied row stays lit — vim's `highlight_on_yank_duration`
 /// default, so a yank in the panel feels like a yank in the editor.
 const COPY_FLASH_DURATION: Duration = Duration::from_millis(200);
+/// What splits the tokens of a task's meta line.
+const META_SEPARATOR: &str = " · ";
 
 actions!(
     thock,
@@ -84,6 +86,8 @@ actions!(
         CopyBacklogTask,
         /// Opens backlog.md at the selected task's line.
         RevealBacklogTask,
+        /// Opens the note the selected backlog task links to.
+        OpenBacklogTaskNote,
         /// Closes the backlog category or lane the cursor is in.
         CollapseBacklogCategory,
         /// Opens the backlog category or lane the cursor is in.
@@ -1206,6 +1210,27 @@ impl BacklogPanel {
         self.reveal_task(task.line, window, cx);
     }
 
+    fn open_selected_task_note(
+        &mut self,
+        _: &OpenBacklogTaskNote,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, task)) = self.selected_task() else {
+            return;
+        };
+        let Some(target) = split_trailing_note_link(&task.text).1 else {
+            return;
+        };
+        open_note_link(
+            &target,
+            &self.project.downgrade(),
+            &self.workspace,
+            window,
+            cx,
+        );
+    }
+
     /// Escape hands focus back to the note the user was writing in — a dock
     /// panel must never trap the keyboard.
     fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1800,7 +1825,7 @@ impl BacklogPanel {
             return None;
         }
         let overdue = chip.is_some_and(|chip| chip.state == ChipState::Overdue);
-        Some((parts.join(" · "), overdue))
+        Some((parts.join(META_SEPARATOR), overdue))
     }
 
     /// Resolves every linked note's folder in one pass over the vault's
@@ -1875,6 +1900,9 @@ impl BacklogPanel {
         let task_line = task.line;
         let meta = self.task_meta(task, cx);
         let (row_text, note_link) = split_trailing_note_link(&task.text);
+        // Long titles stop at two lines with an ellipsis; the selected row
+        // shows its whole title, and hovering any row names it in full.
+        let expanded = self.selection() == Some(TaskSelection { section, index });
         // Chevrons, matching the `>` / `<` keys that do the same thing.
         let (move_icon, move_tooltip, move_action) = match section {
             SectionKind::Someday => (
@@ -2043,8 +2071,7 @@ impl BacklogPanel {
                             .text_size(rems(0.875))
                             .line_height(TASK_LINE_HEIGHT)
                             .text_color(colors.text)
-                            .line_clamp(2)
-                            .text_ellipsis()
+                            .when(!expanded, |this| this.line_clamp(2).text_ellipsis())
                             .child(self.render_task_text(
                                 ElementId::Name(
                                     format!("backlog-text-{section_key}-{index}").into(),
@@ -2092,7 +2119,8 @@ impl BacklogPanel {
     }
 
     /// A task row's meta line: what [`Self::task_meta`] says, then the note
-    /// the task links to as a small, quiet link that opens it.
+    /// the task links to as a small, quiet link that opens it. Every token is
+    /// split by the same " · ".
     fn render_task_meta(
         &self,
         meta: Option<(String, bool)>,
@@ -2103,16 +2131,22 @@ impl BacklogPanel {
         let colors = cx.theme().colors();
         let (meta, overdue) = meta.unzip();
         let has_meta = meta.is_some();
+        let has_note = note_link.is_some();
         h_flex()
             .min_w_0()
-            .gap_1()
             .text_size(rems(0.71875))
             .text_color(colors.text_muted)
             .when_some(meta, |this, meta| {
+                // With a note link it is the note's name that gives way.
                 this.child(
                     div()
-                        .min_w_0()
-                        .truncate()
+                        .map(|this| {
+                            if has_note {
+                                this.flex_none()
+                            } else {
+                                this.min_w_0().truncate()
+                            }
+                        })
                         .when(overdue == Some(true), |this| {
                             this.text_color(cx.theme().status().warning)
                         })
@@ -2122,21 +2156,35 @@ impl BacklogPanel {
             .when_some(note_link, |this, target| {
                 let project = self.project.downgrade();
                 let workspace = self.workspace.clone();
-                this.when(has_meta, |this| this.child("·")).child(
+                let label = note_link_label(&target);
+                this.when(has_meta, |this| {
+                    this.child(div().flex_none().child(META_SEPARATOR))
+                })
+                .child(
                     h_flex()
                         .id(ElementId::Name(format!("backlog-note-{row_key}").into()))
                         .debug_selector(move || format!("backlog-note-{row_key}"))
-                        .flex_none()
-                        .gap_0p5()
+                        .min_w_0()
                         .cursor_pointer()
-                        .hover(|this| this.text_color(colors.text))
-                        .tooltip(Tooltip::text(format!("Open {target}")))
+                        .hover(|this| this.text_color(colors.text).underline())
+                        .tooltip({
+                            let focus_handle = self.focus_handle.clone();
+                            let title = format!("Open {target}");
+                            move |_, cx| {
+                                Tooltip::for_action_in(
+                                    title.clone(),
+                                    &OpenBacklogTaskNote,
+                                    &focus_handle,
+                                    cx,
+                                )
+                            }
+                        })
                         .child(
                             Icon::new(IconName::ArrowUpRight)
                                 .size(IconSize::XSmall)
                                 .color(Color::Muted),
                         )
-                        .child("note")
+                        .child(div().min_w_0().truncate().child(label))
                         .on_click(move |_, window, cx| {
                             if open_note_link(&target, &project, &workspace, window, cx) {
                                 cx.stop_propagation();
@@ -2148,8 +2196,15 @@ impl BacklogPanel {
 
     /// The right end of a lane or group header: the open count, then a
     /// chevron pointing down while open and right while closed. Every header
-    /// ends the same way so the counts line up beside the `+`.
-    fn render_header_end(count: usize, collapsed: bool, cx: &App) -> impl IntoElement {
+    /// ends the same way so the counts line up beside the `+`. The count
+    /// always shows; the chevron only on hover or while the header is
+    /// selected, so the headers don't outshout the tasks.
+    fn render_header_end(
+        count: usize,
+        collapsed: bool,
+        revealed: bool,
+        cx: &App,
+    ) -> impl IntoElement {
         h_flex()
             .flex_none()
             .gap_1()
@@ -2160,19 +2215,30 @@ impl BacklogPanel {
                     .child(SharedString::from(count.to_string())),
             )
             .child(
-                Icon::new(if collapsed {
-                    IconName::ChevronRight
-                } else {
-                    IconName::ChevronDown
-                })
-                .size(IconSize::XSmall)
-                .color(Color::Muted),
+                Self::header_control(revealed).child(
+                    Icon::new(if collapsed {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+                ),
             )
     }
 
+    /// A header's chevron or `+`: shown while the header is selected or
+    /// hovered, and holding its place otherwise so nothing shifts.
+    fn header_control(revealed: bool) -> Div {
+        div().flex_none().when(!revealed, |this| {
+            this.opacity(0.)
+                .group_hover("backlog-row", |this| this.opacity(1.))
+        })
+    }
+
     /// A category caption (V43 §8.3): the group's name in small caps and its
-    /// open count, with its own `+` so a task can be added straight into the
-    /// group (V17 §5.1). Click to open or close it.
+    /// open count, with its own `+` (on hover or selection) so a task can be
+    /// added straight into the group (V17 §5.1). Click to open or close it.
     fn render_category_row(
         &self,
         section: SectionKind,
@@ -2186,6 +2252,7 @@ impl BacklogPanel {
         let section_key = section.id();
         let name = name.to_string();
         let caption = name.to_uppercase();
+        let revealed = self.selection() == Some(TaskSelection { section, index });
         self.row_frame(TaskSelection { section, index }, cx)
             .pt_2()
             .child(
@@ -2207,7 +2274,7 @@ impl BacklogPanel {
                             .text_color(colors.text_muted)
                             .child(SharedString::from(caption)),
                     )
-                    .child(Self::render_header_end(count, collapsed, cx))
+                    .child(Self::render_header_end(count, collapsed, revealed, cx))
                     .on_click(cx.listener({
                         let name = name.clone();
                         move |this, _, _window, cx| {
@@ -2217,23 +2284,30 @@ impl BacklogPanel {
                     })),
             )
             .child(
-                IconButton::new(
-                    ElementId::Name(format!("backlog-group-add-{section_key}-{index}").into()),
-                    IconName::Plus,
-                )
-                .icon_size(IconSize::XSmall)
-                .icon_color(Color::Muted)
-                .tooltip({
-                    let focus_handle = self.focus_handle.clone();
-                    let label = SharedString::from(format!("Add to {name}"));
-                    move |_, cx| {
-                        Tooltip::for_action_in(label.clone(), &AddBacklogTask, &focus_handle, cx)
-                    }
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.select_category_header(section, &name);
-                    this.start_add(section, Some(name.clone()), window, cx);
-                })),
+                Self::header_control(revealed).child(
+                    IconButton::new(
+                        ElementId::Name(format!("backlog-group-add-{section_key}-{index}").into()),
+                        IconName::Plus,
+                    )
+                    .icon_size(IconSize::XSmall)
+                    .icon_color(Color::Muted)
+                    .tooltip({
+                        let focus_handle = self.focus_handle.clone();
+                        let label = SharedString::from(format!("Add to {name}"));
+                        move |_, cx| {
+                            Tooltip::for_action_in(
+                                label.clone(),
+                                &AddBacklogTask,
+                                &focus_handle,
+                                cx,
+                            )
+                        }
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_category_header(section, &name);
+                        this.start_add(section, Some(name.clone()), window, cx);
+                    })),
+                ),
             )
             .into_any_element()
     }
@@ -2250,6 +2324,7 @@ impl BacklogPanel {
         let colors = cx.theme().colors();
         let section_key = section.id();
         let heading = section.heading(&self.headings()).to_string();
+        let revealed = self.selection() == Some(TaskSelection { section, index: 0 });
         self.row_frame(TaskSelection { section, index: 0 }, cx)
             .pt_3()
             .child(
@@ -2269,30 +2344,34 @@ impl BacklogPanel {
                             .text_color(colors.text)
                             .child(SharedString::from(heading)),
                     )
-                    .child(Self::render_header_end(count, folded, cx))
+                    .child(Self::render_header_end(count, folded, revealed, cx))
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.select_row(section, 0, cx);
                         this.set_lane_folded(section, !folded, cx);
                     })),
             )
             .child(
-                IconButton::new(
-                    ElementId::Name(format!("backlog-add-{section_key}").into()),
-                    IconName::Plus,
-                )
-                .icon_size(IconSize::XSmall)
-                .icon_color(Color::Muted)
-                .tooltip({
-                    let focus_handle = self.focus_handle.clone();
-                    let label = match section {
-                        SectionKind::Soon => "Add to Soon",
-                        _ => "Add to Someday",
-                    };
-                    move |_, cx| Tooltip::for_action_in(label, &AddBacklogTask, &focus_handle, cx)
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.start_add(section, None, window, cx);
-                })),
+                Self::header_control(revealed).child(
+                    IconButton::new(
+                        ElementId::Name(format!("backlog-add-{section_key}").into()),
+                        IconName::Plus,
+                    )
+                    .icon_size(IconSize::XSmall)
+                    .icon_color(Color::Muted)
+                    .tooltip({
+                        let focus_handle = self.focus_handle.clone();
+                        let label = match section {
+                            SectionKind::Soon => "Add to Soon",
+                            _ => "Add to Someday",
+                        };
+                        move |_, cx| {
+                            Tooltip::for_action_in(label, &AddBacklogTask, &focus_handle, cx)
+                        }
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_add(section, None, window, cx);
+                    })),
+                ),
             )
             .into_any_element()
     }
@@ -2382,13 +2461,17 @@ impl BacklogPanel {
                     )
                     .child(
                         v_flex()
+                            .id(ElementId::Name(format!("backlog-done-{index}").into()))
                             .flex_1()
                             .min_w_0()
+                            .tooltip(Tooltip::text(thock_sync_core::strip_reminder(label)))
                             .child(
                                 div()
                                     .text_size(rems(0.875))
                                     .text_color(colors.text_muted)
-                                    .line_clamp(2)
+                                    .when(self.selection() != Some(selection), |this| {
+                                        this.line_clamp(2).text_ellipsis()
+                                    })
                                     .child(LabelLike::new().strikethrough().child(
                                         self.render_task_text(
                                             ElementId::Name(
@@ -2619,6 +2702,30 @@ fn split_trailing_note_link(text: &str) -> (String, Option<String>) {
     }
 }
 
+/// What a row's note link says: the note's name without its folder or the
+/// date and time it starts with, since the meta line already gives the date.
+fn note_link_label(target: &str) -> String {
+    let name = target.rsplit('/').next().unwrap_or(target);
+    let mut rest = name;
+    if rest
+        .get(..10)
+        .is_some_and(|head| NaiveDate::parse_from_str(head, "%Y-%m-%d").is_ok())
+    {
+        rest = &rest[10..];
+        let trimmed = rest.trim_start_matches(['-', '_', ' ']);
+        let time_digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+        if time_digits == 4 {
+            rest = &trimmed[4..];
+        }
+        rest = rest.trim_start_matches(['-', '_', ' ']);
+    }
+    if rest.is_empty() {
+        name.to_string()
+    } else {
+        rest.to_string()
+    }
+}
+
 /// The note a task links to, when it links one: the `[[target]]` and the
 /// date in its name, for the row's meta line.
 struct TaskLink {
@@ -2773,6 +2880,7 @@ impl Render for BacklogPanel {
             .on_action(cx.listener(Self::move_selected_task_to_today))
             .on_action(cx.listener(Self::copy_selected_task))
             .on_action(cx.listener(Self::reveal_selected_task))
+            .on_action(cx.listener(Self::open_selected_task_note))
             .on_action(cx.listener(Self::collapse_category))
             .on_action(cx.listener(Self::expand_category))
             .size_full()
@@ -2790,8 +2898,8 @@ impl Focusable for BacklogPanel {
 #[cfg(test)]
 mod tests {
     use super::{
-        BacklogRow, SectionKind, column_rows, restore_hidden_suffix, split_trailing_note_link,
-        task_link,
+        BacklogRow, SectionKind, column_rows, note_link_label, restore_hidden_suffix,
+        split_trailing_note_link, task_link,
     };
     use crate::backlog::{BacklogHeadings, parse_backlog};
     use chrono::NaiveDate;
@@ -2899,6 +3007,17 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_note_link_is_labelled_by_the_notes_name() {
+        assert_eq!(
+            note_link_label("inbox/2026-10-11-0853-satya-nadella"),
+            "satya-nadella"
+        );
+        assert_eq!(note_link_label("2026-10-02 Jimmy"), "Jimmy");
+        assert_eq!(note_link_label("Maestro"), "Maestro");
+        assert_eq!(note_link_label("daily/2026-10-11"), "2026-10-11");
     }
 
     #[test]

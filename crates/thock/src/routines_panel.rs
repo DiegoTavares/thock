@@ -323,6 +323,24 @@ fn ritual_glyph(icon: RowIcon, ritual: bool, selected: bool) -> AnyElement {
         .into_any_element()
 }
 
+fn disclosure_icon(expanded: bool) -> IconName {
+    if expanded {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    }
+}
+
+/// The glyph a group row leads with: its disclosure chevron, except the
+/// Setup group, which runs setup steps and says so with their glyph.
+fn group_lead_icon(key: &str, expanded: bool) -> IconName {
+    if key == SETUP_GROUP {
+        IconName::Settings
+    } else {
+        disclosure_icon(expanded)
+    }
+}
+
 /// Zone captions. They separate a Routine's destinations from its verbs, and
 /// only appear when a section actually holds both.
 const NOTES_CAPTION: &str = "Notes";
@@ -2699,16 +2717,21 @@ impl RoutinesPanel {
         .toggle_state(selected_index == Some(index))
         // The disclosure sits in the start slot, not in `ListItem::toggle`'s
         // own column, so the chevron lands exactly where its siblings' icons
-        // do and the group reads as one of them.
+        // do and the group reads as one of them. The Setup group leads with
+        // the settings glyph its steps carry, so it never reads as a ritual
+        // or a folder of notes, and keeps its chevron at the row's end.
         .start_slot(
-            Icon::new(if expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            })
-            .size(IconSize::XSmall)
-            .color(Color::Muted),
+            Icon::new(group_lead_icon(&key, expanded))
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
         )
+        .when(key.as_ref() == SETUP_GROUP, |item| {
+            item.end_slot(
+                Icon::new(disclosure_icon(expanded))
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+        })
         .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
         .on_click(cx.listener({
             let routine_id = routine_id.to_string();
@@ -3294,6 +3317,14 @@ mod tests {
             skill_icon(&skill_of_kind(SkillKind::Setup, None)),
             RowIcon::Named(IconName::Settings)
         );
+        // The Setup group leads with its steps' glyph; every other group
+        // leads with the chevron that says it opens.
+        assert_eq!(group_lead_icon(SETUP_GROUP, false), IconName::Settings);
+        assert_eq!(
+            group_lead_icon("Older notes", false),
+            IconName::ChevronRight
+        );
+        assert_eq!(group_lead_icon("Older notes", true), IconName::ChevronDown);
     }
 
     fn named_link(id: &str, group: Option<&str>) -> RoutineLink {

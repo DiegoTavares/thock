@@ -983,6 +983,7 @@
       "t": "thock::MoveBacklogTaskToToday",
       "shift-enter": "thock::AddBacklogTask",
       "alt-enter": "thock::RevealBacklogTask",
+      "ctrl-enter": "thock::OpenBacklogTaskNote",
       "alt-left": "thock::MoveBacklogTaskLeft",
       "alt-right": "thock::MoveBacklogTaskRight",
       "ctrl-c": "thock::CopyBacklogTask",

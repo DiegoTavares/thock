@@ -1166,6 +1166,7 @@
       "<": "thock::MoveBacklogTaskLeft",
       "y y": "thock::CopyBacklogTask",
       "g space": "thock::RevealBacklogTask",
+      "g f": "thock::OpenBacklogTaskNote",
       "z c": "thock::CollapseBacklogCategory",
       "z o": "thock::ExpandBacklogCategory",
     },

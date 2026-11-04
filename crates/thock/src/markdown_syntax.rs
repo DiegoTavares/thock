@@ -453,9 +453,11 @@ fn journal_time(line: &str) -> Option<Range<usize>> {
 /// A task's leading time token, read with the Day Planner's own parser so
 /// the editor and the panel agree on what is a time: the whole token takes
 /// `TaskTime`, and a `-` between its two times (with the spaces around it)
-/// takes `TimeDash`.
+/// takes `TimeDash`. A ticked task's time keeps only its dash, so it takes
+/// the done task's muted ink at the text's own weight.
 fn push_task_time_spans(
     line: &str,
+    checked: bool,
     after_checkbox: usize,
     line_start: usize,
     spans: &mut Vec<ConcealSpan>,
@@ -487,7 +489,9 @@ fn push_task_time_spans(
         return;
     }
     let base = line_start + token_start;
-    spans.push(ConcealSpan::new(base..base + token_len, SpanKind::TaskTime));
+    if !checked {
+        spans.push(ConcealSpan::new(base..base + token_len, SpanKind::TaskTime));
+    }
     if let Some(dash) = dash {
         spans.push(ConcealSpan::new(
             base + dash.start..base + dash.end,
@@ -587,7 +591,7 @@ fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
                     SpanKind::DoneTask,
                 ));
             }
-            push_task_time_spans(line, range.end, line_start, spans);
+            push_task_time_spans(line, checked, range.end, line_start, spans);
         } else {
             spans.push(ConcealSpan::new(
                 line_start + bullet.start..line_start + bullet.end,
@@ -2150,8 +2154,17 @@ mod tests {
                 ("- ", SpanKind::Marker),
                 ("[x]", SpanKind::Checkbox(true)),
                 (" 15:00 Call", SpanKind::DoneTask),
-                ("15:00", SpanKind::TaskTime),
             ]
+        );
+        assert_eq!(
+            slices("- [x] 10:00 - 11:00 Test\n"),
+            vec![
+                ("- ", SpanKind::Marker),
+                ("[x]", SpanKind::Checkbox(true)),
+                (" 10:00 - 11:00 Test", SpanKind::DoneTask),
+                (" - ", SpanKind::TimeDash),
+            ],
+            "a ticked task's time keeps its dash but not its bold"
         );
         assert_eq!(
             slices("- [ ] 09:00 – 10:30 Already an en dash\n"),
