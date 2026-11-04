@@ -94,7 +94,7 @@ masthead sizes are in rems of the UI size and editor sizes are multiples of the 
 | `note.h1` | Petrona SemiBold | 1.75B (30px), drawn in a 2-row block | **Day planner** |
 | `note.h2` | Petrona SemiBold | 1.3B (22px), drawn in a 1-row block | **Calendar** |
 | `note.h3` | Plex Sans SemiBold (highlight only) | B | Reminder |
-| `note.time` | Plex Sans SemiBold, `tnum` (highlight) | B | 20:29 |
+| `note.time` | Plex Sans SemiBold, `tnum` (highlight); a task's time at Regular | B | 20:29 |
 | `lane.title` | Petrona SemiBold | 1.0625rem (17px) | Soon |
 | `lane.caption` | Plex Sans SemiBold, uppercase | 0.6875rem (11px) | SPI |
 | `row.text` | Plex Sans Regular | 0.875rem (14px), wraps to 2 lines | Study for DNV elections |
@@ -114,13 +114,13 @@ One Dark and One Light stay as they are. A user who already chose a theme keeps 
 | Token | Dark | Light | Theme keys |
 | --- | --- | --- | --- |
 | ground | `#151413` | `#F8F5EF` | `background`, `editor.background`, `editor.gutter.background` |
-| surface | `#1E1C1A` | `#EFEAE1` | `panel.background`, `surface.background`, `elevated_surface.background`, `element.background`, `tab_bar.background`, `toolbar.background` |
+| surface | `#22201D` | `#EFEAE1` | `panel.background`, `surface.background`, `elevated_surface.background`, `element.background`, `tab_bar.background`, `toolbar.background` |
 | sunken | `#0B0A0A` | `#E8E2D7` | `title_bar.background`, `status_bar.background`, `editor.subheader.background` |
 | rule | `#322E2A` | `#D3C9B8` | `border`, `panel.focused_border`, `pane.focused_border` |
-| ruleSoft | `#262320` | `#DDD5C7` | `border.variant`, `editor.wrap_guide` |
+| ruleSoft | `#2A2724` | `#DDD5C7` | `border.variant`, `editor.wrap_guide` |
 | ink | `#ECE7DE` | `#1C1B19` | `text`, `editor.foreground`, `icon` |
 | muted | `#A89F93` | `#5F594F` | `text.muted`, `icon.muted` |
-| dim | `#6D675E` | `#877F72` | `text.placeholder`, `text.disabled`, `editor.line_number` |
+| dim | `#716B62` | `#877F72` | `text.placeholder`, `text.disabled`, `editor.line_number` |
 | amber | `#E2A554` | `#8D5800` | `text.accent`, `icon.accent`, `border.focused`, `editor.active_line_number`, `players[0].cursor` |
 | amberSoft | `#3A2E1C` | `#ECD9B6` | `element.selected`, `ghost_element.selected`, `players[0].selection` (at 70%) |
 | amberInk | `#151413` | `#F8F5EF` | text on a filled amber surface (today cell, checked box); the `background` key |
@@ -133,7 +133,9 @@ Light, lighter in Dark) and the masthead and status bar are the darkest band in 
 separate by tone, not only by hairline. Text holds its contrast on every one of them (§10), and amber holds 4.5:1 as text on
 each.
 
-Two derived tones that the phone doesn't need: `editor.active_line.background` is ink at 4%, and
+Two derived tones that the phone doesn't need: `editor.active_line.background` is ink at 4% (unused
+by default: Thock's `current_line_highlight` is `none`, so no band runs past the page's text
+column), and
 `error` is `#E07A6A` (dark) / `#A8402F` (light). Terminal ANSI colours come from One Dark / One
 Light, with background and foreground swapped for ground and ink.
 
@@ -144,7 +146,8 @@ The desk adds one meaning, **where you are**: today in the strip, the selected r
 Next card, the active tab underline, journal times, and counts that need you (an overdue
 reminder). Heading markers stay in ink, never amber. Links are not amber: `[[wikilinks]]` and
 `[name](url)` share one link colour, `cal` (`syntax.link_text`), so a link never reads as "where
-you are". Calendar times are set in muted ink, SemiBold, so they don't compete with links.
+you are". Calendar times are set in ink at the text's own weight: a muted or bold time next to its
+en dash reads as struck or done, and strikethrough is the only "declined" signal.
 
 ### 5.3 Heading colours become theme-addressable
 
@@ -339,7 +342,7 @@ is drawn (cursor elsewhere) as:
 Day planner                          ← Petrona SemiBold 30px, row 2
 ☐  Workout                           ← Plex Sans 17px
 Calendar                             ← Petrona Medium Italic 22px, ink, 1-row block
-☑  09:00 – 17:00  Focus time         ← time in muted ink, SemiBold, tnum; whole line struck and dim
+☑  09:00 – 17:00  Focus time         ← ticked: the whole line, time included, in the done ink
 ```
 
 ### 7.3 Times and tasks
@@ -351,9 +354,10 @@ family:
   `20:29 · I'm tired of…`. The time is SemiBold `text.accent`, and the ` · ` stays visible in
   `text.placeholder`.
 - **`TaskTime`:** a task's leading `HH:MM - HH:MM` or `HH:MM`, parsed with the Day Planner's
-  parser so the editor and the panel agree. The time is SemiBold `text.muted`, and the ` - ` is drawn as
-  an en dash (a fold whose placeholder is `–`). A ticked task's time keeps the dash but not the
-  colour or weight: it takes the done text's muted ink at the regular weight.
+  parser so the editor and the panel agree. The time is `text` ink at the text's own weight, and
+  the ` - ` is drawn as an en dash in the same ink (a fold whose placeholder is `–`). A bold or
+  muted time made the dash read as a strikethrough, so a live event looked declined. A ticked
+  task's time keeps the dash and takes the done text's muted ink.
 
 Task list items (`- [ ]`) lose their V24 `•`. The checkbox is enough of a marker, and that
 matches the reference. Plain list items keep the `•`. A checked box is a 1px `text.placeholder`
@@ -376,8 +380,10 @@ right dock and is open by default, at 320px. It has three tabs:
 | **Done** | Completed, newest first, dated | `BacklogPanel`'s Completed column |
 
 The counts are open tasks: Backlog counts Soon and Someday, and Today counts unchecked planner
-tasks. The tab bar has 12px top padding, 18px between labels, and a 2px amber underline under
-the active tab.
+tasks. The tab bar has 12px top padding, 10px between labels, 3px between a label and its count,
+and a 2px amber underline under the active tab, so all four tabs fit the 320px dock. A narrower
+dock scrolls the strip sideways, with a fade at its right edge instead of a hard cut, and showing
+a tab scrolls it into view.
 
 `BacklogPanel` and `DayPlannerPanel` stop being `Panel`s and become views that `DeskPanel`
 renders. Their models, parsing, writes and inline editors don't change. `DeskPanel` takes
@@ -409,15 +415,15 @@ selectable row) reveals the entry in today's note.
 The lanes are stacked vertically:
 
 ```
-Soon                                  18 ⌄ +    ← lane.title; count, then chevron and + on hover
+Soon                                  ⌄ + 18    ← lane.title; chevron and + on hover, then count
 ▌☐ Study for DNV elections                      ← selected: amberSoft fill, 2px amber left edge
    from Sep 28 · inbox · ↗ dnv-ballot           ← row.meta, only when the line carries it
  ☐ Apps to try: vorssaint
-SPI                                    5 ⌄ +    ← lane.caption: a V17 category, ends like a lane
+    SPI                                ⌄ +  5    ← lane.caption: a V17 category, at the task text
  ☐ HD 519673: local cores only used once
  ☐ Refactor Maestro.java
 ────────────────────────────────────────
-Someday                               19 › +    ← a folded lane, one row
+Someday                               › + 19    ← a folded lane, one row
 ```
 
 - Soon opens expanded and Someday starts folded. Each lane's fold state is remembered next to the
@@ -431,11 +437,13 @@ Someday                               19 › +    ← a folded lane, one row
   `OpenBacklogTaskNote` (`cmd-enter`, `ctrl-enter` on Linux, `g f` in vim) opens it from the
   keyboard. A link mid-sentence stays in the text.
 - The meta line's tokens are split by one " · ", the same between every pair.
-- Lane and group headers always show their muted count; the chevron and `+` appear on hover or
-  while the header is selected, holding their place otherwise so nothing shifts. The keys (add,
+- Lane and group headers always show their muted count, last, so every count sits in one column
+  at the row's right edge, where the task text ends; the chevron and `+` appear before it on hover
+  or while the header is selected, holding their place otherwise so nothing shifts. The keys (add,
   `left`/`right`) work either way.
 - The checkbox sits centred on the first line's line box. Group captions are 12px SemiBold small
-  caps in `text.muted`, a step under the lane titles.
+  caps in `text.muted`, a step under the lane titles, and start where the task text does, so a
+  group reads as nested inside its lane rather than as a peer of it.
 - Every row's text wraps to two lines and then truncates with an ellipsis. The full text is in the
   tooltip, in the inline editor, and on the selected row, which shows all of it.
 
@@ -465,11 +473,12 @@ never turn into one.
 The footer has a `border` top and renders the bindings for add, done, open, note, move and today
 from the keymap, so it shows the user's actual keys (and the vim keys when vim mode is on). It
 never hard-codes a key. Each keystroke takes its own 20px keycap with a `text.placeholder` outline
-(3:1), the key in the ink colour; a chord's keycaps sit 4px apart with no `+`, the usual sequence
-notation for `g space`. The labels are 13px `text.muted`, a step above the meta line so they hold
+(3:1), the key in the ink colour; a sequence's keycaps are joined by a small "then" in
+`text.placeholder`, so `g` then `space` never reads as two alternatives. The labels are 13px `text.muted`, a step above the meta line so they hold
 up at 1x. The keycaps sit centred in the footer with equal
 room above and below. When the panel is too narrow the least used hints are left out rather than
-cut off.
+cut off. While the view the hints describe doesn't have focus, the hints dim, since their keys
+don't apply.
 
 ## 9. Implementation notes
 

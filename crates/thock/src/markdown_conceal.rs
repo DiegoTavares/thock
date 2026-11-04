@@ -1777,7 +1777,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
                 SpanKind::EmailMarker(own) => sender_dot_placeholder(own),
                 SpanKind::EmailLink => email_link_placeholder(),
                 SpanKind::ImageTail(false) => image_not_found_placeholder(),
-                SpanKind::TimeDash => time_dash_placeholder(),
+                SpanKind::TimeDash { done } => time_dash_placeholder(done),
                 SpanKind::Reminder { label, state } => reminder_placeholder(label, state),
                 _ => marker_placeholder(),
             };
@@ -1956,7 +1956,7 @@ fn collapsed_text_for(kind: &SpanKind) -> &str {
         SpanKind::EmailMarker(_) => "●",
         SpanKind::EmailLink => "Open in Gmail ↗",
         SpanKind::ImageTail(false) => IMAGE_NOT_FOUND,
-        SpanKind::TimeDash => "–",
+        SpanKind::TimeDash { .. } => "–",
         _ => " ",
     }
 }
@@ -1978,7 +1978,7 @@ fn is_folded(kind: &SpanKind) -> bool {
             | SpanKind::EmailLink
             | SpanKind::EmailMarker(_)
             | SpanKind::ImageTail(_)
-            | SpanKind::TimeDash
+            | SpanKind::TimeDash { .. }
             | SpanKind::Reminder { .. }
     )
 }
@@ -2077,14 +2077,15 @@ fn reminder_placeholder(label: Arc<str>, state: ChipState) -> FoldPlaceholder {
 
 /// Placeholder for the `-` between a task's two times: an en dash, set
 /// like the times around it (V43 §7.3).
-fn time_dash_placeholder() -> FoldPlaceholder {
+fn time_dash_placeholder(done: bool) -> FoldPlaceholder {
     FoldPlaceholder {
-        render: Arc::new(|_, _, cx| {
+        render: Arc::new(move |_, _, cx| {
+            let colors = cx.theme().colors();
             div()
                 .h_full()
                 .flex()
                 .items_center()
-                .text_color(cx.theme().colors().text_muted)
+                .text_color(if done { colors.text_muted } else { colors.text })
                 .child("–")
                 .into_any_element()
         }),
@@ -2686,8 +2687,9 @@ const EMAIL_OWN_SENDER_SLOT: usize = 11;
 const EMAIL_MUTED_SLOT: usize = 12;
 /// A journal entry's time, in the accent (V43 §7.3).
 const JOURNAL_TIME_SLOT: usize = 13;
-/// A task's time, in the muted ink: set apart by weight, not a hue a
-/// link could be mistaken for.
+/// A task's time, in the body ink at the text's own weight: a muted or
+/// bold time beside its dash reads as struck or done, and strikethrough
+/// is the only signal a declined event should carry.
 const TASK_TIME_SLOT: usize = 14;
 /// A ticked task's text, in the muted ink. Over every colour slot, so a
 /// finished task's time and links recede with it.
@@ -2728,7 +2730,7 @@ fn highlight_slot(kind: &SpanKind) -> Option<usize> {
         | SpanKind::EmailMarker(_)
         | SpanKind::ImageTail(_)
         | SpanKind::ImageSource
-        | SpanKind::TimeDash
+        | SpanKind::TimeDash { .. }
         | SpanKind::Reminder { .. } => None,
     }
 }
@@ -2781,7 +2783,7 @@ fn slot_style(slot: usize, cx: &App) -> HighlightStyle {
         _ => {
             let font_weight = matches!(
                 slot,
-                EMAIL_SENDER_SLOT | EMAIL_OWN_SENDER_SLOT | JOURNAL_TIME_SLOT | TASK_TIME_SLOT
+                EMAIL_SENDER_SLOT | EMAIL_OWN_SENDER_SLOT | JOURNAL_TIME_SLOT
             )
             .then_some(gpui::FontWeight::SEMIBOLD);
             HighlightStyle {
@@ -2804,7 +2806,7 @@ fn slot_color(slot: usize, cx: &App) -> Hsla {
         EMAIL_MUTED_SLOT | DONE_TASK_SLOT => colors.text_muted,
         HIDDEN_SLOT => colors.editor_background,
         JOURNAL_TIME_SLOT => colors.text_accent,
-        TASK_TIME_SLOT => colors.text_muted,
+        TASK_TIME_SLOT => colors.text,
         _ => {
             let players = &cx.theme().players().0;
             // Slot 0 of the player palette is the local-user colour; heading
@@ -3142,8 +3144,12 @@ mod tests {
                 .expect("the open task's time is highlighted");
             assert_eq!(
                 time.color,
-                Some(cx.theme().colors().text_muted),
-                "a task's time is set in the muted ink, not a link-like hue"
+                Some(cx.theme().colors().text),
+                "a task's time is set in the body ink, not a done-like grey or a link-like hue"
+            );
+            assert_eq!(
+                time.font_weight, None,
+                "a task's time keeps the text's weight, so its dash never reads as a strike"
             );
         });
         move_cursor_to(&editor, 1, &mut cx);
@@ -3421,7 +3427,7 @@ mod tests {
             assert_eq!(
                 times.len(),
                 1,
-                "only the open task's time is bold; the ticked one's recedes"
+                "only the open task's time takes the time ink; the ticked one's recedes"
             );
         });
     }

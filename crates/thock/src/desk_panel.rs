@@ -22,8 +22,8 @@ use anyhow::Result;
 use chrono::{Local, NaiveDate, NaiveDateTime, Timelike as _};
 use gpui::{
     Action, AnyElement, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, KeyContext, KeybindingKeystroke, Pixels, Subscription, Task, WeakEntity,
-    Window, actions, div, px, rems,
+    Focusable, FontWeight, KeyContext, KeybindingKeystroke, Pixels, ScrollHandle, Subscription,
+    Task, WeakEntity, Window, actions, div, linear_color_stop, linear_gradient, px, rems,
 };
 use language::{Buffer, BufferEvent};
 use menu::{Confirm, SelectPrevious};
@@ -280,6 +280,8 @@ pub struct DeskPanel {
     /// Whether something waits, for the tide mark (V54 §5.2). Kept on the
     /// minute tick and on plan or reminder changes, not on every notify.
     waiting: bool,
+    /// The tab strip scrolls sideways when the dock is too narrow for it.
+    tab_scroll: ScrollHandle,
     _tick: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -369,6 +371,7 @@ impl DeskPanel {
                 now: Arc::new(|| Local::now().naive_local()),
                 reminder_subscription: None,
                 waiting: false,
+                tab_scroll: ScrollHandle::new(),
                 _tick: tick,
                 _subscriptions: subscriptions,
             };
@@ -421,6 +424,9 @@ impl DeskPanel {
                 .update(cx, |reminders, cx| reminders.close_reschedule(cx));
         }
         self.tab = tab;
+        if let Some(index) = DeskTab::ALL.iter().position(|candidate| *candidate == tab) {
+            self.tab_scroll.scroll_to_item(index);
+        }
         self.backlog.update(cx, |backlog, cx| {
             backlog.set_view(
                 match tab {
@@ -632,12 +638,19 @@ impl DeskPanel {
             (overdue > 0).then(|| (overdue, cx.theme().status().warning)),
             None,
         ];
-        h_flex()
+        // When the dock is too narrow for every tab, the strip scrolls and the
+        // last visible tab fades out at the edge instead of being cut.
+        let scroll_offset = self.tab_scroll.offset().x;
+        let scroll_max = self.tab_scroll.max_offset().x;
+        let overflowing = scroll_max > px(0.) && -scroll_offset < scroll_max - px(1.);
+        let tabs = h_flex()
+            .id("thock-desk-tabs")
+            .debug_selector(|| "thock-desk-tabs".into())
             .pt_3()
             .px_3()
-            .gap(px(18.))
-            .border_b_1()
-            .border_color(colors.border_variant)
+            .gap(px(10.))
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll)
             .children(DeskTab::ALL.into_iter().zip(counts).map(|(tab, count)| {
                 let active = tab == self.tab;
                 h_flex()
@@ -645,7 +658,9 @@ impl DeskPanel {
                         "thock-desk-tab-{}",
                         tab.label()
                     )))
-                    .gap_1()
+                    .debug_selector(move || format!("thock-desk-tab-{}", tab.label()))
+                    .flex_none()
+                    .gap(px(3.))
                     .pb_2()
                     .items_baseline()
                     .border_b_2()
@@ -678,7 +693,28 @@ impl DeskPanel {
                         this.show_tab(tab, cx);
                         this.focus_handle(cx).focus(window, cx);
                     }))
-            }))
+            }));
+        div()
+            .relative()
+            .border_b_1()
+            .border_color(colors.border_variant)
+            .child(tabs)
+            .when(overflowing, |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "thock-desk-tabs-fade".into())
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .h_full()
+                        .w(px(32.))
+                        .bg(linear_gradient(
+                            90.,
+                            linear_color_stop(colors.panel_background, 0.6),
+                            linear_color_stop(colors.panel_background.opacity(0.), 0.),
+                        )),
+                )
+            })
             .into_any_element()
     }
 
@@ -777,13 +813,23 @@ fn hint_keystrokes(
 /// one line of hints.
 const HINT_KEYCAP_HEIGHT: Pixels = px(20.);
 
+/// Whether the hints for the view behind `focus` are dimmed: their keys
+/// only apply while that view has focus.
+fn hints_dimmed(focus: &FocusHandle, window: &Window, cx: &App) -> bool {
+    !focus.contains_focused(window, cx)
+}
+
+/// How far the hints fade while their view doesn't have focus.
+const HINTS_UNFOCUSED_OPACITY: f32 = 0.55;
+
 /// A hint's label, a step above the Backlog's meta line so it holds up at 1x.
 const HINT_LABEL_SIZE: Rems = rems(0.8125);
 
 /// A footer of key hints on one line: each stroke of a binding takes its
-/// own keycap, a chord's keycaps set a small gap apart, the usual sequence
-/// notation for `g space`. Hints that don't fit the line are left out, the
-/// least used first.
+/// own keycap, and a sequence's keycaps are joined by a small "then" so
+/// `g` `space` never reads as two alternatives. Hints that don't fit the
+/// line are left out, the least used first. The bar dims while the view
+/// it describes doesn't have focus, since its keys don't apply then.
 fn render_hints(
     hints: &[(Box<dyn Action>, &'static str)],
     focus: &FocusHandle,
@@ -791,6 +837,7 @@ fn render_hints(
     cx: &App,
 ) -> AnyElement {
     let colors = cx.theme().colors();
+    let dimmed = hints_dimmed(focus, window, cx);
     let vim_mode = cx
         .global::<SettingsStore>()
         .merged_settings()
@@ -802,31 +849,46 @@ fn render_hints(
         if keystrokes.is_empty() {
             return None;
         }
-        let keycaps = keystrokes.iter().enumerate().map(|(index, keystroke)| {
-            h_flex()
-                .debug_selector(move || format!("thock-hint-keycap-{label}-{index}"))
-                .flex_none()
-                .h(HINT_KEYCAP_HEIGHT)
-                .min_w(HINT_KEYCAP_HEIGHT)
-                .px_1()
-                .items_center()
-                .justify_center()
-                .rounded_sm()
-                .border_1()
-                // The placeholder ink holds 3:1 on the panel, so the key
-                // reads before its label.
-                .border_color(colors.text_placeholder)
-                .bg(colors.element_background)
-                .text_size(key_size)
-                .font_weight(FontWeight::NORMAL)
-                .children(render_keybinding_keystroke(
-                    keystroke,
-                    Some(Color::Default),
-                    key_size,
-                    PlatformStyle::platform(),
-                    vim_mode,
-                ))
-        });
+        let keycaps = keystrokes
+            .iter()
+            .enumerate()
+            .flat_map(|(index, keystroke)| {
+                let connector = (index > 0).then(|| {
+                    div()
+                        .debug_selector(move || format!("thock-hint-then-{label}-{index}"))
+                        .flex_none()
+                        .text_size(rems(0.6875))
+                        .line_height(HINT_KEYCAP_HEIGHT)
+                        .text_color(colors.text_placeholder)
+                        .child("then")
+                        .into_any_element()
+                });
+                let keycap = h_flex()
+                    .debug_selector(move || format!("thock-hint-keycap-{label}-{index}"))
+                    .flex_none()
+                    .h(HINT_KEYCAP_HEIGHT)
+                    .min_w(HINT_KEYCAP_HEIGHT)
+                    .px_1()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .border_1()
+                    // The placeholder ink holds 3:1 on the panel, so the key
+                    // reads before its label.
+                    .border_color(colors.text_placeholder)
+                    .bg(colors.element_background)
+                    .text_size(key_size)
+                    .font_weight(FontWeight::NORMAL)
+                    .children(render_keybinding_keystroke(
+                        keystroke,
+                        Some(Color::Default),
+                        key_size,
+                        PlatformStyle::platform(),
+                        vim_mode,
+                    ))
+                    .into_any_element();
+                connector.into_iter().chain([keycap])
+            });
         Some(
             h_flex()
                 .flex_none()
@@ -869,6 +931,7 @@ fn render_hints(
                 .gap_x_3()
                 .gap_y_2()
                 .items_center()
+                .when(dimmed, |this| this.opacity(HINTS_UNFOCUSED_OPACITY))
                 .children(hints),
         )
         .into_any_element()
@@ -1701,10 +1764,14 @@ mod tests {
             g.size.height, add.size.height,
             "one height for every keycap"
         );
-        let gap = space.left() - g.right();
+        let then = bounds(&mut setup, "thock-hint-then-open-1");
         assert!(
-            gap >= px(3.) && gap <= px(5.),
-            "a chord's strokes are separate keycaps a small gap apart: {g:?} {space:?}"
+            then.left() > g.right() && then.right() < space.left(),
+            "a sequence's keycaps are joined by a \"then\": {g:?} {then:?} {space:?}"
+        );
+        assert!(
+            setup.cx.debug_bounds("thock-hint-then-open-0").is_none(),
+            "nothing leads the first stroke"
         );
         assert!(
             setup.cx.debug_bounds("thock-hint-keycap-add-1").is_none(),
@@ -1805,5 +1872,131 @@ mod tests {
         setup.cx.run_until_parked();
         assert_eq!(selected(&setup), selection);
         assert!(drawn_focused(&setup), "in full again on coming back");
+    }
+
+    #[gpui::test]
+    async fn the_hints_dim_while_the_backlog_is_not_focused(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        let project_path = setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            workspace
+                .project()
+                .read(cx)
+                .find_project_path(setup.root.join("backlog.md"), cx)
+                .unwrap()
+        });
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.open_path(project_path, None, true, window, cx)
+            })
+            .await
+            .unwrap();
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.focus_panel::<DeskPanel>(window, cx);
+            });
+        setup.cx.run_until_parked();
+        let desk = setup.desk.clone();
+        let dimmed = |setup: &mut Setup| {
+            setup.cx.update(|window, cx| {
+                let focus = desk.read(cx).backlog.read(cx).focus_handle(cx);
+                hints_dimmed(&focus, window, cx)
+            })
+        };
+        assert!(desk_focused(&mut setup));
+        assert!(
+            !dimmed(&mut setup),
+            "the keys apply, so the hints show in full"
+        );
+        setup.cx.simulate_keystrokes("escape");
+        setup.cx.run_until_parked();
+        assert!(!desk_focused(&mut setup));
+        assert!(dimmed(&mut setup), "the keys don't apply from the note");
+    }
+
+    #[gpui::test]
+    async fn a_narrow_dock_scrolls_the_tabs_instead_of_cutting_them(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        let redraw = |setup: &mut Setup| {
+            for _ in 0..2 {
+                setup.cx.update(|window, _| window.refresh());
+                setup.cx.run_until_parked();
+            }
+        };
+        let bounds = |setup: &mut Setup, selector: &'static str| {
+            setup
+                .cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"))
+        };
+        redraw(&mut setup);
+        let strip = bounds(&mut setup, "thock-desk-tabs");
+        let done = bounds(&mut setup, "thock-desk-tab-Done");
+        assert!(
+            done.right() <= strip.right(),
+            "every tab fits the default dock: {done:?} in {strip:?}"
+        );
+        assert!(setup.cx.debug_bounds("thock-desk-tabs-fade").is_none());
+
+        let workspace = setup.workspace.clone();
+        setup.cx.update(|window, cx| {
+            let dock = workspace.read(cx).right_dock().clone();
+            dock.update(cx, |dock, cx| {
+                dock.resize_active_panel(Some(px(120.)), None, window, cx);
+            });
+        });
+        redraw(&mut setup);
+        let strip = bounds(&mut setup, "thock-desk-tabs");
+        let done = bounds(&mut setup, "thock-desk-tab-Done");
+        assert!(
+            done.right() > strip.right(),
+            "the strip overflows: {strip:?}"
+        );
+        assert!(
+            setup.cx.debug_bounds("thock-desk-tabs-fade").is_some(),
+            "the overflow fades out rather than stopping at a hard edge"
+        );
+
+        setup
+            .desk
+            .update(&mut setup.cx, |desk, cx| desk.show_tab(DeskTab::Done, cx));
+        redraw(&mut setup);
+        let strip = bounds(&mut setup, "thock-desk-tabs");
+        let done = bounds(&mut setup, "thock-desk-tab-Done");
+        assert!(
+            done.left() >= strip.left() && done.right() <= strip.right() + px(1.),
+            "showing a tab scrolls it into view: {done:?} in {strip:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn group_captions_nest_and_header_counts_share_a_column(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        setup.cx.update(|window, _| window.refresh());
+        setup.cx.run_until_parked();
+        let bounds = |setup: &mut Setup, selector: &'static str| {
+            setup
+                .cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"))
+        };
+        let lane_count = bounds(&mut setup, "backlog-header-count-soon");
+        let group_count = bounds(&mut setup, "backlog-header-count-soon-3");
+        let words = bounds(&mut setup, "backlog-words-soon-1");
+        let caption = bounds(&mut setup, "backlog-caption-soon-3");
+        assert_eq!(
+            lane_count.right(),
+            group_count.right(),
+            "lane and group counts end in one column"
+        );
+        assert!(
+            (lane_count.right() - words.right()).abs() <= px(1.),
+            "the counts end where the task text does: {lane_count:?} {words:?}"
+        );
+        assert!(
+            (caption.left() + crate::backlog_panel::TASK_TEXT_INSET - words.left()).abs() <= px(1.),
+            "a group caption starts with the task text, nested in its lane: {caption:?} {words:?}"
+        );
     }
 }

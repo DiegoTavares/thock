@@ -207,12 +207,17 @@ mod tests {
             let page = colour(&theme, |theme| &theme.style.colors.editor_background);
             let surface = colour(&theme, |theme| &theme.style.colors.panel_background);
             let sunken = colour(&theme, |theme| &theme.style.colors.title_bar_background);
-            for side in [surface, sunken] {
-                assert!(
-                    contrast(page, side) >= 1.07,
-                    "{name}: the page is a tone step from {side}"
-                );
-            }
+            // The rail and dock sit right beside the page, so their step is
+            // the wider one; the masthead and status bar are bands at the
+            // window's edges.
+            assert!(
+                contrast(page, surface) >= 1.10,
+                "{name}: the page is a clear tone step from {surface}"
+            );
+            assert!(
+                contrast(page, sunken) >= 1.07,
+                "{name}: the page is a tone step from {sunken}"
+            );
             if name == THOCK_LIGHT {
                 // On light paper the page is the brightest sheet, the rail and
                 // dock a step down, the masthead and status bar a step further.

@@ -71,8 +71,9 @@ One section per Routine, and within it, in order:
 4. **Rituals** caption.
 5. Every skill with `kind = "ritual"` (the default), in manifest order.
 6. A collapsed **Setup** row when the Routine has `kind = "setup"` skills, same shape as a link
-   group, except that it leads with the settings glyph its steps carry and keeps its chevron at
-   the row's end, so it never reads as a ritual or a folder of notes.
+   group, except that it leads with the settings glyph its steps carry and has no chevron, so it
+   never reads as a ritual or a folder of notes. Chevrons in the rail mean disclosure and nothing
+   else.
 
 The two captions appear only when a section holds both links and skills. With nothing to separate,
 a caption is decoration, and a Routine that is purely a set of bookmarks should render as a set of
@@ -135,8 +136,8 @@ kind = "setup"           # "ritual" (default) | "setup"
 
 The distinction only works if the two classes don't look alike:
 
-- A ritual's default icon is the filled **run** glyph (`play_filled`), so it never reads as the
-  disclosure chevron beside it. It is muted like every other row's and turns accent while the row
+- A ritual's default icon is the **run** bolt (`bolt_outlined`). It is not a triangle, so it never
+  reads as a collapsed disclosure beside the chevrons. It is muted like every other row's and turns accent while the row
   is selected or hovered, so the rail's colour follows the keys or the pointer instead of sitting
   on every verb. A setup step's is `settings`, muted. Links keep their kind-derived icons, muted;
   a browser link opens a Routine's generated site and takes a dashboard grid. A manifest `icon`

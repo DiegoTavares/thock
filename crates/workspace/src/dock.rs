@@ -24,9 +24,10 @@ use util::ResultExt as _;
 
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
 /// The grip centred on a tide mark, short so it reads as something to
-/// grab rather than the window's frame.
-const TIDE_GRIP_WIDTH: Pixels = px(2.);
-const TIDE_GRIP_HEIGHT: Pixels = px(40.);
+/// grab rather than the window's frame, and heavy enough to find on a
+/// large screen at a glance.
+const TIDE_GRIP_WIDTH: Pixels = px(3.);
+const TIDE_GRIP_HEIGHT: Pixels = px(88.);
 /// How wide a tide mark answers the pointer. Wider than the mark, so it is
 /// easy to hit; the extra overlays the page's margin instead of taking
 /// room from it, so the page stays put.
@@ -546,7 +547,7 @@ impl Dock {
     /// panel; a click focuses it, which brings it back.
     fn render_tide_mark(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let colors = cx.theme().colors();
-        // The full text ink, so a 2pt line is easy to find on a dark ground
+        // The full text ink, so the grip is easy to find on a dark ground
         // and at 1x.
         let grip_color = if self.tide_waiting {
             colors.text_accent

@@ -284,8 +284,9 @@ fn link_icon(link: &RoutineLink) -> RowIcon {
 }
 
 /// A skill's icon: the manifest's override, else a glyph that says what the
-/// row *does*. Rituals get the run glyph so a verb never reads like one of
-/// the note rows above it; setup steps get the settings glyph.
+/// row *does*. Rituals get the bolt, a run glyph that is not a triangle, so
+/// a verb never reads like a collapsed disclosure or one of the note rows
+/// above it; setup steps get the settings glyph.
 fn skill_icon(skill: &RoutineSkill) -> RowIcon {
     skill
         .icon
@@ -294,7 +295,7 @@ fn skill_icon(skill: &RoutineSkill) -> RowIcon {
         .unwrap_or(RowIcon::Named(if skill.kind.is_setup() {
             IconName::Settings
         } else {
-            IconName::PlayFilled
+            IconName::BoltOutlined
         }))
 }
 
@@ -2718,20 +2719,13 @@ impl RoutinesPanel {
         // The disclosure sits in the start slot, not in `ListItem::toggle`'s
         // own column, so the chevron lands exactly where its siblings' icons
         // do and the group reads as one of them. The Setup group leads with
-        // the settings glyph its steps carry, so it never reads as a ritual
-        // or a folder of notes, and keeps its chevron at the row's end.
+        // the settings glyph its steps carry instead, so it never reads as a
+        // ritual or a folder of notes; chevrons only ever mean disclosure.
         .start_slot(
             Icon::new(group_lead_icon(&key, expanded))
                 .size(IconSize::XSmall)
                 .color(Color::Muted),
         )
-        .when(key.as_ref() == SETUP_GROUP, |item| {
-            item.end_slot(
-                Icon::new(disclosure_icon(expanded))
-                    .size(IconSize::XSmall)
-                    .color(Color::Muted),
-            )
-        })
         .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
         .on_click(cx.listener({
             let routine_id = routine_id.to_string();
@@ -3311,7 +3305,7 @@ mod tests {
         // steps to the settings one.
         assert_eq!(
             skill_icon(&skill(None)),
-            RowIcon::Named(IconName::PlayFilled)
+            RowIcon::Named(IconName::BoltOutlined)
         );
         assert_eq!(
             skill_icon(&skill_of_kind(SkillKind::Setup, None)),
@@ -3645,7 +3639,7 @@ mod tests {
         );
         assert_eq!(
             skill_icon(&skill(Some("nope"))),
-            RowIcon::Named(IconName::PlayFilled)
+            RowIcon::Named(IconName::BoltOutlined)
         );
         assert_eq!(routine_icon(Some("nope")), RowIcon::Named(IconName::Blocks));
         assert_eq!(routine_icon(None), RowIcon::Named(IconName::Blocks));

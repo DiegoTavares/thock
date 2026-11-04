@@ -78,8 +78,9 @@ pub enum SpanKind {
     /// A task's leading `HH:MM - HH:MM` or `HH:MM`, as the Day Planner reads
     /// it, drawn in the calendar colour.
     TaskTime,
-    /// The ` - ` between a task's two times, drawn as an en dash.
-    TimeDash,
+    /// The ` - ` between a task's two times, drawn as an en dash in the
+    /// time's ink, or the done text's when the task is ticked.
+    TimeDash { done: bool },
     /// A reminder token, `(@2026-12-02 14:30)`, folded into a chip that
     /// reads `label` and is drawn for `state` (V45 §8.4).
     Reminder { label: Arc<str>, state: ChipState },
@@ -495,7 +496,7 @@ fn push_task_time_spans(
     if let Some(dash) = dash {
         spans.push(ConcealSpan::new(
             base + dash.start..base + dash.end,
-            SpanKind::TimeDash,
+            SpanKind::TimeDash { done: checked },
         ));
     }
 }
@@ -2145,7 +2146,7 @@ mod tests {
                 ("- ", SpanKind::Marker),
                 ("[ ]", SpanKind::Checkbox(false)),
                 ("09:00 - 11:00", SpanKind::TaskTime),
-                (" - ", SpanKind::TimeDash),
+                (" - ", SpanKind::TimeDash { done: false }),
             ]
         );
         assert_eq!(
@@ -2162,7 +2163,7 @@ mod tests {
                 ("- ", SpanKind::Marker),
                 ("[x]", SpanKind::Checkbox(true)),
                 (" 10:00 - 11:00 Test", SpanKind::DoneTask),
-                (" - ", SpanKind::TimeDash),
+                (" - ", SpanKind::TimeDash { done: true }),
             ],
             "a ticked task's time keeps its dash but not its bold"
         );
@@ -2180,7 +2181,7 @@ mod tests {
                 ("- ", SpanKind::Marker),
                 ("[ ]", SpanKind::Checkbox(false)),
                 ("09:00-11:00", SpanKind::TaskTime),
-                ("-", SpanKind::TimeDash),
+                ("-", SpanKind::TimeDash { done: false }),
             ]
         );
         assert_eq!(

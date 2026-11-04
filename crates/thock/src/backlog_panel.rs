@@ -13,8 +13,8 @@ use db::kvp::KeyValueStore;
 use editor::{Editor, EditorEvent, SelectionEffects, scroll::Autoscroll};
 use gpui::{
     Action, AnyElement, App, AsyncWindowContext, ClipboardItem, Context, Entity, FocusHandle,
-    Focusable, FontWeight, Hsla, KeyContext, ScrollHandle, Subscription, Task, WeakEntity, Window,
-    actions, div, px, rems,
+    Focusable, FontWeight, Hsla, KeyContext, Pixels, ScrollHandle, Subscription, Task, WeakEntity,
+    Window, actions, div, px, rems,
 };
 use language::{Buffer, BufferEvent};
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
@@ -52,6 +52,11 @@ use crate::vault_sync::{self, VaultSyncService};
 /// A task's line in the Backlog. The box takes the same height, so it sits
 /// centred on the first line whatever the UI font's own line height is.
 pub(crate) const TASK_LINE_HEIGHT: Rems = rems(1.375);
+/// The width of a task row's checkbox column.
+const TASK_CHECK_WIDTH: Pixels = px(20.);
+/// Where a task's text starts within its row: past the checkbox column and
+/// the row's gap. A group caption starts here too, nesting it under its lane.
+pub(crate) const TASK_TEXT_INSET: Pixels = px(28.);
 
 const BACKLOG_PANEL_KEY: &str = "ThockBacklogPanel";
 const REPARSE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -346,7 +351,7 @@ impl BacklogPanel {
     /// Whether the new-task editor's row lies inside the list's viewport
     /// as last drawn, and how far the list is scrolled, for keystroke tests.
     #[cfg(test)]
-    pub(crate) fn new_task_row_in_view_for_tests(&self) -> Option<(bool, gpui::Pixels)> {
+    pub(crate) fn new_task_row_in_view_for_tests(&self) -> Option<(bool, Pixels)> {
         let EditTarget::New { section, category } = &self.edit_state.as_ref()?.target else {
             return None;
         };
@@ -2019,7 +2024,7 @@ impl BacklogPanel {
                     ))
                     .debug_selector(move || format!("backlog-check-{section_key}-{index}"))
                     .flex_none()
-                    .w(px(20.))
+                    .w(TASK_CHECK_WIDTH)
                     .h(TASK_LINE_HEIGHT)
                     .flex()
                     .items_center()
@@ -2194,26 +2199,22 @@ impl BacklogPanel {
             })
     }
 
-    /// The right end of a lane or group header: the open count, then a
-    /// chevron pointing down while open and right while closed. Every header
-    /// ends the same way so the counts line up beside the `+`. The count
-    /// always shows; the chevron only on hover or while the header is
+    /// The right end of a lane or group header: the chevron (down while
+    /// open, right while closed) and the `+`, then the open count last, so
+    /// every header's count sits in one column at the row's right edge. The
+    /// count always shows; the controls only on hover or while the header is
     /// selected, so the headers don't outshout the tasks.
     fn render_header_end(
         count: usize,
         collapsed: bool,
         revealed: bool,
+        add_button: IconButton,
+        count_id: String,
         cx: &App,
     ) -> impl IntoElement {
         h_flex()
             .flex_none()
             .gap_1()
-            .child(
-                div()
-                    .text_size(rems(0.71875))
-                    .text_color(cx.theme().colors().text_placeholder)
-                    .child(SharedString::from(count.to_string())),
-            )
             .child(
                 Self::header_control(revealed).child(
                     Icon::new(if collapsed {
@@ -2224,6 +2225,14 @@ impl BacklogPanel {
                     .size(IconSize::XSmall)
                     .color(Color::Muted),
                 ),
+            )
+            .child(Self::header_control(revealed).child(add_button))
+            .child(
+                div()
+                    .debug_selector(move || count_id)
+                    .text_size(rems(0.71875))
+                    .text_color(cx.theme().colors().text_placeholder)
+                    .child(SharedString::from(count.to_string())),
             )
     }
 
@@ -2236,9 +2245,10 @@ impl BacklogPanel {
         })
     }
 
-    /// A category caption (V43 §8.3): the group's name in small caps and its
-    /// open count, with its own `+` (on hover or selection) so a task can be
-    /// added straight into the group (V17 §5.1). Click to open or close it.
+    /// A category caption (V43 §8.3): the group's name in small caps,
+    /// indented to the task text so it reads as nested under its lane, and
+    /// its open count, with its own `+` (on hover or selection) so a task can
+    /// be added straight into the group (V17 §5.1). Click to open or close it.
     fn render_category_row(
         &self,
         section: SectionKind,
@@ -2253,6 +2263,24 @@ impl BacklogPanel {
         let name = name.to_string();
         let caption = name.to_uppercase();
         let revealed = self.selection() == Some(TaskSelection { section, index });
+        let add_button = IconButton::new(
+            ElementId::Name(format!("backlog-group-add-{section_key}-{index}").into()),
+            IconName::Plus,
+        )
+        .icon_size(IconSize::XSmall)
+        .icon_color(Color::Muted)
+        .tooltip({
+            let focus_handle = self.focus_handle.clone();
+            let label = SharedString::from(format!("Add to {name}"));
+            move |_, cx| Tooltip::for_action_in(label.clone(), &AddBacklogTask, &focus_handle, cx)
+        })
+        .on_click(cx.listener({
+            let name = name.clone();
+            move |this, _, window, cx| {
+                this.select_category_header(section, &name);
+                this.start_add(section, Some(name.clone()), window, cx);
+            }
+        }));
         self.row_frame(TaskSelection { section, index }, cx)
             .pt_2()
             .child(
@@ -2267,47 +2295,29 @@ impl BacklogPanel {
                     .cursor_pointer()
                     .child(
                         div()
+                            .debug_selector(move || {
+                                format!("backlog-caption-{section_key}-{index}")
+                            })
                             .min_w_0()
+                            .pl(TASK_TEXT_INSET)
                             .truncate()
                             .text_size(rems(0.75))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(colors.text_muted)
                             .child(SharedString::from(caption)),
                     )
-                    .child(Self::render_header_end(count, collapsed, revealed, cx))
-                    .on_click(cx.listener({
-                        let name = name.clone();
-                        move |this, _, _window, cx| {
-                            this.select_category_header(section, &name);
-                            this.set_category_collapsed(!collapsed, cx);
-                        }
-                    })),
-            )
-            .child(
-                Self::header_control(revealed).child(
-                    IconButton::new(
-                        ElementId::Name(format!("backlog-group-add-{section_key}-{index}").into()),
-                        IconName::Plus,
-                    )
-                    .icon_size(IconSize::XSmall)
-                    .icon_color(Color::Muted)
-                    .tooltip({
-                        let focus_handle = self.focus_handle.clone();
-                        let label = SharedString::from(format!("Add to {name}"));
-                        move |_, cx| {
-                            Tooltip::for_action_in(
-                                label.clone(),
-                                &AddBacklogTask,
-                                &focus_handle,
-                                cx,
-                            )
-                        }
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .child(Self::render_header_end(
+                        count,
+                        collapsed,
+                        revealed,
+                        add_button,
+                        format!("backlog-header-count-{section_key}-{index}"),
+                        cx,
+                    ))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
                         this.select_category_header(section, &name);
-                        this.start_add(section, Some(name.clone()), window, cx);
+                        this.set_category_collapsed(!collapsed, cx);
                     })),
-                ),
             )
             .into_any_element()
     }
@@ -2325,6 +2335,23 @@ impl BacklogPanel {
         let section_key = section.id();
         let heading = section.heading(&self.headings()).to_string();
         let revealed = self.selection() == Some(TaskSelection { section, index: 0 });
+        let add_button = IconButton::new(
+            ElementId::Name(format!("backlog-add-{section_key}").into()),
+            IconName::Plus,
+        )
+        .icon_size(IconSize::XSmall)
+        .icon_color(Color::Muted)
+        .tooltip({
+            let focus_handle = self.focus_handle.clone();
+            let label = match section {
+                SectionKind::Soon => "Add to Soon",
+                _ => "Add to Someday",
+            };
+            move |_, cx| Tooltip::for_action_in(label, &AddBacklogTask, &focus_handle, cx)
+        })
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.start_add(section, None, window, cx);
+        }));
         self.row_frame(TaskSelection { section, index: 0 }, cx)
             .pt_3()
             .child(
@@ -2344,34 +2371,18 @@ impl BacklogPanel {
                             .text_color(colors.text)
                             .child(SharedString::from(heading)),
                     )
-                    .child(Self::render_header_end(count, folded, revealed, cx))
+                    .child(Self::render_header_end(
+                        count,
+                        folded,
+                        revealed,
+                        add_button,
+                        format!("backlog-header-count-{section_key}"),
+                        cx,
+                    ))
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.select_row(section, 0, cx);
                         this.set_lane_folded(section, !folded, cx);
                     })),
-            )
-            .child(
-                Self::header_control(revealed).child(
-                    IconButton::new(
-                        ElementId::Name(format!("backlog-add-{section_key}").into()),
-                        IconName::Plus,
-                    )
-                    .icon_size(IconSize::XSmall)
-                    .icon_color(Color::Muted)
-                    .tooltip({
-                        let focus_handle = self.focus_handle.clone();
-                        let label = match section {
-                            SectionKind::Soon => "Add to Soon",
-                            _ => "Add to Someday",
-                        };
-                        move |_, cx| {
-                            Tooltip::for_action_in(label, &AddBacklogTask, &focus_handle, cx)
-                        }
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.start_add(section, None, window, cx);
-                    })),
-                ),
             )
             .into_any_element()
     }
