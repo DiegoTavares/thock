@@ -292,15 +292,16 @@
   "snippet_sort_order": "inline",
   // How to highlight the current line in the editor.
   //
-  // 1. Don't highlight the current line:
+  // 1. Don't highlight the current line (default, so the page reads as a
+  //    page and no band runs past its text column):
   //    "none"
   // 2. Highlight the gutter area:
   //    "gutter"
   // 3. Highlight the editor area:
   //    "line"
-  // 4. Highlight the full line (default):
+  // 4. Highlight the full line:
   //    "all"
-  "current_line_highlight": "all",
+  "current_line_highlight": "none",
   // Whether to highlight all occurrences of the selected text in an editor.
   "selection_highlight": true,
   // Whether the text selection should have rounded corners.
@@ -584,10 +585,14 @@
     // 4. Never show the scrollbar:
     //    "never"
     "show": "auto",
-    // Whether to show cursor positions in the scrollbar.
-    "cursors": true,
-    // Whether to show git diff indicators in the scrollbar.
-    "git_diff": true,
+    // Whether to show cursor positions in the scrollbar. Off so the page's
+    // scrollbar stays a quiet thumb rather than a second cursor.
+    "cursors": false,
+    // Whether to show git diff indicators in the scrollbar. Off: versioning
+    // stays invisible in a vault, and the changes since its last checkpoint
+    // would otherwise keep the page's scrollbar showing, not only while
+    // scrolling.
+    "git_diff": false,
     // Whether to show buffer search results in the scrollbar.
     "search_results": true,
     // Whether to show selected text occurrences in the scrollbar.

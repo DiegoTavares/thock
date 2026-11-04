@@ -4,18 +4,58 @@
 //! the panels need that a theme has no key for, and the tests that keep the
 //! palette readable.
 
-use gpui::{App, Hsla};
-use ui::ActiveTheme as _;
+use gpui::{App, Div, Hsla, Styled as _, div, px};
+use ui::prelude::*;
+use ui::{Icon, IconName, IconSize};
 
 pub const THOCK_DARK: &str = "Thock Dark";
 pub const THOCK_LIGHT: &str = "Thock Light";
 
-/// Text drawn on a surface filled with the accent colour — today's cell in
-/// the strip, a checked box. Themes have no key for it; the window background
+/// Text drawn on a surface filled with the accent colour — the open day's
+/// cell in the strip, a reminder chip due today. Themes have no key for it; the window background
 /// is the phone's `amberInk` in both Thock themes, and in any other theme it
 /// is the colour the accent was chosen to stand out against.
 pub fn on_accent_color(cx: &App) -> Hsla {
     cx.theme().colors().background
+}
+
+/// How strongly a pane draws its selected row while focus is elsewhere:
+/// still there, so it is clear where the keys act on coming back, but
+/// quieter than the focused pane's.
+pub const UNFOCUSED_SELECTION_OPACITY: f32 = 0.5;
+
+/// The edge of an unticked task's box, on the page and in the panels. The
+/// theme's border tokens are hairlines for dividers, too faint for a control
+/// a task is ticked with, and a 1px edge in the placeholder ink fades on the
+/// panels' lighter ground, so the box takes the muted ink, which holds 4.5:1
+/// on every surface it sits on.
+pub fn unchecked_box_border(cx: &App) -> Hsla {
+    cx.theme().colors().text_muted
+}
+
+/// The box a task is ticked with, the same on the page and in the panels:
+/// an outline in [`unchecked_box_border`], or, once ticked, an outline and
+/// check in the placeholder ink, a step quieter than an open box, so
+/// finished work recedes behind what is still open.
+pub fn task_box(checked: bool, cx: &App) -> Div {
+    let colors = cx.theme().colors();
+    let task_box = div()
+        .size(px(13.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded_xs()
+        .border_1();
+    if checked {
+        task_box.border_color(colors.text_placeholder).child(
+            Icon::new(IconName::Check)
+                .size(IconSize::XSmall)
+                .color(Color::Custom(colors.text_placeholder)),
+        )
+    } else {
+        task_box.border_color(unchecked_box_border(cx))
+    }
 }
 
 #[cfg(test)]
@@ -107,11 +147,18 @@ mod tests {
             let theme = theme(name);
             let ground = colour(&theme, |theme| &theme.style.colors.background);
             let surface = colour(&theme, |theme| &theme.style.colors.panel_background);
+            let page = colour(&theme, |theme| &theme.style.colors.editor_background);
+            let title_bar = colour(&theme, |theme| &theme.style.colors.title_bar_background);
             let ink = colour(&theme, |theme| &theme.style.colors.text);
             let muted = colour(&theme, |theme| &theme.style.colors.text_muted);
             let dim = colour(&theme, |theme| &theme.style.colors.text_placeholder);
             let amber = colour(&theme, |theme| &theme.style.colors.text_accent);
-            for background in [ground, surface] {
+            // `muted` is the idle tide grip on the page's ground, the
+            // unticked box's edge, a ticked task's text, the Backlog's
+            // meta line and group labels, and the footer's hint labels; `dim`
+            // is the strip's future digits on the masthead, the footer's
+            // keycap outlines, and a ticked box's edge and check.
+            for background in [ground, surface, page, title_bar] {
                 assert!(
                     contrast(ink, background) >= 7.0,
                     "{name}: ink on {background}"
@@ -124,9 +171,89 @@ mod tests {
                     contrast(dim, background) >= 3.0,
                     "{name}: dim on {background}"
                 );
+                // A ticked box is quieter than an open one beside it.
+                assert!(
+                    contrast(dim, background) < contrast(muted, background),
+                    "{name}: a ticked box recedes behind an open one on {background}"
+                );
             }
             // `on_accent_color` is the window background (amberInk).
             assert!(contrast(ground, amber) >= 4.5, "{name}: amberInk on amber");
+        }
+    }
+
+    #[test]
+    fn amber_reads_as_text_on_every_surface() {
+        for name in [THOCK_DARK, THOCK_LIGHT] {
+            let theme = theme(name);
+            let amber = colour(&theme, |theme| &theme.style.colors.text_accent);
+            for background in [
+                colour(&theme, |theme| &theme.style.colors.editor_background),
+                colour(&theme, |theme| &theme.style.colors.panel_background),
+                colour(&theme, |theme| &theme.style.colors.title_bar_background),
+            ] {
+                assert!(
+                    contrast(amber, background) >= 4.5,
+                    "{name}: amber on {background}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_page_stands_apart_from_the_surfaces_around_it() {
+        for name in [THOCK_DARK, THOCK_LIGHT] {
+            let theme = theme(name);
+            let page = colour(&theme, |theme| &theme.style.colors.editor_background);
+            let surface = colour(&theme, |theme| &theme.style.colors.panel_background);
+            let sunken = colour(&theme, |theme| &theme.style.colors.title_bar_background);
+            // The rail and dock sit right beside the page, so their step is
+            // the wider one; the masthead and status bar are bands at the
+            // window's edges.
+            assert!(
+                contrast(page, surface) >= 1.10,
+                "{name}: the page is a clear tone step from {surface}"
+            );
+            assert!(
+                contrast(page, sunken) >= 1.07,
+                "{name}: the page is a tone step from {sunken}"
+            );
+            if name == THOCK_LIGHT {
+                // On light paper the page is the brightest sheet, the rail and
+                // dock a step down, the masthead and status bar a step further.
+                assert!(
+                    luminance(page) > luminance(surface),
+                    "{name}: page over surface"
+                );
+                assert!(
+                    luminance(surface) > luminance(sunken),
+                    "{name}: surface over sunken"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn links_take_one_colour_apart_from_the_accent() {
+        for name in [THOCK_DARK, THOCK_LIGHT] {
+            let theme = theme(name);
+            let link = theme.style.syntax["link_text"]
+                .color
+                .as_deref()
+                .expect("the theme sets a link colour");
+            let hover = colour(&theme, |theme| &theme.style.colors.link_text_hover);
+            let amber = colour(&theme, |theme| &theme.style.colors.text_accent);
+            assert_eq!(hover, link, "{name}: a hovered link keeps the link colour");
+            assert_ne!(link, amber, "{name}: links are not amber");
+            for background in [
+                colour(&theme, |theme| &theme.style.colors.editor_background),
+                colour(&theme, |theme| &theme.style.colors.panel_background),
+            ] {
+                assert!(
+                    contrast(link, background) >= 4.5,
+                    "{name}: link on {background}"
+                );
+            }
         }
     }
 
@@ -139,14 +266,15 @@ mod tests {
                 syntax["title.h1"].font_weight.map(|weight| weight.0),
                 Some(600.0)
             );
+            // An H2 is the H1's face a size down, not a second voice.
+            assert_eq!(syntax["title.h2"].font_style, None, "{name}: a roman h2");
             assert_eq!(
-                syntax["title.h2"].font_style,
-                Some(settings::FontStyleContent::Italic)
+                syntax["title.h2"].font_weight.map(|weight| weight.0),
+                Some(600.0)
             );
             assert_eq!(
-                syntax["title.h2"].color.as_deref(),
-                theme.style.colors.text_accent.as_deref(),
-                "{name}: the amber italic h2"
+                syntax["title.h2"].color, syntax["title.h1"].color,
+                "{name}: the h2 takes the h1's ink"
             );
         }
     }

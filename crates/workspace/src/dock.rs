@@ -10,8 +10,8 @@ use db::kvp::KeyValueStore;
 use gpui::{
     Action, Anchor, AnyView, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, IntoElement, KeyContext, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement,
-    Render, SharedString, Stateful, StyleRefinement, Styled, Subscription, WeakEntity, Window,
-    deferred, div, px,
+    Render, SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window, deferred, div,
+    px,
 };
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore, TerminalDockPosition};
@@ -23,6 +23,18 @@ use ui::{
 use util::ResultExt as _;
 
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
+/// The grip centred on a tide mark, short so it reads as something to
+/// grab rather than the window's frame, and heavy enough to find on a
+/// large screen at a glance.
+const TIDE_GRIP_WIDTH: Pixels = px(3.);
+const TIDE_GRIP_HEIGHT: Pixels = px(88.);
+/// How wide a tide mark answers the pointer. Wider than the mark, so it is
+/// easy to hit; the extra overlays the page's margin instead of taking
+/// room from it, so the page stays put.
+pub const TIDE_HIT_WIDTH: Pixels = px(10.);
+/// The action that brings the tides back. It is Thock's, which this crate
+/// can't name, so the mark's tooltip builds it by name to show its keys.
+const TOGGLE_TIDE_ACTION: &str = "thock::ToggleTide";
 
 pub enum PanelEvent {
     ZoomIn,
@@ -529,37 +541,69 @@ impl Dock {
         self.tide_waiting
     }
 
-    /// The tide mark: a strip of the panel's background at the window's
-    /// edge, with a line on its inner edge while something waits. A click
-    /// focuses the panel, which brings it back.
-    fn render_tide_mark(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// The tide mark: a short grip centred in the strip at the window's
+    /// edge, on the page's ground so it reads the same on either side.
+    /// While something waits, the grip turns accent. Hovering names the
+    /// panel; a click focuses it, which brings it back.
+    fn render_tide_mark(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let colors = cx.theme().colors();
-        let waiting_line = self.tide_waiting.then(|| {
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .w(px(2.))
-                .bg(colors.text_accent)
-                .map(|this| match self.position {
-                    DockPosition::Left => this.right_0(),
-                    _ => this.left_0(),
-                })
-        });
-        div()
+        // Muted ink at rest, so an idle grip never outshines the page;
+        // accent is kept for "something is waiting".
+        let grip_color = if self.tide_waiting {
+            colors.text_accent
+        } else {
+            colors.text_muted
+        };
+        let side = match self.position {
+            DockPosition::Left => "left",
+            DockPosition::Bottom => "bottom",
+            DockPosition::Right => "right",
+        };
+        let name = self
+            .visible_entry()
+            .and_then(|entry| entry.panel.icon_tooltip(window, cx))
+            .unwrap_or("panel");
+        let title: SharedString = format!("Bring back {name}").into();
+        let hit_zone = div()
             .id("tide-mark")
             .debug_selector(|| "tide-mark".into())
             .absolute()
-            .inset_0()
-            .bg(colors.panel_background)
+            .map(|this| match self.position {
+                DockPosition::Left => this.top_0().bottom_0().left_0().w(TIDE_HIT_WIDTH),
+                DockPosition::Right => this.top_0().bottom_0().right_0().w(TIDE_HIT_WIDTH),
+                DockPosition::Bottom => this.inset_0(),
+            })
             .cursor_pointer()
             .occlude()
+            .tooltip(
+                move |_window, cx| match cx.build_action(TOGGLE_TIDE_ACTION, None) {
+                    Ok(action) => Tooltip::for_action(title.clone(), action.as_ref(), cx),
+                    Err(_) => Tooltip::simple(title.clone(), cx),
+                },
+            )
             .on_click(cx.listener(|dock, _, window, cx| {
                 if let Some(panel) = dock.active_panel() {
                     panel.activation_focus_handle(cx).focus(window, cx);
                 }
-            }))
-            .children(waiting_line)
+            }));
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(colors.editor_background)
+            .child(
+                div()
+                    .debug_selector(move || format!("tide-line-{side}"))
+                    .h(TIDE_GRIP_HEIGHT)
+                    .w(TIDE_GRIP_WIDTH)
+                    .rounded_full()
+                    .bg(grip_color),
+            )
+            // Deferred so the part over the page's margin is painted, and
+            // hit, above the page; the dock clips everything else it draws.
+            .child(deferred(hit_zone))
     }
 
     fn resizable(&self, cx: &App) -> bool {
@@ -1300,7 +1344,7 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
         // The workspace placed this frame's row before its docks draw.
         let row = self
@@ -1334,7 +1378,7 @@ impl Render for Dock {
                         .w(width)
                         .child(panel),
                 )
-                .child(self.render_tide_mark(cx));
+                .child(self.render_tide_mark(window, cx));
         }
         if let Some(entry) = self.visible_entry() {
             let position = self.position;

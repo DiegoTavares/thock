@@ -10,7 +10,7 @@
 use gpui::{
     AnyElement, App, ElementId, Entity, FontStyle, FontWeight, HighlightStyle, Hsla,
     InteractiveText, IntoElement as _, SharedString, StrikethroughStyle, StyledText, TaskExt as _,
-    WeakEntity, px,
+    WeakEntity, Window, px,
 };
 use project::{Project, ProjectPath};
 use ui::ActiveTheme as _;
@@ -182,16 +182,13 @@ fn is_absolute_url(url: &str) -> bool {
         })
 }
 
-/// The colour a `[[wikilink]]` label takes in the Markdown editor.
-pub fn wikilink_color(cx: &App) -> Hsla {
-    cx.theme().colors().text_accent
-}
-
-/// The colour a `[name](url)` label takes in the Markdown editor.
-pub fn external_link_color(cx: &App) -> Hsla {
+/// The colour a link label takes in the Markdown editor and the panels,
+/// `[[wikilink]]` and `[name](url)` alike: the theme's `link_text` syntax
+/// style, so links read as one thing and stay apart from the accent.
+pub fn link_color(cx: &App) -> Hsla {
     cx.theme()
         .syntax()
-        .style_for_name("link_uri")
+        .style_for_name("link_text")
         .and_then(|style| style.color)
         .unwrap_or_else(|| cx.theme().colors().text_accent)
 }
@@ -237,8 +234,7 @@ pub fn render_markdown_row(
         display.push_str(&span.text);
         let range = start..display.len();
         let color = match &span.target {
-            Some(LinkTarget::Url(_)) => Some(external_link_color(cx)),
-            Some(LinkTarget::Note(_)) => Some(wikilink_color(cx)),
+            Some(_) => Some(link_color(cx)),
             None => span.code.then(|| code_color(cx)),
         };
         if !span.is_plain() {
@@ -275,25 +271,9 @@ pub fn render_markdown_row(
                     cx.open_url(url);
                     true
                 }
-                Some(LinkTarget::Note(target)) => project
-                    .upgrade()
-                    .and_then(|project| note_project_path(&project, target, cx))
-                    .map(|path| {
-                        // Deferred: the click is dispatched from inside the
-                        // panel's element tree, and opening reaches back into
-                        // the workspace that may already be leased.
-                        let workspace = workspace.clone();
-                        window.defer(cx, move |window, cx| {
-                            workspace
-                                .update(cx, |workspace, cx| {
-                                    workspace
-                                        .open_path(path, None, true, window, cx)
-                                        .detach_and_log_err(cx);
-                                })
-                                .log_err();
-                        });
-                    })
-                    .is_some(),
+                Some(LinkTarget::Note(target)) => {
+                    open_note_link(target, &project, &workspace, window, cx)
+                }
                 None => false,
             };
             // Without this the row's own click handler fires too, and the
@@ -304,6 +284,36 @@ pub fn render_markdown_row(
             }
         })
         .into_any_element()
+}
+
+/// Opens the note a `[[target]]` names. Returns whether it named one; a
+/// link to a note that doesn't exist does nothing.
+pub fn open_note_link(
+    target: &str,
+    project: &WeakEntity<Project>,
+    workspace: &WeakEntity<Workspace>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let Some(path) = project
+        .upgrade()
+        .and_then(|project| note_project_path(&project, target, cx))
+    else {
+        return false;
+    };
+    // Deferred: the click is dispatched from inside a panel's element tree,
+    // and opening reaches back into the workspace that may already be leased.
+    let workspace = workspace.clone();
+    window.defer(cx, move |window, cx| {
+        workspace
+            .update(cx, |workspace, cx| {
+                workspace
+                    .open_path(path, None, true, window, cx)
+                    .detach_and_log_err(cx);
+            })
+            .log_err();
+    });
+    true
 }
 
 /// The vault file a note link names, resolved against the project's visible

@@ -11,8 +11,8 @@ use chrono::{DateTime, Local, NaiveDate, Utc};
 use fs::Fs;
 use gpui::{
     Action, App, AsyncWindowContext, Context, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, KeyContext, Pixels, PromptLevel, SharedString, Subscription, Task, WeakEntity,
-    Window, actions, px,
+    Focusable, FontWeight, KeyContext, Pixels, PromptLevel, SharedString, Subscription, Task,
+    WeakEntity, Window, actions, px,
 };
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use project::Project;
@@ -24,8 +24,7 @@ use std::str::FromStr as _;
 use std::sync::Arc;
 use ui::prelude::*;
 use ui::{
-    Button, Divider, Icon, IconButton, IconSize, KeyBinding, Label, ListItem, ListSubHeader,
-    Tooltip, rems_from_px,
+    Button, Divider, Icon, IconButton, IconSize, KeyBinding, Label, ListItem, Tooltip, rems_from_px,
 };
 use util::ResultExt as _;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -42,6 +41,7 @@ use crate::routine_collections::{
 use crate::routines::{
     self, DiscoveredRoutine, LinkKind, RoutineLink, RoutineLoad, RoutineManifest, RoutineSkill,
 };
+use crate::thock_theme::UNFOCUSED_SELECTION_OPACITY;
 use crate::vault::{OnboardingState, Vault, VaultStatus, scaffold_vault};
 
 // The pre-V7 key, kept verbatim so the dock's persisted layout survives the
@@ -257,6 +257,10 @@ fn routine_icon(name: Option<&str>) -> RowIcon {
         .unwrap_or(RowIcon::Named(IconName::Blocks))
 }
 
+/// A browser link opens a Routine's generated site, a dashboard, so it
+/// takes a grid rather than a code glyph.
+const DASHBOARD_ICON: &str = "icons/thock/dashboard.svg";
+
 /// A quick link's icon: the manifest's override, else a default that reflects
 /// where the link goes — a note, some other file, or out to the browser.
 fn link_icon(link: &RoutineLink) -> RowIcon {
@@ -264,7 +268,7 @@ fn link_icon(link: &RoutineLink) -> RowIcon {
         .as_deref()
         .and_then(manifest_icon)
         .unwrap_or_else(|| match link.kind {
-            LinkKind::Browser => RowIcon::Path("icons/file_icons/html.svg"),
+            LinkKind::Browser => RowIcon::Path(DASHBOARD_ICON),
             LinkKind::Editor | LinkKind::Preview if link.action.is_some() => {
                 RowIcon::Named(IconName::ArrowRight)
             }
@@ -278,19 +282,67 @@ fn link_icon(link: &RoutineLink) -> RowIcon {
         })
 }
 
+/// A ritual's default glyph: a bolt drawn with the note glyphs' 1.2pt
+/// stroke and extent, so the verbs sit at the same weight as the notes.
+const RITUAL_ICON: &str = "icons/thock/bolt.svg";
+
 /// A skill's icon: the manifest's override, else a glyph that says what the
-/// row *does*. Rituals get the run glyph so a verb never reads like one of
-/// the note rows above it; setup steps get the settings glyph.
+/// row *does*. Rituals get the bolt, a run glyph that is not a triangle, so
+/// a verb never reads like a collapsed disclosure or one of the note rows
+/// above it; setup steps get the settings glyph.
 fn skill_icon(skill: &RoutineSkill) -> RowIcon {
     skill
         .icon
         .as_deref()
         .and_then(manifest_icon)
-        .unwrap_or(RowIcon::Named(if skill.kind.is_setup() {
-            IconName::Settings
+        .unwrap_or(if skill.kind.is_setup() {
+            RowIcon::Named(IconName::Settings)
         } else {
-            IconName::PlayOutlined
-        }))
+            RowIcon::Path(RITUAL_ICON)
+        })
+}
+
+/// A skill row's glyph, in muted ink like every other row's. A ritual's
+/// turns accent while the row is selected or hovered, so the rail's colour
+/// is where the keys or the pointer are, not on every verb at once.
+fn ritual_glyph(icon: RowIcon, ritual: bool, selected: bool) -> AnyElement {
+    let glyph = |color| icon.build().size(IconSize::XSmall).color(color);
+    if !ritual {
+        return glyph(Color::Muted).into_any_element();
+    }
+    if selected {
+        return glyph(Color::Accent).into_any_element();
+    }
+    div()
+        .relative()
+        .child(glyph(Color::Muted))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .opacity(0.)
+                .group_hover("list_item", |this| this.opacity(1.))
+                .child(glyph(Color::Accent)),
+        )
+        .into_any_element()
+}
+
+fn disclosure_icon(expanded: bool) -> IconName {
+    if expanded {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    }
+}
+
+/// The glyph a group row leads with: its disclosure chevron, except the
+/// Setup group, which runs setup steps and says so with their glyph.
+fn group_lead_icon(key: &str, expanded: bool) -> IconName {
+    if key == SETUP_GROUP {
+        IconName::Settings
+    } else {
+        disclosure_icon(expanded)
+    }
 }
 
 /// Zone captions. They separate a Routine's destinations from its verbs, and
@@ -526,21 +578,20 @@ fn section_items(
 }
 
 /// A zone caption. Not a row: it takes no selection and can't be collapsed,
-/// which is the whole reason it replaced the old "Skills" folder entry. The
-/// rule running off to the right is what makes it read as a separator rather
-/// than as another entry in the list.
-fn render_caption(label: SharedString) -> AnyElement {
+/// which is the whole reason it replaced the old "Skills" folder entry. Its
+/// muted face and the indent of the rows under it are what group them. It
+/// takes the Backlog's group-caption style, so both panes share one caption.
+fn render_caption(label: SharedString, cx: &App) -> AnyElement {
+    let caption = SharedString::from(label.to_uppercase());
     div()
-        .pl(px(12.))
-        .pt_1()
-        .child(
-            ListSubHeader::new(label).end_slot(
-                div()
-                    .flex_1()
-                    .child(Divider::horizontal())
-                    .into_any_element(),
-            ),
-        )
+        .debug_selector(move || format!("thock-rail-caption-{label}"))
+        .pl(px(14.))
+        .pt_2()
+        .pb_1()
+        .text_size(rems(0.75))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(cx.theme().colors().text_muted)
+        .child(caption)
         .into_any_element()
 }
 
@@ -643,6 +694,9 @@ pub struct RoutinesPanel {
     /// Keyboard cursor over the flat row list. `None` means the highlight
     /// follows whichever link matches the active editor item.
     selected_index: Option<usize>,
+    /// Whether focus was inside the panel at the last render, which decides
+    /// how strongly the selected row is drawn.
+    focused: bool,
     /// Enabled Routines in registry order — live manifests or visible error
     /// entries, reloaded whenever the refresh snapshot changes.
     routines: Vec<RoutineLoad>,
@@ -763,13 +817,15 @@ impl RoutinesPanel {
                 cx.observe_global::<crate::agent_panel::ConnectionEpoch>(|this: &mut Self, cx| {
                     this.refresh_getting_started(cx);
                 });
+            let focus_handle = cx.focus_handle();
             let mut this = Self {
                 workspace: weak_workspace,
                 project,
-                focus_handle: cx.focus_handle(),
+                focus_handle: focus_handle.clone(),
                 vault_status: VaultStatus::NotAVault,
                 fingerprint: Vec::new(),
                 selected_index: None,
+                focused: false,
                 routines: Vec::new(),
                 discovered: Vec::new(),
                 addable_catalog: Vec::new(),
@@ -789,6 +845,9 @@ impl RoutinesPanel {
                     project_subscription,
                     workspace_subscription,
                     connection_subscription,
+                    // The selected row's strength follows focus.
+                    cx.on_focus_in(&focus_handle, window, |_, _, cx| cx.notify()),
+                    cx.on_focus_out(&focus_handle, window, |_, _, _, cx| cx.notify()),
                 ]
                 .into_iter()
                 .chain(chat_subscription)
@@ -2184,11 +2243,12 @@ impl RoutinesPanel {
     }
 
     /// The highlighted row: the keyboard cursor if one is set, otherwise the
-    /// row matching the active editor item.
+    /// row matching the active editor item, otherwise the first row, so the
+    /// rail always shows where the keyboard will start.
     fn effective_selected_index(&self, rows: &[NavRow], cx: &App) -> Option<usize> {
-        self.selected_index
-            .filter(|index| *index < rows.len())
-            .or_else(|| self.active_row_index(rows, cx))
+        highlighted_row(self.selected_index, rows.len(), || {
+            self.active_row_index(rows, cx)
+        })
     }
 
     fn select_next(&mut self, _: &SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2410,6 +2470,7 @@ impl RoutinesPanel {
         if !expanded {
             return section.into_any_element();
         }
+        let (selected_index, dimmed_index) = split_selection(selected_index, self.focused);
         let mut rows: Vec<AnyElement> = Vec::new();
         // Captions take no index, which is exactly what makes them unreachable
         // by the cursor; everything else consumes one, in rendered order.
@@ -2420,19 +2481,35 @@ impl RoutinesPanel {
         };
         for item in self.section_items(manifest) {
             let indent = 1 + item.depth;
-            rows.push(match item.kind {
-                SectionItemKind::Caption(label) => render_caption(label),
+            let (row, index) = match item.kind {
+                SectionItemKind::Caption(label) => (render_caption(label, cx), None),
                 SectionItemKind::Link(link) => {
                     let index = next_index();
-                    self.render_link_row(&routine_id, &link, indent, index, selected_index, cx)
+                    (
+                        self.render_link_row(&routine_id, &link, indent, index, selected_index, cx),
+                        Some(index),
+                    )
                 }
                 SectionItemKind::Skill(skill) => {
                     let index = next_index();
-                    self.render_skill_row(manifest, &skill, indent, index, selected_index, cx)
+                    (
+                        self.render_skill_row(manifest, &skill, indent, index, selected_index, cx),
+                        Some(index),
+                    )
                 }
                 SectionItemKind::Entry(entry) => {
                     let index = next_index();
-                    self.render_entry_row(&routine_id, &entry, indent, index, selected_index, cx)
+                    (
+                        self.render_entry_row(
+                            &routine_id,
+                            &entry,
+                            indent,
+                            index,
+                            selected_index,
+                            cx,
+                        ),
+                        Some(index),
+                    )
                 }
                 SectionItemKind::Group {
                     key,
@@ -2440,21 +2517,38 @@ impl RoutinesPanel {
                     expanded: group_expanded,
                 } => {
                     let index = next_index();
-                    self.render_group_row(
-                        &routine_id,
-                        key,
-                        label,
-                        group_expanded,
-                        indent,
-                        index,
-                        selected_index,
-                        cx,
+                    (
+                        self.render_group_row(
+                            &routine_id,
+                            key,
+                            label,
+                            group_expanded,
+                            indent,
+                            index,
+                            selected_index,
+                            cx,
+                        ),
+                        Some(index),
                     )
                 }
-            });
+            };
+            let dimmed = index.is_some() && index == dimmed_index;
+            rows.push(self.dim_if_selected(row, dimmed, cx));
         }
         section = section.children(rows);
         section.into_any_element()
+    }
+
+    fn dim_if_selected(&self, row: AnyElement, dimmed: bool, cx: &Context<Self>) -> AnyElement {
+        if !dimmed {
+            return row;
+        }
+        let background = cx.theme().colors().ghost_element_selected;
+        div()
+            .w_full()
+            .bg(background.opacity(UNFOCUSED_SELECTION_OPACITY))
+            .child(row)
+            .into_any_element()
     }
 
     fn render_link_row(
@@ -2519,12 +2613,10 @@ impl RoutinesPanel {
         .indent_level(indent)
         .indent_step_size(px(12.))
         .toggle_state(selected_index == Some(index))
-        .start_slot(skill_icon(skill).build().size(IconSize::XSmall).color(
-            if skill.kind.is_setup() {
-                Color::Muted
-            } else {
-                Color::Accent
-            },
+        .start_slot(ritual_glyph(
+            skill_icon(skill),
+            !skill.kind.is_setup(),
+            selected_index == Some(index),
         ))
         .child(Label::new(skill.name.clone()).size(LabelSize::Small))
         .when(!skill.summary.is_empty(), |item| {
@@ -2637,15 +2729,13 @@ impl RoutinesPanel {
         .toggle_state(selected_index == Some(index))
         // The disclosure sits in the start slot, not in `ListItem::toggle`'s
         // own column, so the chevron lands exactly where its siblings' icons
-        // do and the group reads as one of them.
+        // do and the group reads as one of them. The Setup group leads with
+        // the settings glyph its steps carry instead, so it never reads as a
+        // ritual or a folder of notes; chevrons only ever mean disclosure.
         .start_slot(
-            Icon::new(if expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            })
-            .size(IconSize::XSmall)
-            .color(Color::Muted),
+            Icon::new(group_lead_icon(&key, expanded))
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
         )
         .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
         .on_click(cx.listener({
@@ -2971,36 +3061,46 @@ impl RoutinesPanel {
         selected_index: Option<usize>,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let mut section = v_flex().child(render_caption("Getting started".into()));
+        let (selected_index, dimmed_index) = split_selection(selected_index, self.focused);
+        let mut section = v_flex().child(render_caption("Getting started".into(), cx));
         for step in GettingStartedStep::ALL {
             let index = *row_index;
             *row_index += 1;
             let done = step.done(steps);
             section = section.child(
-                ListItem::new(ElementId::Name(SharedString::from(format!(
-                    "thock-getting-started-{}",
-                    step.key()
-                ))))
-                .indent_level(1)
-                .indent_step_size(px(12.))
-                .toggle_state(selected_index == Some(index))
-                .start_slot(
-                    Icon::new(if done {
-                        IconName::TodoComplete
-                    } else {
-                        IconName::TodoPending
-                    })
-                    .size(IconSize::XSmall)
-                    .color(if done { Color::Success } else { Color::Accent }),
-                )
-                .child(
-                    Label::new(step.label())
-                        .size(LabelSize::Small)
-                        .color(if done { Color::Muted } else { Color::Default }),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.run_getting_started_step(step, window, cx);
-                })),
+                self.dim_if_selected(
+                    ListItem::new(ElementId::Name(SharedString::from(format!(
+                        "thock-getting-started-{}",
+                        step.key()
+                    ))))
+                    .indent_level(1)
+                    .indent_step_size(px(12.))
+                    .toggle_state(selected_index == Some(index))
+                    .start_slot(
+                        Icon::new(if done {
+                            IconName::TodoComplete
+                        } else {
+                            IconName::TodoPending
+                        })
+                        .size(IconSize::XSmall)
+                        .color(if done {
+                            Color::Success
+                        } else {
+                            Color::Accent
+                        }),
+                    )
+                    .child(
+                        Label::new(step.label())
+                            .size(LabelSize::Small)
+                            .color(if done { Color::Muted } else { Color::Default }),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run_getting_started_step(step, window, cx);
+                    }))
+                    .into_any_element(),
+                    dimmed_index == Some(index),
+                    cx,
+                ),
             );
         }
         section.into_any_element()
@@ -3043,7 +3143,8 @@ impl RoutinesPanel {
 }
 
 impl Render for RoutinesPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.focused = self.focus_handle.contains_focused(window, cx);
         let content = match &self.vault_status {
             VaultStatus::Valid(_) => self.render_routines(cx),
             VaultStatus::NotAVault => self.render_non_vault(cx).into_any_element(),
@@ -3139,6 +3240,29 @@ impl Panel for RoutinesPanel {
     }
 }
 
+/// The cursor while it points at a row, else the active note's row, else the
+/// first row; `None` only when there are no rows.
+fn highlighted_row(
+    cursor: Option<usize>,
+    row_count: usize,
+    active_row: impl FnOnce() -> Option<usize>,
+) -> Option<usize> {
+    cursor
+        .filter(|index| *index < row_count)
+        .or_else(active_row)
+        .or_else(|| (row_count > 0).then_some(0))
+}
+
+/// The selection as the rows draw it, `(full, dimmed)`: in full while the
+/// panel has focus, otherwise dimmed, so the cursor stays visible.
+fn split_selection(selected_index: Option<usize>, focused: bool) -> (Option<usize>, Option<usize>) {
+    if focused {
+        (selected_index, None)
+    } else {
+        (None, selected_index)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3177,6 +3301,13 @@ mod tests {
     }
 
     #[test]
+    fn the_selection_dims_rather_than_vanishing_without_focus() {
+        assert_eq!(split_selection(Some(3), true), (Some(3), None));
+        assert_eq!(split_selection(Some(3), false), (None, Some(3)));
+        assert_eq!(split_selection(None, false), (None, None));
+    }
+
+    #[test]
     fn row_icons_default_by_kind() {
         assert_eq!(
             link_icon(&link("daily/2026-08-17.md", LinkKind::Editor, None)),
@@ -3192,18 +3323,23 @@ mod tests {
         );
         assert_eq!(
             link_icon(&link("weekly/site/index.html", LinkKind::Browser, None)),
-            RowIcon::Path("icons/file_icons/html.svg")
+            RowIcon::Path(DASHBOARD_ICON)
         );
         // A verb reads as a verb: rituals default to the run glyph, setup
         // steps to the settings one.
-        assert_eq!(
-            skill_icon(&skill(None)),
-            RowIcon::Named(IconName::PlayOutlined)
-        );
+        assert_eq!(skill_icon(&skill(None)), RowIcon::Path(RITUAL_ICON));
         assert_eq!(
             skill_icon(&skill_of_kind(SkillKind::Setup, None)),
             RowIcon::Named(IconName::Settings)
         );
+        // The Setup group leads with its steps' glyph; every other group
+        // leads with the chevron that says it opens.
+        assert_eq!(group_lead_icon(SETUP_GROUP, false), IconName::Settings);
+        assert_eq!(
+            group_lead_icon("Older notes", false),
+            IconName::ChevronRight
+        );
+        assert_eq!(group_lead_icon("Older notes", true), IconName::ChevronDown);
     }
 
     fn named_link(id: &str, group: Option<&str>) -> RoutineLink {
@@ -3469,6 +3605,27 @@ mod tests {
     }
 
     #[test]
+    fn the_rail_always_shows_a_selection_when_it_has_rows() {
+        assert_eq!(highlighted_row(None, 5, || None), Some(0), "the first row");
+        assert_eq!(
+            highlighted_row(None, 5, || Some(3)),
+            Some(3),
+            "the open note"
+        );
+        assert_eq!(
+            highlighted_row(Some(2), 5, || Some(3)),
+            Some(2),
+            "the cursor"
+        );
+        assert_eq!(
+            highlighted_row(Some(9), 5, || None),
+            Some(0),
+            "a stale cursor"
+        );
+        assert_eq!(highlighted_row(None, 0, || None), None, "an empty rail");
+    }
+
+    #[test]
     fn toggling_a_group_keeps_the_cursor_on_its_row() {
         let manifest = manifest(
             vec![
@@ -3522,11 +3679,15 @@ mod tests {
             link_icon(&link("finance/plan.md", LinkKind::Editor, Some("hashh"))),
             RowIcon::Named(IconName::Notepad)
         );
-        assert_eq!(
-            skill_icon(&skill(Some("nope"))),
-            RowIcon::Named(IconName::PlayOutlined)
-        );
+        assert_eq!(skill_icon(&skill(Some("nope"))), RowIcon::Path(RITUAL_ICON));
         assert_eq!(routine_icon(Some("nope")), RowIcon::Named(IconName::Blocks));
         assert_eq!(routine_icon(None), RowIcon::Named(IconName::Blocks));
+    }
+
+    #[test]
+    fn the_dashboard_icon_ships() {
+        let svg = include_str!("../../../assets/icons/thock/dashboard.svg");
+        assert!(svg.starts_with("<svg"));
+        assert_eq!(DASHBOARD_ICON, "icons/thock/dashboard.svg");
     }
 }

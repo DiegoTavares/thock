@@ -5,7 +5,7 @@
 
 use crate::backlog_panel::{
     AddBacklogTask, CompleteBacklogTask, MoveBacklogTaskRight, MoveBacklogTaskToToday,
-    RevealBacklogTask,
+    OpenBacklogTaskNote, RevealBacklogTask,
 };
 use crate::backlog_panel::{BacklogFolds, BacklogPanel, BacklogView, ToggleBacklogFocus};
 use crate::day_plan::{DayPlan, ItemTiming, ItemWeight, PlanItem};
@@ -22,18 +22,19 @@ use anyhow::Result;
 use chrono::{Local, NaiveDate, NaiveDateTime, Timelike as _};
 use gpui::{
     Action, AnyElement, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, KeyContext, Pixels, Subscription, Task, WeakEntity, Window, actions,
-    div, px, rems,
+    Focusable, FontWeight, KeyContext, KeybindingKeystroke, Pixels, ScrollHandle, Subscription,
+    Task, WeakEntity, Window, actions, div, linear_color_stop, linear_gradient, px, rems,
 };
 use language::{Buffer, BufferEvent};
 use menu::{Confirm, SelectPrevious};
 use project::Project;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use settings::SettingsStore;
 use std::sync::Arc;
 use std::time::Duration;
 use ui::prelude::*;
-use ui::{KeyBinding, Label, LabelSize};
+use ui::{PlatformStyle, render_keybinding_keystroke};
 use util::ResultExt as _;
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -279,6 +280,8 @@ pub struct DeskPanel {
     /// Whether something waits, for the tide mark (V54 §5.2). Kept on the
     /// minute tick and on plan or reminder changes, not on every notify.
     waiting: bool,
+    /// The tab strip scrolls sideways when the dock is too narrow for it.
+    tab_scroll: ScrollHandle,
     _tick: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -368,6 +371,7 @@ impl DeskPanel {
                 now: Arc::new(|| Local::now().naive_local()),
                 reminder_subscription: None,
                 waiting: false,
+                tab_scroll: ScrollHandle::new(),
                 _tick: tick,
                 _subscriptions: subscriptions,
             };
@@ -420,6 +424,9 @@ impl DeskPanel {
                 .update(cx, |reminders, cx| reminders.close_reschedule(cx));
         }
         self.tab = tab;
+        if let Some(index) = DeskTab::ALL.iter().position(|candidate| *candidate == tab) {
+            self.tab_scroll.scroll_to_item(index);
+        }
         self.backlog.update(cx, |backlog, cx| {
             backlog.set_view(
                 match tab {
@@ -626,17 +633,24 @@ impl DeskPanel {
         // The Reminders count is the overdue number, in the warning colour,
         // and nothing when none are (V45 §9.1).
         let counts = [
-            Some((self.backlog.read(cx).open_count(), colors.text_placeholder)),
-            Some((self.planner.read(cx).open_count(), colors.text_placeholder)),
+            Some((self.backlog.read(cx).open_count(), colors.text_muted)),
+            Some((self.planner.read(cx).open_count(), colors.text_muted)),
             (overdue > 0).then(|| (overdue, cx.theme().status().warning)),
             None,
         ];
-        h_flex()
+        // Sized so all four tabs fit the default dock; only a narrower dock
+        // scrolls the strip, with the last visible tab fading at the edge.
+        let scroll_offset = self.tab_scroll.offset().x;
+        let scroll_max = self.tab_scroll.max_offset().x;
+        let overflowing = scroll_max > px(0.) && -scroll_offset < scroll_max - px(1.);
+        let tabs = h_flex()
+            .id("thock-desk-tabs")
+            .debug_selector(|| "thock-desk-tabs".into())
             .pt_3()
             .px_3()
-            .gap(px(18.))
-            .border_b_1()
-            .border_color(colors.border_variant)
+            .gap(px(8.))
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll)
             .children(DeskTab::ALL.into_iter().zip(counts).map(|(tab, count)| {
                 let active = tab == self.tab;
                 h_flex()
@@ -644,7 +658,9 @@ impl DeskPanel {
                         "thock-desk-tab-{}",
                         tab.label()
                     )))
-                    .gap_1()
+                    .debug_selector(move || format!("thock-desk-tab-{}", tab.label()))
+                    .flex_none()
+                    .gap(px(3.))
                     .pb_2()
                     .items_baseline()
                     .border_b_2()
@@ -656,7 +672,7 @@ impl DeskPanel {
                     .cursor_pointer()
                     .child(
                         div()
-                            .text_size(rems(0.8125))
+                            .text_size(rems(0.75))
                             .when(active, |this| this.font_weight(FontWeight::SEMIBOLD))
                             .text_color(if active {
                                 colors.text
@@ -677,7 +693,28 @@ impl DeskPanel {
                         this.show_tab(tab, cx);
                         this.focus_handle(cx).focus(window, cx);
                     }))
-            }))
+            }));
+        div()
+            .relative()
+            .border_b_1()
+            .border_color(colors.border_variant)
+            .child(tabs)
+            .when(overflowing, |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "thock-desk-tabs-fade".into())
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .h_full()
+                        .w(px(32.))
+                        .bg(linear_gradient(
+                            90.,
+                            linear_color_stop(colors.panel_background, 0.6),
+                            linear_color_stop(colors.panel_background.opacity(0.), 0.),
+                        )),
+                )
+            })
             .into_any_element()
     }
 
@@ -724,67 +761,178 @@ impl DeskPanel {
 
     /// The key hints under the Backlog tab (§8.4): rendered from the
     /// keymap, so they show the user's actual keys.
-    fn render_footer(&self, cx: &Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors();
+    fn render_footer(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let focus = self.backlog.read(cx).focus_handle(cx);
-        let hint = |action: &dyn Action, label: &'static str| {
-            h_flex()
-                .gap_1()
-                .items_center()
-                .child(KeyBinding::for_action_in(action, &focus, cx).size(rems(0.6875)))
-                .child(
-                    Label::new(label)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                )
-        };
-        h_flex()
-            .flex_none()
-            .h(px(28.))
-            .px_3()
-            .gap_3()
-            .items_center()
-            .bg(colors.panel_background)
-            .border_t_1()
-            .border_color(colors.border)
-            .child(hint(&AddBacklogTask, "add"))
-            .child(hint(&CompleteBacklogTask, "done"))
-            .child(hint(&RevealBacklogTask, "open"))
-            .child(hint(&MoveBacklogTaskRight, "to Someday"))
-            .child(hint(&MoveBacklogTaskToToday, "to today"))
-            .into_any_element()
+        render_hints(&backlog_hints(), &focus, window, cx)
     }
 
     /// The key hints under the Reminders tab.
-    fn render_reminders_footer(&self, cx: &Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors();
+    fn render_reminders_footer(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let focus = self.reminders.read(cx).focus_handle(cx);
-        let hint = |action: &dyn Action, label: &'static str| {
+        render_hints(&reminder_hints(), &focus, window, cx)
+    }
+}
+
+/// The Backlog footer's hints, most used first: when the panel is narrow
+/// the last ones are left out rather than cut off or wrapped, so "open",
+/// the primary action, leads and is never the one dropped.
+fn backlog_hints() -> [(Box<dyn Action>, &'static str); 6] {
+    [
+        (RevealBacklogTask.boxed_clone(), "open"),
+        (AddBacklogTask.boxed_clone(), "add"),
+        (CompleteBacklogTask.boxed_clone(), "done"),
+        (OpenBacklogTaskNote.boxed_clone(), "note"),
+        (MoveBacklogTaskRight.boxed_clone(), "someday"),
+        (MoveBacklogTaskToToday.boxed_clone(), "today"),
+    ]
+}
+
+fn reminder_hints() -> [(Box<dyn Action>, &'static str); 4] {
+    [
+        (CloseReminder.boxed_clone(), "done"),
+        (RescheduleReminder.boxed_clone(), "later"),
+        (DropReminder.boxed_clone(), "drop"),
+        (NewReminder.boxed_clone(), "new"),
+    ]
+}
+
+/// The keys bound to `action` where `focus` is, one per keystroke of a
+/// chord; empty when it has no binding, which drops its hint.
+fn hint_keystrokes(
+    action: &dyn Action,
+    focus: &FocusHandle,
+    window: &Window,
+) -> Vec<KeybindingKeystroke> {
+    window
+        .highest_precedence_binding_for_action_in(action, focus)
+        .or_else(|| window.highest_precedence_binding_for_action(action))
+        .map(|binding| binding.keystrokes().to_vec())
+        .unwrap_or_default()
+}
+
+/// The height of a keycap in the footer, which is also the height of its
+/// one line of hints.
+const HINT_KEYCAP_HEIGHT: Pixels = px(20.);
+
+/// Whether the hints for the view behind `focus` are dimmed: their keys
+/// only apply while that view has focus.
+fn hints_dimmed(focus: &FocusHandle, window: &Window, cx: &App) -> bool {
+    !focus.contains_focused(window, cx)
+}
+
+/// A hint's label, a step above the Backlog's meta line so it holds up at 1x.
+const HINT_LABEL_SIZE: Rems = rems(0.8125);
+
+/// A footer of key hints on one line: each stroke of a binding takes its
+/// own keycap, and a sequence's keycaps are joined by a small "then" so
+/// `g` `space` never reads as two alternatives. Hints that don't fit the
+/// line are left out, the least used first. The bar dims while the view
+/// it describes doesn't have focus, since its keys don't apply then: the
+/// keys drop to the labels' muted ink, which still reads at 1x.
+fn render_hints(
+    hints: &[(Box<dyn Action>, &'static str)],
+    focus: &FocusHandle,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let colors = cx.theme().colors();
+    let dimmed = hints_dimmed(focus, window, cx);
+    let vim_mode = cx
+        .global::<SettingsStore>()
+        .merged_settings()
+        .vim_mode
+        .unwrap_or(false);
+    let key_size = AbsoluteLength::from(rems(0.75));
+    let hints = hints.iter().filter_map(|(action, label)| {
+        let keystrokes = hint_keystrokes(action.as_ref(), focus, window);
+        if keystrokes.is_empty() {
+            return None;
+        }
+        let keycaps = keystrokes
+            .iter()
+            .enumerate()
+            .flat_map(|(index, keystroke)| {
+                let connector = (index > 0).then(|| {
+                    div()
+                        .debug_selector(move || format!("thock-hint-then-{label}-{index}"))
+                        .flex_none()
+                        .text_size(rems(0.6875))
+                        .line_height(HINT_KEYCAP_HEIGHT)
+                        .text_color(colors.text_placeholder)
+                        .child("then")
+                        .into_any_element()
+                });
+                let keycap = h_flex()
+                    .debug_selector(move || format!("thock-hint-keycap-{label}-{index}"))
+                    .flex_none()
+                    .h(HINT_KEYCAP_HEIGHT)
+                    .min_w(HINT_KEYCAP_HEIGHT)
+                    .px_1()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .border_1()
+                    // The placeholder ink holds 3:1 on the panel, so the key
+                    // reads before its label.
+                    .border_color(colors.text_placeholder)
+                    .bg(colors.element_background)
+                    .text_size(key_size)
+                    .font_weight(FontWeight::NORMAL)
+                    .children(render_keybinding_keystroke(
+                        keystroke,
+                        Some(if dimmed { Color::Muted } else { Color::Default }),
+                        key_size,
+                        PlatformStyle::platform(),
+                        vim_mode,
+                    ))
+                    .into_any_element();
+                connector.into_iter().chain([keycap])
+            });
+        Some(
             h_flex()
+                .flex_none()
+                .h(HINT_KEYCAP_HEIGHT)
                 .gap_1()
                 .items_center()
-                .child(KeyBinding::for_action_in(action, &focus, cx).size(rems(0.6875)))
                 .child(
-                    Label::new(label)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
+                    h_flex()
+                        .debug_selector(move || format!("thock-hint-keys-{label}"))
+                        .flex_none()
+                        .gap(px(4.))
+                        .children(keycaps),
                 )
-        };
-        h_flex()
-            .flex_none()
-            .h(px(28.))
-            .px_3()
-            .gap_3()
-            .items_center()
-            .bg(colors.panel_background)
-            .border_t_1()
-            .border_color(colors.border)
-            .child(hint(&CloseReminder, "done"))
-            .child(hint(&RescheduleReminder, "later"))
-            .child(hint(&DropReminder, "drop"))
-            .child(hint(&NewReminder, "new"))
-            .into_any_element()
-    }
+                .child(
+                    div()
+                        .text_size(HINT_LABEL_SIZE)
+                        .line_height(HINT_KEYCAP_HEIGHT)
+                        .text_color(colors.text_muted)
+                        .child(*label),
+                ),
+        )
+    });
+    div()
+        .debug_selector(|| "thock-hints-bar".into())
+        .flex_none()
+        .px_3()
+        .py_2()
+        .bg(colors.panel_background)
+        .border_t_1()
+        .border_color(colors.border)
+        .child(
+            // Wrapped hints land on a second line that the fixed height
+            // clips away whole, so the bar never grows into the list.
+            h_flex()
+                .debug_selector(|| "thock-hints".into())
+                .flex_wrap()
+                .content_start()
+                .h(HINT_KEYCAP_HEIGHT)
+                .overflow_hidden()
+                .gap_x_3()
+                .gap_y_2()
+                .items_center()
+                .children(hints),
+        )
+        .into_any_element()
 }
 
 impl Focusable for DeskPanel {
@@ -800,7 +948,7 @@ impl Focusable for DeskPanel {
 }
 
 impl Render for DeskPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let card = self.card();
         let has_card = card.is_some();
         self.backlog
@@ -836,10 +984,10 @@ impl Render for DeskPanel {
                     }),
             )
             .when(self.tab == DeskTab::Backlog, |this| {
-                this.child(self.render_footer(cx))
+                this.child(self.render_footer(window, cx))
             })
             .when(self.tab == DeskTab::Reminders, |this| {
-                this.child(self.render_reminders_footer(cx))
+                this.child(self.render_reminders_footer(window, cx))
             })
     }
 }
@@ -1167,6 +1315,69 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_linked_note_rides_the_meta_line_and_opens_on_click(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        let row = setup.desk.read_with(&setup.cx, |desk, cx| {
+            desk.backlog.read(cx).row_for_tests("DNV", cx)
+        });
+        assert_eq!(
+            row,
+            Some((
+                "Study for DNV elections".to_string(),
+                Some(("Sep 28 · inbox".to_string(), false))
+            )),
+            "the slug leaves the text; the link is offered on the meta line"
+        );
+
+        setup.cx.update(|window, _| window.refresh());
+        setup.cx.run_until_parked();
+        let link = setup
+            .cx
+            .debug_bounds("backlog-note-soon-1")
+            .expect("the note link is drawn");
+        setup
+            .cx
+            .simulate_click(link.center(), gpui::Modifiers::none());
+        setup.cx.run_until_parked();
+        let opened = setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            workspace
+                .active_item(cx)
+                .and_then(|item| item.project_path(cx))
+                .map(|path| path.path.as_unix_str().to_string())
+        });
+        assert_eq!(opened.as_deref(), Some("inbox/2026-09-28-dnv-ballot.md"));
+    }
+
+    #[gpui::test]
+    async fn a_backlog_box_sits_centred_on_its_first_line(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        setup.cx.update(|window, _| window.refresh());
+        setup.cx.run_until_parked();
+        let check = setup
+            .cx
+            .debug_bounds("backlog-check-soon-1")
+            .expect("the box is drawn");
+        let words = setup
+            .cx
+            .debug_bounds("backlog-words-soon-1")
+            .expect("the words are drawn");
+        let line_height = setup.cx.update(|window, _| {
+            crate::backlog_panel::TASK_LINE_HEIGHT.to_pixels(window.rem_size())
+        });
+        // Layout rounds to whole pixels, so allow less than one.
+        let close = |a: Pixels, b: Pixels| (a - b).abs() < px(1.);
+        assert!(close(check.top(), words.top()), "{check:?} {words:?}");
+        assert!(
+            close(check.size.height, line_height),
+            "the box spans the first line: {check:?}"
+        );
+        assert!(
+            close(words.size.height, line_height),
+            "one line of words: {words:?}"
+        );
+    }
+
+    #[gpui::test]
     async fn digits_switch_the_views(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false).await;
         assert!(desk_focused(&mut setup));
@@ -1220,9 +1431,14 @@ mod tests {
     #[gpui::test]
     async fn the_cursor_walks_the_stacked_lanes(cx: &mut TestAppContext) {
         let mut setup = setup(cx, true).await;
+        assert_eq!(
+            selected(&setup),
+            Some(("soon", 0)),
+            "the Soon title is selected before any key"
+        );
         setup.cx.simulate_keystrokes("j");
-        assert_eq!(selected(&setup), Some(("soon", 0)), "the Soon title");
-        setup.cx.simulate_keystrokes("j j j");
+        assert_eq!(selected(&setup), Some(("soon", 1)), "down moves off it");
+        setup.cx.simulate_keystrokes("j j");
         assert_eq!(selected(&setup), Some(("soon", 3)), "the SPI caption");
         setup.cx.simulate_keystrokes("j j");
         assert_eq!(
@@ -1317,7 +1533,7 @@ mod tests {
     #[gpui::test]
     async fn marking_done_moves_the_task_to_done(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false).await;
-        setup.cx.simulate_keystrokes("down down");
+        setup.cx.simulate_keystrokes("down");
         assert_eq!(selected(&setup), Some(("soon", 1)));
         setup.cx.simulate_keystrokes("x");
         setup.cx.run_until_parked();
@@ -1332,7 +1548,7 @@ mod tests {
     #[gpui::test]
     async fn the_selection_survives_a_change_on_disk(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false).await;
-        setup.cx.simulate_keystrokes("down down down");
+        setup.cx.simulate_keystrokes("down down");
         assert_eq!(selected(&setup), Some(("soon", 2)));
         setup
             .fs
@@ -1401,6 +1617,23 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn the_card_stays_selected_when_the_backlog_reloads(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        setup.cx.simulate_keystrokes("2 down up");
+        assert_eq!(tab(&setup), DeskTab::Today);
+        assert!(card_selected(&setup));
+        let backlog = setup
+            .desk
+            .read_with(&setup.cx, |desk, _| desk.backlog.clone());
+        backlog.update(&mut setup.cx, |_, cx| cx.notify());
+        setup.cx.run_until_parked();
+        assert!(
+            card_selected(&setup),
+            "the Backlog's dimmed first row doesn't take the cursor"
+        );
+    }
+
+    #[gpui::test]
     async fn up_from_the_top_lands_on_the_card_and_enter_reveals_it(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false).await;
         let card = setup.desk.read_with(&setup.cx, |desk, _| desk.card());
@@ -1408,13 +1641,17 @@ mod tests {
             card.as_ref().map(|card| card.label.as_str()),
             Some("NEXT · IN 25 MIN")
         );
-        setup.cx.simulate_keystrokes("down");
-        assert_eq!(selected(&setup), Some(("soon", 0)));
+        assert_eq!(
+            selected(&setup),
+            Some(("soon", 0)),
+            "the first row to start"
+        );
         setup.cx.simulate_keystrokes("up");
         assert_eq!(selected(&setup), None);
         assert!(card_selected(&setup));
         setup.cx.simulate_keystrokes("down");
         assert!(!card_selected(&setup), "down returns to the lanes");
+        assert_eq!(selected(&setup), Some(("soon", 0)));
         setup.cx.simulate_keystrokes("up");
         setup.cx.simulate_keystrokes("enter");
         setup.cx.run_until_parked();
@@ -1501,5 +1738,289 @@ mod tests {
         setup.cx.simulate_keystrokes("escape");
         setup.cx.run_until_parked();
         assert!(!desk_focused(&mut setup));
+    }
+
+    #[gpui::test]
+    async fn the_footer_gives_each_stroke_a_keycap_on_one_line(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, true).await;
+        let desk = setup.desk.clone();
+        let hints = setup.cx.update(|window, cx| {
+            let focus = desk.read(cx).backlog.read(cx).focus_handle(cx);
+            backlog_hints()
+                .iter()
+                .map(|(action, label)| {
+                    let keys: Vec<String> = hint_keystrokes(action.as_ref(), &focus, window)
+                        .iter()
+                        .map(|keystroke| keystroke.key().to_string())
+                        .collect();
+                    (*label, keys)
+                })
+                .collect::<Vec<_>>()
+        });
+        let labels: Vec<_> = hints.iter().map(|(label, _)| *label).collect();
+        assert_eq!(
+            labels,
+            ["open", "add", "done", "note", "someday", "today"],
+            "most used first, so a narrow dock leaves out the least used"
+        );
+        let open = hints
+            .iter()
+            .find(|(label, _)| *label == "open")
+            .map(|(_, keys)| keys.clone());
+        assert_eq!(open, Some(vec!["g".to_string(), "space".to_string()]));
+        assert!(
+            hints.iter().all(|(_, keys)| !keys.is_empty()),
+            "every hint has a binding: {hints:?}"
+        );
+
+        setup.cx.update(|window, _| window.refresh());
+        setup.cx.run_until_parked();
+        let bounds = |setup: &mut Setup, selector: &'static str| {
+            setup
+                .cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"))
+        };
+        let g = bounds(&mut setup, "thock-hint-keycap-open-0");
+        let space = bounds(&mut setup, "thock-hint-keycap-open-1");
+        let add = bounds(&mut setup, "thock-hint-keycap-add-0");
+        assert_eq!(
+            g.size.height, add.size.height,
+            "one height for every keycap"
+        );
+        let then = bounds(&mut setup, "thock-hint-then-open-1");
+        assert!(
+            then.left() > g.right() && then.right() < space.left(),
+            "a sequence's keycaps are joined by a \"then\": {g:?} {then:?} {space:?}"
+        );
+        assert!(
+            setup.cx.debug_bounds("thock-hint-then-open-0").is_none(),
+            "nothing leads the first stroke"
+        );
+        assert!(
+            setup.cx.debug_bounds("thock-hint-keycap-add-1").is_none(),
+            "a single key is one keycap"
+        );
+        let bar = bounds(&mut setup, "thock-hints");
+        assert_eq!(bar.size.height, HINT_KEYCAP_HEIGHT, "one line of hints");
+        let footer = bounds(&mut setup, "thock-hints-bar");
+        for keycap in [g, space, add] {
+            assert!(
+                keycap.top() >= bar.top() && keycap.bottom() <= bar.bottom(),
+                "the whole keycap shows: {keycap:?} in {bar:?}"
+            );
+            let above = keycap.top() - footer.top();
+            let below = footer.bottom() - keycap.bottom();
+            assert!(
+                (above - below).abs() <= px(1.),
+                "the keycap sits in the middle of the footer: {above:?} above, {below:?} below"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn a_key_opens_the_selected_tasks_note(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, true).await;
+        setup.cx.simulate_keystrokes("j");
+        assert_eq!(selected(&setup), Some(("soon", 1)));
+        setup.cx.simulate_keystrokes("g f");
+        setup.cx.run_until_parked();
+        let opened = setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            workspace
+                .active_item(cx)
+                .and_then(|item| item.project_path(cx))
+                .map(|path| path.path.as_unix_str().to_string())
+        });
+        assert_eq!(opened.as_deref(), Some("inbox/2026-09-28-dnv-ballot.md"));
+    }
+
+    #[gpui::test]
+    async fn a_key_opens_the_selected_tasks_note_without_vim(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        setup.cx.simulate_keystrokes("down ctrl-enter");
+        setup.cx.run_until_parked();
+        let opened = setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            workspace
+                .active_item(cx)
+                .and_then(|item| item.project_path(cx))
+                .map(|path| path.path.as_unix_str().to_string())
+        });
+        assert_eq!(opened.as_deref(), Some("inbox/2026-09-28-dnv-ballot.md"));
+    }
+
+    #[gpui::test]
+    async fn the_selection_stays_drawn_while_the_note_has_focus(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        let project_path = setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            workspace
+                .project()
+                .read(cx)
+                .find_project_path(setup.root.join("backlog.md"), cx)
+                .unwrap()
+        });
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.open_path(project_path, None, true, window, cx)
+            })
+            .await
+            .unwrap();
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.focus_panel::<DeskPanel>(window, cx);
+            });
+        setup.cx.run_until_parked();
+        setup.cx.simulate_keystrokes("down down");
+        setup.cx.run_until_parked();
+        let selection = selected(&setup);
+        assert!(selection.is_some());
+        let drawn_focused = |setup: &Setup| {
+            setup.desk.read_with(&setup.cx, |desk, cx| {
+                desk.backlog.read(cx).selection_drawn_focused_for_tests()
+            })
+        };
+        assert!(drawn_focused(&setup));
+
+        setup.cx.simulate_keystrokes("escape");
+        setup.cx.run_until_parked();
+        assert!(!desk_focused(&mut setup));
+        assert_eq!(selected(&setup), selection, "the cursor survives leaving");
+        assert!(!drawn_focused(&setup), "and is drawn dimmed meanwhile");
+
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.focus_panel::<DeskPanel>(window, cx);
+            });
+        setup.cx.run_until_parked();
+        assert_eq!(selected(&setup), selection);
+        assert!(drawn_focused(&setup), "in full again on coming back");
+    }
+
+    #[gpui::test]
+    async fn the_hints_dim_while_the_backlog_is_not_focused(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        let project_path = setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            workspace
+                .project()
+                .read(cx)
+                .find_project_path(setup.root.join("backlog.md"), cx)
+                .unwrap()
+        });
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.open_path(project_path, None, true, window, cx)
+            })
+            .await
+            .unwrap();
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.focus_panel::<DeskPanel>(window, cx);
+            });
+        setup.cx.run_until_parked();
+        let desk = setup.desk.clone();
+        let dimmed = |setup: &mut Setup| {
+            setup.cx.update(|window, cx| {
+                let focus = desk.read(cx).backlog.read(cx).focus_handle(cx);
+                hints_dimmed(&focus, window, cx)
+            })
+        };
+        assert!(desk_focused(&mut setup));
+        assert!(
+            !dimmed(&mut setup),
+            "the keys apply, so the hints show in full"
+        );
+        setup.cx.simulate_keystrokes("escape");
+        setup.cx.run_until_parked();
+        assert!(!desk_focused(&mut setup));
+        assert!(dimmed(&mut setup), "the keys don't apply from the note");
+    }
+
+    #[gpui::test]
+    async fn a_narrow_dock_scrolls_the_tabs_instead_of_cutting_them(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        let redraw = |setup: &mut Setup| {
+            for _ in 0..2 {
+                setup.cx.update(|window, _| window.refresh());
+                setup.cx.run_until_parked();
+            }
+        };
+        let bounds = |setup: &mut Setup, selector: &'static str| {
+            setup
+                .cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"))
+        };
+        redraw(&mut setup);
+        let strip = bounds(&mut setup, "thock-desk-tabs");
+        let done = bounds(&mut setup, "thock-desk-tab-Done");
+        assert!(
+            done.right() <= strip.right(),
+            "every tab fits the default dock: {done:?} in {strip:?}"
+        );
+        assert!(setup.cx.debug_bounds("thock-desk-tabs-fade").is_none());
+
+        let workspace = setup.workspace.clone();
+        setup.cx.update(|window, cx| {
+            let dock = workspace.read(cx).right_dock().clone();
+            dock.update(cx, |dock, cx| {
+                dock.resize_active_panel(Some(px(120.)), None, window, cx);
+            });
+        });
+        redraw(&mut setup);
+        let strip = bounds(&mut setup, "thock-desk-tabs");
+        let done = bounds(&mut setup, "thock-desk-tab-Done");
+        assert!(
+            done.right() > strip.right(),
+            "the strip overflows: {strip:?}"
+        );
+        assert!(
+            setup.cx.debug_bounds("thock-desk-tabs-fade").is_some(),
+            "the overflow fades out rather than stopping at a hard edge"
+        );
+
+        setup
+            .desk
+            .update(&mut setup.cx, |desk, cx| desk.show_tab(DeskTab::Done, cx));
+        redraw(&mut setup);
+        let strip = bounds(&mut setup, "thock-desk-tabs");
+        let done = bounds(&mut setup, "thock-desk-tab-Done");
+        assert!(
+            done.left() >= strip.left() && done.right() <= strip.right() + px(1.),
+            "showing a tab scrolls it into view: {done:?} in {strip:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn group_captions_nest_and_header_counts_share_a_column(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        setup.cx.update(|window, _| window.refresh());
+        setup.cx.run_until_parked();
+        let bounds = |setup: &mut Setup, selector: &'static str| {
+            setup
+                .cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"))
+        };
+        let lane_count = bounds(&mut setup, "backlog-header-count-soon");
+        let group_count = bounds(&mut setup, "backlog-header-count-soon-3");
+        let words = bounds(&mut setup, "backlog-words-soon-1");
+        let caption = bounds(&mut setup, "backlog-caption-soon-3");
+        assert_eq!(
+            lane_count.right(),
+            group_count.right(),
+            "lane and group counts end in one column"
+        );
+        assert!(
+            (lane_count.right() - words.right()).abs() <= px(1.),
+            "the counts end where the task text does: {lane_count:?} {words:?}"
+        );
+        assert!(
+            (caption.left() + crate::backlog_panel::TASK_TEXT_INSET - words.left()).abs() <= px(1.),
+            "a group caption starts with the task text, nested in its lane: {caption:?} {words:?}"
+        );
     }
 }

@@ -29,7 +29,7 @@ use crate::reminders::{
     ChipState, DayChanged, ReminderClock, ReminderDay, ReminderSettings, is_reminder_note,
     load_reminder_settings, reminder_chip,
 };
-use crate::thock_theme::on_accent_color;
+use crate::thock_theme::{on_accent_color, task_box};
 use crate::vault::{Vault, VaultStatus};
 use anyhow::Context as _;
 use chrono::NaiveDate;
@@ -164,6 +164,10 @@ struct HeadingEntry {
     start: Anchor,
     level: u8,
     text: String,
+    /// The heading follows a `___` rule with only blank lines between. The
+    /// rule already sets the section apart, so an H1 there takes no row of
+    /// breathing room above it.
+    after_rule: bool,
     /// False once the heading is gone from the plan; the entry stays only
     /// until its blocks are removed.
     live: bool,
@@ -958,13 +962,21 @@ fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
         return;
     };
     let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
-    let found: Vec<(Anchor, u8, String)> = addon
+    let rule_rows: HashSet<u32> = addon
+        .spans
+        .iter()
+        .filter(|span| span.kind == SpanKind::Rule)
+        .map(|span| span.range.start.to_point(&buffer_snapshot).row)
+        .collect();
+    let found: Vec<(Anchor, u8, String, bool)> = addon
         .spans
         .iter()
         .filter_map(|span| match span.kind {
             SpanKind::Heading(level @ (1 | 2)) => {
                 let text: String = buffer_snapshot.text_for_range(span.range.clone()).collect();
-                Some((span.range.start, level, text))
+                let row = span.range.start.to_point(&buffer_snapshot).row;
+                let after_rule = follows_rule(row, &rule_rows, &buffer_snapshot);
+                Some((span.range.start, level, text, after_rule))
             }
             _ => None,
         })
@@ -974,21 +986,27 @@ fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
     if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
         previous = std::mem::take(&mut addon.headings);
     }
-    let previous_keys: Vec<(MultiBufferOffset, u8, String)> = previous
+    let previous_keys: Vec<(MultiBufferOffset, u8, String, bool)> = previous
         .iter()
         .map(|entry| {
             (
                 entry.start.to_offset(&buffer_snapshot),
                 entry.level,
                 entry.text.clone(),
+                entry.after_rule,
             )
         })
         .collect();
     let mut carried: Vec<Option<HeadingEntry>> = previous.into_iter().map(Some).collect();
     let headings: Vec<HeadingEntry> = found
         .into_iter()
-        .map(|(start, level, text)| {
-            let key = (start.to_offset(&buffer_snapshot), level, text.clone());
+        .map(|(start, level, text, after_rule)| {
+            let key = (
+                start.to_offset(&buffer_snapshot),
+                level,
+                text.clone(),
+                after_rule,
+            );
             let kept = previous_keys
                 .iter()
                 .position(|previous| *previous == key)
@@ -997,6 +1015,7 @@ fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
                 start,
                 level,
                 text,
+                after_rule,
                 live: true,
                 block: None,
                 spacer: None,
@@ -1059,7 +1078,8 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
             .iter()
             .any(|&(first, last)| row >= first && row <= last);
         let want_block = enabled && entry.live && !is_revealed;
-        let want_spacer = enabled && entry.live && is_revealed && entry.level == 1;
+        let want_spacer =
+            enabled && entry.live && is_revealed && heading_rows(entry.level, entry.after_rule) > 1;
         let mut block = still_held(entry.block);
         if entry.block.is_some() && block.is_none() {
             swept.push((index, HeadingBlock::Replace));
@@ -1149,9 +1169,17 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
 }
 
 /// Rows an H1 and an H2 block take (§7.2): the H1's first row is breathing
-/// room above the text.
-fn heading_rows(level: u8) -> u32 {
-    if level == 1 { 2 } else { 1 }
+/// room above the text, unless a rule just above already gives it.
+fn heading_rows(level: u8, after_rule: bool) -> u32 {
+    if level == 1 && !after_rule { 2 } else { 1 }
+}
+
+/// Whether the line above `row`, past any blank lines, is a `___` rule.
+fn follows_rule(row: u32, rule_rows: &HashSet<u32>, buffer_snapshot: &MultiBufferSnapshot) -> bool {
+    (0..row)
+        .rev()
+        .find(|row| !buffer_snapshot.is_line_blank(MultiBufferRow(*row)))
+        .is_some_and(|row| rule_rows.contains(&row))
 }
 
 /// The text of buffer row `row`, anchored inward so an edit at either end
@@ -1174,7 +1202,7 @@ fn heading_block(
     let level = entry.level;
     BlockProperties {
         placement: BlockPlacement::Replace(line.start..=line.end),
-        height: Some(heading_rows(level)),
+        height: Some(heading_rows(level, entry.after_rule)),
         style: BlockStyle::Flex,
         priority: 0,
         render: Arc::new(move |block| {
@@ -1196,8 +1224,8 @@ fn spacer_block(line: Anchor) -> BlockProperties<Anchor> {
 
 /// Draws a heading in the heading face at its level's size (§4.2), aligned
 /// with the body text and coloured, weighted and slanted by the theme's
-/// `title.hN` style — SemiBold for an H1 and Medium Italic for an H2 when
-/// the theme says nothing. The face is read from settings here rather than
+/// `title.hN` style — SemiBold for both when the theme says nothing, so an
+/// H2 reads as the H1's face a size down. The face is read from settings here rather than
 /// captured, so a settings change shows without rebuilding the blocks. The
 /// text goes through `markdown_text`, so a link, `**strong**` or `` `code` ``
 /// inside a heading looks the same as in a pane row.
@@ -1213,18 +1241,11 @@ fn render_heading_block(
     let rows = block.height;
     let rem_size = block.window.rem_size();
     let buffer_size = block.editor_style.text.font_size.to_pixels(rem_size);
-    let (scale, default_weight, default_italic) = if level == 1 {
-        (1.75, FontWeight::SEMIBOLD, false)
-    } else {
-        (1.3, FontWeight::MEDIUM, true)
-    };
+    let scale = if level == 1 { 1.75 } else { 1.3 };
     let app: &mut App = block.app;
     let family = ThockSettings::get_global(app).heading_family();
     let style = heading_style(level, app);
-    let italic = match style.font_style {
-        Some(font_style) => font_style == FontStyle::Italic,
-        None => default_italic,
-    };
+    let italic = style.font_style == Some(FontStyle::Italic);
     let id = ElementId::Name(SharedString::from(format!("thock-heading-{}", text)));
     let content = match (project, workspace) {
         (Some(project), Some(workspace)) => {
@@ -1239,7 +1260,7 @@ fn render_heading_block(
         .when_some(family, |this, family| this.font_family(family))
         .text_size(buffer_size * scale)
         .line_height(line_height)
-        .font_weight(style.font_weight.unwrap_or(default_weight))
+        .font_weight(style.font_weight.unwrap_or(FontWeight::SEMIBOLD))
         .when(italic, |this| this.italic())
         .when_some(style.color, |this, color| this.text_color(color))
         .child(content);
@@ -1756,7 +1777,7 @@ fn apply_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
                 SpanKind::EmailMarker(own) => sender_dot_placeholder(own),
                 SpanKind::EmailLink => email_link_placeholder(),
                 SpanKind::ImageTail(false) => image_not_found_placeholder(),
-                SpanKind::TimeDash => time_dash_placeholder(),
+                SpanKind::TimeDash { done } => time_dash_placeholder(done),
                 SpanKind::Reminder { label, state } => reminder_placeholder(label, state),
                 _ => marker_placeholder(),
             };
@@ -1935,7 +1956,7 @@ fn collapsed_text_for(kind: &SpanKind) -> &str {
         SpanKind::EmailMarker(_) => "●",
         SpanKind::EmailLink => "Open in Gmail ↗",
         SpanKind::ImageTail(false) => IMAGE_NOT_FOUND,
-        SpanKind::TimeDash => "–",
+        SpanKind::TimeDash { .. } => "–",
         _ => " ",
     }
 }
@@ -1957,7 +1978,7 @@ fn is_folded(kind: &SpanKind) -> bool {
             | SpanKind::EmailLink
             | SpanKind::EmailMarker(_)
             | SpanKind::ImageTail(_)
-            | SpanKind::TimeDash
+            | SpanKind::TimeDash { .. }
             | SpanKind::Reminder { .. }
     )
 }
@@ -2056,14 +2077,15 @@ fn reminder_placeholder(label: Arc<str>, state: ChipState) -> FoldPlaceholder {
 
 /// Placeholder for the `-` between a task's two times: an en dash, set
 /// like the times around it (V43 §7.3).
-fn time_dash_placeholder() -> FoldPlaceholder {
+fn time_dash_placeholder(done: bool) -> FoldPlaceholder {
     FoldPlaceholder {
-        render: Arc::new(|_, _, cx| {
+        render: Arc::new(move |_, _, cx| {
+            let colors = cx.theme().colors();
             div()
                 .h_full()
                 .flex()
                 .items_center()
-                .text_color(cx.theme().status().info)
+                .text_color(if done { colors.text_muted } else { colors.text })
                 .child("–")
                 .into_any_element()
         }),
@@ -2444,32 +2466,13 @@ fn marker_placeholder() -> FoldPlaceholder {
 }
 
 /// Placeholder for a task list's `[ ]` / `[x]`: the checkbox it stands for,
-/// a checked one filled with the accent (V43 §7.3). A click ticks or unticks
+/// a checked one filled with the muted ink (V43 §7.3). A click ticks or unticks
 /// the task without moving the cursor, which would reveal the line and pull
 /// the box out from under the pointer (V49 §4.1).
 fn checkbox_placeholder(editor: WeakEntity<Editor>, checked: bool) -> FoldPlaceholder {
     FoldPlaceholder {
         render: Arc::new(move |fold_id, fold_range, cx| {
-            let colors = cx.theme().colors();
-            let mut checkbox = div()
-                .size(px(13.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_xs()
-                .border_1()
-                .border_color(if checked {
-                    colors.text_accent
-                } else {
-                    colors.border
-                });
-            if checked {
-                checkbox = checkbox.bg(colors.text_accent).child(
-                    Icon::new(IconName::Check)
-                        .size(IconSize::XSmall)
-                        .color(Color::Custom(on_accent_color(cx))),
-                );
-            }
+            let checkbox = task_box(checked, cx);
             let editor = editor.clone();
             div()
                 .id(fold_id)
@@ -2587,7 +2590,7 @@ fn email_link_placeholder() -> FoldPlaceholder {
                 .h_full()
                 .flex()
                 .items_center()
-                .text_color(markdown_text::external_link_color(cx))
+                .text_color(markdown_text::link_color(cx))
                 .child("Open in Gmail ↗")
                 .into_any_element()
         }),
@@ -2657,10 +2660,10 @@ fn sender_color(own: bool, cx: &App) -> Hsla {
 }
 
 /// The number of highlight slots: the quote tint, three heading colours,
-/// bold and italic, inline code, two link colours, the strikethrough, the
-/// email view's sender/own/muted trio, the hidden slot, and the journal and
-/// task times.
-pub(crate) const HIGHLIGHT_SLOTS: usize = 16;
+/// bold and italic, inline code, two link slots, the strikethrough, the
+/// email view's sender/own/muted trio, the journal and task times, the done
+/// task's ink, and the hidden slot.
+pub(crate) const HIGHLIGHT_SLOTS: usize = 17;
 
 /// A later slot's style merges over an earlier one's, so the order below is
 /// priority order: the quote tint sits under everything else a quoted line
@@ -2682,14 +2685,19 @@ const STRIKETHROUGH_SLOT: usize = 9;
 const EMAIL_SENDER_SLOT: usize = 10;
 const EMAIL_OWN_SENDER_SLOT: usize = 11;
 const EMAIL_MUTED_SLOT: usize = 12;
+/// A journal entry's time, in the accent (V43 §7.3).
+const JOURNAL_TIME_SLOT: usize = 13;
+/// A task's time, in the body ink at the text's own weight: a muted or
+/// bold time beside its dash reads as struck or done, and strikethrough
+/// is the only signal a declined event should carry.
+const TASK_TIME_SLOT: usize = 14;
+/// A ticked task's text, in the muted ink. Over every colour slot, so a
+/// finished task's time and links recede with it.
+const DONE_TASK_SLOT: usize = 15;
 /// Text painted in the editor's own background colour: present, one column
 /// wide, and unseen. Only an image line's `!` takes it, which cannot fold
 /// because the editor drops a block whose row begins inside a fold.
-const HIDDEN_SLOT: usize = 13;
-/// A journal entry's time, in the accent (V43 §7.3).
-const JOURNAL_TIME_SLOT: usize = 14;
-/// A task's time, in the calendar colour.
-const TASK_TIME_SLOT: usize = 15;
+const HIDDEN_SLOT: usize = 16;
 
 /// The highlight slot for a styled span, or `None` for one that folds away
 /// rather than taking a colour.
@@ -2712,6 +2720,7 @@ fn highlight_slot(kind: &SpanKind) -> Option<usize> {
         SpanKind::ImageBang => Some(HIDDEN_SLOT),
         SpanKind::JournalTime => Some(JOURNAL_TIME_SLOT),
         SpanKind::TaskTime => Some(TASK_TIME_SLOT),
+        SpanKind::DoneTask => Some(DONE_TASK_SLOT),
         SpanKind::Marker
         | SpanKind::Rule
         | SpanKind::Bullet
@@ -2721,7 +2730,7 @@ fn highlight_slot(kind: &SpanKind) -> Option<usize> {
         | SpanKind::EmailMarker(_)
         | SpanKind::ImageTail(_)
         | SpanKind::ImageSource
-        | SpanKind::TimeDash
+        | SpanKind::TimeDash { .. }
         | SpanKind::Reminder { .. } => None,
     }
 }
@@ -2774,7 +2783,7 @@ fn slot_style(slot: usize, cx: &App) -> HighlightStyle {
         _ => {
             let font_weight = matches!(
                 slot,
-                EMAIL_SENDER_SLOT | EMAIL_OWN_SENDER_SLOT | JOURNAL_TIME_SLOT | TASK_TIME_SLOT
+                EMAIL_SENDER_SLOT | EMAIL_OWN_SENDER_SLOT | JOURNAL_TIME_SLOT
             )
             .then_some(gpui::FontWeight::SEMIBOLD);
             HighlightStyle {
@@ -2791,14 +2800,13 @@ fn slot_color(slot: usize, cx: &App) -> Hsla {
     match slot {
         QUOTE_SLOT => colors.text_muted,
         CODE_SLOT => markdown_text::code_color(cx),
-        WIKILINK_SLOT => markdown_text::wikilink_color(cx),
-        LINK_SLOT => markdown_text::external_link_color(cx),
+        WIKILINK_SLOT | LINK_SLOT => markdown_text::link_color(cx),
         EMAIL_SENDER_SLOT => sender_color(false, cx),
         EMAIL_OWN_SENDER_SLOT => sender_color(true, cx),
-        EMAIL_MUTED_SLOT => colors.text_muted,
+        EMAIL_MUTED_SLOT | DONE_TASK_SLOT => colors.text_muted,
         HIDDEN_SLOT => colors.editor_background,
         JOURNAL_TIME_SLOT => colors.text_accent,
-        TASK_TIME_SLOT => cx.theme().status().info,
+        TASK_TIME_SLOT => colors.text,
         _ => {
             let players = &cx.theme().players().0;
             // Slot 0 of the player palette is the local-user colour; heading
@@ -3128,7 +3136,20 @@ mod tests {
             assert_eq!(highlighted(editor, JOURNAL_TIME_SLOT, cx), vec!["20:29"]);
             assert_eq!(
                 highlighted(editor, TASK_TIME_SLOT, cx),
-                vec!["09:00 - 11:00", "15:00"]
+                vec!["09:00 - 11:00"],
+                "a ticked task's time takes the done ink, not the time's"
+            );
+            let (time, _) = editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(TASK_TIME_SLOT), cx)
+                .expect("the open task's time is highlighted");
+            assert_eq!(
+                time.color,
+                Some(cx.theme().colors().text),
+                "a task's time is set in the body ink, not a done-like grey or a link-like hue"
+            );
+            assert_eq!(
+                time.font_weight, None,
+                "a task's time keeps the text's weight, so its dash never reads as a strike"
             );
         });
         move_cursor_to(&editor, 1, &mut cx);
@@ -3382,6 +3403,32 @@ mod tests {
                 .text_highlights(HighlightKey::ThockMarkdownConceal(WIKILINK_SLOT), cx)
                 .expect("the link inside the quote is still a link");
             assert_eq!(ranges.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    async fn a_ticked_task_recedes_and_an_open_one_does_not(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(
+            cx,
+            "- [x] shipped\n- [ ] still open\n- [x] 10:00 - 11:00 Done call\n- [ ] 12:00 Lunch\n",
+        )
+        .await;
+        editor.update_in(&mut cx, |editor, _, cx| {
+            let muted = cx.theme().colors().text_muted;
+            let (done, ranges) = editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(DONE_TASK_SLOT), cx)
+                .expect("the ticked task is highlighted");
+            assert_eq!(ranges.len(), 2, "only the ticked lines");
+            assert_eq!(done.color, Some(muted));
+            assert_eq!(done.font_weight, None, "at the text's own weight");
+            let (_, times) = editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(TASK_TIME_SLOT), cx)
+                .expect("the open task's time is highlighted");
+            assert_eq!(
+                times.len(),
+                1,
+                "only the open task's time takes the time ink; the ticked one's recedes"
+            );
         });
     }
 
@@ -4344,6 +4391,16 @@ mod tests {
         editor.update_in(&mut cx, |editor, _, cx| {
             assert_eq!(highlighted(editor, WIKILINK_SLOT, cx), vec!["wiki"]);
             assert_eq!(highlighted(editor, LINK_SLOT, cx), vec!["docs"]);
+            let link_color = |slot: usize, cx: &mut Context<Editor>| {
+                editor
+                    .text_highlights(HighlightKey::ThockMarkdownConceal(slot), cx)
+                    .and_then(|(style, _)| style.color)
+            };
+            assert_eq!(
+                link_color(WIKILINK_SLOT, cx),
+                link_color(LINK_SLOT, cx),
+                "both link syntaxes take one colour"
+            );
             assert_eq!(highlighted(editor, HEADING_SLOT, cx), vec!["Title"]);
             toggle(editor, cx);
             assert!(highlighted(editor, WIKILINK_SLOT, cx).is_empty());
@@ -4391,6 +4448,29 @@ mod tests {
             "an H3 stays a coloured line: {text:?}"
         );
         assert_eq!(editor.read_with(&cx, |editor, cx| editor.text(cx)), HEADED);
+    }
+
+    #[gpui::test]
+    async fn an_h1_under_a_rule_takes_no_breathing_row(cx: &mut TestAppContext) {
+        const RULED: &str = "Journal entry\n\n___\n\n# Day planner\n- [ ] Workout\n";
+        let (editor, mut cx) = setup(cx, RULED).await;
+        move_cursor_to(&editor, 5, &mut cx);
+        assert_eq!(
+            custom_blocks(&editor, &mut cx),
+            vec![(true, 1)],
+            "the rule already sets the section apart"
+        );
+        // Six lines and the empty last row, with no extra row for the H1.
+        assert_eq!(display_rows(&editor, &mut cx), 7);
+
+        move_cursor_to(&editor, 4, &mut cx);
+        assert_eq!(
+            custom_blocks(&editor, &mut cx),
+            vec![],
+            "revealed, it needs no spacer to keep its height"
+        );
+        assert_eq!(display_rows(&editor, &mut cx), 7);
+        assert_eq!(editor.read_with(&cx, |editor, cx| editor.text(cx)), RULED);
     }
 
     #[gpui::test]
@@ -4571,8 +4651,9 @@ mod tests {
             assert_eq!(h1.color, Some(colors.text));
             assert_eq!(h1.font_weight, Some(gpui::FontWeight::SEMIBOLD));
             let h2 = heading_style(2, cx);
-            assert_eq!(h2.color, Some(colors.text_accent));
-            assert_eq!(h2.font_style, Some(gpui::FontStyle::Italic));
+            assert_eq!(h2.color, Some(colors.text));
+            assert_eq!(h2.font_weight, Some(gpui::FontWeight::SEMIBOLD));
+            assert_eq!(h2.font_style, None);
             assert_eq!(heading_style(3, cx).color, Some(colors.text_muted));
         });
     }

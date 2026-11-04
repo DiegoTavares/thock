@@ -182,11 +182,15 @@ is today.
 
 ### 5.2 The tide mark
 
-An ebbed dock renders as a 6pt strip at the window's edge in `panel.background`, the full height
-of the dock. Clicking it flows that side back. A 2pt `text.accent` line at its inner edge appears
-while the panel has something waiting: the Desk while a timed entry starts within 10 minutes or a
-reminder is ringing. Panels opt in through a method on the Thock panel side with a default of
-nothing waiting.
+An ebbed dock renders as a 6pt strip at the window's edge on the page's ground, the full height
+of the dock, with a short grip centred in it: a 3pt by 88pt rounded line in the `text.muted` ink, so it is findable without outshining the page, so it reads
+as something to grab rather than the window's frame, and both sides draw the same mark at the same
+inset. The mark answers the pointer 10pt wide: the extra 4pt overlays the page's margin instead
+of taking room from it, so the page never moves (G1). Hovering it names the panel and the
+`ctrl-cmd-\` shortcut; clicking it flows that side back. The grip turns `text.accent` while the
+panel has something waiting:
+the Desk while a timed entry starts within 10 minutes or a reminder is ringing. Panels opt in
+through a method on the Thock panel side with a default of nothing waiting.
 
 ### 5.3 Ebb
 
@@ -312,7 +316,7 @@ V44 added (§7.2 there):
    panel, which stays laid out at its own width and keeps `is_open`. A dock holding the focus is
    never drawn as a mark. Docks ebbed to fit are decided inside `anchor()` on each render. A click
    on the mark only focuses the panel; focus entering the dock brings it back (§5.4 rule 1). The
-   dock also takes a `tide_waiting` flag for the mark's accent line, which `desk_layout.rs` sets
+   dock also takes a `tide_waiting` flag for the mark's accent grip, which `desk_layout.rs` sets
    from the Desk's `has_waiting()`.
 3. `adjust_padding` and the fractional settings go.
 4. **Centred layout left unset.** The saved `centered_layout` is `None` until it is chosen, and
@@ -348,7 +352,7 @@ A new `desk_layout.rs` owns both rules on the Thock side. It's one logical compo
 - **Centred by default:** turns centred layout on for a local vault whose workspace never chose
   it (§6), once the restored workspace has its own setting and again when a path under `.thock/`
   changes. It reads the marker from the project's worktree, with no file read of its own.
-- **Waiting signal:** a `has_waiting()` hook the Desk implements for the tide mark's accent line.
+- **Waiting signal:** a `has_waiting()` hook the Desk implements for the tide mark's accent grip.
 
 ### 8.3 Order of work
 

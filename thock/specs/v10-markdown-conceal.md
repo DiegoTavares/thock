@@ -178,11 +178,12 @@ structure at a glance. Font weight and size are untouched.
 
 ### 7.2 Links
 
-- **Internal** (`[[wikilink]]`) → `theme.colors().text_accent`.
-- **External** (`[text](url)`) → the syntax theme's `link_uri` colour.
+- **Internal** (`[[wikilink]]`) and **external** (`[text](url)`) → the syntax theme's
+  `link_text` colour, falling back to `theme.colors().text_accent`.
 
-Internal and external must be visibly different: knowing whether a click would leave the vault is
-the point of colouring them at all.
+Both syntaxes share one link colour (revised 2026-11, V43 §5.2): two link hues competed with each
+other and with the accent. Whether a link leaves the vault shows in its source when the line is
+revealed.
 
 ### 7.3 Thematic break
 

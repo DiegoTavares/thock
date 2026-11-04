@@ -656,7 +656,8 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
     use workspace::MultiWorkspace;
-    use workspace::center_anchor::ANCHOR_GAP;
+    use workspace::center_anchor::{ANCHOR_GAP, TIDE_MARK_WIDTH};
+    use workspace::dock::TIDE_HIT_WIDTH;
     use workspace::dock::test::TestPanel;
 
     const NOTE: &str = "# Day planner\n- [ ] Workout\n- [ ] 15:00 – 15:30 Standup\n";
@@ -1046,8 +1047,8 @@ mod tests {
     async fn ticking_a_task_from_the_desk_does_not_ebb(cx: &mut TestAppContext) {
         // The tick writes the task into today's note, the page in the centre.
         let mut setup = setup(cx).await;
-        // The first row is the Soon section's lane; the second is a task.
-        setup.cx.simulate_keystrokes("ctrl-alt-u down down x");
+        // The Soon lane's title starts selected; the row under it is a task.
+        setup.cx.simulate_keystrokes("ctrl-alt-u down x");
         setup.cx.run_until_parked();
         let open = setup
             .desk
@@ -1262,6 +1263,66 @@ mod tests {
             !ebbed(&setup, DockPosition::Right),
             "it comes back open and flowing"
         );
+    }
+
+    #[gpui::test]
+    async fn both_tide_marks_are_one_mirrored_pair(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        type_in_note(&mut setup, "a");
+        assert!(ebbed(&setup, DockPosition::Left) && ebbed(&setup, DockPosition::Right));
+        let left = setup
+            .cx
+            .debug_bounds("tide-line-left")
+            .expect("the left mark is drawn");
+        let right = setup
+            .cx
+            .debug_bounds("tide-line-right")
+            .expect("the right mark is drawn");
+        let window_width = setup.cx.update(|window, _| window.viewport_size().width);
+        assert_eq!(left.size, right.size, "same length and width");
+        assert_eq!(left.origin.y, right.origin.y);
+        assert_eq!(
+            left.left(),
+            window_width - right.right(),
+            "the same inset from either edge"
+        );
+        assert!(left.left() > px(0.), "off the window's edge");
+        let window_height = setup.cx.update(|window, _| window.viewport_size().height);
+        assert!(
+            left.size.height < window_height / 4.,
+            "a grip, not a line down the window's edge: {left:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_tide_mark_answers_wider_than_it_is_drawn(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        tides(
+            &mut setup,
+            TidesSettingsContent {
+                left: Some(TidePolicy::Stay),
+                ..Default::default()
+            },
+        );
+        type_in_note(&mut setup, "a");
+        assert!(ebbed(&setup, DockPosition::Right));
+        let window_width = setup.cx.update(|window, _| window.viewport_size().width);
+        let hit_zone = setup
+            .cx
+            .debug_bounds("tide-mark")
+            .expect("the mark is drawn");
+        assert_eq!(hit_zone.size.width, TIDE_HIT_WIDTH);
+        assert!(TIDE_HIT_WIDTH > TIDE_MARK_WIDTH);
+        assert_eq!(hit_zone.right(), window_width, "from the window's edge");
+
+        // A click on the part over the page's margin still brings it back.
+        let over_the_page =
+            gpui::point(window_width - TIDE_HIT_WIDTH + px(1.), hit_zone.center().y);
+        setup
+            .cx
+            .simulate_click(over_the_page, gpui::Modifiers::none());
+        setup.cx.run_until_parked();
+        assert!(!ebbed(&setup, DockPosition::Right), "it comes back");
     }
 
     #[gpui::test]

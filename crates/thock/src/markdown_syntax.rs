@@ -25,6 +25,9 @@ pub enum SpanKind {
     LinkLabel,
     /// A task list item's `[ ]` / `[x]` marker, drawn as a checkbox.
     Checkbox(bool),
+    /// A ticked task's text after its box, drawn muted so finished work
+    /// recedes behind what is still open.
+    DoneTask,
     /// The text between a pair of `~~` delimiters, drawn struck through.
     Strikethrough,
     /// The text between a pair of `**` or `__` delimiters, drawn bold.
@@ -75,8 +78,9 @@ pub enum SpanKind {
     /// A task's leading `HH:MM - HH:MM` or `HH:MM`, as the Day Planner reads
     /// it, drawn in the calendar colour.
     TaskTime,
-    /// The ` - ` between a task's two times, drawn as an en dash.
-    TimeDash,
+    /// The ` - ` between a task's two times, drawn as an en dash in the
+    /// time's ink, or the done text's when the task is ticked.
+    TimeDash { done: bool },
     /// A reminder token, `(@2026-12-02 14:30)`, folded into a chip that
     /// reads `label` and is drawn for `state` (V45 §8.4).
     Reminder { label: Arc<str>, state: ChipState },
@@ -450,9 +454,11 @@ fn journal_time(line: &str) -> Option<Range<usize>> {
 /// A task's leading time token, read with the Day Planner's own parser so
 /// the editor and the panel agree on what is a time: the whole token takes
 /// `TaskTime`, and a `-` between its two times (with the spaces around it)
-/// takes `TimeDash`.
+/// takes `TimeDash`. A ticked task's time keeps only its dash, so it takes
+/// the done task's muted ink at the text's own weight.
 fn push_task_time_spans(
     line: &str,
+    checked: bool,
     after_checkbox: usize,
     line_start: usize,
     spans: &mut Vec<ConcealSpan>,
@@ -484,11 +490,13 @@ fn push_task_time_spans(
         return;
     }
     let base = line_start + token_start;
-    spans.push(ConcealSpan::new(base..base + token_len, SpanKind::TaskTime));
+    if !checked {
+        spans.push(ConcealSpan::new(base..base + token_len, SpanKind::TaskTime));
+    }
     if let Some(dash) = dash {
         spans.push(ConcealSpan::new(
             base + dash.start..base + dash.end,
-            SpanKind::TimeDash,
+            SpanKind::TimeDash { done: checked },
         ));
     }
 }
@@ -577,7 +585,14 @@ fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
                 SpanKind::Checkbox(checked),
             ));
             inline_from = range.end;
-            push_task_time_spans(line, range.end, line_start, spans);
+            let text_end = line.trim_end().len();
+            if checked && text_end > range.end {
+                spans.push(ConcealSpan::new(
+                    line_start + range.end..line_start + text_end,
+                    SpanKind::DoneTask,
+                ));
+            }
+            push_task_time_spans(line, checked, range.end, line_start, spans);
         } else {
             spans.push(ConcealSpan::new(
                 line_start + bullet.start..line_start + bullet.end,
@@ -2094,8 +2109,10 @@ mod tests {
             vec![
                 ("* ", SpanKind::Marker),
                 ("[x]", SpanKind::Checkbox(true)),
+                (" done", SpanKind::DoneTask),
                 ("+ ", SpanKind::Marker),
                 ("[X]", SpanKind::Checkbox(true)),
+                (" also done", SpanKind::DoneTask),
             ]
         );
         // Nested tasks are tasks, and an empty task is still a checkbox.
@@ -2129,7 +2146,7 @@ mod tests {
                 ("- ", SpanKind::Marker),
                 ("[ ]", SpanKind::Checkbox(false)),
                 ("09:00 - 11:00", SpanKind::TaskTime),
-                (" - ", SpanKind::TimeDash),
+                (" - ", SpanKind::TimeDash { done: false }),
             ]
         );
         assert_eq!(
@@ -2137,8 +2154,18 @@ mod tests {
             vec![
                 ("- ", SpanKind::Marker),
                 ("[x]", SpanKind::Checkbox(true)),
-                ("15:00", SpanKind::TaskTime),
+                (" 15:00 Call", SpanKind::DoneTask),
             ]
+        );
+        assert_eq!(
+            slices("- [x] 10:00 - 11:00 Test\n"),
+            vec![
+                ("- ", SpanKind::Marker),
+                ("[x]", SpanKind::Checkbox(true)),
+                (" 10:00 - 11:00 Test", SpanKind::DoneTask),
+                (" - ", SpanKind::TimeDash { done: true }),
+            ],
+            "a ticked task's time keeps its dash but not its bold"
         );
         assert_eq!(
             slices("- [ ] 09:00 – 10:30 Already an en dash\n"),
@@ -2154,7 +2181,7 @@ mod tests {
                 ("- ", SpanKind::Marker),
                 ("[ ]", SpanKind::Checkbox(false)),
                 ("09:00-11:00", SpanKind::TaskTime),
-                ("-", SpanKind::TimeDash),
+                ("-", SpanKind::TimeDash { done: false }),
             ]
         );
         assert_eq!(
@@ -2198,6 +2225,7 @@ mod tests {
             vec![
                 ("- ", SpanKind::Marker),
                 ("[x]", SpanKind::Checkbox(true)),
+                (" read [[notes/spec]]", SpanKind::DoneTask),
                 ("[[", SpanKind::Marker),
                 ("notes/spec", SpanKind::WikilinkLabel),
                 ("]]", SpanKind::Marker),
