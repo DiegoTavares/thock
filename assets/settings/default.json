@@ -584,8 +584,9 @@
     // 4. Never show the scrollbar:
     //    "never"
     "show": "auto",
-    // Whether to show cursor positions in the scrollbar.
-    "cursors": true,
+    // Whether to show cursor positions in the scrollbar. Off so the page's
+    // scrollbar stays a quiet thumb rather than a second cursor.
+    "cursors": false,
     // Whether to show git diff indicators in the scrollbar.
     "git_diff": true,
     // Whether to show buffer search results in the scrollbar.

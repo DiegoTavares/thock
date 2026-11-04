@@ -527,21 +527,13 @@ fn section_items(
 }
 
 /// A zone caption. Not a row: it takes no selection and can't be collapsed,
-/// which is the whole reason it replaced the old "Skills" folder entry. The
-/// rule running off to the right is what makes it read as a separator rather
-/// than as another entry in the list.
+/// which is the whole reason it replaced the old "Skills" folder entry. Its
+/// muted face and the indent of the rows under it are what group them.
 fn render_caption(label: SharedString) -> AnyElement {
     div()
         .pl(px(12.))
         .pt_1()
-        .child(
-            ListSubHeader::new(label).end_slot(
-                div()
-                    .flex_1()
-                    .child(Divider::horizontal())
-                    .into_any_element(),
-            ),
-        )
+        .child(ListSubHeader::new(label))
         .into_any_element()
 }
 

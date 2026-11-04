@@ -2051,7 +2051,7 @@ impl BacklogPanel {
                                 .text_color(if overdue {
                                     cx.theme().status().warning
                                 } else {
-                                    colors.text_placeholder
+                                    colors.text_muted
                                 })
                                 .truncate()
                                 .child(SharedString::from(meta)),
@@ -2087,8 +2087,32 @@ impl BacklogPanel {
             .into_any_element()
     }
 
-    /// A category caption (V43 §8.3): the group's name and open count in
-    /// small caps, with its own `+` so a task can be added straight into the
+    /// The right end of a lane or group header: the open count, then a
+    /// chevron pointing down while open and right while closed. Every header
+    /// ends the same way so the counts line up beside the `+`.
+    fn render_header_end(count: usize, collapsed: bool, cx: &App) -> impl IntoElement {
+        h_flex()
+            .flex_none()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(rems(0.71875))
+                    .text_color(cx.theme().colors().text_placeholder)
+                    .child(SharedString::from(count.to_string())),
+            )
+            .child(
+                Icon::new(if collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+            )
+    }
+
+    /// A category caption (V43 §8.3): the group's name in small caps and its
+    /// open count, with its own `+` so a task can be added straight into the
     /// group (V17 §5.1). Click to open or close it.
     fn render_category_row(
         &self,
@@ -2102,7 +2126,7 @@ impl BacklogPanel {
         let colors = cx.theme().colors();
         let section_key = section.id();
         let name = name.to_string();
-        let caption = format!("{} · {count}", name.to_uppercase());
+        let caption = name.to_uppercase();
         self.row_frame(TaskSelection { section, index }, cx)
             .pt_2()
             .child(
@@ -2113,21 +2137,18 @@ impl BacklogPanel {
                     .flex_1()
                     .min_w_0()
                     .gap_1()
+                    .justify_between()
                     .cursor_pointer()
                     .child(
                         div()
+                            .min_w_0()
+                            .truncate()
                             .text_size(rems(0.6875))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(colors.text_placeholder)
                             .child(SharedString::from(caption)),
                     )
-                    .when(collapsed, |this| {
-                        this.child(
-                            Icon::new(IconName::ChevronRight)
-                                .size(IconSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                    })
+                    .child(Self::render_header_end(count, collapsed, cx))
                     .on_click(cx.listener({
                         let name = name.clone();
                         move |this, _, _window, cx| {
@@ -2158,8 +2179,8 @@ impl BacklogPanel {
             .into_any_element()
     }
 
-    /// A lane's title row (V43 §8.3): the heading in the display face, its
-    /// open count, and a chevron while it is folded. Click to fold or unfold.
+    /// A lane's title row (V43 §8.3): the heading in the display face, then
+    /// its open count and chevron. Click to fold or unfold.
     fn render_lane_row(
         &self,
         section: SectionKind,
@@ -2189,23 +2210,7 @@ impl BacklogPanel {
                             .text_color(colors.text)
                             .child(SharedString::from(heading)),
                     )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(rems(0.71875))
-                                    .text_color(colors.text_placeholder)
-                                    .child(SharedString::from(count.to_string())),
-                            )
-                            .when(folded, |this| {
-                                this.child(
-                                    Icon::new(IconName::ChevronRight)
-                                        .size(IconSize::XSmall)
-                                        .color(Color::Muted),
-                                )
-                            }),
-                    )
+                    .child(Self::render_header_end(count, folded, cx))
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.select_row(section, 0, cx);
                         this.set_lane_folded(section, !folded, cx);

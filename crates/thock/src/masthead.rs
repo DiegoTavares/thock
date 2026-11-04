@@ -11,9 +11,9 @@ use crate::ui::calendar::{monday_of, month_name, weekday_name};
 use crate::vault::{Vault, VaultStatus};
 use chrono::{Datelike, Days, Local, NaiveDate, Weekday};
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, KeyContext, MouseButton,
-    Render, SharedString, Subscription, Task, WeakEntity, Window, actions, div, prelude::*, px,
-    rems,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyContext,
+    MouseButton, Render, SharedString, Subscription, Task, WeakEntity, Window, actions, div,
+    prelude::*, px, rems,
 };
 use menu::{Cancel, Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use project::Project;
@@ -141,6 +141,32 @@ impl Cell {
         }
     }
 
+    /// The numeral's ink. Weekends recede by ink, not by fading the cell,
+    /// so a weekend or future digit keeps its contrast. Today takes the ink,
+    /// not amber, so the open day's fill is the strip's only amber mark.
+    pub fn numeral_ink(&self, frame: CellFrame) -> Ink {
+        if frame == CellFrame::Filled {
+            Ink::OnAccent
+        } else if self.today || (self.has_note && !self.weekend()) {
+            Ink::Text
+        } else if self.has_note || self.viewed {
+            Ink::Muted
+        } else {
+            Ink::Placeholder
+        }
+    }
+
+    /// The ink of the line above the numeral.
+    pub fn label_ink(&self, frame: CellFrame) -> Ink {
+        if frame == CellFrame::Filled {
+            Ink::OnAccent
+        } else if self.today {
+            Ink::Text
+        } else {
+            Ink::Placeholder
+        }
+    }
+
     /// The line above the numeral: the weekday's initial, or "TODAY".
     pub fn label(&self) -> SharedString {
         if self.today {
@@ -156,6 +182,28 @@ pub enum CellFrame {
     Plain,
     Outlined,
     Filled,
+}
+
+/// Which of the theme's inks a part of a cell is drawn in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ink {
+    /// The ink on the accent fill ([`on_accent_color`]).
+    OnAccent,
+    Text,
+    Muted,
+    Placeholder,
+}
+
+impl Ink {
+    fn color(self, cx: &App) -> Hsla {
+        let colors = cx.theme().colors();
+        match self {
+            Ink::OnAccent => on_accent_color(cx),
+            Ink::Text => colors.text,
+            Ink::Muted => colors.text_muted,
+            Ink::Placeholder => colors.text_placeholder,
+        }
+    }
 }
 
 /// Everything the masthead draws, as a value: the title lines and the
@@ -727,26 +775,8 @@ impl Masthead {
         let date = cell.date;
         let frame = cell.frame(viewed);
         let filled = frame == CellFrame::Filled;
-        // Weekends recede by ink, not by fading the cell, so a weekend or
-        // future digit keeps its contrast.
-        let numeral_color = if filled {
-            on_accent
-        } else if cell.today {
-            colors.text_accent
-        } else if cell.has_note && !cell.weekend() {
-            colors.text
-        } else if cell.has_note || cell.viewed {
-            colors.text_muted
-        } else {
-            colors.text_placeholder
-        };
-        let label_color = if filled {
-            on_accent
-        } else if cell.today {
-            colors.text_accent
-        } else {
-            colors.text_placeholder
-        };
+        let numeral_color = cell.numeral_ink(frame).color(cx);
+        let label_color = cell.label_ink(frame).color(cx);
         let dot_color = if filled {
             on_accent
         } else {
@@ -774,7 +804,13 @@ impl Masthead {
             .tooltip(Tooltip::text(tooltip))
             .child(
                 div()
-                    .text_size(if cell.today { rems(0.5) } else { rems(0.625) })
+                    // "TODAY" is five letters in a cell sized for one, so
+                    // it is a step smaller than an initial.
+                    .text_size(if cell.today {
+                        rems(0.5625)
+                    } else {
+                        rems(0.625)
+                    })
                     .line_height(rems(0.75))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(label_color)
@@ -1041,6 +1077,26 @@ mod tests {
             "today is marked by its label, not a second frame"
         );
         assert_eq!(today_cell.label().as_ref(), "TODAY");
+        assert_eq!(open.numeral_ink(CellFrame::Filled), Ink::OnAccent);
+        assert_eq!(
+            (
+                today_cell.label_ink(CellFrame::Plain),
+                today_cell.numeral_ink(CellFrame::Plain)
+            ),
+            (Ink::Text, Ink::Text),
+            "the open day's fill is the only amber in the strip"
+        );
+
+        let open_today = Viewed::Day(today());
+        let model = super::model(Some(open_today), today(), &example_notes());
+        let today_cell = *model.cells.iter().find(|cell| cell.today).unwrap();
+        let frame = today_cell.frame(open_today);
+        assert_eq!(frame, CellFrame::Filled);
+        assert_eq!(
+            (today_cell.label_ink(frame), today_cell.numeral_ink(frame)),
+            (Ink::OnAccent, Ink::OnAccent),
+            "open today, the label takes the fill's ink"
+        );
 
         let week = Viewed::Week(date(2026, 10, 12));
         let model = super::model(Some(week), today(), &example_notes());

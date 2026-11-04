@@ -807,8 +807,10 @@ impl InlineBanner {
 
 /// A panel's banner for the connectors that need the user (V32 §4.2):
 /// a quiet line in the panel's own surface, the state carried by a small
-/// warning mark rather than a red sentence. The text truncates before the
-/// buttons do, so an action is never cut off at the window's edge.
+/// warning mark rather than a red sentence. Its fix is a small outlined
+/// button, so it reads as an action beside the muted text. The text
+/// truncates before the buttons do, so an action is never cut off at the
+/// window's edge.
 pub fn render_inline_banner(statuses: &[ConnectorStatus], cx: &App) -> Option<AnyElement> {
     let banner = InlineBanner::from_statuses(statuses)?;
     let mark = match banner.attention {
@@ -835,6 +837,8 @@ pub fn render_inline_banner(statuses: &[ConnectorStatus], cx: &App) -> Option<An
                 SharedString::from(format!("thock-sync-banner-action-{index}")),
                 action.label.clone(),
             )
+            .style(ButtonStyle::Outlined)
+            .size(ButtonSize::Compact)
             .label_size(LabelSize::Small)
             .on_click(move |_, window, cx| action.dispatch(window, cx))
         });

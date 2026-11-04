@@ -1265,6 +1265,30 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn both_tide_marks_are_one_mirrored_pair(cx: &mut TestAppContext) {
+        let mut setup = setup(cx).await;
+        type_in_note(&mut setup, "a");
+        assert!(ebbed(&setup, DockPosition::Left) && ebbed(&setup, DockPosition::Right));
+        let left = setup
+            .cx
+            .debug_bounds("tide-line-left")
+            .expect("the left mark is drawn");
+        let right = setup
+            .cx
+            .debug_bounds("tide-line-right")
+            .expect("the right mark is drawn");
+        let window_width = setup.cx.update(|window, _| window.viewport_size().width);
+        assert_eq!(left.size, right.size, "same length and width");
+        assert_eq!(left.origin.y, right.origin.y);
+        assert_eq!(
+            left.left(),
+            window_width - right.right(),
+            "the same inset from either edge"
+        );
+        assert!(left.left() > px(0.), "off the window's edge");
+    }
+
+    #[gpui::test]
     async fn the_desk_mark_lights_up_when_an_entry_is_about_to_start(cx: &mut TestAppContext) {
         let mut setup = setup(cx).await;
         let waiting = |setup: &Setup| {

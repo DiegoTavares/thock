@@ -182,11 +182,12 @@ is today.
 
 ### 5.2 The tide mark
 
-An ebbed dock renders as a 6pt strip at the window's edge in `panel.background`, the full height
-of the dock. Clicking it flows that side back. A 2pt `text.accent` line at its inner edge appears
-while the panel has something waiting: the Desk while a timed entry starts within 10 minutes or a
-reminder is ringing. Panels opt in through a method on the Thock panel side with a default of
-nothing waiting.
+An ebbed dock renders as a 6pt strip at the window's edge on the page's ground, the full height
+of the dock, with a 2pt rounded `text.placeholder` line down its middle, so both sides draw the
+same mark at the same inset. Hovering it names the panel and the `ctrl-cmd-\` shortcut; clicking it
+flows that side back. The whole line turns `text.accent` while the panel has something waiting:
+the Desk while a timed entry starts within 10 minutes or a reminder is ringing. Panels opt in
+through a method on the Thock panel side with a default of nothing waiting.
 
 ### 5.3 Ebb
 

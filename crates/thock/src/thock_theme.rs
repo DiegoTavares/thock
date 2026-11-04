@@ -26,10 +26,11 @@ pub const UNFOCUSED_SELECTION_OPACITY: f32 = 0.5;
 
 /// The edge of an unticked task's box, on the page and in the panels. The
 /// theme's border tokens are hairlines for dividers, too faint for a control
-/// a task is ticked with, so the box takes the placeholder ink, which holds
-/// 3:1 on every surface it sits on.
+/// a task is ticked with, and a 1px edge in the placeholder ink fades on the
+/// panels' lighter ground, so the box takes the muted ink, which holds 4.5:1
+/// on every surface it sits on.
 pub fn unchecked_box_border(cx: &App) -> Hsla {
-    cx.theme().colors().text_placeholder
+    cx.theme().colors().text_muted
 }
 
 /// The box a task is ticked with, the same on the page and in the panels:
@@ -154,8 +155,9 @@ mod tests {
             let muted = colour(&theme, |theme| &theme.style.colors.text_muted);
             let dim = colour(&theme, |theme| &theme.style.colors.text_placeholder);
             let amber = colour(&theme, |theme| &theme.style.colors.text_accent);
-            // `dim` is also the unticked box's edge and the strip's
-            // future digits, on the page and the masthead.
+            // `muted` is also the unticked box's edge and the Backlog's
+            // meta line, on the page and in the panels; `dim` is the
+            // strip's future digits on the masthead.
             for background in [ground, surface, page, title_bar] {
                 assert!(
                     contrast(ink, background) >= 7.0,

@@ -96,9 +96,9 @@ masthead sizes are in rems of the UI size and editor sizes are multiples of the 
 | `note.h3` | Plex Sans SemiBold (highlight only) | B | Reminder |
 | `note.time` | Plex Sans SemiBold, `tnum` (highlight) | B | 20:29 |
 | `lane.title` | Petrona SemiBold | 1.0625rem (17px) | Soon |
-| `lane.caption` | Plex Sans SemiBold, uppercase | 0.6875rem (11px) | SPI · 5 |
+| `lane.caption` | Plex Sans SemiBold, uppercase | 0.6875rem (11px) | SPI |
 | `row.text` | Plex Sans Regular | 0.875rem (14px), wraps to 2 lines | Study for DNV elections |
-| `row.meta` | Plex Sans Regular | 0.71875rem (11.5px) | from Sep 28 · inbox |
+| `row.meta` | Plex Sans Regular, `text.muted` | 0.71875rem (11.5px) | from Sep 28 · inbox |
 | `tab.label` | Plex Sans Regular / SemiBold when active | 0.8125rem (13px) | Backlog 37 |
 | `keys.hint` | Plex Sans Regular + `ui::KeyBinding` | 0.6875rem (11px) | `x` done |
 
@@ -189,7 +189,7 @@ Cell states:
 | --- | --- |
 | Viewed day (a daily note) | Filled amber, radius 6, text and dot in amberInk |
 | Viewed week (a weekly note) | 1px amber border, radius 6, on all seven days |
-| Today | "TODAY" in place of the initial and an amber numeral; filled like any viewed day when open |
+| Today | "TODAY" (9px) in place of the initial, label and numeral in ink, so the open day's fill is the only amber; filled like any viewed day when open, in amberInk |
 | Has a note | ink numeral (muted on a weekend), dim dot |
 | Past day with no note | dim numeral, no dot, not clickable (tooltip "No note on Mon 12") |
 | Future after tomorrow | dim numeral, not clickable |
@@ -346,7 +346,8 @@ family:
 
 Task list items (`- [ ]`) lose their V24 `•`. The checkbox is enough of a marker, and that
 matches the reference. Plain list items keep the `•`. A checked box is filled `text.accent` with
-an amberInk tick.
+an amberInk tick; an unchecked one is a 1px `text.muted` outline, the same on the page and in the
+Backlog, so it holds 4.5:1 on the panels' lighter ground too.
 
 ## 8. The Desk panel
 
@@ -395,15 +396,15 @@ selectable row) reveals the entry in today's note.
 The lanes are stacked vertically:
 
 ```
-Soon                                    18      ← lane.title + count (row.meta, dim)
+Soon                                  18 ⌄ +    ← lane.title; count, chevron and + on the right
 ▌☐ Study for DNV elections                      ← selected: amberSoft fill, 2px amber left edge
    from Sep 28 · inbox                          ← row.meta, only when the line carries it
  ☐ Apps to try: vorssaint
-SPI · 5                                         ← lane.caption: a V17 category
+SPI                                    5 ⌄ +    ← lane.caption: a V17 category, ends like a lane
  ☐ HD 519673: local cores only used once
  ☐ Refactor Maestro.java
 ────────────────────────────────────────
-Someday                                 19 ›    ← a folded lane, one row
+Someday                               19 › +    ← a folded lane, one row
 ```
 
 - Soon opens expanded and Someday starts folded. Each lane's fold state is remembered next to the

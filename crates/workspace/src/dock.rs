@@ -23,9 +23,12 @@ use ui::{
 use util::ResultExt as _;
 
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
-/// The line on a tide mark's inner edge, so a tucked-away panel reads as
+/// The line down the middle of a tide mark, so a tucked-away panel reads as
 /// there on both sides and in either theme.
 const TIDE_LINE_WIDTH: Pixels = px(2.);
+/// The action that brings the tides back. It is Thock's, which this crate
+/// can't name, so the mark's tooltip builds it by name to show its keys.
+const TOGGLE_TIDE_ACTION: &str = "thock::ToggleTide";
 
 pub enum PanelEvent {
     ZoomIn,
@@ -532,37 +535,56 @@ impl Dock {
         self.tide_waiting
     }
 
-    /// The tide mark: a strip of the panel's background at the window's
-    /// edge with a line on its inner edge, the same on either side. While
-    /// something waits, the top of the line turns accent. A click focuses
-    /// the panel, which brings it back.
-    fn render_tide_mark(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// The tide mark: a line centred in the strip at the window's edge, on
+    /// the page's ground so it reads the same on either side. While
+    /// something waits, the whole line turns accent. Hovering names the
+    /// panel; a click focuses it, which brings it back.
+    fn render_tide_mark(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let colors = cx.theme().colors();
-        let inner_edge = |this: Div| match self.position {
-            DockPosition::Left => this.right_0(),
-            _ => this.left_0(),
+        let line_color = if self.tide_waiting {
+            colors.text_accent
+        } else {
+            colors.text_placeholder
         };
-        let line = inner_edge(div().absolute().top_0().bottom_0().w(TIDE_LINE_WIDTH))
-            .bg(colors.text_placeholder);
-        let waiting = self.tide_waiting.then(|| {
-            inner_edge(div().absolute().top_0().h(px(48.)).w(TIDE_LINE_WIDTH))
-                .bg(colors.text_accent)
-        });
+        let side = match self.position {
+            DockPosition::Left => "left",
+            DockPosition::Bottom => "bottom",
+            DockPosition::Right => "right",
+        };
+        let name = self
+            .visible_entry()
+            .and_then(|entry| entry.panel.icon_tooltip(window, cx))
+            .unwrap_or("panel");
+        let title: SharedString = format!("Bring back {name}").into();
         div()
             .id("tide-mark")
             .debug_selector(|| "tide-mark".into())
             .absolute()
             .inset_0()
-            .bg(colors.panel_background)
+            .flex()
+            .justify_center()
+            .bg(colors.editor_background)
             .cursor_pointer()
             .occlude()
+            .tooltip(
+                move |_window, cx| match cx.build_action(TOGGLE_TIDE_ACTION, None) {
+                    Ok(action) => Tooltip::for_action(title.clone(), action.as_ref(), cx),
+                    Err(_) => Tooltip::simple(title.clone(), cx),
+                },
+            )
             .on_click(cx.listener(|dock, _, window, cx| {
                 if let Some(panel) = dock.active_panel() {
                     panel.activation_focus_handle(cx).focus(window, cx);
                 }
             }))
-            .child(line)
-            .children(waiting)
+            .child(
+                div()
+                    .debug_selector(move || format!("tide-line-{side}"))
+                    .h_full()
+                    .w(TIDE_LINE_WIDTH)
+                    .rounded_full()
+                    .bg(line_color),
+            )
     }
 
     fn resizable(&self, cx: &App) -> bool {
@@ -1303,7 +1325,7 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context();
         // The workspace placed this frame's row before its docks draw.
         let row = self
@@ -1337,7 +1359,7 @@ impl Render for Dock {
                         .w(width)
                         .child(panel),
                 )
-                .child(self.render_tide_mark(cx));
+                .child(self.render_tide_mark(window, cx));
         }
         if let Some(entry) = self.visible_entry() {
             let position = self.position;

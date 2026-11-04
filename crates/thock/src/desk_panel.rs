@@ -738,14 +738,14 @@ impl DeskPanel {
 }
 
 /// The Backlog footer's hints, most used first: when the panel is narrow
-/// the last ones wrap onto a second line rather than being cut off.
+/// the last ones are left out rather than cut off or wrapped.
 fn backlog_hints() -> [(Box<dyn Action>, &'static str); 5] {
     [
         (AddBacklogTask.boxed_clone(), "add"),
         (CompleteBacklogTask.boxed_clone(), "done"),
         (RevealBacklogTask.boxed_clone(), "open"),
-        (MoveBacklogTaskRight.boxed_clone(), "to Someday"),
-        (MoveBacklogTaskToToday.boxed_clone(), "to today"),
+        (MoveBacklogTaskRight.boxed_clone(), "someday"),
+        (MoveBacklogTaskToToday.boxed_clone(), "today"),
     ]
 }
 
@@ -772,9 +772,14 @@ fn hint_keystrokes(
         .unwrap_or_default()
 }
 
-/// A footer of key hints: each key in its own keycap, so a chord like
-/// `g space` reads as two keys and never runs into the muted label after
-/// it. Hints wrap rather than clip.
+/// The height of a keycap in the footer, which is also the height of its
+/// one line of hints.
+const HINT_KEYCAP_HEIGHT: Pixels = px(18.);
+
+/// A footer of key hints on one line: a binding's keys share one keycap,
+/// split by a hairline when it takes more than one stroke, so `g space`
+/// reads as one binding before its label. Hints that don't fit the line
+/// are left out, the least used first.
 fn render_hints(
     hints: &[(Box<dyn Action>, &'static str)],
     focus: &FocusHandle,
@@ -793,17 +798,12 @@ fn render_hints(
         if keystrokes.is_empty() {
             return None;
         }
-        let keycaps = keystrokes.iter().map(|keystroke| {
+        let keys = keystrokes.iter().enumerate().map(|(index, keystroke)| {
             h_flex()
-                .flex_none()
-                .h(px(18.))
-                .min_w(px(18.))
-                .px_1()
-                .justify_center()
-                .rounded_sm()
-                .border_1()
-                .border_color(colors.border)
-                .bg(colors.element_background)
+                .gap_1()
+                .when(index > 0, |this| {
+                    this.child(div().h(px(10.)).w_px().bg(colors.border))
+                })
                 .children(render_keybinding_keystroke(
                     keystroke,
                     Some(Color::Default),
@@ -817,7 +817,21 @@ fn render_hints(
                 .flex_none()
                 .gap_1()
                 .items_center()
-                .child(h_flex().gap_0p5().children(keycaps))
+                .child(
+                    h_flex()
+                        .debug_selector(move || format!("thock-hint-keycap-{label}"))
+                        .flex_none()
+                        .h(HINT_KEYCAP_HEIGHT)
+                        .min_w(HINT_KEYCAP_HEIGHT)
+                        .px_1()
+                        .gap_1()
+                        .justify_center()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.element_background)
+                        .children(keys),
+                )
                 .child(
                     Label::new(*label)
                         .size(LabelSize::Small)
@@ -825,18 +839,27 @@ fn render_hints(
                 ),
         )
     });
-    h_flex()
+    div()
         .flex_none()
-        .flex_wrap()
         .px_3()
-        .py_1p5()
-        .gap_x_3()
-        .gap_y_1()
-        .items_center()
+        .py_2()
         .bg(colors.panel_background)
         .border_t_1()
         .border_color(colors.border)
-        .children(hints)
+        .child(
+            // Wrapped hints land on a second line that the fixed height
+            // clips away whole, so the bar never grows into the list.
+            h_flex()
+                .debug_selector(|| "thock-hints".into())
+                .flex_wrap()
+                .content_start()
+                .h(HINT_KEYCAP_HEIGHT)
+                .overflow_hidden()
+                .gap_x_3()
+                .gap_y_2()
+                .items_center()
+                .children(hints),
+        )
         .into_any_element()
 }
 
@@ -1557,7 +1580,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_footer_gives_each_key_of_a_chord_its_own_keycap(cx: &mut TestAppContext) {
+    async fn the_footer_keeps_a_chord_in_one_keycap_on_one_line(cx: &mut TestAppContext) {
         let mut setup = setup(cx, true).await;
         let desk = setup.desk.clone();
         let hints = setup.cx.update(|window, cx| {
@@ -1576,8 +1599,8 @@ mod tests {
         let labels: Vec<_> = hints.iter().map(|(label, _)| *label).collect();
         assert_eq!(
             labels,
-            ["add", "done", "open", "to Someday", "to today"],
-            "most used first, so a wrap moves the least used"
+            ["add", "done", "open", "someday", "today"],
+            "most used first, so a narrow dock leaves out the least used"
         );
         let open = hints
             .iter()
@@ -1588,6 +1611,27 @@ mod tests {
             hints.iter().all(|(_, keys)| !keys.is_empty()),
             "every hint has a binding: {hints:?}"
         );
+
+        setup.cx.update(|window, _| window.refresh());
+        setup.cx.run_until_parked();
+        let open = setup
+            .cx
+            .debug_bounds("thock-hint-keycap-open")
+            .expect("the open hint is drawn");
+        let add = setup
+            .cx
+            .debug_bounds("thock-hint-keycap-add")
+            .expect("the add hint is drawn");
+        assert_eq!(open.size.height, add.size.height, "one keycap for g space");
+        assert!(
+            open.size.width > add.size.width * 1.5,
+            "both keys of the chord sit in the one keycap: {open:?} {add:?}"
+        );
+        let bar = setup
+            .cx
+            .debug_bounds("thock-hints")
+            .expect("the footer is drawn");
+        assert_eq!(bar.size.height, HINT_KEYCAP_HEIGHT, "one line of hints");
     }
 
     #[gpui::test]
