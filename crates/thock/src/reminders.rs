@@ -278,9 +278,10 @@ pub fn reminder_chip(reminder: &LineReminder, today: NaiveDate) -> Option<Remind
 
 /// The chip a mirror line's carried due draws as on `today`, or `None` when
 /// the line carries none. A mirror has no token of its own (§7.1), so this is
-/// drawing only: the line stays as written.
+/// drawing only: the line stays as written. A struck mirror is over, ticked
+/// or not.
 pub fn carried_chip(mirror: &MirrorLine, today: NaiveDate) -> Option<ReminderChip> {
-    let state = if mirror.checked {
+    let state = if mirror.checked || mirror.mark.is_some() {
         ReminderState::Closed
     } else {
         ReminderState::Open
@@ -659,6 +660,17 @@ mod tests {
 
     fn chip(line: &str, day: Option<NaiveDate>, today: NaiveDate) -> Option<ReminderChip> {
         reminder_chip(&parse_line(line, day)?, today)
+    }
+
+    #[test]
+    fn a_struck_mirror_draws_closed_with_its_box_open() {
+        let today = date(2026, 10, 21);
+        let carried = |line: &str| carried_chip(&MirrorLine::parse(line).unwrap(), today);
+        let open = carried("- [ ] Old · 2026-10-19 · [[reminders]] <!--rem:111111111111-->");
+        assert_eq!(open.map(|chip| chip.state), Some(ChipState::Overdue));
+        let dropped =
+            carried("- [ ] ~~Old~~ (dropped) · 2026-10-19 · [[reminders]] <!--rem:111111111111-->");
+        assert_eq!(dropped.map(|chip| chip.state), Some(ChipState::Closed));
     }
 
     #[test]
