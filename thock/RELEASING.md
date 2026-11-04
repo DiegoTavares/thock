@@ -20,6 +20,9 @@ accepts this repository on `main` or on a tag, nothing else (setup: `specs/v20-a
   build to App Store review unless the user asked for that release in this session.** Each of these
   reaches real users and none can be fully undone. Preparing the version-bump PR is fine; shipping
   it is the user's call.
+- **Asking to land is asking for the desktop release.** The `land` skill merges the version-bump PR,
+  then pushes the `vX.Y.Z` tag on its merge commit and watches the run. It never runs
+  `promote-release` or `deploy.sh`.
 - **A TestFlight upload is not a release.** It reaches only the internal testers, and it is the
   `ship` skill's last step for a pull request that touches `thock/ios/`: the build Diego checks by
   hand is the one about to be merged. Upload from the pull request's branch, never from `main`
@@ -34,6 +37,9 @@ accepts this repository on `main` or on a tag, nothing else (setup: `specs/v20-a
    `Cargo.lock` follow (`cargo update -p thock_app --precise X.Y.Z` or a scoped `cargo check -p thock_app`).
    Two lines change. PR it as `Release X.Y.Z` and merge.
 2. **Tag.** On the merge commit: `git tag -a vX.Y.Z -m "Thock X.Y.Z" && git push origin vX.Y.Z`.
+   If no `release.yml` run appears within a minute (GitHub sometimes drops the tag event, as for
+   v1.24.0), start it on the tag: `gh workflow run release.yml -R DiegoTavares/thock --ref vX.Y.Z`.
+   Run on a tag, it takes the same publish path as a push.
 3. **Wait.** `release.yml` first verifies the tag: it matches the crate version, the commit is on
    `main`, and the `CI` check passed on it (it waits up to 30 minutes for CI still running). Then it
    builds and notarizes the macOS bundle and builds the Linux one (about 90 minutes), drafts a GitHub
