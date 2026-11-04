@@ -726,8 +726,11 @@ impl BacklogPanel {
         self.row_above = row_above;
     }
 
+    /// Whether the user has put the cursor on a row. The dimmed first row a
+    /// view shows before any motion doesn't count, so it never takes the
+    /// cursor off the Desk's card.
     pub fn has_selection(&self) -> bool {
-        self.selection().is_some()
+        self.selected.is_some()
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
@@ -1241,11 +1244,11 @@ impl BacklogPanel {
         let Some((_, task)) = self.selected_task() else {
             return;
         };
-        let Some(target) = split_trailing_note_link(&task.text).1 else {
+        let Some(link) = task_link(&task.text) else {
             return;
         };
         open_note_link(
-            &target,
+            &link.target,
             &self.project.downgrade(),
             &self.workspace,
             window,
@@ -2755,19 +2758,23 @@ fn note_link_label(target: &str) -> String {
 }
 
 /// The note a task links to, when it links one: the `[[target]]` and the
-/// date in its name, for the row's meta line.
+/// date in its name, for the row's meta line. The trailing link the row
+/// draws as "↗" wins, so the meta line and `OpenBacklogTaskNote` describe
+/// the note that link opens; otherwise the first link in the text.
 struct TaskLink {
     target: String,
     date: Option<NaiveDate>,
 }
 
 fn task_link(text: &str) -> Option<TaskLink> {
-    let target = parse_inline_spans(text)
-        .into_iter()
-        .find_map(|span| match span.target {
-            Some(LinkTarget::Note(target)) => Some(target),
-            _ => None,
-        })?;
+    let target = split_trailing_note_link(text).1.or_else(|| {
+        parse_inline_spans(text)
+            .into_iter()
+            .find_map(|span| match span.target {
+                Some(LinkTarget::Note(target)) => Some(target),
+                _ => None,
+            })
+    })?;
     let name = target.rsplit('/').next().unwrap_or(&target);
     let date = name
         .get(..10)
@@ -3093,6 +3100,24 @@ mod tests {
         assert!(task_link("Apps to try: vorssaint").is_none());
         assert!(task_link("See [docs](https://a.example)").is_none());
         assert_eq!(task_link("Read [[Maestro]]").unwrap().date, None);
+    }
+
+    #[test]
+    fn a_task_link_prefers_the_trailing_note() {
+        let link =
+            task_link("Ask about [[people/Maestro]] re [[inbox/2026-10-11-0853-call]]").unwrap();
+        assert_eq!(link.target, "inbox/2026-10-11-0853-call");
+        assert_eq!(link.date, NaiveDate::from_ymd_opt(2026, 10, 11));
+        assert_eq!(
+            task_link("Read [[Maestro]] before Friday").unwrap().target,
+            "Maestro",
+            "a link mid-sentence still counts"
+        );
+        assert_eq!(
+            task_link("[[2026-09-28-dnv-ballot]]").unwrap().target,
+            "2026-09-28-dnv-ballot",
+            "and so does a task that is only a link"
+        );
     }
 
     #[test]

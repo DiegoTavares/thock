@@ -3240,8 +3240,6 @@ impl Panel for RoutinesPanel {
     }
 }
 
-/// The selection as the rows draw it, `(full, dimmed)`: in full while the
-/// panel has focus, otherwise dimmed, so the cursor stays visible.
 /// The cursor while it points at a row, else the active note's row, else the
 /// first row; `None` only when there are no rows.
 fn highlighted_row(
@@ -3255,6 +3253,8 @@ fn highlighted_row(
         .or_else(|| (row_count > 0).then_some(0))
 }
 
+/// The selection as the rows draw it, `(full, dimmed)`: in full while the
+/// panel has focus, otherwise dimmed, so the cursor stays visible.
 fn split_selection(selected_index: Option<usize>, focused: bool) -> (Option<usize>, Option<usize>) {
     if focused {
         (selected_index, None)

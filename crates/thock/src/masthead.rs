@@ -241,12 +241,14 @@ pub struct MastheadModel {
 }
 
 /// The model for `viewed` (today's day when `None`), on `today`, given the
-/// days that have a daily note (§6.2).
+/// days that have a daily note (§6.2). With nothing dated open, no cell is
+/// marked viewed, so the fill only ever marks the open day.
 pub fn model(
     viewed: Option<Viewed>,
     today: NaiveDate,
     notes: &BTreeSet<NaiveDate>,
 ) -> MastheadModel {
+    let open = viewed.is_some();
     let viewed = viewed.unwrap_or(Viewed::Day(today));
     let strip_start = strip_start(viewed.anchor(), today);
     let tomorrow = today + Days::new(1);
@@ -254,10 +256,11 @@ pub fn model(
         .map(|offset| {
             let date = strip_start + Days::new(offset);
             let has_note = notes.contains(&date);
-            let viewed = match viewed {
-                Viewed::Day(day) => date == day,
-                Viewed::Week(monday) => date >= monday && date < monday + Days::new(7),
-            };
+            let viewed = open
+                && match viewed {
+                    Viewed::Day(day) => date == day,
+                    Viewed::Week(monday) => date >= monday && date < monday + Days::new(7),
+                };
             Cell {
                 date,
                 has_note,
@@ -1178,9 +1181,18 @@ mod tests {
         let model = model(None, today(), &example_notes());
         assert_eq!(model.title, "Thursday");
         assert_eq!(model.date_line, "15 OCTOBER 2026 · WEEK 42");
-        let outlined: Vec<_> = model.cells.iter().filter(|cell| cell.viewed).collect();
-        assert_eq!(outlined.len(), 1);
-        assert!(outlined[0].today);
+        assert!(
+            model.cells.iter().all(|cell| !cell.viewed),
+            "nothing is open, so no cell is filled"
+        );
+        let today_cell = model
+            .cells
+            .iter()
+            .find(|cell| cell.today)
+            .expect("today is in the strip");
+        assert_eq!(today_cell.frame(model.viewed), CellFrame::Plain);
+        assert_eq!(today_cell.label(), "TODAY");
+        assert!(!today_cell.tooltip(model.viewed).contains("Open"));
     }
 
     #[test]

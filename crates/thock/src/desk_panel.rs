@@ -1617,6 +1617,23 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn the_card_stays_selected_when_the_backlog_reloads(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        setup.cx.simulate_keystrokes("2 down up");
+        assert_eq!(tab(&setup), DeskTab::Today);
+        assert!(card_selected(&setup));
+        let backlog = setup
+            .desk
+            .read_with(&setup.cx, |desk, _| desk.backlog.clone());
+        backlog.update(&mut setup.cx, |_, cx| cx.notify());
+        setup.cx.run_until_parked();
+        assert!(
+            card_selected(&setup),
+            "the Backlog's dimmed first row doesn't take the cursor"
+        );
+    }
+
+    #[gpui::test]
     async fn up_from_the_top_lands_on_the_card_and_enter_reveals_it(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false).await;
         let card = setup.desk.read_with(&setup.cx, |desk, _| desk.card());
