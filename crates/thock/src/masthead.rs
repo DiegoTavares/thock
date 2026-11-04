@@ -117,7 +117,7 @@ pub struct Cell {
     pub date: NaiveDate,
     pub has_note: bool,
     pub today: bool,
-    /// Outlined: the viewed day, or every day of the viewed week.
+    /// The viewed day, or every day of the viewed week.
     pub viewed: bool,
     /// Whether the cell opens on click or `enter`: a day with a note, or
     /// today and tomorrow, which may be created. Past days without a note
@@ -129,6 +129,33 @@ impl Cell {
     pub fn weekend(&self) -> bool {
         matches!(self.date.weekday(), Weekday::Sat | Weekday::Sun)
     }
+
+    /// How the cell stands out. The open day is the strong state, filled;
+    /// a weekly note's seven days are outlined. Today is not a frame but a
+    /// label ([`Cell::label`]), so the two never compete.
+    pub fn frame(&self, viewed: Viewed) -> CellFrame {
+        match (self.viewed, viewed) {
+            (false, _) => CellFrame::Plain,
+            (true, Viewed::Day(_)) => CellFrame::Filled,
+            (true, Viewed::Week(_)) => CellFrame::Outlined,
+        }
+    }
+
+    /// The line above the numeral: the weekday's initial, or "TODAY".
+    pub fn label(&self) -> SharedString {
+        if self.today {
+            "TODAY".into()
+        } else {
+            weekday_name(self.date)[..1].to_string().into()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellFrame {
+    Plain,
+    Outlined,
+    Filled,
 }
 
 /// Everything the masthead draws, as a value: the title lines and the
@@ -688,18 +715,39 @@ impl Masthead {
             .into_any_element()
     }
 
-    fn render_cell(&self, cell: Cell, focused: bool, cx: &Context<Self>) -> AnyElement {
+    fn render_cell(
+        &self,
+        cell: Cell,
+        viewed: Viewed,
+        focused: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let colors = cx.theme().colors();
         let on_accent = on_accent_color(cx);
         let date = cell.date;
-        let numeral_color = if cell.today {
+        let frame = cell.frame(viewed);
+        let filled = frame == CellFrame::Filled;
+        // Weekends recede by ink, not by fading the cell, so a weekend or
+        // future digit keeps its contrast.
+        let numeral_color = if filled {
             on_accent
-        } else if cell.has_note || cell.viewed {
+        } else if cell.today {
+            colors.text_accent
+        } else if cell.has_note && !cell.weekend() {
             colors.text
+        } else if cell.has_note || cell.viewed {
+            colors.text_muted
         } else {
             colors.text_placeholder
         };
-        let dot_color = if cell.today {
+        let label_color = if filled {
+            on_accent
+        } else if cell.today {
+            colors.text_accent
+        } else {
+            colors.text_placeholder
+        };
+        let dot_color = if filled {
             on_accent
         } else {
             colors.text_placeholder
@@ -716,9 +764,8 @@ impl Masthead {
             .items_center()
             .gap_1()
             .rounded(px(6.))
-            .when(cell.weekend() && !cell.today, |this| this.opacity(0.55))
-            .when(cell.today, |this| this.bg(colors.text_accent))
-            .when(cell.viewed && !cell.today, |this| {
+            .when(filled, |this| this.bg(colors.text_accent))
+            .when(frame == CellFrame::Outlined, |this| {
                 this.border_1().border_color(colors.text_accent)
             })
             .when(focused, |this| {
@@ -727,15 +774,11 @@ impl Masthead {
             .tooltip(Tooltip::text(tooltip))
             .child(
                 div()
-                    .text_size(rems(0.625))
+                    .text_size(if cell.today { rems(0.5) } else { rems(0.625) })
                     .line_height(rems(0.75))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(if cell.today {
-                        on_accent
-                    } else {
-                        colors.text_placeholder
-                    })
-                    .child(SharedString::from(weekday_name(date)[..1].to_string())),
+                    .text_color(label_color)
+                    .child(cell.label()),
             )
             .child(
                 div()
@@ -787,7 +830,7 @@ impl Masthead {
             .children(cells.chunks(CELLS / 2).map(|week| {
                 h_flex().gap(px(4.)).children(week.iter().map(|cell| {
                     let focused = strip_focused && self.strip_cursor == Some(cell.date);
-                    self.render_cell(*cell, focused, cx)
+                    self.render_cell(*cell, model.viewed, focused, cx)
                 }))
             }))
             .into_any_element()
@@ -805,8 +848,8 @@ impl Masthead {
             .flex()
             .justify_end()
             .font_family(".ZedMono")
-            .text_size(rems(0.6875))
-            .text_color(colors.text_placeholder)
+            .text_size(rems(0.75))
+            .text_color(colors.text_muted)
             .cursor_pointer()
             .tooltip(Tooltip::text("Show in the file tree"))
             .on_click(cx.listener(|this, _, window, cx| this.reveal_active_path(window, cx)))
@@ -981,6 +1024,37 @@ mod tests {
         assert!(!by_day(17).enabled, "the day after tomorrow may not");
         assert!(by_day(18).enabled, "a future day with a note opens");
         assert!(by_day(18).weekend());
+    }
+
+    #[test]
+    fn the_open_day_is_filled_and_today_is_labelled() {
+        let viewed = Viewed::Day(date(2026, 10, 14));
+        let model = model(Some(viewed), today(), &example_notes());
+        let cell = |day: NaiveDate| *model.cells.iter().find(|cell| cell.date == day).unwrap();
+        let open = cell(date(2026, 10, 14));
+        assert_eq!(open.frame(viewed), CellFrame::Filled);
+        assert_eq!(open.label().as_ref(), "W");
+        let today_cell = cell(today());
+        assert_eq!(
+            today_cell.frame(viewed),
+            CellFrame::Plain,
+            "today is marked by its label, not a second frame"
+        );
+        assert_eq!(today_cell.label().as_ref(), "TODAY");
+
+        let week = Viewed::Week(date(2026, 10, 12));
+        let model = super::model(Some(week), today(), &example_notes());
+        let frames: Vec<_> = model
+            .cells
+            .iter()
+            .filter(|cell| cell.viewed)
+            .map(|cell| cell.frame(week))
+            .collect();
+        assert_eq!(
+            frames,
+            [CellFrame::Outlined; 7],
+            "a week's days are outlined"
+        );
     }
 
     #[test]

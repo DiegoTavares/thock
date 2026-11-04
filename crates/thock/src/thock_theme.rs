@@ -4,8 +4,9 @@
 //! the panels need that a theme has no key for, and the tests that keep the
 //! palette readable.
 
-use gpui::{App, Hsla};
-use ui::ActiveTheme as _;
+use gpui::{App, Div, Hsla, Styled as _, div, px};
+use ui::prelude::*;
+use ui::{Icon, IconName, IconSize};
 
 pub const THOCK_DARK: &str = "Thock Dark";
 pub const THOCK_LIGHT: &str = "Thock Light";
@@ -16,6 +17,46 @@ pub const THOCK_LIGHT: &str = "Thock Light";
 /// is the colour the accent was chosen to stand out against.
 pub fn on_accent_color(cx: &App) -> Hsla {
     cx.theme().colors().background
+}
+
+/// How strongly a pane draws its selected row while focus is elsewhere:
+/// still there, so it is clear where the keys act on coming back, but
+/// quieter than the focused pane's.
+pub const UNFOCUSED_SELECTION_OPACITY: f32 = 0.5;
+
+/// The edge of an unticked task's box, on the page and in the panels. The
+/// theme's border tokens are hairlines for dividers, too faint for a control
+/// a task is ticked with, so the box takes the placeholder ink, which holds
+/// 3:1 on every surface it sits on.
+pub fn unchecked_box_border(cx: &App) -> Hsla {
+    cx.theme().colors().text_placeholder
+}
+
+/// The box a task is ticked with, the same on the page and in the panels:
+/// an outline in [`unchecked_box_border`], or filled with the accent and
+/// checked.
+pub fn task_box(checked: bool, cx: &App) -> Div {
+    let colors = cx.theme().colors();
+    let task_box = div()
+        .size(px(13.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded_xs()
+        .border_1();
+    if checked {
+        task_box
+            .border_color(colors.text_accent)
+            .bg(colors.text_accent)
+            .child(
+                Icon::new(IconName::Check)
+                    .size(IconSize::XSmall)
+                    .color(Color::Custom(on_accent_color(cx))),
+            )
+    } else {
+        task_box.border_color(unchecked_box_border(cx))
+    }
 }
 
 #[cfg(test)]
@@ -107,11 +148,15 @@ mod tests {
             let theme = theme(name);
             let ground = colour(&theme, |theme| &theme.style.colors.background);
             let surface = colour(&theme, |theme| &theme.style.colors.panel_background);
+            let page = colour(&theme, |theme| &theme.style.colors.editor_background);
+            let title_bar = colour(&theme, |theme| &theme.style.colors.title_bar_background);
             let ink = colour(&theme, |theme| &theme.style.colors.text);
             let muted = colour(&theme, |theme| &theme.style.colors.text_muted);
             let dim = colour(&theme, |theme| &theme.style.colors.text_placeholder);
             let amber = colour(&theme, |theme| &theme.style.colors.text_accent);
-            for background in [ground, surface] {
+            // `dim` is also the unticked box's edge and the strip's
+            // future digits, on the page and the masthead.
+            for background in [ground, surface, page, title_bar] {
                 assert!(
                     contrast(ink, background) >= 7.0,
                     "{name}: ink on {background}"
@@ -139,14 +184,15 @@ mod tests {
                 syntax["title.h1"].font_weight.map(|weight| weight.0),
                 Some(600.0)
             );
+            // An H2 is the H1's face a size down, not a second voice.
+            assert_eq!(syntax["title.h2"].font_style, None, "{name}: a roman h2");
             assert_eq!(
-                syntax["title.h2"].font_style,
-                Some(settings::FontStyleContent::Italic)
+                syntax["title.h2"].font_weight.map(|weight| weight.0),
+                Some(600.0)
             );
             assert_eq!(
-                syntax["title.h2"].color.as_deref(),
-                theme.style.colors.text_accent.as_deref(),
-                "{name}: the amber italic h2"
+                syntax["title.h2"].color, syntax["title.h1"].color,
+                "{name}: the h2 takes the h1's ink"
             );
         }
     }

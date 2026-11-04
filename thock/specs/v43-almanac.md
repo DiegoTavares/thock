@@ -89,10 +89,10 @@ masthead sizes are in rems of the UI size and editor sizes are multiples of the 
 | `masthead.date` | Plex Sans SemiBold, uppercase, `tnum` | 0.6875rem (11px) | 15 OCTOBER 2026 · WEEK 42 |
 | `strip.initial` | Plex Sans SemiBold, uppercase | 0.625rem (10px) | T |
 | `strip.numeral` | Plex Sans SemiBold, `tnum` | 0.9375rem (15px) | 15 |
-| `masthead.path` | Lilex Regular | 0.6875rem (11px) | daily / 20261015_Oct-Thu.md |
+| `masthead.path` | Lilex Regular | 0.75rem (12px) | daily / 20261015_Oct-Thu.md |
 | `note.body` | Plex Sans Regular, `tnum` | B (17px), `comfortable` line height (1.618 → 27.5px row) | I need to stop and build some kind of factory. |
 | `note.h1` | Petrona SemiBold | 1.75B (30px), drawn in a 2-row block | **Day planner** |
-| `note.h2` | Petrona Medium Italic | 1.3B (22px), drawn in a 1-row block | *Calendar* |
+| `note.h2` | Petrona SemiBold | 1.3B (22px), drawn in a 1-row block | **Calendar** |
 | `note.h3` | Plex Sans SemiBold (highlight only) | B | Reminder |
 | `note.time` | Plex Sans SemiBold, `tnum` (highlight) | B | 20:29 |
 | `lane.title` | Petrona SemiBold | 1.0625rem (17px) | Soon |
@@ -150,7 +150,7 @@ One Light don't define them, so they look exactly as they do today.
 
 ```json
 "title.h1": { "color": "#ECE7DE", "font_weight": 600 },
-"title.h2": { "color": "#E2A554", "font_style": "italic" },
+"title.h2": { "color": "#ECE7DE", "font_weight": 600 },
 "title.h3": { "color": "#A89F93", "font_weight": 600 }
 ```
 
@@ -178,17 +178,19 @@ on `title_bar.background`, with a 1px `border` below and 20px side padding. It h
   the viewed week and the week after when today falls there, so looking at last week never
   pushes today out of the strip. Each cell is 40px wide with 4px between cells and 20px between
   the two weeks, and holds the initial, the numeral and a 4px dot when a daily note exists for
-  that day. Weekend cells are drawn at 55% opacity.
+  that day. Weekend numerals take the muted ink rather than fading the cell, so every digit
+  keeps 3:1.
 - **Path:** the active item's vault-relative path, with separators shown as ` / `, in
-  `masthead.path` and `text.placeholder`. Clicking it reveals the file in the project panel.
+  `masthead.path` and `text.muted`. Clicking it reveals the file in the project panel.
 
 Cell states:
 
 | State | Treatment |
 | --- | --- |
-| Today | Filled amber, radius 6, text and dot in amberInk |
-| Viewed (not today) | 1px amber border, radius 6 |
-| Has a note | ink numeral, dim dot |
+| Viewed day (a daily note) | Filled amber, radius 6, text and dot in amberInk |
+| Viewed week (a weekly note) | 1px amber border, radius 6, on all seven days |
+| Today | "TODAY" in place of the initial and an amber numeral; filled like any viewed day when open |
+| Has a note | ink numeral (muted on a weekend), dim dot |
 | Past day with no note | dim numeral, no dot, not clickable (tooltip "No note on Mon 12") |
 | Future after tomorrow | dim numeral, not clickable |
 
@@ -434,9 +436,11 @@ three columns to stacked lanes changes what `left`/`right` do, as listed below.
 With vim mode on, digits stay tab switches: the Desk's views take no vim count (`3j`), so `1`–`3`
 never turn into one.
 
-The footer is a single 28px row with a `border` top. It renders the bindings for add, done,
-open, move and today with `ui::KeyBinding`, so it shows the user's actual keys (and the vim keys
-when vim mode is on). It never hard-codes a key.
+The footer has a `border` top and renders the bindings for add, done, open, move and today from
+the keymap, so it shows the user's actual keys (and the vim keys when vim mode is on). It never
+hard-codes a key. Each keystroke of a binding sits in its own keycap in the ink colour, apart
+from the muted label, so a chord like `g space` reads as two keys. When the panel is too narrow
+the hints wrap onto a second line in that order, instead of being cut off.
 
 ## 9. Implementation notes
 

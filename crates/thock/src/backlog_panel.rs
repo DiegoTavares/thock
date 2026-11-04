@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use text::{Bias, Point};
 use ui::prelude::*;
-use ui::{Checkbox, Icon, IconButton, IconSize, Label, LabelLike, ToggleState, Tooltip};
+use ui::{Icon, IconButton, IconSize, Label, LabelLike, Tooltip};
 use util::ResultExt as _;
 use util::rel_path::RelPath;
 use workspace::{OpenOptions, OpenVisible, Workspace};
@@ -45,6 +45,7 @@ use crate::reminder_index::{IndexSection, IndexedReminder, IndexedState, StampKi
 use crate::reminder_service::{self, ReminderEvent, ReminderService};
 use crate::reminders::{ChipState, ReminderClock, ReminderDay, reminder_chip};
 use crate::sync_status;
+use crate::thock_theme::{UNFOCUSED_SELECTION_OPACITY, task_box};
 use crate::vault::{Vault, VaultStatus};
 use crate::vault_sync::{self, VaultSyncService};
 
@@ -225,6 +226,9 @@ pub struct BacklogPanel {
     folded_lanes: HashSet<SectionKind>,
     pending_serialization: Option<Task<()>>,
     selected: Option<TaskSelection>,
+    /// Whether focus was inside the panel at the last render, which decides
+    /// how strongly the selection is drawn.
+    focused: bool,
     /// The folder each linked note lives in, by link target, resolved on
     /// every reparse for the rows' meta lines.
     link_folders: HashMap<String, Option<String>>,
@@ -306,6 +310,12 @@ impl BacklogPanel {
             .map(|selection| (selection.section.id(), selection.index))
     }
 
+    /// Whether the selection was last drawn in full (focused) or dimmed.
+    #[cfg(test)]
+    pub(crate) fn selection_drawn_focused_for_tests(&self) -> bool {
+        self.focused
+    }
+
     /// The row text and meta line of the first Soon task containing
     /// `needle`, for label tests.
     #[cfg(test)]
@@ -344,12 +354,13 @@ impl BacklogPanel {
     pub fn new(
         workspace: &mut Workspace,
         folds: BacklogFolds,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         let project = workspace.project().clone();
         let weak_workspace = workspace.weak_handle();
         cx.new(|cx| {
+            let focus_handle = cx.focus_handle();
             let project_subscription = cx.subscribe(&project, |this: &mut Self, _, event, cx| {
                 if matches!(
                     event,
@@ -381,10 +392,13 @@ impl BacklogPanel {
             // Reminder chips relabel when the day turns.
             let reminder_day = ReminderDay::global(cx);
             subscriptions.push(cx.observe(&reminder_day, |_, _, cx| cx.notify()));
+            // The selection's strength follows focus.
+            subscriptions.push(cx.on_focus_in(&focus_handle, window, |_, _, cx| cx.notify()));
+            subscriptions.push(cx.on_focus_out(&focus_handle, window, |_, _, _, cx| cx.notify()));
             let mut this = Self {
                 workspace: weak_workspace,
                 project,
-                focus_handle: cx.focus_handle(),
+                focus_handle,
                 view: BacklogView::Open,
                 row_above: false,
                 vault_status: VaultStatus::NotAVault,
@@ -399,6 +413,7 @@ impl BacklogPanel {
                     .unwrap_or_else(|| HashSet::from_iter([SectionKind::Someday])),
                 pending_serialization: None,
                 selected: None,
+                focused: false,
                 link_folders: HashMap::default(),
                 scroll_handles: std::array::from_fn(|_| ScrollHandle::new()),
                 copy_flash: None,
@@ -1740,11 +1755,20 @@ impl BacklogPanel {
 
     /// A row's background: the copy flash outranks the selection highlight, so
     /// the pulse is visible even on the row the cursor is already sitting on.
+    /// While focus is elsewhere the selection stays drawn, dimmed, so it is
+    /// clear where the keys will act on coming back.
     fn row_background(&self, row: TaskSelection, cx: &Context<Self>) -> Option<Hsla> {
         if self.copy_flash == Some(row) {
             return Some(cx.theme().colors().text_accent.alpha(0.2));
         }
-        (self.selection() == Some(row)).then(|| cx.theme().colors().element_selected)
+        let selected = cx.theme().colors().element_selected;
+        (self.selection() == Some(row)).then(|| {
+            if self.focused {
+                selected
+            } else {
+                selected.opacity(UNFOCUSED_SELECTION_OPACITY)
+            }
+        })
     }
 
     /// What a task row says under its text (V43 §8.3, V45 §8.5): its
@@ -1812,6 +1836,7 @@ impl BacklogPanel {
         let selected = self.selection() == Some(row);
         let background = self.row_background(row, cx);
         h_flex()
+            .relative()
             .w_full()
             .group("backlog-row")
             .gap_2()
@@ -1819,10 +1844,10 @@ impl BacklogPanel {
             .pr_2()
             .py_1()
             .border_l_2()
-            .border_color(if selected {
-                colors.text_accent
-            } else {
-                gpui::transparent_black()
+            .border_color(match (selected, self.focused) {
+                (true, true) => colors.text_accent,
+                (true, false) => colors.text_accent.opacity(UNFOCUSED_SELECTION_OPACITY),
+                (false, _) => gpui::transparent_black(),
             })
             .when_some(background, |row, background| row.bg(background))
     }
@@ -1858,11 +1883,13 @@ impl BacklogPanel {
                 MoveBacklogTaskRight.boxed_clone(),
             ),
         };
+        // The tools float over the row's right end on hover instead of
+        // holding a column, so the text runs the full width of the row.
+        let row_background = self.row_background(TaskSelection { section, index }, cx);
         let tools = h_flex()
-            .flex_none()
             .gap_0p5()
-            .opacity(0.)
-            .group_hover("backlog-row", |this| this.opacity(1.))
+            .rounded_sm()
+            .when_some(row_background, |this, background| this.bg(background))
             .child(
                 IconButton::new(
                     ElementId::Name(format!("backlog-move-{section_key}-{index}").into()),
@@ -1953,12 +1980,16 @@ impl BacklogPanel {
         self.row_frame(TaskSelection { section, index }, cx)
             .items_start()
             .child(
-                div().pt_0p5().child(
-                    Checkbox::new(
-                        ElementId::Name(format!("backlog-check-{section_key}-{index}").into()),
-                        ToggleState::Unselected,
-                    )
-                    .disabled(self.mark_in_flight)
+                div()
+                    .id(ElementId::Name(
+                        format!("backlog-check-{section_key}-{index}").into(),
+                    ))
+                    .flex_none()
+                    .size(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(task_box(false, cx))
                     .tooltip({
                         let focus_handle = self.focus_handle.clone();
                         move |_, cx| {
@@ -1970,14 +2001,25 @@ impl BacklogPanel {
                             )
                         }
                     })
-                    .on_click(cx.listener({
-                        let task_text = task_text.clone();
-                        move |this, _, window, cx| {
-                            this.select_row(section, index, cx);
-                            this.mark_done(section, task_line, task_text.clone(), window, cx);
+                    .map(|this| {
+                        if self.mark_in_flight {
+                            this.cursor_not_allowed()
+                        } else {
+                            this.cursor_pointer().on_click(cx.listener({
+                                let task_text = task_text.clone();
+                                move |this, _, window, cx| {
+                                    this.select_row(section, index, cx);
+                                    this.mark_done(
+                                        section,
+                                        task_line,
+                                        task_text.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            }))
                         }
-                    })),
-                ),
+                    }),
             )
             .child(
                 v_flex()
@@ -1993,6 +2035,7 @@ impl BacklogPanel {
                             .text_size(rems(0.875))
                             .text_color(colors.text)
                             .line_clamp(2)
+                            .text_ellipsis()
                             .child(self.render_task_text(
                                 ElementId::Name(
                                     format!("backlog-text-{section_key}-{index}").into(),
@@ -2010,6 +2053,7 @@ impl BacklogPanel {
                                 } else {
                                     colors.text_placeholder
                                 })
+                                .truncate()
                                 .child(SharedString::from(meta)),
                         )
                     })
@@ -2029,7 +2073,17 @@ impl BacklogPanel {
                         }
                     })),
             )
-            .child(tools)
+            .child(
+                div()
+                    .absolute()
+                    .top_0p5()
+                    .right_1()
+                    .rounded_sm()
+                    .bg(colors.panel_background)
+                    .opacity(0.)
+                    .group_hover("backlog-row", |this| this.opacity(1.))
+                    .child(tools),
+            )
             .into_any_element()
     }
 
@@ -2416,12 +2470,12 @@ impl BacklogPanel {
             .into_any_element()
     }
 
-    /// The connector rows kept at the top of the view (V32 §4.2): Gmail,
-    /// Inbox, Readwise, and the phone, each only while it needs the user.
+    /// The connector banner kept at the top of the view (V32 §4.2): Gmail,
+    /// Inbox, Readwise, and the phone, only while one needs the user.
     /// Everything else lives in the sync icon's popover.
-    fn render_status_rows(&self, cx: &App) -> Vec<AnyElement> {
+    fn render_status_banner(&self, cx: &App) -> Option<AnyElement> {
         let gmail = self.gmail_service.as_ref().map(|service| service.read(cx));
-        sync_status::inline_statuses([
+        let statuses = sync_status::inline_statuses([
             gmail.and_then(sync_status::gmail_status),
             self.inbox_service
                 .as_ref()
@@ -2432,10 +2486,8 @@ impl BacklogPanel {
             self.vault_sync_service
                 .as_ref()
                 .and_then(|service| sync_status::phone_status(service.read(cx))),
-        ])
-        .iter()
-        .map(|status| sync_status::render_inline_row(status, cx))
-        .collect()
+        ]);
+        sync_status::render_inline_banner(&statuses, cx)
     }
 
     fn render_body(&self, cx: &Context<Self>) -> AnyElement {
@@ -2599,7 +2651,8 @@ fn restore_hidden_suffix(original: &str, edited: &str) -> String {
 }
 
 impl Render for BacklogPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.focused = self.focus_handle.contains_focused(window, cx);
         let mut key_context = KeyContext::new_with_defaults();
         key_context.add("ThockBacklogPanel");
         // The inline editor is a descendant of this element, so the view's
@@ -2632,7 +2685,7 @@ impl Render for BacklogPanel {
             .on_action(cx.listener(Self::collapse_category))
             .on_action(cx.listener(Self::expand_category))
             .size_full()
-            .children(self.render_status_rows(cx))
+            .children(self.render_status_banner(cx))
             .child(self.render_body(cx))
     }
 }

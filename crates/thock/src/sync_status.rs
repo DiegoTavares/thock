@@ -125,6 +125,7 @@ pub enum ActionKind {
     ChoosePlannerHeading,
     OpenInbox,
     RetryReminders,
+    ShowSyncStatus,
 }
 
 impl ActionKind {
@@ -143,6 +144,7 @@ impl ActionKind {
             Self::ChoosePlannerHeading => ChoosePlannerHeading.boxed_clone(),
             Self::OpenInbox => OpenInbox.boxed_clone(),
             Self::RetryReminders => RetryReminders.boxed_clone(),
+            Self::ShowSyncStatus => ToggleSyncStatus.boxed_clone(),
         }
     }
 
@@ -712,16 +714,11 @@ pub(crate) fn format_ago(elapsed: Duration) -> String {
     }
 }
 
-/// Where a row is drawn, which decides its shape.
+/// Where a popover row stands relative to the keyboard cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RowPlacement {
-    /// At the top of a panel: the connector's name prefixes the summary.
-    Inline,
-    /// In the popover: a name column, and the keyboard cursor.
-    Popover {
-        selected: bool,
-        selected_action: usize,
-    },
+pub struct RowPlacement {
+    pub selected: bool,
+    pub selected_action: usize,
 }
 
 type RunAction = Rc<dyn Fn(&ConnectorAction, &mut Window, &mut App)>;
@@ -735,19 +732,132 @@ fn attention_color(attention: Attention) -> Color {
     }
 }
 
-/// A panel's inline row: the status with its name, and its buttons
-/// dispatching their actions directly.
-pub fn render_inline_row(status: &ConnectorStatus, cx: &App) -> AnyElement {
-    render_connector_row(
-        status,
-        RowPlacement::Inline,
-        Rc::new(|action, window, cx| action.dispatch(window, cx)),
-        cx,
+/// What a panel says at its top about the connectors that need the user:
+/// one line however many there are, so a broken sign-in never pushes the
+/// panel's own content down a row per connector.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineBanner {
+    pub text: SharedString,
+    /// The tooltip: each connector's own sentence and detail.
+    pub detail: Option<SharedString>,
+    pub attention: Attention,
+    /// The connector's actions, or for several the fix they share, or the
+    /// popover that lists them all.
+    pub actions: Vec<ConnectorAction>,
+}
+
+impl InlineBanner {
+    /// `None` when nothing needs the user.
+    pub fn from_statuses(statuses: &[ConnectorStatus]) -> Option<Self> {
+        let statuses: Vec<&ConnectorStatus> = statuses
+            .iter()
+            .filter(|status| status.needs_user())
+            .collect();
+        match statuses.as_slice() {
+            [] => None,
+            [status] => Some(Self {
+                text: format!("{} · {}", status.connector.name(), status.summary).into(),
+                detail: status.detail.clone(),
+                attention: status.attention,
+                actions: status.actions.clone(),
+            }),
+            [first, .., last] => {
+                let names: Vec<&str> = statuses
+                    .iter()
+                    .map(|status| status.connector.name())
+                    .collect();
+                let (head, _) = names.split_at(names.len() - 1);
+                let text = format!("{} and {} need you", head.join(", "), last.connector.name());
+                let detail = statuses
+                    .iter()
+                    .map(|status| {
+                        let line = format!("{} · {}", status.connector.name(), status.summary);
+                        match &status.detail {
+                            Some(detail) => format!("{line}: {detail}"),
+                            None => line,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let shared = first.primary_action().filter(|primary| {
+                    statuses.iter().all(|status| {
+                        status
+                            .primary_action()
+                            .is_some_and(|action| action.kind == primary.kind)
+                    })
+                });
+                let action = match shared {
+                    Some(action) => action.clone(),
+                    None => ConnectorAction::new(ActionKind::ShowSyncStatus, "Review"),
+                };
+                Some(Self {
+                    text: text.into(),
+                    detail: Some(detail.into()),
+                    attention: statuses
+                        .iter()
+                        .map(|status| status.attention)
+                        .max()
+                        .unwrap_or_default(),
+                    actions: vec![action],
+                })
+            }
+        }
+    }
+}
+
+/// A panel's banner for the connectors that need the user (V32 §4.2):
+/// a quiet line in the panel's own surface, the state carried by a small
+/// warning mark rather than a red sentence. The text truncates before the
+/// buttons do, so an action is never cut off at the window's edge.
+pub fn render_inline_banner(statuses: &[ConnectorStatus], cx: &App) -> Option<AnyElement> {
+    let banner = InlineBanner::from_statuses(statuses)?;
+    let mark = match banner.attention {
+        Attention::Waiting => Color::Accent,
+        _ => Color::Warning,
+    };
+    let text = div()
+        .id("thock-sync-banner-text")
+        .flex_1()
+        .min_w_0()
+        .child(
+            Label::new(banner.text.clone())
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .truncate(),
+        )
+        .tooltip(Tooltip::text(banner.detail.unwrap_or(banner.text)));
+    let buttons = banner
+        .actions
+        .into_iter()
+        .enumerate()
+        .map(|(index, action)| {
+            Button::new(
+                SharedString::from(format!("thock-sync-banner-action-{index}")),
+                action.label.clone(),
+            )
+            .label_size(LabelSize::Small)
+            .on_click(move |_, window, cx| action.dispatch(window, cx))
+        });
+    Some(
+        h_flex()
+            .px_2()
+            .py_0p5()
+            .gap_1p5()
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                Icon::new(IconName::Warning)
+                    .size(IconSize::XSmall)
+                    .color(mark),
+            )
+            .child(text)
+            .child(h_flex().flex_none().gap_1().children(buttons))
+            .into_any_element(),
     )
 }
 
-/// The one row renderer behind the popover and the panels. `run` is what a
-/// button does with its action, so the popover can close itself after.
+/// One connector's row in the popover. `run` is what a button does with
+/// its action, so the popover can close itself after.
 pub fn render_connector_row(
     status: &ConnectorStatus,
     placement: RowPlacement,
@@ -756,17 +866,10 @@ pub fn render_connector_row(
 ) -> AnyElement {
     let name = status.connector.name();
     let color = attention_color(status.attention);
-    let (summary_text, selected_action) = match placement {
-        RowPlacement::Inline => (format!("{name} · {}", status.summary), None),
-        RowPlacement::Popover {
-            selected,
-            selected_action,
-        } => (
-            status.summary.to_string(),
-            selected.then_some(selected_action),
-        ),
-    };
-    let summary = Label::new(summary_text).size(LabelSize::Small).color(color);
+    let selected_action = placement.selected.then_some(placement.selected_action);
+    let summary = Label::new(status.summary.clone())
+        .size(LabelSize::Small)
+        .color(color);
     let summary = match &status.detail {
         Some(detail) => div()
             .id(SharedString::from(format!("thock-sync-{name}-summary")))
@@ -786,36 +889,23 @@ pub fn render_connector_row(
         .toggle_state(selected_action == Some(index))
         .on_click(move |_, window, cx| run(&action, window, cx))
     });
-
-    match placement {
-        RowPlacement::Inline => h_flex()
-            .px_2()
-            .py_1()
-            .gap_2()
-            .justify_between()
-            .border_b_1()
-            .border_color(cx.theme().colors().border_variant)
-            .child(summary)
-            .child(h_flex().gap_1().children(buttons))
-            .into_any_element(),
-        RowPlacement::Popover { selected, .. } => h_flex()
-            .px_2()
-            .py_1()
-            .gap_2()
-            .rounded_sm()
-            .when(selected, |this| {
-                this.bg(cx.theme().colors().element_selected)
-            })
-            .child(
-                div()
-                    .w(px(72.))
-                    .flex_none()
-                    .child(Label::new(name).size(LabelSize::Small)),
-            )
-            .child(div().flex_1().min_w_0().child(summary))
-            .child(h_flex().flex_none().gap_1().children(buttons))
-            .into_any_element(),
-    }
+    h_flex()
+        .px_2()
+        .py_1()
+        .gap_2()
+        .rounded_sm()
+        .when(placement.selected, |this| {
+            this.bg(cx.theme().colors().element_selected)
+        })
+        .child(
+            div()
+                .w(px(72.))
+                .flex_none()
+                .child(Label::new(name).size(LabelSize::Small)),
+        )
+        .child(div().flex_1().min_w_0().child(summary))
+        .child(h_flex().flex_none().gap_1().children(buttons))
+        .into_any_element()
 }
 
 /// The status-bar item: hidden until a connector has a config, then an icon
@@ -1243,7 +1333,7 @@ impl Render for SyncStatusPopover {
                     .min(status.actions.len().saturating_sub(1));
                 render_connector_row(
                     status,
-                    RowPlacement::Popover {
+                    RowPlacement {
                         selected,
                         selected_action,
                     },
@@ -1650,6 +1740,45 @@ mod tests {
                  daily/2026-10-02.md: held back, the vault is at its quota"
             )
         );
+    }
+
+    #[test]
+    fn the_banner_is_one_line_however_many_connectors_need_the_user() {
+        assert_eq!(
+            InlineBanner::from_statuses(&[
+                status_for_gmail(&synced(), &ArchiveStatus::Off).unwrap()
+            ]),
+            None
+        );
+
+        let gmail = status_for_gmail(&SyncState::Disconnected, &ArchiveStatus::Off).unwrap();
+        let single = InlineBanner::from_statuses(std::slice::from_ref(&gmail)).unwrap();
+        assert_eq!(single.text.as_ref(), "Gmail · sign-in needed");
+        assert_eq!(single.actions, gmail.actions);
+
+        // Both lost the same Google sign-in, so one Reconnect fixes both.
+        let inbox = status_for_inbox(&SyncState::Disconnected, 0, false).unwrap();
+        let shared = InlineBanner::from_statuses(&[gmail.clone(), inbox]).unwrap();
+        assert_eq!(shared.text.as_ref(), "Gmail and Inbox need you");
+        assert_eq!(shared.attention, Attention::Error);
+        assert_eq!(
+            shared.detail.as_deref(),
+            Some("Gmail · sign-in needed\nInbox · sign-in expired")
+        );
+        let kinds: Vec<_> = shared.actions.iter().map(|action| action.kind).collect();
+        assert_eq!(kinds, [ActionKind::ConnectGoogleWorkspace]);
+
+        // Different fixes: the banner points at the popover that lists them.
+        let readwise = status_for_readwise(&failing("boom"), ReadwiseExtras::default()).unwrap();
+        let mixed = InlineBanner::from_statuses(&[
+            gmail,
+            status_for_inbox(&synced(), 2, false).unwrap(),
+            readwise,
+        ])
+        .unwrap();
+        assert_eq!(mixed.text.as_ref(), "Gmail, Inbox and Readwise need you");
+        let kinds: Vec<_> = mixed.actions.iter().map(|action| action.kind).collect();
+        assert_eq!(kinds, [ActionKind::ShowSyncStatus]);
     }
 
     #[test]

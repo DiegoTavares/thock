@@ -22,18 +22,19 @@ use anyhow::Result;
 use chrono::{Local, NaiveDate, NaiveDateTime, Timelike as _};
 use gpui::{
     Action, AnyElement, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, KeyContext, Pixels, Subscription, Task, WeakEntity, Window, actions,
-    div, px, rems,
+    Focusable, FontWeight, KeyContext, KeybindingKeystroke, Pixels, Subscription, Task, WeakEntity,
+    Window, actions, div, px, rems,
 };
 use language::{Buffer, BufferEvent};
 use menu::{Confirm, SelectPrevious};
 use project::Project;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use settings::SettingsStore;
 use std::sync::Arc;
 use std::time::Duration;
 use ui::prelude::*;
-use ui::{KeyBinding, Label, LabelSize};
+use ui::{Label, LabelSize, PlatformStyle, render_keybinding_keystroke};
 use util::ResultExt as _;
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -724,67 +725,119 @@ impl DeskPanel {
 
     /// The key hints under the Backlog tab (§8.4): rendered from the
     /// keymap, so they show the user's actual keys.
-    fn render_footer(&self, cx: &Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors();
+    fn render_footer(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let focus = self.backlog.read(cx).focus_handle(cx);
-        let hint = |action: &dyn Action, label: &'static str| {
-            h_flex()
-                .gap_1()
-                .items_center()
-                .child(KeyBinding::for_action_in(action, &focus, cx).size(rems(0.6875)))
-                .child(
-                    Label::new(label)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                )
-        };
-        h_flex()
-            .flex_none()
-            .h(px(28.))
-            .px_3()
-            .gap_3()
-            .items_center()
-            .bg(colors.panel_background)
-            .border_t_1()
-            .border_color(colors.border)
-            .child(hint(&AddBacklogTask, "add"))
-            .child(hint(&CompleteBacklogTask, "done"))
-            .child(hint(&RevealBacklogTask, "open"))
-            .child(hint(&MoveBacklogTaskRight, "to Someday"))
-            .child(hint(&MoveBacklogTaskToToday, "to today"))
-            .into_any_element()
+        render_hints(&backlog_hints(), &focus, window, cx)
     }
 
     /// The key hints under the Reminders tab.
-    fn render_reminders_footer(&self, cx: &Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors();
+    fn render_reminders_footer(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let focus = self.reminders.read(cx).focus_handle(cx);
-        let hint = |action: &dyn Action, label: &'static str| {
+        render_hints(&reminder_hints(), &focus, window, cx)
+    }
+}
+
+/// The Backlog footer's hints, most used first: when the panel is narrow
+/// the last ones wrap onto a second line rather than being cut off.
+fn backlog_hints() -> [(Box<dyn Action>, &'static str); 5] {
+    [
+        (AddBacklogTask.boxed_clone(), "add"),
+        (CompleteBacklogTask.boxed_clone(), "done"),
+        (RevealBacklogTask.boxed_clone(), "open"),
+        (MoveBacklogTaskRight.boxed_clone(), "to Someday"),
+        (MoveBacklogTaskToToday.boxed_clone(), "to today"),
+    ]
+}
+
+fn reminder_hints() -> [(Box<dyn Action>, &'static str); 4] {
+    [
+        (CloseReminder.boxed_clone(), "done"),
+        (RescheduleReminder.boxed_clone(), "later"),
+        (DropReminder.boxed_clone(), "drop"),
+        (NewReminder.boxed_clone(), "new"),
+    ]
+}
+
+/// The keys bound to `action` where `focus` is, one per keystroke of a
+/// chord; empty when it has no binding, which drops its hint.
+fn hint_keystrokes(
+    action: &dyn Action,
+    focus: &FocusHandle,
+    window: &Window,
+) -> Vec<KeybindingKeystroke> {
+    window
+        .highest_precedence_binding_for_action_in(action, focus)
+        .or_else(|| window.highest_precedence_binding_for_action(action))
+        .map(|binding| binding.keystrokes().to_vec())
+        .unwrap_or_default()
+}
+
+/// A footer of key hints: each key in its own keycap, so a chord like
+/// `g space` reads as two keys and never runs into the muted label after
+/// it. Hints wrap rather than clip.
+fn render_hints(
+    hints: &[(Box<dyn Action>, &'static str)],
+    focus: &FocusHandle,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
+    let colors = cx.theme().colors();
+    let vim_mode = cx
+        .global::<SettingsStore>()
+        .merged_settings()
+        .vim_mode
+        .unwrap_or(false);
+    let key_size = AbsoluteLength::from(rems(0.75));
+    let hints = hints.iter().filter_map(|(action, label)| {
+        let keystrokes = hint_keystrokes(action.as_ref(), focus, window);
+        if keystrokes.is_empty() {
+            return None;
+        }
+        let keycaps = keystrokes.iter().map(|keystroke| {
             h_flex()
+                .flex_none()
+                .h(px(18.))
+                .min_w(px(18.))
+                .px_1()
+                .justify_center()
+                .rounded_sm()
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.element_background)
+                .children(render_keybinding_keystroke(
+                    keystroke,
+                    Some(Color::Default),
+                    key_size,
+                    PlatformStyle::platform(),
+                    vim_mode,
+                ))
+        });
+        Some(
+            h_flex()
+                .flex_none()
                 .gap_1()
                 .items_center()
-                .child(KeyBinding::for_action_in(action, &focus, cx).size(rems(0.6875)))
+                .child(h_flex().gap_0p5().children(keycaps))
                 .child(
-                    Label::new(label)
-                        .size(LabelSize::XSmall)
+                    Label::new(*label)
+                        .size(LabelSize::Small)
                         .color(Color::Muted),
-                )
-        };
-        h_flex()
-            .flex_none()
-            .h(px(28.))
-            .px_3()
-            .gap_3()
-            .items_center()
-            .bg(colors.panel_background)
-            .border_t_1()
-            .border_color(colors.border)
-            .child(hint(&CloseReminder, "done"))
-            .child(hint(&RescheduleReminder, "later"))
-            .child(hint(&DropReminder, "drop"))
-            .child(hint(&NewReminder, "new"))
-            .into_any_element()
-    }
+                ),
+        )
+    });
+    h_flex()
+        .flex_none()
+        .flex_wrap()
+        .px_3()
+        .py_1p5()
+        .gap_x_3()
+        .gap_y_1()
+        .items_center()
+        .bg(colors.panel_background)
+        .border_t_1()
+        .border_color(colors.border)
+        .children(hints)
+        .into_any_element()
 }
 
 impl Focusable for DeskPanel {
@@ -800,7 +853,7 @@ impl Focusable for DeskPanel {
 }
 
 impl Render for DeskPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let card = self.card();
         let has_card = card.is_some();
         self.backlog
@@ -836,10 +889,10 @@ impl Render for DeskPanel {
                     }),
             )
             .when(self.tab == DeskTab::Backlog, |this| {
-                this.child(self.render_footer(cx))
+                this.child(self.render_footer(window, cx))
             })
             .when(self.tab == DeskTab::Reminders, |this| {
-                this.child(self.render_reminders_footer(cx))
+                this.child(self.render_reminders_footer(window, cx))
             })
     }
 }
@@ -1501,5 +1554,89 @@ mod tests {
         setup.cx.simulate_keystrokes("escape");
         setup.cx.run_until_parked();
         assert!(!desk_focused(&mut setup));
+    }
+
+    #[gpui::test]
+    async fn the_footer_gives_each_key_of_a_chord_its_own_keycap(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, true).await;
+        let desk = setup.desk.clone();
+        let hints = setup.cx.update(|window, cx| {
+            let focus = desk.read(cx).backlog.read(cx).focus_handle(cx);
+            backlog_hints()
+                .iter()
+                .map(|(action, label)| {
+                    let keys: Vec<String> = hint_keystrokes(action.as_ref(), &focus, window)
+                        .iter()
+                        .map(|keystroke| keystroke.key().to_string())
+                        .collect();
+                    (*label, keys)
+                })
+                .collect::<Vec<_>>()
+        });
+        let labels: Vec<_> = hints.iter().map(|(label, _)| *label).collect();
+        assert_eq!(
+            labels,
+            ["add", "done", "open", "to Someday", "to today"],
+            "most used first, so a wrap moves the least used"
+        );
+        let open = hints
+            .iter()
+            .find(|(label, _)| *label == "open")
+            .map(|(_, keys)| keys.clone());
+        assert_eq!(open, Some(vec!["g".to_string(), "space".to_string()]));
+        assert!(
+            hints.iter().all(|(_, keys)| !keys.is_empty()),
+            "every hint has a binding: {hints:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_selection_stays_drawn_while_the_note_has_focus(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        let project_path = setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            workspace
+                .project()
+                .read(cx)
+                .find_project_path(setup.root.join("backlog.md"), cx)
+                .unwrap()
+        });
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.open_path(project_path, None, true, window, cx)
+            })
+            .await
+            .unwrap();
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.focus_panel::<DeskPanel>(window, cx);
+            });
+        setup.cx.run_until_parked();
+        setup.cx.simulate_keystrokes("down down");
+        setup.cx.run_until_parked();
+        let selection = selected(&setup);
+        assert!(selection.is_some());
+        let drawn_focused = |setup: &Setup| {
+            setup.desk.read_with(&setup.cx, |desk, cx| {
+                desk.backlog.read(cx).selection_drawn_focused_for_tests()
+            })
+        };
+        assert!(drawn_focused(&setup));
+
+        setup.cx.simulate_keystrokes("escape");
+        setup.cx.run_until_parked();
+        assert!(!desk_focused(&mut setup));
+        assert_eq!(selected(&setup), selection, "the cursor survives leaving");
+        assert!(!drawn_focused(&setup), "and is drawn dimmed meanwhile");
+
+        setup
+            .workspace
+            .update_in(&mut setup.cx, |workspace, window, cx| {
+                workspace.focus_panel::<DeskPanel>(window, cx);
+            });
+        setup.cx.run_until_parked();
+        assert_eq!(selected(&setup), selection);
+        assert!(drawn_focused(&setup), "in full again on coming back");
     }
 }

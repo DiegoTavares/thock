@@ -23,6 +23,9 @@ use ui::{
 use util::ResultExt as _;
 
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
+/// The line on a tide mark's inner edge, so a tucked-away panel reads as
+/// there on both sides and in either theme.
+const TIDE_LINE_WIDTH: Pixels = px(2.);
 
 pub enum PanelEvent {
     ZoomIn,
@@ -530,21 +533,20 @@ impl Dock {
     }
 
     /// The tide mark: a strip of the panel's background at the window's
-    /// edge, with a line on its inner edge while something waits. A click
-    /// focuses the panel, which brings it back.
+    /// edge with a line on its inner edge, the same on either side. While
+    /// something waits, the top of the line turns accent. A click focuses
+    /// the panel, which brings it back.
     fn render_tide_mark(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let colors = cx.theme().colors();
-        let waiting_line = self.tide_waiting.then(|| {
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .w(px(2.))
+        let inner_edge = |this: Div| match self.position {
+            DockPosition::Left => this.right_0(),
+            _ => this.left_0(),
+        };
+        let line = inner_edge(div().absolute().top_0().bottom_0().w(TIDE_LINE_WIDTH))
+            .bg(colors.text_placeholder);
+        let waiting = self.tide_waiting.then(|| {
+            inner_edge(div().absolute().top_0().h(px(48.)).w(TIDE_LINE_WIDTH))
                 .bg(colors.text_accent)
-                .map(|this| match self.position {
-                    DockPosition::Left => this.right_0(),
-                    _ => this.left_0(),
-                })
         });
         div()
             .id("tide-mark")
@@ -559,7 +561,8 @@ impl Dock {
                     panel.activation_focus_handle(cx).focus(window, cx);
                 }
             }))
-            .children(waiting_line)
+            .child(line)
+            .children(waiting)
     }
 
     fn resizable(&self, cx: &App) -> bool {

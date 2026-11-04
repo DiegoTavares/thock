@@ -29,7 +29,7 @@ use crate::reminders::{
     ChipState, DayChanged, ReminderClock, ReminderDay, ReminderSettings, is_reminder_note,
     load_reminder_settings, reminder_chip,
 };
-use crate::thock_theme::on_accent_color;
+use crate::thock_theme::{on_accent_color, task_box};
 use crate::vault::{Vault, VaultStatus};
 use anyhow::Context as _;
 use chrono::NaiveDate;
@@ -164,6 +164,10 @@ struct HeadingEntry {
     start: Anchor,
     level: u8,
     text: String,
+    /// The heading follows a `___` rule with only blank lines between. The
+    /// rule already sets the section apart, so an H1 there takes no row of
+    /// breathing room above it.
+    after_rule: bool,
     /// False once the heading is gone from the plan; the entry stays only
     /// until its blocks are removed.
     live: bool,
@@ -958,13 +962,21 @@ fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
         return;
     };
     let buffer_snapshot = editor.buffer().read(cx).snapshot(cx);
-    let found: Vec<(Anchor, u8, String)> = addon
+    let rule_rows: HashSet<u32> = addon
+        .spans
+        .iter()
+        .filter(|span| span.kind == SpanKind::Rule)
+        .map(|span| span.range.start.to_point(&buffer_snapshot).row)
+        .collect();
+    let found: Vec<(Anchor, u8, String, bool)> = addon
         .spans
         .iter()
         .filter_map(|span| match span.kind {
             SpanKind::Heading(level @ (1 | 2)) => {
                 let text: String = buffer_snapshot.text_for_range(span.range.clone()).collect();
-                Some((span.range.start, level, text))
+                let row = span.range.start.to_point(&buffer_snapshot).row;
+                let after_rule = follows_rule(row, &rule_rows, &buffer_snapshot);
+                Some((span.range.start, level, text, after_rule))
             }
             _ => None,
         })
@@ -974,21 +986,27 @@ fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
     if let Some(addon) = editor.addon_mut::<MarkdownConcealAddon>() {
         previous = std::mem::take(&mut addon.headings);
     }
-    let previous_keys: Vec<(MultiBufferOffset, u8, String)> = previous
+    let previous_keys: Vec<(MultiBufferOffset, u8, String, bool)> = previous
         .iter()
         .map(|entry| {
             (
                 entry.start.to_offset(&buffer_snapshot),
                 entry.level,
                 entry.text.clone(),
+                entry.after_rule,
             )
         })
         .collect();
     let mut carried: Vec<Option<HeadingEntry>> = previous.into_iter().map(Some).collect();
     let headings: Vec<HeadingEntry> = found
         .into_iter()
-        .map(|(start, level, text)| {
-            let key = (start.to_offset(&buffer_snapshot), level, text.clone());
+        .map(|(start, level, text, after_rule)| {
+            let key = (
+                start.to_offset(&buffer_snapshot),
+                level,
+                text.clone(),
+                after_rule,
+            );
             let kept = previous_keys
                 .iter()
                 .position(|previous| *previous == key)
@@ -997,6 +1015,7 @@ fn refresh_headings(editor: &mut Editor, cx: &mut Context<Editor>) {
                 start,
                 level,
                 text,
+                after_rule,
                 live: true,
                 block: None,
                 spacer: None,
@@ -1059,7 +1078,8 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
             .iter()
             .any(|&(first, last)| row >= first && row <= last);
         let want_block = enabled && entry.live && !is_revealed;
-        let want_spacer = enabled && entry.live && is_revealed && entry.level == 1;
+        let want_spacer =
+            enabled && entry.live && is_revealed && heading_rows(entry.level, entry.after_rule) > 1;
         let mut block = still_held(entry.block);
         if entry.block.is_some() && block.is_none() {
             swept.push((index, HeadingBlock::Replace));
@@ -1149,9 +1169,17 @@ fn apply_heading_blocks(editor: &mut Editor, cx: &mut Context<Editor>) {
 }
 
 /// Rows an H1 and an H2 block take (§7.2): the H1's first row is breathing
-/// room above the text.
-fn heading_rows(level: u8) -> u32 {
-    if level == 1 { 2 } else { 1 }
+/// room above the text, unless a rule just above already gives it.
+fn heading_rows(level: u8, after_rule: bool) -> u32 {
+    if level == 1 && !after_rule { 2 } else { 1 }
+}
+
+/// Whether the line above `row`, past any blank lines, is a `___` rule.
+fn follows_rule(row: u32, rule_rows: &HashSet<u32>, buffer_snapshot: &MultiBufferSnapshot) -> bool {
+    (0..row)
+        .rev()
+        .find(|row| !buffer_snapshot.is_line_blank(MultiBufferRow(*row)))
+        .is_some_and(|row| rule_rows.contains(&row))
 }
 
 /// The text of buffer row `row`, anchored inward so an edit at either end
@@ -1174,7 +1202,7 @@ fn heading_block(
     let level = entry.level;
     BlockProperties {
         placement: BlockPlacement::Replace(line.start..=line.end),
-        height: Some(heading_rows(level)),
+        height: Some(heading_rows(level, entry.after_rule)),
         style: BlockStyle::Flex,
         priority: 0,
         render: Arc::new(move |block| {
@@ -1196,8 +1224,8 @@ fn spacer_block(line: Anchor) -> BlockProperties<Anchor> {
 
 /// Draws a heading in the heading face at its level's size (§4.2), aligned
 /// with the body text and coloured, weighted and slanted by the theme's
-/// `title.hN` style — SemiBold for an H1 and Medium Italic for an H2 when
-/// the theme says nothing. The face is read from settings here rather than
+/// `title.hN` style — SemiBold for both when the theme says nothing, so an
+/// H2 reads as the H1's face a size down. The face is read from settings here rather than
 /// captured, so a settings change shows without rebuilding the blocks. The
 /// text goes through `markdown_text`, so a link, `**strong**` or `` `code` ``
 /// inside a heading looks the same as in a pane row.
@@ -1213,18 +1241,11 @@ fn render_heading_block(
     let rows = block.height;
     let rem_size = block.window.rem_size();
     let buffer_size = block.editor_style.text.font_size.to_pixels(rem_size);
-    let (scale, default_weight, default_italic) = if level == 1 {
-        (1.75, FontWeight::SEMIBOLD, false)
-    } else {
-        (1.3, FontWeight::MEDIUM, true)
-    };
+    let scale = if level == 1 { 1.75 } else { 1.3 };
     let app: &mut App = block.app;
     let family = ThockSettings::get_global(app).heading_family();
     let style = heading_style(level, app);
-    let italic = match style.font_style {
-        Some(font_style) => font_style == FontStyle::Italic,
-        None => default_italic,
-    };
+    let italic = style.font_style == Some(FontStyle::Italic);
     let id = ElementId::Name(SharedString::from(format!("thock-heading-{}", text)));
     let content = match (project, workspace) {
         (Some(project), Some(workspace)) => {
@@ -1239,7 +1260,7 @@ fn render_heading_block(
         .when_some(family, |this, family| this.font_family(family))
         .text_size(buffer_size * scale)
         .line_height(line_height)
-        .font_weight(style.font_weight.unwrap_or(default_weight))
+        .font_weight(style.font_weight.unwrap_or(FontWeight::SEMIBOLD))
         .when(italic, |this| this.italic())
         .when_some(style.color, |this, color| this.text_color(color))
         .child(content);
@@ -2450,26 +2471,7 @@ fn marker_placeholder() -> FoldPlaceholder {
 fn checkbox_placeholder(editor: WeakEntity<Editor>, checked: bool) -> FoldPlaceholder {
     FoldPlaceholder {
         render: Arc::new(move |fold_id, fold_range, cx| {
-            let colors = cx.theme().colors();
-            let mut checkbox = div()
-                .size(px(13.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_xs()
-                .border_1()
-                .border_color(if checked {
-                    colors.text_accent
-                } else {
-                    colors.border
-                });
-            if checked {
-                checkbox = checkbox.bg(colors.text_accent).child(
-                    Icon::new(IconName::Check)
-                        .size(IconSize::XSmall)
-                        .color(Color::Custom(on_accent_color(cx))),
-                );
-            }
+            let checkbox = task_box(checked, cx);
             let editor = editor.clone();
             div()
                 .id(fold_id)
@@ -4394,6 +4396,29 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn an_h1_under_a_rule_takes_no_breathing_row(cx: &mut TestAppContext) {
+        const RULED: &str = "Journal entry\n\n___\n\n# Day planner\n- [ ] Workout\n";
+        let (editor, mut cx) = setup(cx, RULED).await;
+        move_cursor_to(&editor, 5, &mut cx);
+        assert_eq!(
+            custom_blocks(&editor, &mut cx),
+            vec![(true, 1)],
+            "the rule already sets the section apart"
+        );
+        // Six lines and the empty last row, with no extra row for the H1.
+        assert_eq!(display_rows(&editor, &mut cx), 7);
+
+        move_cursor_to(&editor, 4, &mut cx);
+        assert_eq!(
+            custom_blocks(&editor, &mut cx),
+            vec![],
+            "revealed, it needs no spacer to keep its height"
+        );
+        assert_eq!(display_rows(&editor, &mut cx), 7);
+        assert_eq!(editor.read_with(&cx, |editor, cx| editor.text(cx)), RULED);
+    }
+
+    #[gpui::test]
     async fn revealing_a_heading_keeps_the_row_count(cx: &mut TestAppContext) {
         let (editor, mut cx) = setup(cx, HEADED).await;
         move_cursor_to(&editor, 5, &mut cx);
@@ -4571,8 +4596,9 @@ mod tests {
             assert_eq!(h1.color, Some(colors.text));
             assert_eq!(h1.font_weight, Some(gpui::FontWeight::SEMIBOLD));
             let h2 = heading_style(2, cx);
-            assert_eq!(h2.color, Some(colors.text_accent));
-            assert_eq!(h2.font_style, Some(gpui::FontStyle::Italic));
+            assert_eq!(h2.color, Some(colors.text));
+            assert_eq!(h2.font_weight, Some(gpui::FontWeight::SEMIBOLD));
+            assert_eq!(h2.font_style, None);
             assert_eq!(heading_style(3, cx).color, Some(colors.text_muted));
         });
     }

@@ -42,6 +42,7 @@ use crate::routine_collections::{
 use crate::routines::{
     self, DiscoveredRoutine, LinkKind, RoutineLink, RoutineLoad, RoutineManifest, RoutineSkill,
 };
+use crate::thock_theme::UNFOCUSED_SELECTION_OPACITY;
 use crate::vault::{OnboardingState, Vault, VaultStatus, scaffold_vault};
 
 // The pre-V7 key, kept verbatim so the dock's persisted layout survives the
@@ -643,6 +644,9 @@ pub struct RoutinesPanel {
     /// Keyboard cursor over the flat row list. `None` means the highlight
     /// follows whichever link matches the active editor item.
     selected_index: Option<usize>,
+    /// Whether focus was inside the panel at the last render, which decides
+    /// how strongly the selected row is drawn.
+    focused: bool,
     /// Enabled Routines in registry order — live manifests or visible error
     /// entries, reloaded whenever the refresh snapshot changes.
     routines: Vec<RoutineLoad>,
@@ -763,13 +767,15 @@ impl RoutinesPanel {
                 cx.observe_global::<crate::agent_panel::ConnectionEpoch>(|this: &mut Self, cx| {
                     this.refresh_getting_started(cx);
                 });
+            let focus_handle = cx.focus_handle();
             let mut this = Self {
                 workspace: weak_workspace,
                 project,
-                focus_handle: cx.focus_handle(),
+                focus_handle: focus_handle.clone(),
                 vault_status: VaultStatus::NotAVault,
                 fingerprint: Vec::new(),
                 selected_index: None,
+                focused: false,
                 routines: Vec::new(),
                 discovered: Vec::new(),
                 addable_catalog: Vec::new(),
@@ -789,6 +795,9 @@ impl RoutinesPanel {
                     project_subscription,
                     workspace_subscription,
                     connection_subscription,
+                    // The selected row's strength follows focus.
+                    cx.on_focus_in(&focus_handle, window, |_, _, cx| cx.notify()),
+                    cx.on_focus_out(&focus_handle, window, |_, _, _, cx| cx.notify()),
                 ]
                 .into_iter()
                 .chain(chat_subscription)
@@ -2410,6 +2419,7 @@ impl RoutinesPanel {
         if !expanded {
             return section.into_any_element();
         }
+        let (selected_index, dimmed_index) = split_selection(selected_index, self.focused);
         let mut rows: Vec<AnyElement> = Vec::new();
         // Captions take no index, which is exactly what makes them unreachable
         // by the cursor; everything else consumes one, in rendered order.
@@ -2420,19 +2430,35 @@ impl RoutinesPanel {
         };
         for item in self.section_items(manifest) {
             let indent = 1 + item.depth;
-            rows.push(match item.kind {
-                SectionItemKind::Caption(label) => render_caption(label),
+            let (row, index) = match item.kind {
+                SectionItemKind::Caption(label) => (render_caption(label), None),
                 SectionItemKind::Link(link) => {
                     let index = next_index();
-                    self.render_link_row(&routine_id, &link, indent, index, selected_index, cx)
+                    (
+                        self.render_link_row(&routine_id, &link, indent, index, selected_index, cx),
+                        Some(index),
+                    )
                 }
                 SectionItemKind::Skill(skill) => {
                     let index = next_index();
-                    self.render_skill_row(manifest, &skill, indent, index, selected_index, cx)
+                    (
+                        self.render_skill_row(manifest, &skill, indent, index, selected_index, cx),
+                        Some(index),
+                    )
                 }
                 SectionItemKind::Entry(entry) => {
                     let index = next_index();
-                    self.render_entry_row(&routine_id, &entry, indent, index, selected_index, cx)
+                    (
+                        self.render_entry_row(
+                            &routine_id,
+                            &entry,
+                            indent,
+                            index,
+                            selected_index,
+                            cx,
+                        ),
+                        Some(index),
+                    )
                 }
                 SectionItemKind::Group {
                     key,
@@ -2440,21 +2466,38 @@ impl RoutinesPanel {
                     expanded: group_expanded,
                 } => {
                     let index = next_index();
-                    self.render_group_row(
-                        &routine_id,
-                        key,
-                        label,
-                        group_expanded,
-                        indent,
-                        index,
-                        selected_index,
-                        cx,
+                    (
+                        self.render_group_row(
+                            &routine_id,
+                            key,
+                            label,
+                            group_expanded,
+                            indent,
+                            index,
+                            selected_index,
+                            cx,
+                        ),
+                        Some(index),
                     )
                 }
-            });
+            };
+            let dimmed = index.is_some() && index == dimmed_index;
+            rows.push(self.dim_if_selected(row, dimmed, cx));
         }
         section = section.children(rows);
         section.into_any_element()
+    }
+
+    fn dim_if_selected(&self, row: AnyElement, dimmed: bool, cx: &Context<Self>) -> AnyElement {
+        if !dimmed {
+            return row;
+        }
+        let background = cx.theme().colors().ghost_element_selected;
+        div()
+            .w_full()
+            .bg(background.opacity(UNFOCUSED_SELECTION_OPACITY))
+            .child(row)
+            .into_any_element()
     }
 
     fn render_link_row(
@@ -2971,36 +3014,46 @@ impl RoutinesPanel {
         selected_index: Option<usize>,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let (selected_index, dimmed_index) = split_selection(selected_index, self.focused);
         let mut section = v_flex().child(render_caption("Getting started".into()));
         for step in GettingStartedStep::ALL {
             let index = *row_index;
             *row_index += 1;
             let done = step.done(steps);
             section = section.child(
-                ListItem::new(ElementId::Name(SharedString::from(format!(
-                    "thock-getting-started-{}",
-                    step.key()
-                ))))
-                .indent_level(1)
-                .indent_step_size(px(12.))
-                .toggle_state(selected_index == Some(index))
-                .start_slot(
-                    Icon::new(if done {
-                        IconName::TodoComplete
-                    } else {
-                        IconName::TodoPending
-                    })
-                    .size(IconSize::XSmall)
-                    .color(if done { Color::Success } else { Color::Accent }),
-                )
-                .child(
-                    Label::new(step.label())
-                        .size(LabelSize::Small)
-                        .color(if done { Color::Muted } else { Color::Default }),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.run_getting_started_step(step, window, cx);
-                })),
+                self.dim_if_selected(
+                    ListItem::new(ElementId::Name(SharedString::from(format!(
+                        "thock-getting-started-{}",
+                        step.key()
+                    ))))
+                    .indent_level(1)
+                    .indent_step_size(px(12.))
+                    .toggle_state(selected_index == Some(index))
+                    .start_slot(
+                        Icon::new(if done {
+                            IconName::TodoComplete
+                        } else {
+                            IconName::TodoPending
+                        })
+                        .size(IconSize::XSmall)
+                        .color(if done {
+                            Color::Success
+                        } else {
+                            Color::Accent
+                        }),
+                    )
+                    .child(
+                        Label::new(step.label())
+                            .size(LabelSize::Small)
+                            .color(if done { Color::Muted } else { Color::Default }),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run_getting_started_step(step, window, cx);
+                    }))
+                    .into_any_element(),
+                    dimmed_index == Some(index),
+                    cx,
+                ),
             );
         }
         section.into_any_element()
@@ -3043,7 +3096,8 @@ impl RoutinesPanel {
 }
 
 impl Render for RoutinesPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.focused = self.focus_handle.contains_focused(window, cx);
         let content = match &self.vault_status {
             VaultStatus::Valid(_) => self.render_routines(cx),
             VaultStatus::NotAVault => self.render_non_vault(cx).into_any_element(),
@@ -3139,6 +3193,16 @@ impl Panel for RoutinesPanel {
     }
 }
 
+/// The selection as the rows draw it, `(full, dimmed)`: in full while the
+/// panel has focus, otherwise dimmed, so the cursor stays visible.
+fn split_selection(selected_index: Option<usize>, focused: bool) -> (Option<usize>, Option<usize>) {
+    if focused {
+        (selected_index, None)
+    } else {
+        (None, selected_index)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3174,6 +3238,13 @@ mod tests {
             reads: Vec::new(),
             writes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_selection_dims_rather_than_vanishing_without_focus() {
+        assert_eq!(split_selection(Some(3), true), (Some(3), None));
+        assert_eq!(split_selection(Some(3), false), (None, Some(3)));
+        assert_eq!(split_selection(None, false), (None, None));
     }
 
     #[test]

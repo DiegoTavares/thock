@@ -762,12 +762,8 @@ impl DayPlannerPanel {
         let reminders = reminder_service::service_for_project(&self.project, cx)
             .and_then(|service| sync_status::reminder_day_status(service.read(cx), cx))
             .filter(|status| status.needs_user());
-        let rows: Vec<AnyElement> = calendar
-            .into_iter()
-            .chain(reminders)
-            .map(|status| sync_status::render_inline_row(&status, cx))
-            .collect();
-        (!rows.is_empty()).then(|| v_flex().children(rows).into_any_element())
+        let statuses: Vec<_> = calendar.into_iter().chain(reminders).collect();
+        sync_status::render_inline_banner(&statuses, cx)
     }
 
     /// The theme colour for an item's subsection, from the `players()`
