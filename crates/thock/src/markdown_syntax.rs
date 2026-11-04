@@ -25,6 +25,9 @@ pub enum SpanKind {
     LinkLabel,
     /// A task list item's `[ ]` / `[x]` marker, drawn as a checkbox.
     Checkbox(bool),
+    /// A ticked task's text after its box, drawn muted so finished work
+    /// recedes behind what is still open.
+    DoneTask,
     /// The text between a pair of `~~` delimiters, drawn struck through.
     Strikethrough,
     /// The text between a pair of `**` or `__` delimiters, drawn bold.
@@ -577,6 +580,13 @@ fn scan_line(line: &str, line_start: usize, spans: &mut Vec<ConcealSpan>) {
                 SpanKind::Checkbox(checked),
             ));
             inline_from = range.end;
+            let text_end = line.trim_end().len();
+            if checked && text_end > range.end {
+                spans.push(ConcealSpan::new(
+                    line_start + range.end..line_start + text_end,
+                    SpanKind::DoneTask,
+                ));
+            }
             push_task_time_spans(line, range.end, line_start, spans);
         } else {
             spans.push(ConcealSpan::new(
@@ -2094,8 +2104,10 @@ mod tests {
             vec![
                 ("* ", SpanKind::Marker),
                 ("[x]", SpanKind::Checkbox(true)),
+                (" done", SpanKind::DoneTask),
                 ("+ ", SpanKind::Marker),
                 ("[X]", SpanKind::Checkbox(true)),
+                (" also done", SpanKind::DoneTask),
             ]
         );
         // Nested tasks are tasks, and an empty task is still a checkbox.
@@ -2137,6 +2149,7 @@ mod tests {
             vec![
                 ("- ", SpanKind::Marker),
                 ("[x]", SpanKind::Checkbox(true)),
+                (" 15:00 Call", SpanKind::DoneTask),
                 ("15:00", SpanKind::TaskTime),
             ]
         );
@@ -2198,6 +2211,7 @@ mod tests {
             vec![
                 ("- ", SpanKind::Marker),
                 ("[x]", SpanKind::Checkbox(true)),
+                (" read [[notes/spec]]", SpanKind::DoneTask),
                 ("[[", SpanKind::Marker),
                 ("notes/spec", SpanKind::WikilinkLabel),
                 ("]]", SpanKind::Marker),

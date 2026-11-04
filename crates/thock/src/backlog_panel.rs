@@ -38,7 +38,7 @@ use crate::day_plan::strip_trailing_metadata;
 use crate::gmail_service::{self, GmailService};
 use crate::inbox_service::{self, InboxService};
 use crate::markdown_conceal::resolve_wikilink_target;
-use crate::markdown_text::{LinkTarget, parse_inline_spans, render_markdown_row};
+use crate::markdown_text::{LinkTarget, open_note_link, parse_inline_spans, render_markdown_row};
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
 use crate::readwise_service::{self, ReadwiseService};
 use crate::reminder_index::{IndexSection, IndexedReminder, IndexedState, StampKind};
@@ -48,6 +48,10 @@ use crate::sync_status;
 use crate::thock_theme::{UNFOCUSED_SELECTION_OPACITY, task_box};
 use crate::vault::{Vault, VaultStatus};
 use crate::vault_sync::{self, VaultSyncService};
+
+/// A task's line in the Backlog. The box takes the same height, so it sits
+/// centred on the first line whatever the UI font's own line height is.
+pub(crate) const TASK_LINE_HEIGHT: Rems = rems(1.375);
 
 const BACKLOG_PANEL_KEY: &str = "ThockBacklogPanel";
 const REPARSE_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -330,7 +334,7 @@ impl BacklogPanel {
             .iter()
             .find(|task| task.text.contains(needle))?;
         Some((
-            thock_sync_core::strip_reminder(&task.text),
+            split_trailing_note_link(&task.text).0,
             self.task_meta(task, cx),
         ))
     }
@@ -1870,6 +1874,7 @@ impl BacklogPanel {
         let today_task_text = task.text.clone();
         let task_line = task.line;
         let meta = self.task_meta(task, cx);
+        let (row_text, note_link) = split_trailing_note_link(&task.text);
         // Chevrons, matching the `>` / `<` keys that do the same thing.
         let (move_icon, move_tooltip, move_action) = match section {
             SectionKind::Someday => (
@@ -1984,8 +1989,10 @@ impl BacklogPanel {
                     .id(ElementId::Name(
                         format!("backlog-check-{section_key}-{index}").into(),
                     ))
+                    .debug_selector(move || format!("backlog-check-{section_key}-{index}"))
                     .flex_none()
-                    .size(px(20.))
+                    .w(px(20.))
+                    .h(TASK_LINE_HEIGHT)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2032,7 +2039,9 @@ impl BacklogPanel {
                     .tooltip(Tooltip::text(thock_sync_core::strip_reminder(&task.text)))
                     .child(
                         div()
+                            .debug_selector(move || format!("backlog-words-{section_key}-{index}"))
                             .text_size(rems(0.875))
+                            .line_height(TASK_LINE_HEIGHT)
                             .text_color(colors.text)
                             .line_clamp(2)
                             .text_ellipsis()
@@ -2040,22 +2049,17 @@ impl BacklogPanel {
                                 ElementId::Name(
                                     format!("backlog-text-{section_key}-{index}").into(),
                                 ),
-                                &task.text,
+                                &row_text,
                                 cx,
                             )),
                     )
-                    .when_some(meta, |this, (meta, overdue)| {
-                        this.child(
-                            div()
-                                .text_size(rems(0.71875))
-                                .text_color(if overdue {
-                                    cx.theme().status().warning
-                                } else {
-                                    colors.text_muted
-                                })
-                                .truncate()
-                                .child(SharedString::from(meta)),
-                        )
+                    .when(meta.is_some() || note_link.is_some(), |this| {
+                        this.child(self.render_task_meta(
+                            meta,
+                            note_link,
+                            format!("{section_key}-{index}"),
+                            cx,
+                        ))
                     })
                     .on_click(cx.listener({
                         move |this, _, window, cx| {
@@ -2085,6 +2089,61 @@ impl BacklogPanel {
                     .child(tools),
             )
             .into_any_element()
+    }
+
+    /// A task row's meta line: what [`Self::task_meta`] says, then the note
+    /// the task links to as a small, quiet link that opens it.
+    fn render_task_meta(
+        &self,
+        meta: Option<(String, bool)>,
+        note_link: Option<String>,
+        row_key: String,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let (meta, overdue) = meta.unzip();
+        let has_meta = meta.is_some();
+        h_flex()
+            .min_w_0()
+            .gap_1()
+            .text_size(rems(0.71875))
+            .text_color(colors.text_muted)
+            .when_some(meta, |this, meta| {
+                this.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .when(overdue == Some(true), |this| {
+                            this.text_color(cx.theme().status().warning)
+                        })
+                        .child(SharedString::from(meta)),
+                )
+            })
+            .when_some(note_link, |this, target| {
+                let project = self.project.downgrade();
+                let workspace = self.workspace.clone();
+                this.when(has_meta, |this| this.child("·")).child(
+                    h_flex()
+                        .id(ElementId::Name(format!("backlog-note-{row_key}").into()))
+                        .debug_selector(move || format!("backlog-note-{row_key}"))
+                        .flex_none()
+                        .gap_0p5()
+                        .cursor_pointer()
+                        .hover(|this| this.text_color(colors.text))
+                        .tooltip(Tooltip::text(format!("Open {target}")))
+                        .child(
+                            Icon::new(IconName::ArrowUpRight)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child("note")
+                        .on_click(move |_, window, cx| {
+                            if open_note_link(&target, &project, &workspace, window, cx) {
+                                cx.stop_propagation();
+                            }
+                        }),
+                )
+            })
     }
 
     /// The right end of a lane or group header: the open count, then a
@@ -2143,9 +2202,9 @@ impl BacklogPanel {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_size(rems(0.6875))
+                            .text_size(rems(0.75))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(colors.text_placeholder)
+                            .text_color(colors.text_muted)
                             .child(SharedString::from(caption)),
                     )
                     .child(Self::render_header_end(count, collapsed, cx))
@@ -2533,6 +2592,33 @@ impl BacklogPanel {
     }
 }
 
+/// A task's text as its row shows it, and the note it ends by linking to.
+/// A trailing `[[note]]` is a pointer, not words, so the row leaves it out
+/// of the text and offers it on the meta line instead; a link mid-sentence
+/// is part of the words and stays. The reminder token and trailing comments
+/// are left out too, as the row never shows them.
+fn split_trailing_note_link(text: &str) -> (String, Option<String>) {
+    let visible = thock_sync_core::strip_reminder(text);
+    let trimmed = visible.trim_end();
+    let link = trimmed
+        .strip_suffix("]]")
+        .and_then(|head| head.rfind("[[").map(|start| (start, &trimmed[start..])))
+        .filter(|(start, _)| !trimmed[..*start].trim().is_empty())
+        .and_then(
+            |(start, suffix)| match parse_inline_spans(suffix).as_slice() {
+                [span] => match &span.target {
+                    Some(LinkTarget::Note(target)) => Some((start, target.clone())),
+                    _ => None,
+                },
+                _ => None,
+            },
+        );
+    match link {
+        Some((start, target)) => (trimmed[..start].trim_end().to_string(), Some(target)),
+        None => (visible, None),
+    }
+}
+
 /// The note a task links to, when it links one: the `[[target]]` and the
 /// date in its name, for the row's meta line.
 struct TaskLink {
@@ -2703,7 +2789,10 @@ impl Focusable for BacklogPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{BacklogRow, SectionKind, column_rows, restore_hidden_suffix, task_link};
+    use super::{
+        BacklogRow, SectionKind, column_rows, restore_hidden_suffix, split_trailing_note_link,
+        task_link,
+    };
     use crate::backlog::{BacklogHeadings, parse_backlog};
     use chrono::NaiveDate;
     use std::collections::HashSet;
@@ -2810,6 +2899,41 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_trailing_note_link_leaves_the_text_for_the_meta_line() {
+        assert_eq!(
+            split_trailing_note_link(
+                "Satya Nadella (@satyanadella) on X [[2026-10-11-0853-satya-nadella]]"
+            ),
+            (
+                "Satya Nadella (@satyanadella) on X".to_string(),
+                Some("2026-10-11-0853-satya-nadella".to_string())
+            )
+        );
+        assert_eq!(
+            split_trailing_note_link("Reply [[inbox/2026-10-02 Jimmy]] <!--gmail:ab12-->"),
+            (
+                "Reply".to_string(),
+                Some("inbox/2026-10-02 Jimmy".to_string())
+            ),
+            "the trailing comment is hidden first"
+        );
+        assert_eq!(
+            split_trailing_note_link("Read [[Maestro]] before Friday"),
+            ("Read [[Maestro]] before Friday".to_string(), None),
+            "a link mid-sentence is part of the words"
+        );
+        assert_eq!(
+            split_trailing_note_link("[[2026-09-28-dnv-ballot]]"),
+            ("[[2026-09-28-dnv-ballot]]".to_string(), None),
+            "a task that is only a link keeps it as its text"
+        );
+        assert_eq!(
+            split_trailing_note_link("See [docs](https://a.example)"),
+            ("See [docs](https://a.example)".to_string(), None)
+        );
     }
 
     #[test]

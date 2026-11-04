@@ -85,12 +85,12 @@ eight rows across one:
   Notes ───────────────────────────────────────
     ▤  Today                                ⌃⌥T
     ▤  This Week
-    </> Weekly Dashboard
+    ⊞  Weekly Dashboard
     ›  Older notes
   Rituals ─────────────────────────────────────
-    ▸  Wrap Today                           ⌃⌥⏎
-    ▸  Wrap Yesterday
-    ▸  Week Review
+    ▶  Wrap Today                           ⌃⌥⏎
+    ▶  Wrap Yesterday
+    ▶  Week Review
     ›  Setup
 ```
 
@@ -134,9 +134,12 @@ kind = "setup"           # "ritual" (default) | "setup"
 
 The distinction only works if the two classes don't look alike:
 
-- A ritual's default icon is the **run** glyph (`play_outlined`) in the accent colour; a setup step's
-  is `settings`, muted. Links keep their kind-derived icons, muted. A manifest `icon` override still
-  wins on the glyph — the colour stays, because the colour is what encodes the class.
+- A ritual's default icon is the filled **run** glyph (`play_filled`), so it never reads as the
+  disclosure chevron beside it. It is muted like every other row's and turns accent while the row
+  is selected or hovered, so the rail's colour follows the keys or the pointer instead of sitting
+  on every verb. A setup step's is `settings`, muted. Links keep their kind-derived icons, muted;
+  a browser link opens a Routine's generated site and takes a dashboard grid. A manifest `icon`
+  override still wins on the glyph.
 - The **row runs the ritual**. Clicking it, or pressing `enter` on it, launches the skill. That is a
   change from V7, where the row opened the skill's Markdown and a hover button ran it; the primary
   action now matches the primary affordance.

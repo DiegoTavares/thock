@@ -258,6 +258,10 @@ fn routine_icon(name: Option<&str>) -> RowIcon {
         .unwrap_or(RowIcon::Named(IconName::Blocks))
 }
 
+/// A browser link opens a Routine's generated site, a dashboard, so it
+/// takes a grid rather than a code glyph.
+const DASHBOARD_ICON: &str = "icons/thock/dashboard.svg";
+
 /// A quick link's icon: the manifest's override, else a default that reflects
 /// where the link goes — a note, some other file, or out to the browser.
 fn link_icon(link: &RoutineLink) -> RowIcon {
@@ -265,7 +269,7 @@ fn link_icon(link: &RoutineLink) -> RowIcon {
         .as_deref()
         .and_then(manifest_icon)
         .unwrap_or_else(|| match link.kind {
-            LinkKind::Browser => RowIcon::Path("icons/file_icons/html.svg"),
+            LinkKind::Browser => RowIcon::Path(DASHBOARD_ICON),
             LinkKind::Editor | LinkKind::Preview if link.action.is_some() => {
                 RowIcon::Named(IconName::ArrowRight)
             }
@@ -290,8 +294,33 @@ fn skill_icon(skill: &RoutineSkill) -> RowIcon {
         .unwrap_or(RowIcon::Named(if skill.kind.is_setup() {
             IconName::Settings
         } else {
-            IconName::PlayOutlined
+            IconName::PlayFilled
         }))
+}
+
+/// A skill row's glyph, in muted ink like every other row's. A ritual's
+/// turns accent while the row is selected or hovered, so the rail's colour
+/// is where the keys or the pointer are, not on every verb at once.
+fn ritual_glyph(icon: RowIcon, ritual: bool, selected: bool) -> AnyElement {
+    let glyph = |color| icon.build().size(IconSize::XSmall).color(color);
+    if !ritual {
+        return glyph(Color::Muted).into_any_element();
+    }
+    if selected {
+        return glyph(Color::Accent).into_any_element();
+    }
+    div()
+        .relative()
+        .child(glyph(Color::Muted))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .opacity(0.)
+                .group_hover("list_item", |this| this.opacity(1.))
+                .child(glyph(Color::Accent)),
+        )
+        .into_any_element()
 }
 
 /// Zone captions. They separate a Routine's destinations from its verbs, and
@@ -2554,12 +2583,10 @@ impl RoutinesPanel {
         .indent_level(indent)
         .indent_step_size(px(12.))
         .toggle_state(selected_index == Some(index))
-        .start_slot(skill_icon(skill).build().size(IconSize::XSmall).color(
-            if skill.kind.is_setup() {
-                Color::Muted
-            } else {
-                Color::Accent
-            },
+        .start_slot(ritual_glyph(
+            skill_icon(skill),
+            !skill.kind.is_setup(),
+            selected_index == Some(index),
         ))
         .child(Label::new(skill.name.clone()).size(LabelSize::Small))
         .when(!skill.summary.is_empty(), |item| {
@@ -3255,13 +3282,13 @@ mod tests {
         );
         assert_eq!(
             link_icon(&link("weekly/site/index.html", LinkKind::Browser, None)),
-            RowIcon::Path("icons/file_icons/html.svg")
+            RowIcon::Path(DASHBOARD_ICON)
         );
         // A verb reads as a verb: rituals default to the run glyph, setup
         // steps to the settings one.
         assert_eq!(
             skill_icon(&skill(None)),
-            RowIcon::Named(IconName::PlayOutlined)
+            RowIcon::Named(IconName::PlayFilled)
         );
         assert_eq!(
             skill_icon(&skill_of_kind(SkillKind::Setup, None)),
@@ -3587,9 +3614,16 @@ mod tests {
         );
         assert_eq!(
             skill_icon(&skill(Some("nope"))),
-            RowIcon::Named(IconName::PlayOutlined)
+            RowIcon::Named(IconName::PlayFilled)
         );
         assert_eq!(routine_icon(Some("nope")), RowIcon::Named(IconName::Blocks));
         assert_eq!(routine_icon(None), RowIcon::Named(IconName::Blocks));
+    }
+
+    #[test]
+    fn the_dashboard_icon_ships() {
+        let svg = include_str!("../../../assets/icons/thock/dashboard.svg");
+        assert!(svg.starts_with("<svg"));
+        assert_eq!(DASHBOARD_ICON, "icons/thock/dashboard.svg");
     }
 }

@@ -191,7 +191,11 @@ Cell states:
 | Viewed week (a weekly note) | 1px amber border, radius 6, on all seven days |
 | Today | "TODAY" (9px) in place of the initial, label and numeral in ink, so the open day's fill is the only amber; filled like any viewed day when open, in amberInk |
 | Has a note | ink numeral (muted on a weekend), dim dot |
-| Past day with no note | dim numeral, no dot, not clickable (tooltip "No note on Mon 12") |
+| Past day with no note | dim numeral, no dot, not clickable |
+
+The dot means one thing: the day has a note. Hovering a cell says what it is, the day and then
+what sets it apart, e.g. "Fri 30 · Open · Has a note", "Tue 3 · Today · Has a note",
+"Wed 4 · No note yet" (a day that opens to a new note), "Mon 12 · No note".
 | Future after tomorrow | dim numeral, not clickable |
 
 ### 6.2 What it shows for each kind of note
@@ -345,9 +349,11 @@ family:
   an en dash (a fold whose placeholder is `–`).
 
 Task list items (`- [ ]`) lose their V24 `•`. The checkbox is enough of a marker, and that
-matches the reference. Plain list items keep the `•`. A checked box is filled `text.accent` with
-an amberInk tick; an unchecked one is a 1px `text.muted` outline, the same on the page and in the
-Backlog, so it holds 4.5:1 on the panels' lighter ground too.
+matches the reference. Plain list items keep the `•`. A checked box is filled `text.muted` with
+a tick in the window background, and the ticked task's text, times and links take `text.muted`
+too, so finished work recedes behind what is still open. An unchecked one is a 1px `text.muted`
+outline, the same on the page and in the Backlog, so it holds 4.5:1 on the panels' lighter
+ground too.
 
 ## 8. The Desk panel
 
@@ -398,7 +404,7 @@ The lanes are stacked vertically:
 ```
 Soon                                  18 ⌄ +    ← lane.title; count, chevron and + on the right
 ▌☐ Study for DNV elections                      ← selected: amberSoft fill, 2px amber left edge
-   from Sep 28 · inbox                          ← row.meta, only when the line carries it
+   from Sep 28 · inbox · ↗ note                 ← row.meta, only when the line carries it
  ☐ Apps to try: vorssaint
 SPI                                    5 ⌄ +    ← lane.caption: a V17 category, ends like a lane
  ☐ HD 519673: local cores only used once
@@ -412,6 +418,10 @@ Someday                               19 › +    ← a folded lane, one row
 - The meta line shows only what the line already carries: the date of a linked
   `[[YYYY-MM-DD-…]]` note ("from Sep 28") and the folder it lives in ("inbox",
   "archives/emails" → "email"). A task with no link has no meta line, and nothing is inferred.
+- A trailing `[[note]]` is a pointer, not words: the row leaves the slug out of its text and
+  ends the meta line with a muted "↗ note" that opens it. A link mid-sentence stays in the text.
+- The checkbox sits centred on the first line's line box. Group captions are 12px SemiBold small
+  caps in `text.muted`, a step under the lane titles.
 - Rows wrap to two lines and then truncate with an ellipsis. The full text is in the tooltip and
   in the inline editor.
 
@@ -439,9 +449,11 @@ never turn into one.
 
 The footer has a `border` top and renders the bindings for add, done, open, move and today from
 the keymap, so it shows the user's actual keys (and the vim keys when vim mode is on). It never
-hard-codes a key. Each keystroke of a binding sits in its own keycap in the ink colour, apart
-from the muted label, so a chord like `g space` reads as two keys. When the panel is too narrow
-the hints wrap onto a second line in that order, instead of being cut off.
+hard-codes a key. A binding's keystrokes share one 20px keycap with a `text.placeholder` outline
+(3:1), the keys in the ink colour at one size and weight, separated by a small gap, so `g space`
+reads as one binding before its muted label. The keycaps sit centred in the footer with equal
+room above and below. When the panel is too narrow the least used hints are left out rather than
+cut off.
 
 ## 9. Implementation notes
 

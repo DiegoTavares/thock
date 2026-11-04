@@ -2465,7 +2465,7 @@ fn marker_placeholder() -> FoldPlaceholder {
 }
 
 /// Placeholder for a task list's `[ ]` / `[x]`: the checkbox it stands for,
-/// a checked one filled with the accent (V43 §7.3). A click ticks or unticks
+/// a checked one filled with the muted ink (V43 §7.3). A click ticks or unticks
 /// the task without moving the cursor, which would reveal the line and pull
 /// the box out from under the pointer (V49 §4.1).
 fn checkbox_placeholder(editor: WeakEntity<Editor>, checked: bool) -> FoldPlaceholder {
@@ -2660,9 +2660,9 @@ fn sender_color(own: bool, cx: &App) -> Hsla {
 
 /// The number of highlight slots: the quote tint, three heading colours,
 /// bold and italic, inline code, two link colours, the strikethrough, the
-/// email view's sender/own/muted trio, the hidden slot, and the journal and
-/// task times.
-pub(crate) const HIGHLIGHT_SLOTS: usize = 16;
+/// email view's sender/own/muted trio, the journal and task times, the done
+/// task's ink, and the hidden slot.
+pub(crate) const HIGHLIGHT_SLOTS: usize = 17;
 
 /// A later slot's style merges over an earlier one's, so the order below is
 /// priority order: the quote tint sits under everything else a quoted line
@@ -2684,14 +2684,17 @@ const STRIKETHROUGH_SLOT: usize = 9;
 const EMAIL_SENDER_SLOT: usize = 10;
 const EMAIL_OWN_SENDER_SLOT: usize = 11;
 const EMAIL_MUTED_SLOT: usize = 12;
+/// A journal entry's time, in the accent (V43 §7.3).
+const JOURNAL_TIME_SLOT: usize = 13;
+/// A task's time, in the calendar colour.
+const TASK_TIME_SLOT: usize = 14;
+/// A ticked task's text, in the muted ink. Over every colour slot, so a
+/// finished task's time and links recede with it.
+const DONE_TASK_SLOT: usize = 15;
 /// Text painted in the editor's own background colour: present, one column
 /// wide, and unseen. Only an image line's `!` takes it, which cannot fold
 /// because the editor drops a block whose row begins inside a fold.
-const HIDDEN_SLOT: usize = 13;
-/// A journal entry's time, in the accent (V43 §7.3).
-const JOURNAL_TIME_SLOT: usize = 14;
-/// A task's time, in the calendar colour.
-const TASK_TIME_SLOT: usize = 15;
+const HIDDEN_SLOT: usize = 16;
 
 /// The highlight slot for a styled span, or `None` for one that folds away
 /// rather than taking a colour.
@@ -2714,6 +2717,7 @@ fn highlight_slot(kind: &SpanKind) -> Option<usize> {
         SpanKind::ImageBang => Some(HIDDEN_SLOT),
         SpanKind::JournalTime => Some(JOURNAL_TIME_SLOT),
         SpanKind::TaskTime => Some(TASK_TIME_SLOT),
+        SpanKind::DoneTask => Some(DONE_TASK_SLOT),
         SpanKind::Marker
         | SpanKind::Rule
         | SpanKind::Bullet
@@ -2797,7 +2801,7 @@ fn slot_color(slot: usize, cx: &App) -> Hsla {
         LINK_SLOT => markdown_text::external_link_color(cx),
         EMAIL_SENDER_SLOT => sender_color(false, cx),
         EMAIL_OWN_SENDER_SLOT => sender_color(true, cx),
-        EMAIL_MUTED_SLOT => colors.text_muted,
+        EMAIL_MUTED_SLOT | DONE_TASK_SLOT => colors.text_muted,
         HIDDEN_SLOT => colors.editor_background,
         JOURNAL_TIME_SLOT => colors.text_accent,
         TASK_TIME_SLOT => cx.theme().status().info,
@@ -3384,6 +3388,19 @@ mod tests {
                 .text_highlights(HighlightKey::ThockMarkdownConceal(WIKILINK_SLOT), cx)
                 .expect("the link inside the quote is still a link");
             assert_eq!(ranges.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    async fn a_ticked_task_recedes_and_an_open_one_does_not(cx: &mut TestAppContext) {
+        let (editor, mut cx) = setup(cx, "- [x] shipped\n- [ ] still open\n").await;
+        editor.update_in(&mut cx, |editor, _, cx| {
+            let muted = cx.theme().colors().text_muted;
+            let (done, ranges) = editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(DONE_TASK_SLOT), cx)
+                .expect("the ticked task is highlighted");
+            assert_eq!(ranges.len(), 1, "only the ticked line");
+            assert_eq!(done.color, Some(muted));
         });
     }
 

@@ -11,8 +11,8 @@ use ui::{Icon, IconName, IconSize};
 pub const THOCK_DARK: &str = "Thock Dark";
 pub const THOCK_LIGHT: &str = "Thock Light";
 
-/// Text drawn on a surface filled with the accent colour — today's cell in
-/// the strip, a checked box. Themes have no key for it; the window background
+/// Text drawn on a surface filled with the accent colour — the open day's
+/// cell in the strip, a reminder chip due today. Themes have no key for it; the window background
 /// is the phone's `amberInk` in both Thock themes, and in any other theme it
 /// is the colour the accent was chosen to stand out against.
 pub fn on_accent_color(cx: &App) -> Hsla {
@@ -34,8 +34,8 @@ pub fn unchecked_box_border(cx: &App) -> Hsla {
 }
 
 /// The box a task is ticked with, the same on the page and in the panels:
-/// an outline in [`unchecked_box_border`], or filled with the accent and
-/// checked.
+/// an outline in [`unchecked_box_border`], or filled with the same muted ink
+/// and checked, so finished work recedes behind what is still open.
 pub fn task_box(checked: bool, cx: &App) -> Div {
     let colors = cx.theme().colors();
     let task_box = div()
@@ -48,12 +48,12 @@ pub fn task_box(checked: bool, cx: &App) -> Div {
         .border_1();
     if checked {
         task_box
-            .border_color(colors.text_accent)
-            .bg(colors.text_accent)
+            .border_color(colors.text_muted)
+            .bg(colors.text_muted)
             .child(
                 Icon::new(IconName::Check)
                     .size(IconSize::XSmall)
-                    .color(Color::Custom(on_accent_color(cx))),
+                    .color(Color::Custom(colors.background)),
             )
     } else {
         task_box.border_color(unchecked_box_border(cx))
@@ -155,9 +155,11 @@ mod tests {
             let muted = colour(&theme, |theme| &theme.style.colors.text_muted);
             let dim = colour(&theme, |theme| &theme.style.colors.text_placeholder);
             let amber = colour(&theme, |theme| &theme.style.colors.text_accent);
-            // `muted` is also the unticked box's edge and the Backlog's
-            // meta line, on the page and in the panels; `dim` is the
-            // strip's future digits on the masthead.
+            // `muted` is also the unticked box's edge, the ticked box's
+            // fill (its check is the window background), a ticked task's
+            // text, the Backlog's meta line and group labels, and the tide
+            // mark's grip; `dim` is the strip's future digits on the
+            // masthead and the footer's keycap outlines.
             for background in [ground, surface, page, title_bar] {
                 assert!(
                     contrast(ink, background) >= 7.0,
@@ -174,6 +176,11 @@ mod tests {
             }
             // `on_accent_color` is the window background (amberInk).
             assert!(contrast(ground, amber) >= 4.5, "{name}: amberInk on amber");
+            // A ticked box's check, the window background on the muted fill.
+            assert!(
+                contrast(ground, muted) >= 4.5,
+                "{name}: the check on a ticked box"
+            );
         }
     }
 

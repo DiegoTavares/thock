@@ -167,6 +167,30 @@ impl Cell {
         }
     }
 
+    /// What hovering the cell says: the day, then what sets it apart, so
+    /// the dot under the numeral is explained where it shows. The dot means
+    /// one thing, that the day has a note.
+    pub fn tooltip(&self, viewed: Viewed) -> String {
+        let mut parts = vec![short_day(self.date)];
+        if self.today {
+            parts.push("Today".into());
+        }
+        match self.frame(viewed) {
+            CellFrame::Filled => parts.push("Open".into()),
+            CellFrame::Outlined => parts.push("In the open week".into()),
+            CellFrame::Plain => {}
+        }
+        parts.push(
+            match (self.has_note, self.enabled) {
+                (true, _) => "Has a note",
+                (false, true) => "No note yet",
+                (false, false) => "No note",
+            }
+            .into(),
+        );
+        parts.join(" · ")
+    }
+
     /// The line above the numeral: the weekday's initial, or "TODAY".
     pub fn label(&self) -> SharedString {
         if self.today {
@@ -782,11 +806,7 @@ impl Masthead {
         } else {
             colors.text_placeholder
         };
-        let tooltip: SharedString = if cell.enabled {
-            short_day(date).into()
-        } else {
-            format!("No note on {}", short_day(date)).into()
-        };
+        let tooltip: SharedString = cell.tooltip(viewed).into();
         let mut element = v_flex()
             .id(SharedString::from(format!("thock-strip-{date}")))
             .w(px(40.))
@@ -980,6 +1000,34 @@ mod tests {
             date(2026, 10, 15),
             date(2026, 10, 18),
         ])
+    }
+
+    #[test]
+    fn a_cell_says_what_it_is_on_hover() {
+        let model = model(
+            Some(Viewed::Day(date(2026, 10, 14))),
+            today(),
+            &example_notes(),
+        );
+        let viewed = Viewed::Day(date(2026, 10, 14));
+        let tooltip = |day: u32| {
+            model
+                .cells
+                .iter()
+                .find(|cell| cell.date == date(2026, 10, day))
+                .map(|cell| cell.tooltip(viewed))
+        };
+        assert_eq!(tooltip(14).as_deref(), Some("Wed 14 · Open · Has a note"));
+        assert_eq!(tooltip(15).as_deref(), Some("Thu 15 · Today · Has a note"));
+        assert_eq!(tooltip(16).as_deref(), Some("Fri 16 · No note yet"));
+        assert_eq!(tooltip(12).as_deref(), Some("Mon 12 · No note"));
+        assert!(
+            model
+                .cells
+                .iter()
+                .all(|cell| cell.tooltip(viewed).ends_with("Has a note") == cell.has_note),
+            "the dot means one thing"
+        );
     }
 
     #[test]

@@ -34,7 +34,7 @@ use settings::SettingsStore;
 use std::sync::Arc;
 use std::time::Duration;
 use ui::prelude::*;
-use ui::{Label, LabelSize, PlatformStyle, render_keybinding_keystroke};
+use ui::{Label, LabelSize, LineHeightStyle, PlatformStyle, render_keybinding_keystroke};
 use util::ResultExt as _;
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -774,12 +774,12 @@ fn hint_keystrokes(
 
 /// The height of a keycap in the footer, which is also the height of its
 /// one line of hints.
-const HINT_KEYCAP_HEIGHT: Pixels = px(18.);
+const HINT_KEYCAP_HEIGHT: Pixels = px(20.);
 
 /// A footer of key hints on one line: a binding's keys share one keycap,
-/// split by a hairline when it takes more than one stroke, so `g space`
-/// reads as one binding before its label. Hints that don't fit the line
-/// are left out, the least used first.
+/// split by a gap when it takes more than one stroke, so `g space` reads as
+/// one binding before its label. Hints that don't fit the line are left
+/// out, the least used first.
 fn render_hints(
     hints: &[(Box<dyn Action>, &'static str)],
     focus: &FocusHandle,
@@ -798,23 +798,19 @@ fn render_hints(
         if keystrokes.is_empty() {
             return None;
         }
-        let keys = keystrokes.iter().enumerate().map(|(index, keystroke)| {
-            h_flex()
-                .gap_1()
-                .when(index > 0, |this| {
-                    this.child(div().h(px(10.)).w_px().bg(colors.border))
-                })
-                .children(render_keybinding_keystroke(
-                    keystroke,
-                    Some(Color::Default),
-                    key_size,
-                    PlatformStyle::platform(),
-                    vim_mode,
-                ))
+        let keys = keystrokes.iter().flat_map(|keystroke| {
+            render_keybinding_keystroke(
+                keystroke,
+                Some(Color::Default),
+                key_size,
+                PlatformStyle::platform(),
+                vim_mode,
+            )
         });
         Some(
             h_flex()
                 .flex_none()
+                .h(HINT_KEYCAP_HEIGHT)
                 .gap_1()
                 .items_center()
                 .child(
@@ -824,22 +820,29 @@ fn render_hints(
                         .h(HINT_KEYCAP_HEIGHT)
                         .min_w(HINT_KEYCAP_HEIGHT)
                         .px_1()
-                        .gap_1()
+                        .gap(px(5.))
+                        .items_center()
                         .justify_center()
                         .rounded_sm()
                         .border_1()
-                        .border_color(colors.border)
+                        // The placeholder ink holds 3:1 on the panel, so the
+                        // key reads before its muted label.
+                        .border_color(colors.text_placeholder)
                         .bg(colors.element_background)
+                        .text_size(key_size)
+                        .font_weight(FontWeight::NORMAL)
                         .children(keys),
                 )
                 .child(
                     Label::new(*label)
                         .size(LabelSize::Small)
+                        .line_height_style(LineHeightStyle::UiLabel)
                         .color(Color::Muted),
                 ),
         )
     });
     div()
+        .debug_selector(|| "thock-hints-bar".into())
         .flex_none()
         .px_3()
         .py_2()
@@ -1243,6 +1246,69 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_linked_note_rides_the_meta_line_and_opens_on_click(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        let row = setup.desk.read_with(&setup.cx, |desk, cx| {
+            desk.backlog.read(cx).row_for_tests("DNV", cx)
+        });
+        assert_eq!(
+            row,
+            Some((
+                "Study for DNV elections".to_string(),
+                Some(("from Sep 28 · inbox".to_string(), false))
+            )),
+            "the slug leaves the text; the link is offered on the meta line"
+        );
+
+        setup.cx.update(|window, _| window.refresh());
+        setup.cx.run_until_parked();
+        let link = setup
+            .cx
+            .debug_bounds("backlog-note-soon-1")
+            .expect("the note link is drawn");
+        setup
+            .cx
+            .simulate_click(link.center(), gpui::Modifiers::none());
+        setup.cx.run_until_parked();
+        let opened = setup.workspace.read_with(&setup.cx, |workspace, cx| {
+            workspace
+                .active_item(cx)
+                .and_then(|item| item.project_path(cx))
+                .map(|path| path.path.as_unix_str().to_string())
+        });
+        assert_eq!(opened.as_deref(), Some("inbox/2026-09-28-dnv-ballot.md"));
+    }
+
+    #[gpui::test]
+    async fn a_backlog_box_sits_centred_on_its_first_line(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, false).await;
+        setup.cx.update(|window, _| window.refresh());
+        setup.cx.run_until_parked();
+        let check = setup
+            .cx
+            .debug_bounds("backlog-check-soon-1")
+            .expect("the box is drawn");
+        let words = setup
+            .cx
+            .debug_bounds("backlog-words-soon-1")
+            .expect("the words are drawn");
+        let line_height = setup.cx.update(|window, _| {
+            crate::backlog_panel::TASK_LINE_HEIGHT.to_pixels(window.rem_size())
+        });
+        // Layout rounds to whole pixels, so allow less than one.
+        let close = |a: Pixels, b: Pixels| (a - b).abs() < px(1.);
+        assert!(close(check.top(), words.top()), "{check:?} {words:?}");
+        assert!(
+            close(check.size.height, line_height),
+            "the box spans the first line: {check:?}"
+        );
+        assert!(
+            close(words.size.height, line_height),
+            "one line of words: {words:?}"
+        );
+    }
+
+    #[gpui::test]
     async fn digits_switch_the_views(cx: &mut TestAppContext) {
         let mut setup = setup(cx, false).await;
         assert!(desk_focused(&mut setup));
@@ -1632,6 +1698,22 @@ mod tests {
             .debug_bounds("thock-hints")
             .expect("the footer is drawn");
         assert_eq!(bar.size.height, HINT_KEYCAP_HEIGHT, "one line of hints");
+        let footer = setup
+            .cx
+            .debug_bounds("thock-hints-bar")
+            .expect("the footer is drawn");
+        for keycap in [open, add] {
+            assert!(
+                keycap.top() >= bar.top() && keycap.bottom() <= bar.bottom(),
+                "the whole keycap shows: {keycap:?} in {bar:?}"
+            );
+            let above = keycap.top() - footer.top();
+            let below = footer.bottom() - keycap.bottom();
+            assert!(
+                (above - below).abs() <= px(1.),
+                "the keycap sits in the middle of the footer: {above:?} above, {below:?} below"
+            );
+        }
     }
 
     #[gpui::test]
