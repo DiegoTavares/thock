@@ -2084,7 +2084,7 @@ fn time_dash_placeholder() -> FoldPlaceholder {
                 .h_full()
                 .flex()
                 .items_center()
-                .text_color(cx.theme().status().info)
+                .text_color(cx.theme().colors().text_muted)
                 .child("–")
                 .into_any_element()
         }),
@@ -2589,7 +2589,7 @@ fn email_link_placeholder() -> FoldPlaceholder {
                 .h_full()
                 .flex()
                 .items_center()
-                .text_color(markdown_text::external_link_color(cx))
+                .text_color(markdown_text::link_color(cx))
                 .child("Open in Gmail ↗")
                 .into_any_element()
         }),
@@ -2659,7 +2659,7 @@ fn sender_color(own: bool, cx: &App) -> Hsla {
 }
 
 /// The number of highlight slots: the quote tint, three heading colours,
-/// bold and italic, inline code, two link colours, the strikethrough, the
+/// bold and italic, inline code, two link slots, the strikethrough, the
 /// email view's sender/own/muted trio, the journal and task times, the done
 /// task's ink, and the hidden slot.
 pub(crate) const HIGHLIGHT_SLOTS: usize = 17;
@@ -2686,7 +2686,8 @@ const EMAIL_OWN_SENDER_SLOT: usize = 11;
 const EMAIL_MUTED_SLOT: usize = 12;
 /// A journal entry's time, in the accent (V43 §7.3).
 const JOURNAL_TIME_SLOT: usize = 13;
-/// A task's time, in the calendar colour.
+/// A task's time, in the muted ink: set apart by weight, not a hue a
+/// link could be mistaken for.
 const TASK_TIME_SLOT: usize = 14;
 /// A ticked task's text, in the muted ink. Over every colour slot, so a
 /// finished task's time and links recede with it.
@@ -2797,14 +2798,13 @@ fn slot_color(slot: usize, cx: &App) -> Hsla {
     match slot {
         QUOTE_SLOT => colors.text_muted,
         CODE_SLOT => markdown_text::code_color(cx),
-        WIKILINK_SLOT => markdown_text::wikilink_color(cx),
-        LINK_SLOT => markdown_text::external_link_color(cx),
+        WIKILINK_SLOT | LINK_SLOT => markdown_text::link_color(cx),
         EMAIL_SENDER_SLOT => sender_color(false, cx),
         EMAIL_OWN_SENDER_SLOT => sender_color(true, cx),
         EMAIL_MUTED_SLOT | DONE_TASK_SLOT => colors.text_muted,
         HIDDEN_SLOT => colors.editor_background,
         JOURNAL_TIME_SLOT => colors.text_accent,
-        TASK_TIME_SLOT => cx.theme().status().info,
+        TASK_TIME_SLOT => colors.text_muted,
         _ => {
             let players = &cx.theme().players().0;
             // Slot 0 of the player palette is the local-user colour; heading
@@ -3136,6 +3136,14 @@ mod tests {
                 highlighted(editor, TASK_TIME_SLOT, cx),
                 vec!["09:00 - 11:00"],
                 "a ticked task's time takes the done ink, not the time's"
+            );
+            let (time, _) = editor
+                .text_highlights(HighlightKey::ThockMarkdownConceal(TASK_TIME_SLOT), cx)
+                .expect("the open task's time is highlighted");
+            assert_eq!(
+                time.color,
+                Some(cx.theme().colors().text_muted),
+                "a task's time is set in the muted ink, not a link-like hue"
             );
         });
         move_cursor_to(&editor, 1, &mut cx);
@@ -4377,6 +4385,16 @@ mod tests {
         editor.update_in(&mut cx, |editor, _, cx| {
             assert_eq!(highlighted(editor, WIKILINK_SLOT, cx), vec!["wiki"]);
             assert_eq!(highlighted(editor, LINK_SLOT, cx), vec!["docs"]);
+            let link_color = |slot: usize, cx: &mut Context<Editor>| {
+                editor
+                    .text_highlights(HighlightKey::ThockMarkdownConceal(slot), cx)
+                    .and_then(|(style, _)| style.color)
+            };
+            assert_eq!(
+                link_color(WIKILINK_SLOT, cx),
+                link_color(LINK_SLOT, cx),
+                "both link syntaxes take one colour"
+            );
             assert_eq!(highlighted(editor, HEADING_SLOT, cx), vec!["Title"]);
             toggle(editor, cx);
             assert!(highlighted(editor, WIKILINK_SLOT, cx).is_empty());

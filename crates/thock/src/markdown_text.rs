@@ -182,16 +182,13 @@ fn is_absolute_url(url: &str) -> bool {
         })
 }
 
-/// The colour a `[[wikilink]]` label takes in the Markdown editor.
-pub fn wikilink_color(cx: &App) -> Hsla {
-    cx.theme().colors().text_accent
-}
-
-/// The colour a `[name](url)` label takes in the Markdown editor.
-pub fn external_link_color(cx: &App) -> Hsla {
+/// The colour a link label takes in the Markdown editor and the panels,
+/// `[[wikilink]]` and `[name](url)` alike: the theme's `link_text` syntax
+/// style, so links read as one thing and stay apart from the accent.
+pub fn link_color(cx: &App) -> Hsla {
     cx.theme()
         .syntax()
-        .style_for_name("link_uri")
+        .style_for_name("link_text")
         .and_then(|style| style.color)
         .unwrap_or_else(|| cx.theme().colors().text_accent)
 }
@@ -237,8 +234,7 @@ pub fn render_markdown_row(
         display.push_str(&span.text);
         let range = start..display.len();
         let color = match &span.target {
-            Some(LinkTarget::Url(_)) => Some(external_link_color(cx)),
-            Some(LinkTarget::Note(_)) => Some(wikilink_color(cx)),
+            Some(_) => Some(link_color(cx)),
             None => span.code.then(|| code_color(cx)),
         };
         if !span.is_plain() {

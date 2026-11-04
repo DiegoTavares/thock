@@ -113,20 +113,25 @@ One Dark and One Light stay as they are. A user who already chose a theme keeps 
 
 | Token | Dark | Light | Theme keys |
 | --- | --- | --- | --- |
-| ground | `#151413` | `#F3EFE7` | `background`, `editor.background`, `editor.gutter.background` |
-| surface | `#1C1B19` | `#FAF7F1` | `panel.background`, `surface.background`, `elevated_surface.background`, `tab_bar.background`, `toolbar.background` |
-| sunken | `#111010` | `#EBE6DC` | `title_bar.background`, `status_bar.background`, `editor.subheader.background` |
-| rule | `#322E2A` | `#D9D1C3` | `border`, `panel.focused_border`, `pane.focused_border` |
-| ruleSoft | `#262320` | `#E7E1D6` | `border.variant`, `editor.wrap_guide` |
+| ground | `#151413` | `#F8F5EF` | `background`, `editor.background`, `editor.gutter.background` |
+| surface | `#1E1C1A` | `#EFEAE1` | `panel.background`, `surface.background`, `elevated_surface.background`, `element.background`, `tab_bar.background`, `toolbar.background` |
+| sunken | `#0B0A0A` | `#E8E2D7` | `title_bar.background`, `status_bar.background`, `editor.subheader.background` |
+| rule | `#322E2A` | `#D3C9B8` | `border`, `panel.focused_border`, `pane.focused_border` |
+| ruleSoft | `#262320` | `#DDD5C7` | `border.variant`, `editor.wrap_guide` |
 | ink | `#ECE7DE` | `#1C1B19` | `text`, `editor.foreground`, `icon` |
 | muted | `#A89F93` | `#5F594F` | `text.muted`, `icon.muted` |
-| dim | `#6D675E` | `#978F82` | `text.placeholder`, `text.disabled`, `editor.line_number` |
-| amber | `#E2A554` | `#A8711F` | `text.accent`, `icon.accent`, `border.focused`, `editor.active_line_number`, `players[0].cursor` |
-| amberSoft | `#3A2E1C` | `#F1E3C9` | `element.selected`, `ghost_element.selected`, `players[0].selection` (at 70%) |
-| amberInk | `#171613` | `#FAF7F1` | text on a filled amber surface (today cell, checked box) |
-| cal | `#8FA5C0` | `#4F6A8C` | `syntax.link_uri`, `info`, calendar times |
+| dim | `#6D675E` | `#877F72` | `text.placeholder`, `text.disabled`, `editor.line_number` |
+| amber | `#E2A554` | `#8D5800` | `text.accent`, `icon.accent`, `border.focused`, `editor.active_line_number`, `players[0].cursor` |
+| amberSoft | `#3A2E1C` | `#ECD9B6` | `element.selected`, `ghost_element.selected`, `players[0].selection` (at 70%) |
+| amberInk | `#151413` | `#F8F5EF` | text on a filled amber surface (today cell, checked box); the `background` key |
+| cal | `#8FA5C0` | `#4F6A8C` | `syntax.link_text`, `link_text.hover`, `syntax.link_uri`, `info`: every link |
 | good | `#86B48F` | `#3F7A4F` | `success`, `created` |
 | warn | `#E08A5A` | `#B2541F` | `warning`, `modified` |
+
+The page is the clearest surface: the rail and the dock step one tone away from it (darker in
+Light, lighter in Dark) and the masthead and status bar are the darkest band in both, so the panes
+separate by tone, not only by hairline. Text holds its contrast on every one of them (§10), and amber holds 4.5:1 as text on
+each.
 
 Two derived tones that the phone doesn't need: `editor.active_line.background` is ink at 4%, and
 `error` is `#E07A6A` (dark) / `#A8402F` (light). Terminal ANSI colours come from One Dark / One
@@ -136,9 +141,10 @@ Light, with background and foreground swapped for ground and ink.
 
 The phone's rule is that amber means the agent and the primary action, and nothing else (V33 §13).
 The desk adds one meaning, **where you are**: today in the strip, the selected row, the caret, the
-Next card, the active tab underline, and journal times. It also keeps the reference's amber
-italic `##`, which is the only typographic use. Calendar times stay `cal`, and links follow the
-existing rules (wikilinks `text.accent`, external links `syntax.link_uri`).
+Next card, the active tab underline, journal times, and counts that need you (an overdue
+reminder). Heading markers stay in ink, never amber. Links are not amber: `[[wikilinks]]` and
+`[name](url)` share one link colour, `cal` (`syntax.link_text`), so a link never reads as "where
+you are". Calendar times are set in muted ink, SemiBold, so they don't compete with links.
 
 ### 5.3 Heading colours become theme-addressable
 
@@ -332,8 +338,8 @@ is drawn (cursor elsewhere) as:
                                      ← row 1 of the H1 block (space)
 Day planner                          ← Petrona SemiBold 30px, row 2
 ☐  Workout                           ← Plex Sans 17px
-Calendar                             ← Petrona Medium Italic 22px, amber, 1-row block
-☑  09:00 – 17:00  Focus time         ← time in cal, SemiBold, tnum; whole line struck and dim
+Calendar                             ← Petrona Medium Italic 22px, ink, 1-row block
+☑  09:00 – 17:00  Focus time         ← time in muted ink, SemiBold, tnum; whole line struck and dim
 ```
 
 ### 7.3 Times and tasks
@@ -345,7 +351,7 @@ family:
   `20:29 · I'm tired of…`. The time is SemiBold `text.accent`, and the ` · ` stays visible in
   `text.placeholder`.
 - **`TaskTime`:** a task's leading `HH:MM - HH:MM` or `HH:MM`, parsed with the Day Planner's
-  parser so the editor and the panel agree. The time is SemiBold `cal`, and the ` - ` is drawn as
+  parser so the editor and the panel agree. The time is SemiBold `text.muted`, and the ` - ` is drawn as
   an en dash (a fold whose placeholder is `–`). A ticked task's time keeps the dash but not the
   colour or weight: it takes the done text's muted ink at the regular weight.
 

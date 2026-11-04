@@ -183,6 +183,76 @@ mod tests {
     }
 
     #[test]
+    fn amber_reads_as_text_on_every_surface() {
+        for name in [THOCK_DARK, THOCK_LIGHT] {
+            let theme = theme(name);
+            let amber = colour(&theme, |theme| &theme.style.colors.text_accent);
+            for background in [
+                colour(&theme, |theme| &theme.style.colors.editor_background),
+                colour(&theme, |theme| &theme.style.colors.panel_background),
+                colour(&theme, |theme| &theme.style.colors.title_bar_background),
+            ] {
+                assert!(
+                    contrast(amber, background) >= 4.5,
+                    "{name}: amber on {background}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_page_stands_apart_from_the_surfaces_around_it() {
+        for name in [THOCK_DARK, THOCK_LIGHT] {
+            let theme = theme(name);
+            let page = colour(&theme, |theme| &theme.style.colors.editor_background);
+            let surface = colour(&theme, |theme| &theme.style.colors.panel_background);
+            let sunken = colour(&theme, |theme| &theme.style.colors.title_bar_background);
+            for side in [surface, sunken] {
+                assert!(
+                    contrast(page, side) >= 1.07,
+                    "{name}: the page is a tone step from {side}"
+                );
+            }
+            if name == THOCK_LIGHT {
+                // On light paper the page is the brightest sheet, the rail and
+                // dock a step down, the masthead and status bar a step further.
+                assert!(
+                    luminance(page) > luminance(surface),
+                    "{name}: page over surface"
+                );
+                assert!(
+                    luminance(surface) > luminance(sunken),
+                    "{name}: surface over sunken"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn links_take_one_colour_apart_from_the_accent() {
+        for name in [THOCK_DARK, THOCK_LIGHT] {
+            let theme = theme(name);
+            let link = theme.style.syntax["link_text"]
+                .color
+                .as_deref()
+                .expect("the theme sets a link colour");
+            let hover = colour(&theme, |theme| &theme.style.colors.link_text_hover);
+            let amber = colour(&theme, |theme| &theme.style.colors.text_accent);
+            assert_eq!(hover, link, "{name}: a hovered link keeps the link colour");
+            assert_ne!(link, amber, "{name}: links are not amber");
+            for background in [
+                colour(&theme, |theme| &theme.style.colors.editor_background),
+                colour(&theme, |theme| &theme.style.colors.panel_background),
+            ] {
+                assert!(
+                    contrast(link, background) >= 4.5,
+                    "{name}: link on {background}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn headings_are_theme_addressable() {
         for name in [THOCK_DARK, THOCK_LIGHT] {
             let theme = theme(name);
