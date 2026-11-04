@@ -489,8 +489,9 @@ impl LineWrapper {
         matches!(c, '\u{202F}' | '\u{00A0}' | '\u{2011}')
     }
 
+    /// The width of `c` in this wrapper's font and size.
     #[inline(always)]
-    fn width_for_char(&mut self, c: char) -> Pixels {
+    pub fn width_for_char(&mut self, c: char) -> Pixels {
         if (c as u32) < 128 {
             if let Some(cached_width) = self.cached_ascii_char_widths[c as usize] {
                 cached_width

@@ -550,9 +550,17 @@ impl WrapSnapshot {
                             });
                             break;
                         } else {
-                            if let Some(width) =
-                                chunk.renderer.as_ref().and_then(|r| r.measured_width)
-                            {
+                            // A rendered chunk is one element even before it has been
+                            // measured: a wrap inside a fold placeholder has no buffer
+                            // position, so the text must only stand in for its width.
+                            if let Some(renderer) = &chunk.renderer {
+                                let width = renderer.measured_width.unwrap_or_else(|| {
+                                    chunk
+                                        .text
+                                        .chars()
+                                        .map(|character| line_wrapper.width_for_char(character))
+                                        .sum()
+                                });
                                 line_fragments
                                     .push(gpui::LineFragment::element(width, chunk.text.len()));
                             } else {

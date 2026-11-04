@@ -4575,4 +4575,54 @@ pub mod tests {
         let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
         assert_eq!(snapshot.text(), "prefix more initial");
     }
+
+    #[gpui::test]
+    async fn test_soft_wrap_keeps_unmeasured_fold_placeholder_whole(cx: &mut gpui::TestAppContext) {
+        cx.background_executor
+            .set_block_on_ticks(usize::MAX..=usize::MAX);
+        cx.update(|cx| init_test(cx, &|_| {}));
+
+        let label = "Tomorrow 10:00";
+        let token = "!remind(2026-11-05 10:00)";
+        let text = format!("aaaa bbbb cccc {token} dddd eeee ffff\nsecond\n");
+        let token_start = text.find(token).expect("text contains the token");
+        let token_range =
+            MultiBufferOffset(token_start)..MultiBufferOffset(token_start + token.len());
+
+        for wrap_width in (30..300).step_by(3) {
+            let buffer = cx.update(|cx| MultiBuffer::build_simple(&text, cx));
+            let map = cx.new(|cx| {
+                DisplayMap::new(
+                    buffer,
+                    font("Helvetica"),
+                    px(12.0),
+                    Some(px(wrap_width as f32)),
+                    1,
+                    1,
+                    FoldPlaceholder::test(),
+                    DiagnosticSeverity::Warning,
+                    cx,
+                )
+            });
+            let snapshot = map.update(cx, |map, cx| {
+                map.fold(
+                    vec![Crease::simple(
+                        token_range.clone(),
+                        FoldPlaceholder {
+                            collapsed_text: Some(label.into()),
+                            ..FoldPlaceholder::test()
+                        },
+                    )],
+                    cx,
+                );
+                map.snapshot(cx)
+            });
+            cx.run_until_parked();
+            assert!(
+                snapshot.text().contains(label),
+                "wrapped inside the placeholder at width {wrap_width}: {:?}",
+                snapshot.text()
+            );
+        }
+    }
 }
