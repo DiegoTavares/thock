@@ -234,6 +234,13 @@ function sign_app_binaries() {
         codesign --force --deep --entitlements "${app_path}/Contents/Resources/thock.entitlements" --sign ${MACOS_SIGNING_KEY:- -} "${app_path}" -v
     fi
 
+    # The standalone agents-bridge client the release publishes (V55 §12): the
+    # stripped, signed copy from the bundle, taken here because the bundle
+    # moves into the dmg folder below. The dmg is what gets notarised; a
+    # browser download of this file still carries the quarantine attribute
+    # (the connect-agent skill says what to do), a curl download does not.
+    cp "${app_path}/Contents/MacOS/thock-bridge" "target/${target_triple}/${target_dir}/thock-bridge-macos-${arch_suffix}"
+
     bundle_name=$(basename "$app_path")
 
     if [ "$local_install" = true ]; then
@@ -301,10 +308,3 @@ strip "${app_path}/Contents/MacOS/thock"
 strip "${app_path}/Contents/MacOS/cli"
 strip "${app_path}/Contents/MacOS/thock-bridge"
 sign_app_binaries
-
-# The standalone agents-bridge client the release publishes (V55 §12): the
-# stripped, signed copy from the bundle, so Gatekeeper treats it like the
-# app's own binaries. The dmg is what gets notarised; a browser download of
-# this file still carries the quarantine attribute (the connect-agent skill
-# says what to do), a curl download does not.
-cp "${app_path}/Contents/MacOS/thock-bridge" "target/${target_triple}/${target_dir}/thock-bridge-macos-${arch_suffix}"
