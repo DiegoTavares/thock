@@ -1029,7 +1029,13 @@ async fn handle_pair(
         return Outgoing::error(400, "pair needs {\"code\", \"name\"}");
     };
     let name = request.name.trim();
-    if name.is_empty() || name.len() > 64 || name.contains(['/', '\\', '@']) {
+    let plain_host_name = !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !plain_host_name {
         return Outgoing::error(400, "the client's name must be a plain host name");
     }
     let accepted = match context.shared.lock() {
