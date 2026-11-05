@@ -52,6 +52,9 @@ const PAIR_BODY_LIMIT: usize = 1024;
 /// long and no longer (R1).
 const HEAD_DEADLINE: Duration = Duration::from_secs(10);
 const CONNECTION_DEADLINE: Duration = Duration::from_secs(30);
+/// An unpaired peer's `/v1/pair` body is a few hundred bytes; it gets this
+/// long after its head, not the paired budget.
+const PAIR_BODY_DEADLINE: Duration = Duration::from_secs(5);
 /// Connections answered at once; the rest get a 503 rather than a queue.
 const MAX_WORKERS: usize = 16;
 /// Connections one address may hold before its head has arrived, so a
@@ -962,7 +965,14 @@ fn listen(
                 let shared = shared.clone();
                 let sender = sender.clone();
                 move || {
-                    let release = || release_preauth(&preauth, peer_ip);
+                    // Released once, the first time it is called: after the
+                    // token checks out, or when the request is answered.
+                    let released = std::cell::Cell::new(false);
+                    let release = || {
+                        if !released.replace(true) {
+                            release_preauth(&preauth, peer_ip);
+                        }
+                    };
                     handle_connection(stream, &shared, &sender, &release);
                     workers.fetch_sub(1, Ordering::SeqCst);
                 }
@@ -987,34 +997,33 @@ fn release_preauth(preauth: &Arc<Mutex<HashMap<IpAddr, usize>>>, ip: IpAddr) {
 
 /// One connection, one request: route and authenticate from the head
 /// before a byte of body is read, cap the body by who is asking, hand the
-/// rest to the foreground, write the reply.
+/// rest to the foreground, write the reply. `release` frees the peer's
+/// pre-auth slot; it is called once the token checks out, else when the
+/// request has been answered, so an unpaired peer holds its slot for the
+/// whole of its (short) budget.
 fn handle_connection(
     mut stream: TcpStream,
     shared: &Arc<Mutex<Shared>>,
     sender: &mpsc::UnboundedSender<(Incoming, oneshot::Sender<Outgoing>)>,
-    head_done: &dyn Fn(),
+    release: &dyn Fn(),
 ) {
     let opened = std::time::Instant::now();
     stream.set_write_timeout(Some(CONNECTION_DEADLINE)).ok();
     let outgoing = {
         let Ok(reading) = stream.try_clone() else {
-            head_done();
+            release();
             return;
         };
         let mut reader = BufReader::new(thock_bridge::DeadlineStream::new(
             reading,
             opened + HEAD_DEADLINE,
         ));
-        let head = thock_bridge::read_request_head(&mut reader);
-        head_done();
-        match head {
-            Ok(head) => {
-                reader.get_mut().set_deadline(opened + CONNECTION_DEADLINE);
-                answer(head, &mut reader, shared, sender)
-            }
+        match thock_bridge::read_request_head(&mut reader) {
+            Ok(head) => answer(head, &mut reader, opened, shared, sender, release),
             Err(status) => Outgoing::error(status, "the desk couldn't read that request"),
         }
     };
+    release();
     let written = thock_bridge::write_response(
         &mut stream,
         outgoing.status,
@@ -1028,9 +1037,11 @@ fn handle_connection(
 
 fn answer(
     head: thock_bridge::RequestHead,
-    reader: &mut impl std::io::Read,
+    reader: &mut BufReader<thock_bridge::DeadlineStream>,
+    opened: std::time::Instant,
     shared: &Arc<Mutex<Shared>>,
     sender: &mpsc::UnboundedSender<(Incoming, oneshot::Sender<Outgoing>)>,
+    release: &dyn Fn(),
 ) -> Outgoing {
     let route = thock_bridge::parse_route(&head.method, &head.url);
     let client = match route {
@@ -1062,8 +1073,13 @@ fn answer(
         }
     };
     let limit = if client.is_some() {
+        release();
+        reader.get_mut().set_deadline(opened + CONNECTION_DEADLINE);
         BODY_LIMIT
     } else {
+        reader
+            .get_mut()
+            .set_deadline(std::time::Instant::now() + PAIR_BODY_DEADLINE);
         PAIR_BODY_LIMIT
     };
     if head.content_length > limit {
@@ -2511,6 +2527,51 @@ mod tests {
             turned_away, 4,
             "two per address trickle, the rest get a 503"
         );
+        // A complete `/v1/pair` head with no body holds its slot until it
+        // is answered, so sixteen of them from one address can't take the
+        // workers: two hold, the rest are turned away, the paired client
+        // is served meanwhile.
+        drop(tricklers);
+        std::thread::sleep(Duration::from_millis(50));
+        let mut headless: Vec<TcpStream> = Vec::new();
+        for _ in 0..6 {
+            let mut stream = from_other_address(desk.port);
+            stream
+                .write_all(b"POST /v1/pair HTTP/1.1\r\nHost: x\r\nContent-Length: 500\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+            headless.push(stream);
+        }
+        let started = std::time::Instant::now();
+        let (status, _) = roundtrip(
+            cx,
+            desk.port,
+            "GET",
+            "/v1/health",
+            &[("Authorization", auth.as_str())],
+            "",
+        );
+        assert_eq!(status, 200);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        let mut turned_away = 0;
+        for stream in &mut headless {
+            stream
+                .set_read_timeout(Some(Duration::from_millis(300)))
+                .ok();
+            let mut buf = [0u8; 64];
+            if matches!(stream.read(&mut buf), Ok(n) if n > 0) {
+                turned_away += 1;
+            }
+        }
+        assert_eq!(
+            turned_away, 4,
+            "the slot is held until the pair is answered"
+        );
+        let tricklers = headless;
         // A head with no newline at all is cut at the cap, not grown (R2).
         drop(tricklers);
         std::thread::sleep(Duration::from_millis(50));
