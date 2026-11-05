@@ -1,6 +1,6 @@
 # Thock V55 - The Agents Routine: your other agents share the vault's memory
 
-**Status:** Implemented (2026-11-04): PR #190, TestFlight build 25
+**Status:** Shipped (2026-11-05): merged as #190, TestFlight build 25, by-hand checks passed
 **Owner:** Diego · **Date:** 2026-11-04
 **Companion docs:** `v28-agent-memory.md` (the memory tiers, Reflect, decisions 9 and 12 amended
 here), `v27-*` and `crates/thock/src/hosted_agent.rs` (`compose_vault_context`, the block the
