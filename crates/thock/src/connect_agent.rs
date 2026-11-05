@@ -81,9 +81,13 @@ impl ConnectAgentModal {
         }
     }
 
+    /// The code was typed somewhere: the desk spent it (a known name
+    /// re-pairing replaces its entry, so the count may not move) or the
+    /// client list changed. Either way the modal's job is done.
     fn service_changed(&mut self, service: gpui::Entity<BridgeService>, cx: &mut Context<Self>) {
         let clients = service.read(cx).clients();
-        if self.invite.is_none() || clients.len() <= self.clients_before {
+        let code_spent = !service.read(cx).has_pending_code();
+        if self.invite.is_none() || (!code_spent && clients.len() == self.clients_before) {
             return;
         }
         let name = clients

@@ -597,10 +597,16 @@ mod tests {
     #[test]
     fn whole_files_are_scanned_line_by_line() {
         let forbidden = vec!["salary".to_string()];
-        assert_eq!(find_unkeepable("# Memory\n- cmake 3.31 on robin\n", &forbidden), None);
         assert_eq!(
-            find_unkeepable("# Memory\n\n- token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef12\n", &forbidden)
-                .as_deref(),
+            find_unkeepable("# Memory\n- cmake 3.31 on robin\n", &forbidden),
+            None
+        );
+        assert_eq!(
+            find_unkeepable(
+                "# Memory\n\n- token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef12\n",
+                &forbidden
+            )
+            .as_deref(),
             Some("line 3 looks like an API token")
         );
         assert_eq!(

@@ -11,7 +11,7 @@
 use chrono::NaiveDate;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,6 +85,11 @@ impl ToolHost for VaultHost<'_> {
             return Ok(*outcome);
         }
         let fact = thock_bridge::check_fact(fact, &[])?;
+        if fact.contains("refuse-me") {
+            return Err(HostError(
+                "that topic is on the person's do-not-keep list".into(),
+            ));
+        }
         let date = meta
             .date
             .unwrap_or_else(|| chrono::Local::now().date_naive());
@@ -159,46 +164,21 @@ impl Desk {
     }
 }
 
+/// One connection through the library's own HTTP helpers, the same ones
+/// the desk serves with.
 fn serve_one(mut stream: TcpStream, vault: &Arc<Mutex<Vault>>) {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("timeout");
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
-        return;
-    }
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_string();
-    let url = parts.next().unwrap_or_default().to_string();
-    let mut headers = Vec::new();
-    let mut content_length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            break;
-        }
-        let line = line.trim_end().to_string();
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().unwrap_or(0);
-            }
-            headers.push((name.trim().to_string(), value.trim().to_string()));
-        }
-    }
-    let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body).expect("body");
-    let (status, content_type, reply) = respond(&method, &url, &headers, &body, vault);
-    let head = format!(
-        "HTTP/1.0 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        reply.len()
-    );
-    stream.write_all(head.as_bytes()).expect("head");
-    stream.write_all(&reply).expect("reply");
-    stream.flush().expect("flush");
+    let (status, content_type, reply) = match thock_bridge::read_request_head(&mut reader) {
+        Ok(head) => match thock_bridge::read_body(&mut reader, head.content_length) {
+            Ok(body) => respond(&head.method, &head.url, &head.headers, &body, vault),
+            Err(status) => (status, "text/plain", Vec::new()),
+        },
+        Err(status) => (status, "text/plain", Vec::new()),
+    };
+    thock_bridge::write_response(&mut stream, status, content_type, &reply).expect("reply");
 }
 
 fn respond(
@@ -269,6 +249,15 @@ fn respond(
         }
         Route::Skill => (200, "text/markdown", b"---\nname: thock-memory\n---\nthe skill\n".to_vec()),
         Route::AgentFile { harness, path } => {
+            if let Some(reason) =
+                thock_bridge::find_unkeepable(&String::from_utf8_lossy(body), &[])
+            {
+                return (
+                    422,
+                    "application/json",
+                    thock_bridge::response_json(&format!("{path}: {reason}")).into_bytes(),
+                );
+            }
             vault.mirrored.insert(
                 format!("{harness}/robin/{path}"),
                 String::from_utf8_lossy(body).into_owned(),
@@ -463,7 +452,19 @@ fn pair_call_go_offline_and_drain_once() {
     assert_eq!(queued.first_text(), thock_bridge::QUEUED_SENTENCE);
     let queued = serve.tool("note_today", json!({"line": "Shipped it offline."}));
     assert_eq!(queued.first_text(), thock_bridge::QUEUED_SENTENCE);
-    assert_eq!(client.outbox_lines(), 2);
+    // A line the desk will refuse for good queues too (the client can't
+    // know the person's list) and is dropped on the drain, not kept forever.
+    let queued = serve.tool("remember", json!({"fact": "Something to refuse-me later"}));
+    assert_eq!(queued.first_text(), thock_bridge::QUEUED_SENTENCE);
+    // A line the client can see is wrong never enters the queue.
+    let refused = serve.tool("remember", json!({"fact": "- a bullet"}));
+    assert!(refused.is_error);
+    assert!(
+        refused.first_text().contains("leading"),
+        "{}",
+        refused.first_text()
+    );
+    assert_eq!(client.outbox_lines(), 3);
     let stderr = serve.finish();
     assert!(stderr.contains("unreachable"), "{stderr}");
 
@@ -472,9 +473,10 @@ fn pair_call_go_offline_and_drain_once() {
     let pong = serve.call("ping", json!({}));
     assert!(pong.error.is_none());
     serve.finish();
-    assert_eq!(client.outbox_lines(), 2);
+    assert_eq!(client.outbox_lines(), 3);
 
-    // The desk is back: the start-up drain lands both lines, once.
+    // The desk is back: the start-up drain lands both lines, once, and
+    // drops the one the desk refuses.
     let desk = Desk::start(port, vault.clone());
     let mut serve = client.serve();
     let pong = serve.call("ping", json!({}));
@@ -483,6 +485,7 @@ fn pair_call_go_offline_and_drain_once() {
     assert!(!context.first_text().contains("from cache"), "online again");
     let stderr = serve.finish();
     assert!(stderr.contains("2 queued line(s) landed"), "{stderr}");
+    assert!(stderr.contains("refused a queued remember"), "{stderr}");
     assert_eq!(client.outbox_lines(), 0);
     {
         let vault = vault.lock().expect("lock");
@@ -538,6 +541,10 @@ fn pair_call_go_offline_and_drain_once() {
     assert!(ok);
     assert!(stdout.contains("Reachable: yes"), "{stdout}");
     assert!(stdout.contains("Outbox: 0 queued"), "{stdout}");
+    assert!(
+        stdout.contains("Refused by the desk: 1 line(s)"),
+        "{stdout}"
+    );
 
     // Mirror: a harness folder's text files go up under their harness.
     let mirror_dir = client.home.path().join("data/agents/claude-code");
@@ -545,9 +552,15 @@ fn pair_call_go_offline_and_drain_once() {
     std::fs::write(mirror_dir.join("MEMORY.md"), "# index\n").expect("write");
     std::fs::write(mirror_dir.join("topics/build.md"), "cmake 3.31\n").expect("write");
     std::fs::write(mirror_dir.join("photo.png"), "png").expect("write");
+    std::fs::write(mirror_dir.join("topics/secret.md"), "password: hunter2\n").expect("write");
     let (ok, stdout, stderr) = client.run(&["mirror"]);
     assert!(ok, "{stderr}");
     assert!(stdout.contains("2 file(s) mirrored"), "{stdout}");
+    assert!(
+        stdout.contains("refused claude-code/topics/secret.md: 422"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("1 refused"), "{stdout}");
     {
         let vault = vault.lock().expect("lock");
         assert_eq!(vault.mirrored["claude-code/robin/MEMORY.md"], "# index\n");

@@ -3937,4 +3937,137 @@ mod tests {
         assert!(svg.starts_with("<svg"));
         assert_eq!(DASHBOARD_ICON, "icons/thock/dashboard.svg");
     }
+
+    /// The Agents section's rows work from the keyboard (CLAUDE.md panels
+    /// rule): `enter` on the status row opens *Connect an agent*, `escape`
+    /// hands focus back, and `enter` on a machine's row disconnects it.
+    #[gpui::test]
+    async fn enter_on_the_agents_rows_connects_and_disconnects(cx: &mut gpui::TestAppContext) {
+        use crate::bridge_service::{self, BridgeService};
+        use crate::connect_agent::ConnectAgentModal;
+        use fs::FakeFs;
+        use gpui::{KeyBinding, VisualTestContext};
+        use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
+        use workspace::MultiWorkspace;
+
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            let key_bindings: Vec<KeyBinding> = match KeymapFile::load(
+                include_str!("../../../assets/keymaps/default-linux.json"),
+                cx,
+            ) {
+                KeymapFileLoadResult::Success { key_bindings }
+                | KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => key_bindings,
+                KeymapFileLoadResult::JsonParseFailure { error } => panic!("bad keymap: {error}"),
+            };
+            cx.bind_keys(key_bindings);
+        });
+        // The desk serves from a real thread, which the scheduler is told
+        // to expect.
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        scaffold_vault(&root).unwrap();
+        routines::install_routine(&root, bridge_service::AGENTS_ROUTINE_ID).unwrap();
+        let vault = match Vault::detect(&root) {
+            VaultStatus::Valid(vault) => vault,
+            other => panic!("{other:?}"),
+        };
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            &root,
+            serde_json::json!({
+                ".thock": {
+                    "config.toml": std::fs::read_to_string(root.join(".thock/config.toml")).unwrap(),
+                    "routines": { "agents": { "bridge.toml": "port = 0\nbind = \"127.0.0.1\"\n" } },
+                },
+            }),
+        )
+        .await;
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        cx.run_until_parked();
+        let service = cx.update(|cx| BridgeService::attach_for_test(vault, &project, cx));
+        cx.run_until_parked();
+        service.update(cx, |service, cx| {
+            service.add_client_for_test("robin", "token", cx)
+        });
+
+        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            bridge_service::register_workspace_actions(workspace);
+            let panel = RoutinesPanel::new(workspace, window, cx);
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.focus_panel::<RoutinesPanel>(window, cx);
+            panel
+        });
+        cx.run_until_parked();
+
+        let (status_index, rows) = panel.read_with(cx, |panel, _| {
+            let rows = panel.nav_rows();
+            let index = rows
+                .iter()
+                .position(|row| matches!(row.kind, NavRowKind::BridgeStatus))
+                .expect("the Agents section leads with its status row");
+            (index, rows.len())
+        });
+        assert!(
+            rows > status_index + 1,
+            "a Connected agents row follows the status"
+        );
+        panel.update(cx, |panel, cx| {
+            panel.selected_index = Some(status_index);
+            cx.notify();
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .active_modal::<ConnectAgentModal>(cx)
+                .is_some()),
+            "enter on the status row opens Connect an agent"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<ConnectAgentModal>(cx).is_none()
+        }));
+        let panel_focus = panel.read_with(cx, |panel, _| panel.focus_handle.clone());
+        assert!(
+            cx.update(|window, _| panel_focus.is_focused(window)),
+            "escape gives the panel its focus back"
+        );
+
+        // The group row, then into it, then the machine's row.
+        panel.update(cx, |panel, cx| {
+            panel.selected_index = Some(status_index + 1);
+            cx.notify();
+        });
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        let (selected, keys) = panel.read_with(cx, |panel, cx| {
+            (
+                panel.selected_row(cx).map(|row| row_key(&row)),
+                panel.nav_rows().iter().map(row_key).collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(
+            selected.as_deref(),
+            Some(nav_key(bridge_service::AGENTS_ROUTINE_ID, "client", "robin").as_str()),
+            "rows: {keys:?}"
+        );
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(
+            service.read_with(cx, |service, _| service.clients().is_empty()),
+            "enter on a machine's row disconnects it"
+        );
+    }
 }

@@ -228,7 +228,10 @@ fn pair(args: &[String]) -> Result<(), String> {
     )?;
     if !response.is_success() {
         return Err(match response.status {
-            410 => "that code was already used or has expired; run Connect an agent on the desk again".into(),
+            410 => {
+                "that code was already used or has expired; run Connect an agent on the desk again"
+                    .into()
+            }
             403 => "the desk refused the code; check it and try again".into(),
             other => format!("the desk answered {other}: {}", response.text().trim()),
         });
@@ -401,7 +404,10 @@ impl Proxy {
         }
         for (entry, reason) in &report.refused {
             let what = format!("{} {}", entry.tool, entry.args);
-            eprintln!("thock-bridge: the desk refused a queued {}: {reason}", entry.tool);
+            eprintln!(
+                "thock-bridge: the desk refused a queued {}: {reason}",
+                entry.tool
+            );
             self.home.record_refusal(&what, reason);
         }
         if let Some(stop) = report.stopped {
@@ -442,7 +448,9 @@ impl Proxy {
         }
         let id = request.id.clone()?;
         match request.method.as_str() {
-            "initialize" | "ping" | "tools/list" | "resources/list" => local_answer(request, VERSION),
+            "initialize" | "ping" | "tools/list" | "resources/list" => {
+                local_answer(request, VERSION)
+            }
             "tools/call" | "resources/read" => {
                 self.drain_outbox();
                 let tool = request.tool_name().map(str::to_string);
@@ -477,7 +485,13 @@ impl Proxy {
                     }
                     Err(ForwardFailure::Transport(reason)) => {
                         self.note_online(false);
-                        Some(self.offline_answer(id, &request, tool.as_deref(), &arguments, &reason))
+                        Some(self.offline_answer(
+                            id,
+                            &request,
+                            tool.as_deref(),
+                            &arguments,
+                            &reason,
+                        ))
                     }
                 }
             }
@@ -645,9 +659,7 @@ impl Proxy {
 fn local_answer(request: JsonRpcRequest, version: &str) -> Option<JsonRpcResponse> {
     let id = request.id.clone()?;
     Some(match request.method.as_str() {
-        "initialize" => {
-            thock_bridge::result_response(id, thock_bridge::initialize_result(version))
-        }
+        "initialize" => thock_bridge::result_response(id, thock_bridge::initialize_result(version)),
         "ping" => thock_bridge::result_response(id, json!({})),
         "tools/list" => thock_bridge::result_response(id, json!({"tools": thock_bridge::tools()})),
         "resources/list" => {
@@ -810,10 +822,7 @@ fn mirror_pass(home: &Home, config: &ClientConfig, verbose: bool) -> Result<Mirr
             let response = thock_bridge::request(&request, TIMEOUT)?;
             let label = format!("{name}/{}", file.relative);
             if response.status >= 500 {
-                return Err(format!(
-                    "the desk answered {} for {label}",
-                    response.status
-                ));
+                return Err(format!("the desk answered {} for {label}", response.status));
             }
             if !response.is_success() {
                 let reason = serde_json::from_slice::<Value>(&response.body)

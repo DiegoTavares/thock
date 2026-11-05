@@ -22,17 +22,16 @@ pub use offline::{
     Cache, CachedText, DrainFailure, DrainReport, DrainStop, Outbox, OutboxEntry, offline_suffix,
 };
 pub use rpc::{
-    CALL_DATE_WINDOW_DAYS, CallMeta, CallToolResponse, HostError, INDEX_RESOURCE_URI, INVALID_PARAMS, JsonRpcError,
-    JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, NOTE_RESOURCE_PREFIX, PROTOCOL_VERSION,
-    QUEUED_SENTENCE, ReadTarget, RecentNote, Resource, ResourceContents, SearchHit, SearchQuery,
-    Tool, ToolHost, ToolResponseContent, WriteOutcome, accepted_call_date, dispatch, error_response,
-    initialize_result,
-    render_hits, render_recent, resources, result_response, tools, validate_tool_arguments,
+    CALL_DATE_WINDOW_DAYS, CallMeta, CallToolResponse, HostError, INDEX_RESOURCE_URI,
+    INVALID_PARAMS, JsonRpcError, JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND,
+    NOTE_RESOURCE_PREFIX, PROTOCOL_VERSION, QUEUED_SENTENCE, ReadTarget, RecentNote, Resource,
+    ResourceContents, SearchHit, SearchQuery, Tool, ToolHost, ToolResponseContent, WriteOutcome,
+    accepted_call_date, dispatch, error_response, initialize_result, render_hits, render_recent,
+    resources, result_response, tools, validate_tool_arguments,
 };
 pub use rules::{
     FACT_MAX_CHARS, FilterRefusal, INBOX_PATH, InboxLine, PathError, Refusal, check_fact,
-    find_unkeepable,
-    forbidden_topics, inbox_line, inbox_write, parse_inbox_line, parse_today_line,
+    find_unkeepable, forbidden_topics, inbox_line, inbox_write, parse_inbox_line, parse_today_line,
     sanitize_harness, today_line, today_write, validate_vault_path,
 };
 pub use search::{IndexEntry, LinkResolution, SearchIndex, note_title};

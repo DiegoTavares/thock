@@ -14,10 +14,11 @@ use gpui::{App, AppContext as _, AsyncApp, Context, Entity, EntityId, Global, Ta
 use project::Project;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Read as _;
+use std::io::BufReader;
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs as _};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thock_bridge::{
@@ -32,18 +33,25 @@ use workspace::Workspace;
 use crate::calendar_service::{ManualSyncFinished, show_sync_toast};
 use crate::history;
 use crate::notes::{NoteKind, expand_template};
+pub use crate::routines::AGENTS_ROUTINE_ID;
 use crate::vault::{VAULT_CONFIG_FILE, VAULT_MARKER_DIR, Vault, VaultStatus};
 
-pub const AGENTS_ROUTINE_ID: &str = "agents";
 /// Port and bind address, created on activation (§6.1).
 pub const BRIDGE_CONFIG_PATH: &str = ".thock/routines/agents/bridge.toml";
 pub const CLIENTS_PATH: &str = ".thock/state/bridge/clients.toml";
 pub const PENDING_PATH: &str = ".thock/state/bridge/pending.toml";
 pub const SEEN_PATH: &str = ".thock/state/bridge/seen.jsonl";
 const PROFILE_PATH: &str = "profile.md";
-/// What one request may carry; a mirrored file is capped lower (§9.6).
+/// What one authenticated request may carry; a mirrored file is capped
+/// lower (§9.6) and an unpaired peer's `/v1/pair` lower still.
 const BODY_LIMIT: usize = 2 * 1024 * 1024;
-const RECV_TIMEOUT: Duration = Duration::from_millis(250);
+const PAIR_BODY_LIMIT: usize = 1024;
+/// How long a connection may take to deliver its head or body before the
+/// desk gives up on it, so a stalled peer costs one worker for this long
+/// and nothing else.
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connections answered at once; the rest get a 503 rather than a queue.
+const MAX_WORKERS: usize = 16;
 /// The client id the bridge's sync-core writes carry.
 const WRITE_CLIENT_ID: &str = "thock-bridge";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -84,7 +92,15 @@ pub fn init(cx: &mut App) {
                 .remove(&project_id);
         })
         .detach();
+        register_workspace_actions(workspace);
+    })
+    .detach();
+}
 
+/// The palette actions, looked up against the workspace's service when they
+/// run; split from `init` so a test can register them over a test service.
+pub(crate) fn register_workspace_actions(workspace: &mut Workspace) {
+    {
         workspace.register_action(|workspace, _: &ConnectOtherAgent, window, cx| {
             let Some(service) = service_for_project(workspace.project(), cx) else {
                 return;
@@ -121,8 +137,7 @@ pub fn init(cx: &mut App) {
                 service.update(cx, |service, cx| service.toggle(cx));
             }
         });
-    })
-    .detach();
+    }
 }
 
 #[derive(Default)]
@@ -231,16 +246,37 @@ struct Shared {
 
 struct Listener {
     shutdown: Arc<AtomicBool>,
+    /// Where a connection reaches the accept loop, to wake it for a stop.
+    wake: SocketAddr,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Listener {
+    /// Asks the accept loop to stop and joins it off the foreground, so a
+    /// stop never waits on a request still in flight (H1).
+    fn stop(mut self, cx: &App) -> Task<()> {
+        self.signal();
+        let thread = self.thread.take();
+        cx.background_spawn(async move {
+            if let Some(thread) = thread
+                && thread.join().is_err()
+            {
+                log::warn!("Thock: the agents bridge listener thread panicked");
+            }
+        })
+    }
+
+    fn signal(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        // `accept` blocks; one connection from here lets it see the flag.
+        TcpStream::connect_timeout(&self.wake, Duration::from_millis(200)).ok();
+    }
 }
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-        if let Some(thread) = self.thread.take()
-            && thread.join().is_err()
-        {
-            log::warn!("Thock: the agents bridge listener thread panicked");
+        if self.thread.is_some() {
+            self.signal();
         }
     }
 }
@@ -308,8 +344,14 @@ pub struct BridgeService {
     state: BridgeState,
     config: BridgeConfig,
     shared: Arc<Mutex<Shared>>,
-    listener: Option<Listener>,
+    // Declared before `listener` so an entity drop releases the in-flight
+    // replies (and the workers waiting on them) before the accept loop is
+    // told to stop.
     receiver_task: Option<Task<()>>,
+    listener: Option<Listener>,
+    /// The previous listener's join, awaited before the next bind so the
+    /// port is free again (a pause followed by a resume).
+    stopping: Option<Task<()>>,
     start_task: Option<Task<()>>,
     index: Rc<RefCell<Option<SearchIndex>>>,
     seen: Rc<RefCell<SeenCalls>>,
@@ -334,8 +376,9 @@ impl BridgeService {
             state: BridgeState::Off,
             config: BridgeConfig::default(),
             shared: Arc::new(Mutex::new(Shared::default())),
-            listener: None,
             receiver_task: None,
+            listener: None,
+            stopping: None,
             start_task: None,
             index: Rc::new(RefCell::new(None)),
             seen: Rc::new(RefCell::new(SeenCalls::default())),
@@ -377,6 +420,29 @@ impl BridgeService {
 
     pub fn is_paused(&self) -> bool {
         self.paused
+    }
+
+    /// Whether a pairing code is still waiting to be typed somewhere.
+    pub fn has_pending_code(&self) -> bool {
+        self.shared
+            .lock()
+            .map(|shared| shared.pending.is_some())
+            .unwrap_or(false)
+    }
+
+    /// After the service has started: `start` replaces the client list
+    /// with the one on disk.
+    #[cfg(test)]
+    pub(crate) fn add_client_for_test(&mut self, name: &str, token: &str, cx: &mut Context<Self>) {
+        cx.notify();
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.clients.push(PairedClient {
+                name: name.to_string(),
+                token_sha256: thock_bridge::sha256_hex(token),
+                paired_at: "2026-11-04T08:00:00Z".into(),
+                last_seen: "2026-11-04T08:00:00Z".into(),
+            });
+        }
     }
 
     pub fn clients(&self) -> Vec<ClientView> {
@@ -478,7 +544,7 @@ impl BridgeService {
         self.enabled = vault.as_ref().is_some_and(routine_enabled);
         self.vault = vault;
         if changed_root {
-            self.stop(BridgeState::Off);
+            self.stop(BridgeState::Off, cx);
             *self.index.borrow_mut() = None;
             *self.seen.borrow_mut() = SeenCalls::default();
         }
@@ -493,7 +559,7 @@ impl BridgeService {
             } else {
                 BridgeState::Off
             };
-            self.stop(state);
+            self.stop(state, cx);
             cx.notify();
             return;
         }
@@ -503,9 +569,14 @@ impl BridgeService {
         self.start(cx);
     }
 
-    fn stop(&mut self, state: BridgeState) {
-        self.listener = None;
+    /// The replies go first: dropping `receiver_task` closes every pending
+    /// request's channel, so a worker blocked on one answers 503 at once
+    /// instead of holding the stop (H1).
+    fn stop(&mut self, state: BridgeState, cx: &App) {
         self.receiver_task = None;
+        if let Some(listener) = self.listener.take() {
+            self.stopping = Some(listener.stop(cx));
+        }
         self.start_task = None;
         self.state = state;
     }
@@ -522,9 +593,13 @@ impl BridgeService {
             return;
         };
         let fs = self.fs(cx);
+        let stopping = self.stopping.take();
         self.state = BridgeState::Starting;
         cx.notify();
         self.start_task = Some(cx.spawn(async move |this, cx| {
+            if let Some(stopping) = stopping {
+                stopping.await;
+            }
             let loaded = load_server_files(&fs, &vault.root).await;
             this.update(cx, |service, cx| {
                 service.start_task = None;
@@ -552,14 +627,13 @@ impl BridgeService {
 
     fn bind(&mut self, cx: &mut Context<Self>) {
         let address = format!("{}:{}", self.config.bind, self.config.port);
-        let server = match tiny_http::Server::http(&address) {
-            Ok(server) => server,
+        let listener = match TcpListener::bind(&address) {
+            Ok(listener) => listener,
             Err(error) => {
-                let message = error.to_string();
-                let error = if message.contains("in use") {
+                let error = if error.kind() == std::io::ErrorKind::AddrInUse {
                     format!("port {} is in use", self.config.port)
                 } else {
-                    message
+                    error.to_string()
                 };
                 log::warn!("Thock: the agents bridge couldn't bind {address}: {error}");
                 self.state = BridgeState::Failed {
@@ -569,11 +643,22 @@ impl BridgeService {
                 return;
             }
         };
-        let port = server
-            .server_addr()
-            .to_ip()
-            .map(|addr| addr.port())
-            .unwrap_or(self.config.port);
+        let bound = match listener.local_addr() {
+            Ok(bound) => bound,
+            Err(error) => {
+                self.state = BridgeState::Failed {
+                    port: self.config.port,
+                    error: error.to_string(),
+                };
+                return;
+            }
+        };
+        let port = bound.port();
+        let wake = if bound.ip().is_unspecified() {
+            SocketAddr::from(([127, 0, 0, 1], port))
+        } else {
+            bound
+        };
         let (sender, mut receiver) = mpsc::unbounded::<(Incoming, oneshot::Sender<Outgoing>)>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread = std::thread::Builder::new()
@@ -581,7 +666,7 @@ impl BridgeService {
             .spawn({
                 let shutdown = shutdown.clone();
                 let shared = self.shared.clone();
-                move || listen(server, shutdown, shared, sender)
+                move || listen(listener, shutdown, shared, sender)
             });
         let thread = match thread {
             Ok(thread) => thread,
@@ -595,6 +680,7 @@ impl BridgeService {
         };
         self.listener = Some(Listener {
             shutdown,
+            wake,
             thread: Some(thread),
         });
         self.serving_since = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -641,12 +727,11 @@ impl BridgeService {
             shared.pending = Some(pending.clone());
         }
         let fs = self.fs(cx);
-        let addresses = desk_addresses();
         cx.background_spawn(async move {
             write_state_file(&fs, &vault.root, PENDING_PATH, &pending.render()).await?;
             Ok(PairingInvite {
                 code,
-                addresses,
+                addresses: desk_addresses(port),
                 port,
                 expires_at: pending.expires_at,
             })
@@ -699,16 +784,28 @@ fn desk_name() -> String {
         .to_string()
 }
 
-/// `.local` name first (mDNS reaches it on most home networks), then the
-/// first non-loopback IPv4 the machine would route out through.
-fn desk_addresses() -> Vec<String> {
-    let mut addresses = vec![format!("{}.local", desk_name())];
+/// The `.local` name first when mDNS resolves it here (so it most likely
+/// does on the other machine too), else the first non-loopback IPv4 the
+/// machine would route out through, with the name second as a hint (§7).
+/// Resolving blocks: call from a background thread.
+fn desk_addresses(port: u16) -> Vec<String> {
+    let local_name = format!("{}.local", desk_name());
+    let mut addresses = Vec::new();
     if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0")
         && socket.connect("10.255.255.255:1").is_ok()
         && let Ok(local) = socket.local_addr()
         && !local.ip().is_loopback()
     {
         addresses.push(local.ip().to_string());
+    }
+    let resolves = (local_name.as_str(), port)
+        .to_socket_addrs()
+        .map(|mut found| found.next().is_some())
+        .unwrap_or(false);
+    if resolves {
+        addresses.insert(0, local_name);
+    } else {
+        addresses.push(local_name);
     }
     addresses
 }
@@ -756,109 +853,104 @@ async fn write_state_file(fs: &Arc<dyn Fs>, root: &Path, relative: &str, text: &
         .with_context(|| format!("writing {relative}"))
 }
 
-/// The listener thread: parses each request, checks the token against the
-/// paired clients, and hands the rest to the foreground.
+/// The accept loop: every connection goes to a worker of its own, so a
+/// peer that stalls on its body holds one worker for `SOCKET_TIMEOUT` and
+/// never the loop (H2).
 fn listen(
-    server: tiny_http::Server,
+    listener: TcpListener,
     shutdown: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
     sender: mpsc::UnboundedSender<(Incoming, oneshot::Sender<Outgoing>)>,
 ) {
-    while !shutdown.load(Ordering::SeqCst) {
-        let request = match server.recv_timeout(RECV_TIMEOUT) {
-            Ok(Some(request)) => request,
-            Ok(None) => continue,
+    let workers = Arc::new(AtomicUsize::new(0));
+    loop {
+        let (stream, _) = match listener.accept() {
+            Ok(accepted) => accepted,
             Err(error) => {
-                log::warn!("Thock: the agents bridge stopped listening: {error}");
-                break;
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+                log::warn!("Thock: the agents bridge couldn't accept a connection: {error}");
+                continue;
             }
         };
-        let outgoing = answer(request_parts(request), &shared, &sender);
-        let (request, outgoing) = outgoing;
-        let mut response =
-            tiny_http::Response::from_data(outgoing.body).with_status_code(outgoing.status);
-        for (name, value) in [
-            ("Content-Type", outgoing.content_type),
-            ("Connection", "close"),
-        ] {
-            if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
-                response = response.with_header(header);
-            }
+        if shutdown.load(Ordering::SeqCst) {
+            break;
         }
-        if let Err(error) = request.respond(response) {
-            log::warn!("Thock: couldn't answer an agents bridge request: {error}");
-        }
-    }
-}
-
-struct RequestParts {
-    request: tiny_http::Request,
-    method: String,
-    url: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-    oversized: bool,
-}
-
-fn request_parts(mut request: tiny_http::Request) -> RequestParts {
-    let method = request.method().as_str().to_string();
-    let url = request.url().to_string();
-    let headers = request
-        .headers()
-        .iter()
-        .map(|header| {
-            (
-                header.field.as_str().to_string(),
-                header.value.as_str().to_string(),
+        if workers.load(Ordering::SeqCst) >= MAX_WORKERS {
+            let mut stream = stream;
+            thock_bridge::write_response(
+                &mut stream,
+                503,
+                "application/json",
+                thock_bridge::response_json("the desk is busy; try again in a moment").as_bytes(),
             )
-        })
-        .collect();
-    let mut body = Vec::new();
-    let oversized = request
-        .body_length()
-        .is_some_and(|length| length > BODY_LIMIT);
-    if !oversized {
-        request
-            .as_reader()
-            .take(BODY_LIMIT as u64 + 1)
-            .read_to_end(&mut body)
-            .log_err();
+            .ok();
+            continue;
+        }
+        workers.fetch_add(1, Ordering::SeqCst);
+        let spawned = std::thread::Builder::new()
+            .name("thock-bridge-worker".into())
+            .spawn({
+                let workers = workers.clone();
+                let shared = shared.clone();
+                let sender = sender.clone();
+                move || {
+                    handle_connection(stream, &shared, &sender);
+                    workers.fetch_sub(1, Ordering::SeqCst);
+                }
+            });
+        if spawned.is_err() {
+            workers.fetch_sub(1, Ordering::SeqCst);
+        }
     }
-    RequestParts {
-        request,
-        method,
-        url,
-        headers,
-        body,
-        oversized,
+}
+
+/// One connection, one request: route and authenticate from the head
+/// before a byte of body is read, cap the body by who is asking, hand the
+/// rest to the foreground, write the reply.
+fn handle_connection(
+    mut stream: TcpStream,
+    shared: &Arc<Mutex<Shared>>,
+    sender: &mpsc::UnboundedSender<(Incoming, oneshot::Sender<Outgoing>)>,
+) {
+    stream.set_read_timeout(Some(SOCKET_TIMEOUT)).ok();
+    stream.set_write_timeout(Some(SOCKET_TIMEOUT)).ok();
+    let outgoing = {
+        let Ok(reading) = stream.try_clone() else {
+            return;
+        };
+        let mut reader = BufReader::new(reading);
+        match thock_bridge::read_request_head(&mut reader) {
+            Ok(head) => answer(head, &mut reader, shared, sender),
+            Err(status) => Outgoing::error(status, "the desk couldn't read that request"),
+        }
+    };
+    let written = thock_bridge::write_response(
+        &mut stream,
+        outgoing.status,
+        outgoing.content_type,
+        &outgoing.body,
+    );
+    if let Err(error) = written {
+        log::debug!("Thock: couldn't answer an agents bridge request: {error}");
     }
 }
 
 fn answer(
-    parts: RequestParts,
+    head: thock_bridge::RequestHead,
+    reader: &mut impl std::io::Read,
     shared: &Arc<Mutex<Shared>>,
     sender: &mpsc::UnboundedSender<(Incoming, oneshot::Sender<Outgoing>)>,
-) -> (tiny_http::Request, Outgoing) {
-    let RequestParts {
-        request,
-        method,
-        url,
-        headers,
-        body,
-        oversized,
-    } = parts;
-    if oversized || body.len() > BODY_LIMIT {
-        return (
-            request,
-            Outgoing::error(413, "that is more than the desk takes in one request"),
-        );
-    }
-    let route = thock_bridge::parse_route(&method, &url);
+) -> Outgoing {
+    let route = thock_bridge::parse_route(&head.method, &head.url);
     let client = match route {
-        Route::Pair | Route::NotFound | Route::McpNotPost => None,
+        Route::NotFound => return Outgoing::error(404, "nothing here"),
+        Route::McpNotPost => return Outgoing::error(405, "POST one JSON-RPC request to /mcp"),
+        Route::Pair => None,
         _ => {
             let token = thock_bridge::bearer_token(
-                headers
+                head.headers
                     .iter()
                     .map(|(name, value)| (name.as_str(), value.as_str())),
             );
@@ -876,20 +968,23 @@ fn answer(
             });
             match known {
                 Some(name) => Some(name),
-                None => {
-                    return (
-                        request,
-                        Outgoing::error(401, "unknown client; pair again from the desk"),
-                    );
-                }
+                None => return Outgoing::error(401, "unknown client; pair again from the desk"),
             }
         }
     };
-    let harness = headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(thock_bridge::HARNESS_HEADER))
-        .map(|(_, value)| value.as_str())
-        .unwrap_or("agent");
+    let limit = if client.is_some() {
+        BODY_LIMIT
+    } else {
+        PAIR_BODY_LIMIT
+    };
+    if head.content_length > limit {
+        return Outgoing::error(413, "that is more than the desk takes in one request");
+    }
+    let body = match thock_bridge::read_body(reader, head.content_length) {
+        Ok(body) => body,
+        Err(status) => return Outgoing::error(status, "the request's body didn't arrive in time"),
+    };
+    let harness = head.header(thock_bridge::HARNESS_HEADER).unwrap_or("agent");
     let incoming = Incoming {
         route,
         client,
@@ -898,11 +993,11 @@ fn answer(
     };
     let (reply_sender, reply_receiver) = oneshot::channel();
     if sender.unbounded_send((incoming, reply_sender)).is_err() {
-        return (request, Outgoing::error(503, "the desk is closing"));
+        return Outgoing::error(503, "the desk is closing");
     }
     match futures::executor::block_on(reply_receiver) {
-        Ok(outgoing) => (request, outgoing),
-        Err(_) => (request, Outgoing::error(503, "the desk is closing")),
+        Ok(outgoing) => outgoing,
+        Err(_) => Outgoing::error(503, "the desk is closing"),
     }
 }
 
@@ -1153,9 +1248,23 @@ async fn handle_agent_file(
     let Some(parent) = absolute.parent().map(Path::to_path_buf) else {
         return Outgoing::error(400, "that path can't live in the vault");
     };
+    if !resolves_inside(&context.fs, &context.vault.root, &absolute).await {
+        return Outgoing::error(400, "that path points outside the vault");
+    }
     let Ok(text) = String::from_utf8(body.to_vec()) else {
         return Outgoing::error(400, "mirrored files must be UTF-8 text");
     };
+    let forbidden = match context
+        .fs
+        .load(&context.vault.root.join(PROFILE_PATH))
+        .await
+    {
+        Ok(profile) => thock_bridge::forbidden_topics(&profile),
+        Err(_) => Vec::new(),
+    };
+    if let Some(reason) = thock_bridge::find_unkeepable(&text, &forbidden) {
+        return Outgoing::error(422, &format!("{path}: {reason}; the vault doesn't keep it"));
+    }
     let written = async {
         context.fs.create_dir(&parent).await?;
         context.fs.atomic_write(absolute, text).await
@@ -1166,6 +1275,28 @@ async fn handle_agent_file(
         Err(error) => {
             log::error!("Thock: couldn't mirror {relative}: {error:#}");
             Outgoing::error(500, "the desk couldn't write the file")
+        }
+    }
+}
+
+/// Whether `path`, once its deepest existing ancestor is canonicalised,
+/// still sits under the vault root (§9.1): a symlink out of the vault is
+/// refused whether the file exists yet or not.
+async fn resolves_inside(fs: &Arc<dyn Fs>, root: &Path, path: &Path) -> bool {
+    let canonical_root = fs
+        .canonicalize(root)
+        .await
+        .unwrap_or_else(|_| root.to_path_buf());
+    let mut probe = path.to_path_buf();
+    loop {
+        match fs.canonicalize(&probe).await {
+            Ok(canonical) => return canonical.starts_with(&canonical_root),
+            Err(_) => match probe.parent() {
+                Some(parent) if parent.starts_with(root) && parent != root => {
+                    probe = parent.to_path_buf()
+                }
+                _ => return true,
+            },
         }
     }
 }
@@ -1205,16 +1336,8 @@ impl DeskHost<'_> {
         thock_bridge::validate_vault_path(relative)
             .map_err(|error| HostError(error.to_string()))?;
         let absolute = self.root().join(relative.trim());
-        if let Ok(canonical) = self.context.fs.canonicalize(&absolute).await {
-            let root = self
-                .context
-                .fs
-                .canonicalize(self.root())
-                .await
-                .unwrap_or_else(|_| self.root().to_path_buf());
-            if !canonical.starts_with(&root) {
-                return Err(HostError(format!("{relative} points outside the vault")));
-            }
+        if !resolves_inside(&self.context.fs, self.root(), &absolute).await {
+            return Err(HostError(format!("{relative} points outside the vault")));
         }
         Ok(absolute)
     }
@@ -1423,7 +1546,10 @@ impl ToolHost for DeskHost<'_> {
         }
         let forbidden = self.forbidden_topics().await;
         let fact = thock_bridge::check_fact(fact, &forbidden)?;
-        let date = meta.date.unwrap_or_else(|| Local::now().date_naive());
+        // A queued line keeps its day within the window; an older or future
+        // date is not one the agent may label, so today's stands in (M1).
+        let today = Local::now().date_naive();
+        let date = thock_bridge::accepted_call_date(meta.date, today).unwrap_or(today);
         let line = thock_bridge::inbox_line(date, &fact, &self.identity);
         let inbox = self.root().join(thock_bridge::INBOX_PATH);
         if let Ok(existing) = self.context.fs.load(&inbox).await
@@ -1454,7 +1580,19 @@ impl ToolHost for DeskHost<'_> {
             let line = thock_bridge::check_fact(line, &forbidden)?;
             rendered.push(thock_bridge::today_line(&self.identity, &line));
         }
-        let date = meta.date.unwrap_or_else(|| Local::now().date_naive());
+        let today = Local::now().date_naive();
+        let date = match meta.date {
+            None => today,
+            Some(asked) => {
+                thock_bridge::accepted_call_date(Some(asked), today).ok_or_else(|| {
+                    HostError(format!(
+                        "{asked} is outside the {} days the desk writes into; only a queued line \
+                     keeps its day, and only that far back",
+                        thock_bridge::CALL_DATE_WINDOW_DAYS
+                    ))
+                })?
+            }
+        };
         let vault = &self.context.vault;
         let absolute = vault.note_path(NoteKind::Daily, date);
         let relative = absolute
@@ -1501,7 +1639,7 @@ async fn read_index_entry(
 ) -> Option<(NaiveDate, String)> {
     let absolute = root.join(relative);
     let metadata = fs.metadata(&absolute).await.ok().flatten()?;
-    if metadata.is_dir || metadata.len > BODY_LIMIT as u64 {
+    if metadata.is_dir || metadata.is_symlink || metadata.len > BODY_LIMIT as u64 {
         return None;
     }
     let body = fs.load(&absolute).await.ok()?;
@@ -1528,7 +1666,15 @@ async fn build_index(fs: &Arc<dyn Fs>, root: &Path) -> Result<SearchIndex, HostE
             if name.starts_with('.') {
                 continue;
             }
-            if fs.is_dir(&path).await {
+            // A link is never followed: it could lead out of the vault, or
+            // back into it forever (M2).
+            let Ok(Some(metadata)) = fs.metadata(&path).await else {
+                continue;
+            };
+            if metadata.is_symlink {
+                continue;
+            }
+            if metadata.is_dir {
                 pending.push(path);
                 continue;
             }
@@ -1558,6 +1704,8 @@ mod tests {
     use gpui::TestAppContext;
     use serde_json::json;
     use settings::SettingsStore;
+
+    use std::io::Write as _;
 
     use crate::vault::{DEFAULT_DAILY_TEMPLATE, InstalledRoutine, VaultConfig};
 
@@ -2121,6 +2269,296 @@ mod tests {
         );
     }
 
+    /// A request already handed to the foreground when the bridge stops
+    /// gets its 503 at once; the stop never waits on it (H1).
+    #[gpui::test]
+    async fn stopping_with_a_request_in_flight_returns_at_once(cx: &mut TestAppContext) {
+        let desk = serve(cx, true).await;
+        let token = pair(cx, &desk, "robin").await;
+        let port = desk.port;
+        let request = thock_bridge::HttpRequest {
+            method: "GET".into(),
+            url: format!("http://127.0.0.1:{port}/v1/health"),
+            headers: vec![("Authorization".into(), format!("Bearer {token}"))],
+            body: Vec::new(),
+        };
+        // Not pumped: the worker has sent the request to the foreground and
+        // is blocked on the reply when the pause lands.
+        let pending =
+            std::thread::spawn(move || thock_bridge::request(&request, Duration::from_secs(10)));
+        std::thread::sleep(Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        desk.service.update(cx, |service, cx| service.toggle(cx));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the stop did not wait"
+        );
+        // The foreground still has to run the cancelled task's drop, which
+        // is what releases the worker; the app's executor does that at once.
+        while !pending.is_finished() {
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let response = pending.join().unwrap().unwrap();
+        assert_eq!(response.status, 503);
+        assert!(response.text().contains("the desk is closing"));
+        cx.run_until_parked();
+        assert_eq!(
+            desk.service
+                .read_with(cx, |service, _| service.state().clone()),
+            BridgeState::Paused
+        );
+    }
+
+    /// A peer that announces a body and never sends it holds one worker,
+    /// not the desk: the next paired request is answered meanwhile (H2).
+    #[gpui::test]
+    async fn a_stalled_pair_body_does_not_block_the_desk(cx: &mut TestAppContext) {
+        let desk = serve(cx, true).await;
+        let token = pair(cx, &desk, "robin").await;
+        let mut stalled = TcpStream::connect(("127.0.0.1", desk.port)).unwrap();
+        stalled
+            .write_all(b"POST /v1/pair HTTP/1.1\r\nHost: x\r\nContent-Length: 900\r\n\r\n")
+            .unwrap();
+        stalled.flush().unwrap();
+        let auth = format!("Bearer {token}");
+        let started = std::time::Instant::now();
+        let (status, _) = roundtrip(
+            cx,
+            desk.port,
+            "GET",
+            "/v1/health",
+            &[("Authorization", auth.as_str())],
+            "",
+        );
+        assert_eq!(status, 200);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "answered beside the stalled peer"
+        );
+        // An oversized pair body is refused from its head alone.
+        let (status, _) = roundtrip(
+            cx,
+            desk.port,
+            "POST",
+            "/v1/pair",
+            &[],
+            &"x".repeat(PAIR_BODY_LIMIT + 1),
+        );
+        assert_eq!(status, 413);
+        drop(stalled);
+    }
+
+    /// A client's `_meta.date` is honoured only inside the outbox's own
+    /// window (M1): older labels fall back to today for the inbox, and
+    /// `note_today` refuses rather than write into a distant day.
+    #[gpui::test]
+    async fn dates_outside_the_window_are_not_written(cx: &mut TestAppContext) {
+        let desk = serve(cx, true).await;
+        let token = pair(cx, &desk, "robin").await;
+        let today = Local::now().date_naive();
+        let old = (today - chrono::Duration::days(30)).to_string();
+        let refused = call_tool(
+            cx,
+            &desk,
+            &token,
+            "note_today",
+            json!({"line": "Back-dated."}),
+            Some(json!({"call_id": "d-1", "date": old})),
+        );
+        assert!(refused.is_error);
+        assert!(
+            refused.first_text().contains("outside the 7 days"),
+            "{}",
+            refused.first_text()
+        );
+        let future = (today + chrono::Duration::days(1)).to_string();
+        let refused = call_tool(
+            cx,
+            &desk,
+            &token,
+            "note_today",
+            json!({"line": "Tomorrow's."}),
+            Some(json!({"call_id": "d-2", "date": future})),
+        );
+        assert!(refused.is_error);
+        let remembered = call_tool(
+            cx,
+            &desk,
+            &token,
+            "remember",
+            json!({"fact": "An old fact"}),
+            Some(json!({"call_id": "d-3", "date": old})),
+        );
+        assert!(!remembered.is_error);
+        let inbox = desk
+            .fs
+            .load(Path::new("/vault/memory/inbox.md"))
+            .await
+            .unwrap();
+        assert!(
+            inbox.contains(&format!("- {today} · An old fact · via claude-code@robin")),
+            "{inbox}"
+        );
+        let recent = (today - chrono::Duration::days(3)).to_string();
+        let kept = call_tool(
+            cx,
+            &desk,
+            &token,
+            "note_today",
+            json!({"line": "Three days ago."}),
+            Some(json!({"call_id": "d-4", "date": recent})),
+        );
+        assert!(!kept.is_error, "{}", kept.first_text());
+        assert!(
+            desk.fs
+                .is_file(Path::new(&format!("/vault/daily/{recent}.md")))
+                .await
+        );
+    }
+
+    /// The index never follows a link: not out of the vault, not back into
+    /// it (M2).
+    #[gpui::test]
+    async fn the_index_skips_symlinks(cx: &mut TestAppContext) {
+        let desk = serve(cx, true).await;
+        let token = pair(cx, &desk, "robin").await;
+        desk.fs
+            .insert_tree(
+                "/elsewhere",
+                json!({"secret.md": "# Elsewhere\n\nxyzzy outside\n"}),
+            )
+            .await;
+        desk.fs
+            .insert_symlink("/vault/outside", PathBuf::from("/elsewhere"))
+            .await;
+        desk.fs
+            .insert_symlink("/vault/loop", PathBuf::from("/vault"))
+            .await;
+        desk.fs
+            .insert_symlink("/vault/linked.md", PathBuf::from("/elsewhere/secret.md"))
+            .await;
+        cx.run_until_parked();
+        let hits = call_tool(cx, &desk, &token, "search", json!({"query": "xyzzy"}), None);
+        assert_eq!(hits.first_text(), "No notes match `xyzzy`.");
+        let hits = call_tool(cx, &desk, &token, "search", json!({"query": "ana"}), None);
+        assert!(
+            !hits.first_text().contains("loop/"),
+            "{}",
+            hits.first_text()
+        );
+        let read = call_tool(
+            cx,
+            &desk,
+            &token,
+            "read",
+            json!({"path": "outside/secret.md"}),
+            None,
+        );
+        assert!(read.is_error, "{}", read.first_text());
+        assert!(read.first_text().contains("outside the vault"));
+    }
+
+    /// A mirrored file lands only where its path really resolves (M4), and
+    /// only when nothing in it is something the vault refuses to keep (M5a).
+    #[gpui::test]
+    async fn mirrored_files_are_checked_before_they_land(cx: &mut TestAppContext) {
+        let desk = serve(cx, true).await;
+        let token = pair(cx, &desk, "robin").await;
+        let auth = format!("Bearer {token}");
+        desk.fs.create_dir(Path::new("/elsewhere")).await.unwrap();
+        desk.fs
+            .create_dir(Path::new("/vault/memory/agents"))
+            .await
+            .unwrap();
+        desk.fs
+            .insert_symlink("/vault/memory/agents/codex", PathBuf::from("/elsewhere"))
+            .await;
+        let (status, body) = roundtrip(
+            cx,
+            desk.port,
+            "PUT",
+            "/v1/agents/codex/MEMORY.md",
+            &[("Authorization", auth.as_str())],
+            "# fine\n",
+        );
+        assert_eq!(status, 400, "{body}");
+        assert!(
+            !desk
+                .fs
+                .is_file(Path::new("/elsewhere/robin/MEMORY.md"))
+                .await
+        );
+
+        let (status, body) = roundtrip(
+            cx,
+            desk.port,
+            "PUT",
+            "/v1/agents/claude-code/MEMORY.md",
+            &[("Authorization", auth.as_str())],
+            "# Memory\n- token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef12\n",
+        );
+        assert_eq!(status, 422, "{body}");
+        assert!(body.contains("line 2 looks like an API token"), "{body}");
+        let (status, body) = roundtrip(
+            cx,
+            desk.port,
+            "PUT",
+            "/v1/agents/claude-code/topics/pay.md",
+            &[("Authorization", auth.as_str())],
+            "- Their salary went up\n",
+        );
+        assert_eq!(status, 422, "{body}");
+        assert!(body.contains("do-not-keep"), "{body}");
+        assert!(
+            !desk
+                .fs
+                .is_file(Path::new(
+                    "/vault/memory/agents/claude-code/robin/MEMORY.md"
+                ))
+                .await
+        );
+    }
+
+    /// The desk's write goes through the `Fs`, so the worktree sees it
+    /// like any edit (§14).
+    #[gpui::test]
+    async fn remember_fires_a_file_event(cx: &mut TestAppContext) {
+        let desk = serve(cx, true).await;
+        let token = pair(cx, &desk, "robin").await;
+        let project = desk
+            .service
+            .read_with(cx, |service, _| service.project.clone());
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update({
+            let seen = seen.clone();
+            move |cx| {
+                cx.subscribe(&project, move |_, event, _| {
+                    if let project::Event::WorktreeUpdatedEntries(_, changes) = event {
+                        for (path, _, _) in changes.iter() {
+                            seen.borrow_mut().push(path.as_unix_str().to_string());
+                        }
+                    }
+                })
+            }
+        });
+        let result = call_tool(
+            cx,
+            &desk,
+            &token,
+            "remember",
+            json!({"fact": "Likes short PR titles"}),
+            Some(json!({"call_id": "e-1"})),
+        );
+        assert!(!result.is_error, "{}", result.first_text());
+        cx.run_until_parked();
+        assert!(
+            seen.borrow().iter().any(|path| path == "memory/inbox.md"),
+            "events: {:?}",
+            seen.borrow()
+        );
+    }
+
     /// The lines the skill tells an agent to write by hand, when the tools
     /// are absent, parse with the same functions the desk writes them with
     /// (V55 §14).
@@ -2160,7 +2598,7 @@ mod tests {
             .lines()
             .find_map(|line| line.strip_prefix("description: "))
             .unwrap();
-        assert!(description.len() <= 80, "{description}");
+        assert!(description.len() <= 60, "{description}");
 
         // The core files learned about the bridge (V55 §10).
         let agents_md = include_str!("../assets/AGENTS.md");

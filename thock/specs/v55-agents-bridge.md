@@ -522,6 +522,15 @@ Added at implementation (2026-11-04):
 | 20 | `context` composition | **`compose_vault_context` is reused whole** and the bridge appends a `## You, from here` block (identity, how the two writes land, the do-not-keep topics). Its lines about `append`/templates read fine through `read`/`note_today`; factoring Pi-specific lines out was more churn than the block is worth. |
 | 21 | Disconnect on a row | **`enter` on a client row disconnects it** (the row says `Disconnect`); the toast says it can pair again. `thock::DisconnectAgent` opens a picker over the clients. |
 | 22 | Release asset | `thock-bridge-<os>-<arch>` is published as its own artifact and the update manifest lists it under **asset `thock-bridge`**, so the releases index can serve it by `?asset=thock-bridge`. |
+| 23 | Stop ordering (review H1) | **Replies before the listener.** `receiver_task` is dropped first so a worker blocked on a reply answers 503 at once; the accept loop is woken with a local connection and joined on a background task that the next bind awaits. Never a join on the foreground. |
+| 24 | Serving (review H2) | **The desk's own accept loop over `std::net`**, one worker thread per connection (16 at once, 503 beyond), 10 s socket timeouts, route and token from the head before any body, `/v1/pair` bodies capped at 1 KiB, authenticated ones at 2 MiB. `tiny_http` is out: it reads bodies lazily with no timeout. The head/body/response helpers live in the library (`read_request_head`, `read_body`, `write_response`), which the client's integration test serves with too. |
+| 25 | Client dates (review M1) | **`_meta.date` is honoured within [today − 7, today]** (`CALL_DATE_WINDOW_DAYS`, the outbox horizon). Outside it `remember` labels the line with today and `note_today` refuses with the window in the sentence. |
+| 26 | Links (review M2, M4) | **Symlinks are never followed**: the index skips any linked entry, and every write or read resolves its deepest existing ancestor and requires it under the canonical root (`resolves_inside`), mirror `PUT` included. |
+| 27 | Queue hygiene (review M3) | **Validate before queueing, drop what the desk refuses for good.** A queued `remember`/`note_today` passes the library's argument parsers and the credential/shape filter first; on a drain, HTTP 4xx, JSON-RPC `-32602`/`-32601` and an `is_error` tool result drop the entry and are logged to stderr and `refused.log` (shown by `status`); only a desk that does not answer stops the drain. |
+| 28 | Mirrored files (review M5) | **(a) The desk scans every mirrored file** line by line with the credential filter and the person's do-not-keep list and answers 422 with the line and reason; the client skips it, reports it in `mirror`/`status`, keeps going, tries again next pass. **(b) `connect claude` says before the y/N** that every project's `~/.claude/projects/*/memory` stops loading, counts them, and `--import` copies each into the mirror under `imported/<project-slug>/` for Reflect and search. |
+| 29 | Outbox sharing (review L2, L3) | Each entry records the **harness** that queued it and drains under that name; an advisory `flock` on `outbox.lock` wraps every push and drain. |
+| 30 | Modal close (review L6) | The modal closes when the **pending code is spent** or the client list changes, so a known machine re-pairing closes it too. |
+| 31 | Pairing address (§7) | `.local` leads **only when it resolves here**; otherwise the IPv4 leads and the name follows as a hint. |
 
 ## 16. Open decisions, for the first iterations
 
@@ -550,6 +559,17 @@ Definition of done, in order:
 7. `connect claude|codex|gemini`, `update`, bundling in both bundle scripts and the release
    workflow asset.
 8. VISION §12 entry; `TESTING.md` learns the new package in `thock/script/test`'s mapping.
+
+## 17a. Review follow-ups (2026-11-04)
+
+An independent review before the PR found the items decisions 23–31 record. Also fixed without a
+decision: the token file is created `0600` (not chmod'd after), `percent_decode` works on bytes, a
+4xx from the desk reaches the agent as `is_error` instead of being queued, mirror passes skip and
+report a refused file instead of stopping, `AGENTS_ROUTINE_ID` is defined once in `routines.rs`,
+Wrap Yesterday carries the `## From your agents` note like Wrap Today, the skill description is
+60 characters and the test holds it there, `remember`'s desk test asserts the worktree file event,
+and the Routines panel's Agents rows have a keystroke test (enter opens the modal, enter on a
+machine disconnects it) with `j`/`k` bound for the modal's address list under vim.
 
 ## 18. Risks
 

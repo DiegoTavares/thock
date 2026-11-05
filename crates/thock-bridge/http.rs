@@ -426,7 +426,10 @@ mod tests {
             read_request_head(&mut std::io::BufReader::new(&b"garbage"[..])).unwrap_err(),
             400
         );
-        let long = format!("GET / HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(MAX_HEAD_BYTES));
+        let long = format!(
+            "GET / HTTP/1.1\r\nX: {}\r\n\r\n",
+            "a".repeat(MAX_HEAD_BYTES)
+        );
         assert_eq!(
             read_request_head(&mut std::io::BufReader::new(long.as_bytes())).unwrap_err(),
             431

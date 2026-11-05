@@ -1,6 +1,6 @@
 ---
 name: thock-memory
-description: Share what a Thock vault knows about the person; leave notes in it.
+description: What a Thock vault knows about the person; leave notes in it
 version: 1
 ---
 
