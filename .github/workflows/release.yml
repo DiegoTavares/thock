@@ -141,6 +141,17 @@ jobs:
           path: target/aarch64-apple-darwin/release/Thock-aarch64.dmg
           if-no-files-found: error
 
+      # The agents bridge client on its own (V55 §12), for a machine without
+      # the app: curl it, chmod +x, pair.
+      - name: Name the bridge binary
+        run: cp target/aarch64-apple-darwin/release/thock-bridge target/aarch64-apple-darwin/release/thock-bridge-macos-aarch64
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: thock-bridge-macos-aarch64
+          path: target/aarch64-apple-darwin/release/thock-bridge-macos-aarch64
+          if-no-files-found: error
+
   linux:
     name: Linux (x86_64)
     needs: verify
@@ -192,6 +203,15 @@ jobs:
         with:
           name: thock-linux-x86_64
           path: target/release/thock-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+      - name: Name the bridge binary
+        run: cp target/x86_64-unknown-linux-gnu/release/thock-bridge target/release/thock-bridge-linux-x86_64
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: thock-bridge-linux-x86_64
+          path: target/release/thock-bridge-linux-x86_64
           if-no-files-found: error
 
   publish:

@@ -18,7 +18,10 @@ pub enum Route {
     Skill,
     /// `PUT /v1/agents/{harness}/{path}`: the harness and the path under
     /// its mirror folder, still to be validated by the host.
-    AgentFile { harness: String, path: String },
+    AgentFile {
+        harness: String,
+        path: String,
+    },
     NotFound,
 }
 

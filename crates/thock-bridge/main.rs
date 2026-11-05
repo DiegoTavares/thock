@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thock_bridge::{
     Cache, ClientConfig, HARNESS_HEADER, HttpRequest, JsonRpcRequest, JsonRpcResponse, MirrorState,
-    Outbox, OutboxEntry, PROTOCOL_HEADER, PairRequest, PairResponse, PROTOCOL_VERSION,
+    Outbox, OutboxEntry, PROTOCOL_HEADER, PROTOCOL_VERSION, PairRequest, PairResponse,
     error_response, offline_suffix, plan_mirror, sanitize_harness,
 };
 
@@ -187,7 +187,10 @@ fn pair(args: &[String]) -> Result<(), String> {
     )?;
     if !response.is_success() {
         return Err(match response.status {
-            410 => "that code was already used or has expired; run Connect an agent on the desk again".into(),
+            410 => {
+                "that code was already used or has expired; run Connect an agent on the desk again"
+                    .into()
+            }
             403 => "the desk refused the code; check it and try again".into(),
             other => format!("the desk answered {other}: {}", response.text().trim()),
         });
@@ -234,7 +237,11 @@ impl Proxy {
             eprintln!(
                 "thock-bridge: the desk at {} is {}",
                 self.desk_label(),
-                if online { "reachable" } else { "unreachable; answering from cache" }
+                if online {
+                    "reachable"
+                } else {
+                    "unreachable; answering from cache"
+                }
             );
             self.online = Some(online);
         }
@@ -357,7 +364,13 @@ impl Proxy {
                     }
                     Err(reason) => {
                         self.note_online(false);
-                        Some(self.offline_answer(id, &request, tool.as_deref(), &arguments, &reason))
+                        Some(self.offline_answer(
+                            id,
+                            &request,
+                            tool.as_deref(),
+                            &arguments,
+                            &reason,
+                        ))
                     }
                 }
             }
@@ -690,9 +703,14 @@ fn mirror_pass(home: &Home, config: &ClientConfig, verbose: bool) -> Result<usiz
 
 fn mirror_command() -> Result<(), String> {
     let home = Home::resolve();
-    let config = home.load_config().ok_or("not paired; run `thock-bridge pair` first")?;
+    let config = home
+        .load_config()
+        .ok_or("not paired; run `thock-bridge pair` first")?;
     let count = mirror_pass(&home, &config, true)?;
-    println!("{count} file(s) mirrored into {}'s memory/agents/", config.vault);
+    println!(
+        "{count} file(s) mirrored into {}'s memory/agents/",
+        config.vault
+    );
     Ok(())
 }
 
@@ -701,7 +719,9 @@ fn mirror_command() -> Result<(), String> {
 fn status() -> Result<(), String> {
     let home = Home::resolve();
     let Some(config) = home.load_config() else {
-        println!("Not paired. Run `thock-bridge pair <host:port> <code>` with the code from Connect an agent on the desk.");
+        println!(
+            "Not paired. Run `thock-bridge pair <host:port> <code>` with the code from Connect an agent on the desk."
+        );
         return Ok(());
     };
     println!("Desk: {} (vault {})", config.desk, config.vault);
@@ -846,11 +866,22 @@ fn link_skill(target_dir: &Path) -> Result<(), String> {
 fn mcp_add_command(harness: &Harness, binary: &str) -> Vec<String> {
     let serve = ["serve", "--harness", harness.id];
     match harness.id {
-        "claude-code" => ["claude", "mcp", "add", "--scope", "user", "--transport", "stdio", "thock", "--", binary]
-            .into_iter()
-            .chain(serve)
-            .map(String::from)
-            .collect(),
+        "claude-code" => [
+            "claude",
+            "mcp",
+            "add",
+            "--scope",
+            "user",
+            "--transport",
+            "stdio",
+            "thock",
+            "--",
+            binary,
+        ]
+        .into_iter()
+        .chain(serve)
+        .map(String::from)
+        .collect(),
         "codex" => ["codex", "mcp", "add", "thock", "--", binary]
             .into_iter()
             .chain(serve)
@@ -893,12 +924,15 @@ fn connect(args: &[String]) -> Result<(), String> {
             other => return Err(format!("unexpected argument {other}")),
         }
     }
-    let name = name.ok_or("usage: thock-bridge connect <claude|codex|gemini> [--dry-run] [--yes]")?;
+    let name =
+        name.ok_or("usage: thock-bridge connect <claude|codex|gemini> [--dry-run] [--yes]")?;
     let harness = harness_for(&name).ok_or_else(|| {
         format!("{name} isn't a harness this command knows; the skill and the server work from any MCP client, see the printed config block")
     })?;
     let home = Home::resolve();
-    let config = home.load_config().ok_or("not paired; run `thock-bridge pair` first")?;
+    let config = home
+        .load_config()
+        .ok_or("not paired; run `thock-bridge pair` first")?;
     let skill = fetch_skill(&config)?;
     let binary = std::env::current_exe()
         .ok()
@@ -919,7 +953,11 @@ fn connect(args: &[String]) -> Result<(), String> {
         describe: format!(
             "link {} -> {}",
             skills_dir.join(SKILL_NAME).display(),
-            canonical.parent().map(Path::display).map(|p| p.to_string()).unwrap_or_default()
+            canonical
+                .parent()
+                .map(Path::display)
+                .map(|p| p.to_string())
+                .unwrap_or_default()
         ),
         apply: Box::new(move || link_skill(&skills_dir)),
     });
@@ -934,11 +972,16 @@ fn connect(args: &[String]) -> Result<(), String> {
             match status {
                 Ok(status) if status.success() => Ok(()),
                 Ok(status) => {
-                    eprintln!("the command exited with {status}; add this by hand instead:\n{block}");
+                    eprintln!(
+                        "the command exited with {status}; add this by hand instead:\n{block}"
+                    );
                     Ok(())
                 }
                 Err(error) => {
-                    eprintln!("couldn't run {}: {error}; add this by hand instead:\n{block}", command[0]);
+                    eprintln!(
+                        "couldn't run {}: {error}; add this by hand instead:\n{block}",
+                        command[0]
+                    );
                     Ok(())
                 }
             }
@@ -1012,7 +1055,9 @@ fn set_auto_memory_directory(settings: &Path, mirror_dir: &Path) -> Result<(), S
 
 fn update() -> Result<(), String> {
     let home = Home::resolve();
-    let config = home.load_config().ok_or("not paired; run `thock-bridge pair` first")?;
+    let config = home
+        .load_config()
+        .ok_or("not paired; run `thock-bridge pair` first")?;
     let skill = fetch_skill(&config)?;
     let canonical = canonical_skill_file();
     write_text(&canonical, &skill)?;

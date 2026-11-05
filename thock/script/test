@@ -28,6 +28,7 @@ suites_for() {
     .github/workflows/ci.yml | thock/script/*) printf '%s\n' "${ALL_SUITES[@]}" ;;
     crates/thock-sync-core/fixtures/*) echo sync-core; echo ios ;;
     crates/thock-sync-core/*) echo sync-core; echo rust; echo integration ;;
+    crates/thock-bridge/*) echo rust ;;
     crates/thock/src/vault_sync*) echo rust; echo integration ;;
     thock/services/plus/*) echo go-plus; echo integration ;;
     thock/ios/ThockKit/Sources/ThockKit/Sync*) echo ios; echo integration ;;
@@ -55,11 +56,14 @@ changed_paths() {
   git ls-files --others --exclude-standard
 }
 
+# The Thock crate and the agents bridge (`crates/thock-bridge`, the library
+# the desk serves and the `thock-bridge` client binary), which the Thock
+# crate depends on.
 run_rust() {
   if cargo nextest --version >/dev/null 2>&1; then
-    cargo nextest run -p thock --no-fail-fast "$@"
+    cargo nextest run -p thock -p thock_bridge --no-fail-fast "$@"
   else
-    cargo test -p thock "$@"
+    cargo test -p thock -p thock_bridge "$@"
   fi
 }
 

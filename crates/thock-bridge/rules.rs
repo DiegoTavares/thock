@@ -29,7 +29,10 @@ impl std::fmt::Display for PathError {
             Self::Empty => write!(f, "the path is empty"),
             Self::Absolute => write!(f, "the path must be relative to the vault"),
             Self::Traversal => write!(f, "the path leaves the vault"),
-            Self::Hidden => write!(f, "paths under a dot-folder are Thock's own and stay closed"),
+            Self::Hidden => write!(
+                f,
+                "paths under a dot-folder are Thock's own and stay closed"
+            ),
             Self::EmptyComponent => write!(f, "the path has an empty segment"),
         }
     }
@@ -146,11 +149,17 @@ impl std::fmt::Display for Refusal {
         match &self.0 {
             FilterRefusal::Empty => write!(f, "the line is empty"),
             FilterRefusal::TooLong => {
-                write!(f, "the line is over {FACT_MAX_CHARS} characters; keep it to one fact")
+                write!(
+                    f,
+                    "the line is over {FACT_MAX_CHARS} characters; keep it to one fact"
+                )
             }
             FilterRefusal::Multiline => write!(f, "one line only; it holds a line break"),
             FilterRefusal::LeadingBullet => {
-                write!(f, "write the fact without a leading `- `; the desk adds the bullet")
+                write!(
+                    f,
+                    "write the fact without a leading `- `; the desk adds the bullet"
+                )
             }
             FilterRefusal::ForbiddenTopic(_) => {
                 write!(f, "that topic is on the person's do-not-keep list")
@@ -197,7 +206,8 @@ pub fn check_fact(text: &str, forbidden: &[String]) -> Result<String, Refusal> {
 /// regex engine.
 fn looks_like_credential(text: &str) -> Option<&'static str> {
     let lower = text.to_lowercase();
-    for token in text.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | ')' | ',' | ';'))
+    for token in text
+        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | ')' | ',' | ';'))
     {
         if token.len() < 12 {
             continue;
@@ -205,7 +215,10 @@ fn looks_like_credential(text: &str) -> Option<&'static str> {
         if token.starts_with("sk-") || token.starts_with("ghp_") || token.starts_with("AKIA") {
             return Some("an API token");
         }
-        if ["xoxa-", "xoxb-", "xoxp-"].iter().any(|prefix| token.starts_with(prefix)) {
+        if ["xoxa-", "xoxb-", "xoxp-"]
+            .iter()
+            .any(|prefix| token.starts_with(prefix))
+        {
             return Some("an API token");
         }
         if token.len() >= 32 && token.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -225,8 +238,9 @@ fn looks_like_credential(text: &str) -> Option<&'static str> {
             return Some("an account number");
         }
     }
-    for keyword in ["password", "passwd", "secret", "token", "api_key", "api-key", "api key", "apikey"]
-    {
+    for keyword in [
+        "password", "passwd", "secret", "token", "api_key", "api-key", "api key", "apikey",
+    ] {
         let mut from = 0;
         while let Some(found) = lower[from..].find(keyword) {
             let after = &lower[from + found + keyword.len()..];
@@ -458,7 +472,9 @@ mod tests {
             "one line only; it holds a line break"
         );
         assert_eq!(
-            check_fact("- a bullet", &forbidden).unwrap_err().to_string(),
+            check_fact("- a bullet", &forbidden)
+                .unwrap_err()
+                .to_string(),
             "write the fact without a leading `- `; the desk adds the bullet"
         );
         assert_eq!(
@@ -498,7 +514,10 @@ mod tests {
     #[test]
     fn the_today_line_round_trips() {
         let line = today_line(&identity(), "Shipped the PR (#184); CI green.");
-        assert_eq!(line, "- claude-code@robin · Shipped the PR (#184); CI green.");
+        assert_eq!(
+            line,
+            "- claude-code@robin · Shipped the PR (#184); CI green."
+        );
         assert_eq!(
             parse_today_line(&line).unwrap(),
             (identity(), "Shipped the PR (#184); CI green.".to_string())
@@ -510,10 +529,18 @@ mod tests {
         let write = inbox_write("bridge", "- 2026-11-04 · A fact · via codex@hp");
         let applied = apply(Some("# Noted\n\n_explainer_\n"), &write, None);
         assert_eq!(applied.outcome, Outcome::Applied);
-        assert!(applied.text.ends_with("- 2026-11-04 · A fact · via codex@hp\n"));
+        assert!(
+            applied
+                .text
+                .ends_with("- 2026-11-04 · A fact · via codex@hp\n")
+        );
         assert!(applied.text.starts_with("# Noted\n\n_explainer_\n"));
         let again = apply(Some(&applied.text), &write, None);
-        assert_eq!(again.outcome, Outcome::Noop, "the same line is not written twice");
+        assert_eq!(
+            again.outcome,
+            Outcome::Noop,
+            "the same line is not written twice"
+        );
 
         let write = today_write(
             "bridge",
@@ -524,13 +551,21 @@ mod tests {
         let created = apply(None, &write, Some("# Wednesday\n\n## Notes\n"));
         assert_eq!(created.outcome, Outcome::Created);
         assert!(created.text.contains("## From your agents\n"));
-        assert!(created.text.ends_with("- claude-code@robin · Shipped it.\n"));
+        assert!(
+            created
+                .text
+                .ends_with("- claude-code@robin · Shipped it.\n")
+        );
         let added = apply(Some("# Wednesday\n\n## Notes\n- x\n"), &write, None);
         assert_eq!(added.outcome, Outcome::SectionAdded);
         let existing = "# Wednesday\n\n## From your agents\n\n- codex@hp · Earlier.\n";
         let appended = apply(Some(existing), &write, None);
         assert_eq!(appended.outcome, Outcome::Applied);
-        assert!(appended.text.contains("- codex@hp · Earlier.\n- claude-code@robin · Shipped it.\n"));
+        assert!(
+            appended
+                .text
+                .contains("- codex@hp · Earlier.\n- claude-code@robin · Shipped it.\n")
+        );
     }
 
     #[test]

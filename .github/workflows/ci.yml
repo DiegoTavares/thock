@@ -118,11 +118,11 @@ jobs:
           key: clippy
           cache-all-crates: true
 
-      # Thock lives in `crates/thock` and `crates/thock-sync-core`; `crates/thock_app`
+      # Thock lives in `crates/thock`, `crates/thock-bridge` and `crates/thock-sync-core`; `crates/thock_app`
       # is the shell that registers them, and `crates/cli` is the `thock` command,
       # which only the bundle scripts build otherwise.
       - name: cargo clippy
-        run: cargo clippy -p thock -p thock_sync_core -p thock_app -p cli --all-targets -- --deny warnings
+        run: cargo clippy -p thock -p thock_bridge -p thock_sync_core -p thock_app -p cli --all-targets -- --deny warnings
 
   test:
     name: Test (${{ matrix.os }})
@@ -159,7 +159,7 @@ jobs:
           cache-all-crates: true
 
       - name: cargo nextest
-        run: cargo nextest run -p thock -p thock_sync_core --no-fail-fast --failure-output immediate-final
+        run: cargo nextest run -p thock -p thock_bridge -p thock_sync_core --no-fail-fast --failure-output immediate-final
 
   # The app shell's tests, including the bundled-keymap guard. Linux only:
   # macOS minutes cost ten times as much and the tests are platform-neutral.

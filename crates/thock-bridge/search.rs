@@ -163,14 +163,22 @@ impl SearchIndex {
             .entries
             .values()
             .filter(|entry| entry.modified >= oldest)
-            .filter(|entry| folder.as_ref().is_none_or(|folder| in_folder(&entry.path, folder)))
+            .filter(|entry| {
+                folder
+                    .as_ref()
+                    .is_none_or(|folder| in_folder(&entry.path, folder))
+            })
             .map(|entry| RecentNote {
                 path: entry.path.clone(),
                 title: entry.title.clone(),
                 modified: entry.modified,
             })
             .collect();
-        notes.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.path.cmp(&b.path)));
+        notes.sort_by(|a, b| {
+            b.modified
+                .cmp(&a.modified)
+                .then_with(|| a.path.cmp(&b.path))
+        });
         notes
     }
 
@@ -336,7 +344,10 @@ mod tests {
     #[test]
     fn titles_come_from_the_first_heading_else_the_stem() {
         assert_eq!(note_title("x/y.md", "intro\n# Real title\n"), "Real title");
-        assert_eq!(note_title("daily/2026-11-03.md", "no heading"), "2026-11-03");
+        assert_eq!(
+            note_title("daily/2026-11-03.md", "no heading"),
+            "2026-11-03"
+        );
     }
 
     #[test]
@@ -345,7 +356,11 @@ mod tests {
         let paths: Vec<&str> = hits.iter().map(|hit| hit.path.as_str()).collect();
         assert_eq!(
             paths,
-            ["memory/people/ana.md", "daily/2026-11-03.md", "daily/2025-11-03.md"]
+            [
+                "memory/people/ana.md",
+                "daily/2026-11-03.md",
+                "daily/2025-11-03.md"
+            ]
         );
         assert_eq!(hits[0].title, "Ana");
         assert_eq!(hits[1].snippet, "- Met Ana about the newsletter - Gym");
@@ -417,7 +432,10 @@ mod tests {
             LinkResolution::Ambiguous(paths) if paths.len() == 2
         ));
         index.remove("people/ana.md");
-        assert!(matches!(index.resolve_link("Ana"), LinkResolution::Found(_)));
+        assert!(matches!(
+            index.resolve_link("Ana"),
+            LinkResolution::Found(_)
+        ));
     }
 
     #[test]

@@ -2405,9 +2405,7 @@ impl RoutinesPanel {
             NavRowKind::GettingStarted(step) => self.run_getting_started_step(step, window, cx),
             // Deferred by `dispatch_action`, so the workspace that opens the
             // modal is not leased while this panel is.
-            NavRowKind::BridgeStatus => {
-                window.dispatch_action(ConnectOtherAgent.boxed_clone(), cx)
-            }
+            NavRowKind::BridgeStatus => window.dispatch_action(ConnectOtherAgent.boxed_clone(), cx),
             NavRowKind::BridgeClient(name) => self.disconnect_agent(&name, cx),
         }
     }
@@ -2891,7 +2889,9 @@ impl RoutinesPanel {
                 .size(LabelSize::XSmall)
                 .color(Color::Muted),
         )
-        .tooltip(Tooltip::text("Disconnect this computer; it can pair again any time"))
+        .tooltip(Tooltip::text(
+            "Disconnect this computer; it can pair again any time",
+        ))
         .on_click(cx.listener(move |this, _, _window, cx| {
             this.disconnect_agent(&name, cx);
         }))

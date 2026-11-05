@@ -146,8 +146,14 @@ pub enum BridgeState {
     /// `thock::ToggleBridge` stopped it; the Routine stays.
     Paused,
     Starting,
-    Serving { address: String, port: u16 },
-    Failed { port: u16, error: String },
+    Serving {
+        address: String,
+        port: u16,
+    },
+    Failed {
+        port: u16,
+        error: String,
+    },
 }
 
 impl BridgeState {
@@ -411,7 +417,11 @@ impl BridgeService {
                     if path == vault_config || path == BRIDGE_CONFIG_PATH {
                         reload = true;
                     } else if SearchIndex::indexes(path) {
-                        self.index_changed(path, matches!(change, project::PathChange::Removed), cx);
+                        self.index_changed(
+                            path,
+                            matches!(change, project::PathChange::Removed),
+                            cx,
+                        );
                     }
                 }
                 if reload {
@@ -463,8 +473,8 @@ impl BridgeService {
                 VaultStatus::Valid(vault) => Some(vault),
                 _ => None,
             });
-        let changed_root =
-            self.vault.as_ref().map(|v| v.root.as_path()) != vault.as_ref().map(|v| v.root.as_path());
+        let changed_root = self.vault.as_ref().map(|v| v.root.as_path())
+            != vault.as_ref().map(|v| v.root.as_path());
         self.enabled = vault.as_ref().is_some_and(routine_enabled);
         self.vault = vault;
         if changed_root {
@@ -614,13 +624,18 @@ impl BridgeService {
             BridgeState::Failed { error, .. } => {
                 return Task::ready(Err(anyhow!("the desk isn't serving: {error}")));
             }
-            _ => return Task::ready(Err(anyhow!("the desk isn't serving yet; try again in a moment"))),
+            _ => {
+                return Task::ready(Err(anyhow!(
+                    "the desk isn't serving yet; try again in a moment"
+                )));
+            }
         };
         let code = thock_bridge::generate_code();
         let pending = PendingCode {
             code_sha256: thock_bridge::sha256_hex(&code),
-            expires_at: (Utc::now() + chrono::Duration::minutes(thock_bridge::PAIRING_CODE_MINUTES))
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            expires_at: (Utc::now()
+                + chrono::Duration::minutes(thock_bridge::PAIRING_CODE_MINUTES))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         };
         if let Ok(mut shared) = self.shared.lock() {
             shared.pending = Some(pending.clone());
@@ -799,7 +814,9 @@ fn request_parts(mut request: tiny_http::Request) -> RequestParts {
         })
         .collect();
     let mut body = Vec::new();
-    let oversized = request.body_length().is_some_and(|length| length > BODY_LIMIT);
+    let oversized = request
+        .body_length()
+        .is_some_and(|length| length > BODY_LIMIT);
     if !oversized {
         request
             .as_reader()
@@ -831,7 +848,10 @@ fn answer(
         oversized,
     } = parts;
     if oversized || body.len() > BODY_LIMIT {
-        return (request, Outgoing::error(413, "that is more than the desk takes in one request"));
+        return (
+            request,
+            Outgoing::error(413, "that is more than the desk takes in one request"),
+        );
     }
     let route = thock_bridge::parse_route(&method, &url);
     let client = match route {
@@ -848,8 +868,9 @@ fn answer(
                     .clients
                     .iter()
                     .find(|client| {
-                        hash.as_deref()
-                            .is_some_and(|hash| thock_bridge::constant_time_eq(hash, &client.token_sha256))
+                        hash.as_deref().is_some_and(|hash| {
+                            thock_bridge::constant_time_eq(hash, &client.token_sha256)
+                        })
                     })
                     .map(|client| client.name.clone())
             });
@@ -943,8 +964,14 @@ async fn handle_incoming(
             }
         }
         Route::AgentFile { harness, path } => {
-            handle_agent_file(&context, incoming.client.as_deref(), &harness, &path, &incoming.body)
-                .await
+            handle_agent_file(
+                &context,
+                incoming.client.as_deref(),
+                &harness,
+                &path,
+                &incoming.body,
+            )
+            .await
         }
         Route::NotFound => Outgoing::error(404, "nothing here"),
     };
@@ -1106,7 +1133,10 @@ async fn handle_agent_file(
         return Outgoing::error(413, "mirrored files stay under 1 MiB");
     }
     if !thock_bridge::is_mirrored_path(path) {
-        return Outgoing::error(400, "only .md, .txt and .json files at plain paths are mirrored");
+        return Outgoing::error(
+            400,
+            "only .md, .txt and .json files at plain paths are mirrored",
+        );
     }
     let harness = thock_bridge::sanitize_harness(harness);
     let relative = format!("{}/{harness}/{client}/{path}", thock_bridge::AGENTS_DIR);
@@ -1166,7 +1196,8 @@ impl DeskHost<'_> {
     /// The absolute path of a vault-relative note, refused when it leaves
     /// the vault (§9.1).
     async fn note_path(&self, relative: &str) -> Result<PathBuf, HostError> {
-        thock_bridge::validate_vault_path(relative).map_err(|error| HostError(error.to_string()))?;
+        thock_bridge::validate_vault_path(relative)
+            .map_err(|error| HostError(error.to_string()))?;
         let absolute = self.root().join(relative.trim());
         if let Ok(canonical) = self.context.fs.canonicalize(&absolute).await {
             let root = self
@@ -1231,17 +1262,32 @@ impl DeskHost<'_> {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        write_state_file(&self.context.fs, self.root(), SEEN_PATH, &format!("{lines}\n"))
-            .await
-            .log_err();
+        write_state_file(
+            &self.context.fs,
+            self.root(),
+            SEEN_PATH,
+            &format!("{lines}\n"),
+        )
+        .await
+        .log_err();
     }
 
     /// Applies a sync-core write to a note through the `Fs`, after the
     /// history checkpoint every AI write takes.
-    async fn apply_write(&mut self, write: &Write, seed: Option<String>) -> Result<WriteOutcome, HostError> {
+    async fn apply_write(
+        &mut self,
+        write: &Write,
+        seed: Option<String>,
+    ) -> Result<WriteOutcome, HostError> {
         let absolute = self.root().join(&write.path);
         let existing = if self.context.fs.is_file(&absolute).await {
-            Some(self.context.fs.load(&absolute).await.map_err(HostError::from)?)
+            Some(
+                self.context
+                    .fs
+                    .load(&absolute)
+                    .await
+                    .map_err(HostError::from)?,
+            )
         } else {
             None
         };
@@ -1253,7 +1299,11 @@ impl DeskHost<'_> {
         self.cx
             .update(|cx| history::checkpoint_before_ai_write(&project, cx));
         if let Some(parent) = absolute.parent() {
-            self.context.fs.create_dir(parent).await.map_err(HostError::from)?;
+            self.context
+                .fs
+                .create_dir(parent)
+                .await
+                .map_err(HostError::from)?;
         }
         self.context
             .fs
@@ -1277,14 +1327,23 @@ impl ToolHost for DeskHost<'_> {
             .await
             .unwrap_or_default();
         let forbidden = self.forbidden_topics().await;
-        Ok(crate::hosted_agent::bridge_context(&base, &self.identity, &forbidden, &self.context.config.today_heading))
+        Ok(crate::hosted_agent::bridge_context(
+            &base,
+            &self.identity,
+            &forbidden,
+            &self.context.config.today_heading,
+        ))
     }
 
     async fn memory_index(&mut self) -> Result<String, HostError> {
         let lines = self.context.vault.config.memory.index_lines;
-        Ok(crate::memory::read_index_capped(&self.context.fs, self.root(), lines)
-            .await
-            .unwrap_or_else(|| "Nothing yet: no session has learned anything about them.".into()))
+        Ok(
+            crate::memory::read_index_capped(&self.context.fs, self.root(), lines)
+                .await
+                .unwrap_or_else(|| {
+                    "Nothing yet: no session has learned anything about them.".into()
+                }),
+        )
     }
 
     async fn search(&mut self, query: &SearchQuery) -> Result<Vec<SearchHit>, HostError> {
@@ -1329,10 +1388,18 @@ impl ToolHost for DeskHost<'_> {
         if !self.context.fs.is_file(&absolute).await {
             return Err(HostError(format!("{relative} is not in the vault")));
         }
-        self.context.fs.load(&absolute).await.map_err(HostError::from)
+        self.context
+            .fs
+            .load(&absolute)
+            .await
+            .map_err(HostError::from)
     }
 
-    async fn recent(&mut self, days: u32, folder: Option<&str>) -> Result<Vec<RecentNote>, HostError> {
+    async fn recent(
+        &mut self,
+        days: u32,
+        folder: Option<&str>,
+    ) -> Result<Vec<RecentNote>, HostError> {
         self.ensure_index().await?;
         let today = Local::now().date_naive();
         Ok(self
@@ -1367,7 +1434,11 @@ impl ToolHost for DeskHost<'_> {
         Ok(outcome)
     }
 
-    async fn note_today(&mut self, lines: &[String], meta: &CallMeta) -> Result<WriteOutcome, HostError> {
+    async fn note_today(
+        &mut self,
+        lines: &[String],
+        meta: &CallMeta,
+    ) -> Result<WriteOutcome, HostError> {
         if let Some(outcome) = self.seen(meta).await {
             return Ok(outcome);
         }
@@ -1397,7 +1468,12 @@ impl ToolHost for DeskHost<'_> {
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            Some(expand_template(&template, date, Local::now().time(), &title))
+            Some(expand_template(
+                &template,
+                date,
+                Local::now().time(),
+                &title,
+            ))
         };
         let write = thock_bridge::today_write(
             WRITE_CLIENT_ID,
@@ -1412,7 +1488,11 @@ impl ToolHost for DeskHost<'_> {
 }
 
 /// One index entry's ingredients, read through the `Fs`.
-async fn read_index_entry(fs: &Arc<dyn Fs>, root: &Path, relative: &str) -> Option<(NaiveDate, String)> {
+async fn read_index_entry(
+    fs: &Arc<dyn Fs>,
+    root: &Path,
+    relative: &str,
+) -> Option<(NaiveDate, String)> {
     let absolute = root.join(relative);
     let metadata = fs.metadata(&absolute).await.ok().flatten()?;
     if metadata.is_dir || metadata.len > BODY_LIMIT as u64 {
@@ -1472,7 +1552,6 @@ mod tests {
     use gpui::TestAppContext;
     use serde_json::json;
     use settings::SettingsStore;
-    use std::net::TcpStream;
 
     use crate::vault::{DEFAULT_DAILY_TEMPLATE, InstalledRoutine, VaultConfig};
 
@@ -1486,10 +1565,11 @@ mod tests {
     fn vault(enabled: bool) -> Vault {
         let mut config = VaultConfig::default();
         if enabled {
-            config
-                .routines
-                .installed
-                .push(InstalledRoutine::new(AGENTS_ROUTINE_ID.to_string(), true, 1));
+            config.routines.installed.push(InstalledRoutine::new(
+                AGENTS_ROUTINE_ID.to_string(),
+                true,
+                1,
+            ));
         }
         Vault {
             root: PathBuf::from("/vault"),
@@ -1533,8 +1613,7 @@ mod tests {
         fs.insert_tree("/vault", vault_tree()).await;
         let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
         cx.run_until_parked();
-        let service =
-            cx.update(|cx| BridgeService::attach_for_test(vault(enabled), &project, cx));
+        let service = cx.update(|cx| BridgeService::attach_for_test(vault(enabled), &project, cx));
         cx.run_until_parked();
         let port = match service.read_with(cx, |service, _| service.state().clone()) {
             BridgeState::Serving { port, .. } => port,
@@ -1565,9 +1644,8 @@ mod tests {
                 .collect(),
             body: body.as_bytes().to_vec(),
         };
-        let handle = std::thread::spawn(move || {
-            thock_bridge::request(&request, Duration::from_secs(10))
-        });
+        let handle =
+            std::thread::spawn(move || thock_bridge::request(&request, Duration::from_secs(10)));
         while !handle.is_finished() {
             cx.run_until_parked();
             std::thread::sleep(Duration::from_millis(2));
@@ -1584,7 +1662,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(invite.port, desk.port);
-        assert!(invite.command(&invite.addresses[0]).starts_with("thock-bridge pair "));
+        assert!(
+            invite
+                .command(&invite.addresses[0])
+                .starts_with("thock-bridge pair ")
+        );
         let (status, body) = roundtrip(
             cx,
             desk.port,
@@ -1636,7 +1718,8 @@ mod tests {
     async fn the_routine_off_binds_nothing(cx: &mut TestAppContext) {
         let desk = serve(cx, false).await;
         assert_eq!(
-            desk.service.read_with(cx, |service, _| service.state().clone()),
+            desk.service
+                .read_with(cx, |service, _| service.state().clone()),
             BridgeState::Off
         );
         assert!(!desk.fs.is_dir(Path::new("/vault/.thock/state")).await);
@@ -1673,10 +1756,22 @@ mod tests {
         );
         assert_eq!(status, 200);
         assert!(body.contains("\"vault\":\"vault\""));
-        let clients = desk.fs.load(Path::new("/vault/.thock/state/bridge/clients.toml")).await.unwrap();
+        let clients = desk
+            .fs
+            .load(Path::new("/vault/.thock/state/bridge/clients.toml"))
+            .await
+            .unwrap();
         assert!(clients.contains("name = \"robin\""));
-        assert!(!clients.contains(&token), "tokens are never stored in the clear");
-        assert!(!desk.fs.is_file(Path::new("/vault/.thock/state/bridge/pending.toml")).await);
+        assert!(
+            !clients.contains(&token),
+            "tokens are never stored in the clear"
+        );
+        assert!(
+            !desk
+                .fs
+                .is_file(Path::new("/vault/.thock/state/bridge/pending.toml"))
+                .await
+        );
 
         // The code is spent.
         let (status, _) = roundtrip(
@@ -1702,7 +1797,10 @@ mod tests {
             "",
         );
         assert_eq!(status, 401);
-        assert!(desk.service.read_with(cx, |service, _| service.clients().is_empty()));
+        assert!(
+            desk.service
+                .read_with(cx, |service, _| service.clients().is_empty())
+        );
     }
 
     #[gpui::test]
@@ -1723,7 +1821,11 @@ mod tests {
             result.first_text(),
             "Noted in memory/inbox.md; the Reflect ritual files it (applied)."
         );
-        let inbox = desk.fs.load(Path::new("/vault/memory/inbox.md")).await.unwrap();
+        let inbox = desk
+            .fs
+            .load(Path::new("/vault/memory/inbox.md"))
+            .await
+            .unwrap();
         assert!(inbox.ends_with(
             "- 2026-11-04 · Prefers PR titles in the imperative · via claude-code@robin\n"
         ));
@@ -1738,9 +1840,17 @@ mod tests {
             Some(meta),
         );
         assert_eq!(again.first_text(), result.first_text());
-        let inbox_again = desk.fs.load(Path::new("/vault/memory/inbox.md")).await.unwrap();
+        let inbox_again = desk
+            .fs
+            .load(Path::new("/vault/memory/inbox.md"))
+            .await
+            .unwrap();
         assert_eq!(inbox, inbox_again);
-        assert!(desk.fs.is_file(Path::new("/vault/.thock/state/bridge/seen.jsonl")).await);
+        assert!(
+            desk.fs
+                .is_file(Path::new("/vault/.thock/state/bridge/seen.jsonl"))
+                .await
+        );
 
         // A repeat with a new id is refused as a duplicate.
         let duplicate = call_tool(
@@ -1764,7 +1874,10 @@ mod tests {
             None,
         );
         assert!(refused.is_error);
-        assert_eq!(refused.first_text(), "that topic is on the person's do-not-keep list");
+        assert_eq!(
+            refused.first_text(),
+            "that topic is on the person's do-not-keep list"
+        );
     }
 
     #[gpui::test]
@@ -1781,7 +1894,11 @@ mod tests {
         );
         assert!(!result.is_error, "{}", result.first_text());
         assert_eq!(result.first_text(), "Added to today's note (created).");
-        let note = desk.fs.load(Path::new("/vault/daily/2026-11-04.md")).await.unwrap();
+        let note = desk
+            .fs
+            .load(Path::new("/vault/daily/2026-11-04.md"))
+            .await
+            .unwrap();
         assert!(note.starts_with("# "), "made from the template: {note}");
         assert!(note.contains("## From your agents\n"));
         assert!(note.ends_with(
@@ -1804,11 +1921,21 @@ mod tests {
             json!({"line": "Yesterday's."}),
             Some(json!({"call_id": "n-3", "date": "2026-11-03"})),
         );
-        assert_eq!(on_existing.first_text(), "Added to today's note (section_added).");
-        let yesterday = desk.fs.load(Path::new("/vault/daily/2026-11-03.md")).await.unwrap();
+        assert_eq!(
+            on_existing.first_text(),
+            "Added to today's note (section_added)."
+        );
+        let yesterday = desk
+            .fs
+            .load(Path::new("/vault/daily/2026-11-03.md"))
+            .await
+            .unwrap();
         assert!(yesterday.starts_with("# Tuesday\n\n- Met Ana about the newsletter\n"));
         assert!(yesterday.contains("\n## From your agents\n"), "{yesterday}");
-        assert!(yesterday.ends_with("- claude-code@robin · Yesterday's.\n"), "{yesterday}");
+        assert!(
+            yesterday.ends_with("- claude-code@robin · Yesterday's.\n"),
+            "{yesterday}"
+        );
     }
 
     #[gpui::test]
@@ -1820,32 +1947,77 @@ mod tests {
         let text = hits.first_text().to_string();
         assert!(text.contains("`memory/people/ana.md` — Ana"), "{text}");
         assert!(text.contains("`daily/2026-11-03.md` — Tuesday"), "{text}");
-        assert!(text.find("ana.md").unwrap() < text.find("2026-11-03.md").unwrap(), "title beats body");
+        assert!(
+            text.find("ana.md").unwrap() < text.find("2026-11-03.md").unwrap(),
+            "title beats body"
+        );
 
         let read = call_tool(cx, &desk, &token, "read", json!({"link": "Ana"}), None);
-        assert_eq!(read.first_text(), "# Ana\n\n- Manager. Prefers written updates.\n");
-        let closed = call_tool(cx, &desk, &token, "read", json!({"path": ".thock/config.toml"}), None);
+        assert_eq!(
+            read.first_text(),
+            "# Ana\n\n- Manager. Prefers written updates.\n"
+        );
+        let closed = call_tool(
+            cx,
+            &desk,
+            &token,
+            "read",
+            json!({"path": ".thock/config.toml"}),
+            None,
+        );
         assert!(closed.is_error);
-        let gone = call_tool(cx, &desk, &token, "read", json!({"path": "daily/2000-01-01.md"}), None);
+        let gone = call_tool(
+            cx,
+            &desk,
+            &token,
+            "read",
+            json!({"path": "daily/2000-01-01.md"}),
+            None,
+        );
         assert!(gone.is_error);
 
         let recent = call_tool(cx, &desk, &token, "recent", json!({"days": 7}), None);
-        assert!(recent.first_text().contains("`daily/2026-11-03.md` — Tuesday"));
+        assert!(
+            recent
+                .first_text()
+                .contains("`daily/2026-11-03.md` — Tuesday")
+        );
 
         let context = call_tool(cx, &desk, &token, "context", json!({}), None);
         let text = context.first_text();
         assert!(text.contains("# Right now"), "{text}");
-        assert!(text.contains("**Ana**"), "the memory index rides along: {text}");
+        assert!(
+            text.contains("**Ana**"),
+            "the memory index rides along: {text}"
+        );
         assert!(text.contains("you are claude-code@robin"), "{text}");
-        assert!(text.contains("salary"), "the do-not-keep topics ride along: {text}");
+        assert!(
+            text.contains("salary"),
+            "the do-not-keep topics ride along: {text}"
+        );
 
         // A new note shows up in the index through the worktree's events.
         desk.fs
-            .insert_tree("/vault/projects", json!({"newsletter.md": "# Newsletter\n\nAna owns it.\n"}))
+            .insert_tree(
+                "/vault/projects",
+                json!({"newsletter.md": "# Newsletter\n\nAna owns it.\n"}),
+            )
             .await;
         cx.run_until_parked();
-        let hits = call_tool(cx, &desk, &token, "search", json!({"query": "newsletter"}), None);
-        assert!(hits.first_text().contains("`projects/newsletter.md` — Newsletter"), "{}", hits.first_text());
+        let hits = call_tool(
+            cx,
+            &desk,
+            &token,
+            "search",
+            json!({"query": "newsletter"}),
+            None,
+        );
+        assert!(
+            hits.first_text()
+                .contains("`projects/newsletter.md` — Newsletter"),
+            "{}",
+            hits.first_text()
+        );
     }
 
     #[gpui::test]
@@ -1864,7 +2036,9 @@ mod tests {
         assert_eq!(status, 204);
         assert_eq!(
             desk.fs
-                .load(Path::new("/vault/memory/agents/claude-code/robin/MEMORY.md"))
+                .load(Path::new(
+                    "/vault/memory/agents/claude-code/robin/MEMORY.md"
+                ))
                 .await
                 .unwrap(),
             "# Memory\n- build needs cmake\n"
@@ -1906,14 +2080,27 @@ mod tests {
         desk.service.update(cx, |service, cx| service.toggle(cx));
         cx.run_until_parked();
         assert_eq!(
-            desk.service.read_with(cx, |service, _| service.state().clone()),
+            desk.service
+                .read_with(cx, |service, _| service.state().clone()),
             BridgeState::Paused
         );
-        assert!(TcpStream::connect(("127.0.0.1", port)).is_err(), "the port is closed");
+        // The listener is gone with its thread joined; another test may
+        // already have been handed the same port number, so the proof is
+        // the service's own state, not a refused connection.
+        assert!(
+            desk.service
+                .read_with(cx, |service, _| service.listener.is_none())
+        );
+        assert!(port > 0);
         desk.service.update(cx, |service, cx| service.toggle(cx));
         cx.run_until_parked();
-        let reopened = desk.service.read_with(cx, |service, _| service.state().clone());
-        assert!(matches!(reopened, BridgeState::Serving { .. }), "{reopened:?}");
+        let reopened = desk
+            .service
+            .read_with(cx, |service, _| service.state().clone());
+        assert!(
+            matches!(reopened, BridgeState::Serving { .. }),
+            "{reopened:?}"
+        );
 
         // The Routine removed: the registry rewrite is a config change.
         desk.service.update(cx, |service, cx| {
@@ -1922,7 +2109,8 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(
-            desk.service.read_with(cx, |service, _| service.state().clone()),
+            desk.service
+                .read_with(cx, |service, _| service.state().clone()),
             BridgeState::Off
         );
     }

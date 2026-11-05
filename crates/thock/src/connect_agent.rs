@@ -201,7 +201,12 @@ impl Render for ConnectAgentModal {
                             .child(
                                 div()
                                     .id("thock-pairing-command")
-                                    .font_family(theme_settings::ThemeSettings::get_global(cx).buffer_font.family.clone())
+                                    .font_family(
+                                        theme_settings::ThemeSettings::get_global(cx)
+                                            .buffer_font
+                                            .family
+                                            .clone(),
+                                    )
                                     .text_sm()
                                     .child(SharedString::from(command.clone())),
                             )
@@ -209,14 +214,17 @@ impl Render for ConnectAgentModal {
                                 h_flex()
                                     .gap_2()
                                     .child(
-                                        Button::new("thock-copy-pairing-command", if self.copied { "Copied" } else { "Copy" })
-                                            .style(ButtonStyle::Filled)
-                                            .key_binding(KeyBinding::for_action_in(
-                                                &menu::Confirm,
-                                                &self.focus_handle,
-                                                cx,
-                                            ))
-                                            .on_click(cx.listener(|this, _, _, cx| this.copy(cx))),
+                                        Button::new(
+                                            "thock-copy-pairing-command",
+                                            if self.copied { "Copied" } else { "Copy" },
+                                        )
+                                        .style(ButtonStyle::Filled)
+                                        .key_binding(KeyBinding::for_action_in(
+                                            &menu::Confirm,
+                                            &self.focus_handle,
+                                            cx,
+                                        ))
+                                        .on_click(cx.listener(|this, _, _, cx| this.copy(cx))),
                                     )
                                     .when(addresses.len() > 1, |this| {
                                         this.child(muted(&format!(

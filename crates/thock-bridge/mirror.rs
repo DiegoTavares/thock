@@ -52,14 +52,11 @@ impl MirrorState {
 /// `.md`, `.txt` or `.json` file at a valid vault-relative path.
 pub fn is_mirrored_path(relative: &str) -> bool {
     validate_vault_path(relative).is_ok()
-        && relative
-            .rsplit('.')
-            .next()
-            .is_some_and(|extension| {
-                MIRRORED_EXTENSIONS
-                    .iter()
-                    .any(|allowed| extension.eq_ignore_ascii_case(allowed))
-            })
+        && relative.rsplit('.').next().is_some_and(|extension| {
+            MIRRORED_EXTENSIONS
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+        })
 }
 
 /// The files under `root` newer than their last upload, in path order.
@@ -140,12 +137,21 @@ mod tests {
         fs::write(root.join("image.png"), "png").unwrap();
         fs::write(root.join(".hidden/x.md"), "x").unwrap();
         fs::write(root.join(".secret.md"), "x").unwrap();
-        fs::write(root.join("big.md"), vec![b'x'; (MIRROR_MAX_BYTES + 1) as usize]).unwrap();
+        fs::write(
+            root.join("big.md"),
+            vec![b'x'; (MIRROR_MAX_BYTES + 1) as usize],
+        )
+        .unwrap();
         let planned = plan_mirror(root, &MirrorState::default());
         let paths: Vec<&str> = planned.iter().map(|file| file.relative.as_str()).collect();
         assert_eq!(
             paths,
-            ["MEMORY.md", "topics/a.md", "topics/data.json", "topics/notes.txt"]
+            [
+                "MEMORY.md",
+                "topics/a.md",
+                "topics/data.json",
+                "topics/notes.txt"
+            ]
         );
     }
 
@@ -164,7 +170,10 @@ mod tests {
         let state_path = root.join("state/mirror-state.json");
         state.save(&state_path).unwrap();
         assert_eq!(MirrorState::load(&state_path), state);
-        assert_eq!(MirrorState::load(&root.join("missing.json")), MirrorState::default());
+        assert_eq!(
+            MirrorState::load(&root.join("missing.json")),
+            MirrorState::default()
+        );
     }
 
     #[test]

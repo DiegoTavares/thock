@@ -54,8 +54,9 @@ impl JsonRpcRequest {
     /// Parses one request; a malformed body is the error response to send
     /// back, with a null id as JSON-RPC asks.
     pub fn parse(body: &str) -> Result<Self, JsonRpcResponse> {
-        let value: Value = serde_json::from_str(body)
-            .map_err(|error| error_response(Value::Null, PARSE_ERROR, &format!("not JSON: {error}")))?;
+        let value: Value = serde_json::from_str(body).map_err(|error| {
+            error_response(Value::Null, PARSE_ERROR, &format!("not JSON: {error}"))
+        })?;
         if !value.is_object() {
             return Err(error_response(
                 Value::Null,
@@ -308,9 +309,7 @@ impl WriteOutcome {
         match outcome {
             thock_sync_core::Outcome::Created => Self::Created,
             thock_sync_core::Outcome::SectionAdded => Self::SectionAdded,
-            thock_sync_core::Outcome::Applied | thock_sync_core::Outcome::KeptBoth => {
-                Self::Applied
-            }
+            thock_sync_core::Outcome::Applied | thock_sync_core::Outcome::KeptBoth => Self::Applied,
             thock_sync_core::Outcome::Noop => Self::Noop,
         }
     }
@@ -534,7 +533,10 @@ pub async fn dispatch<H: ToolHost>(
     Some(response)
 }
 
-async fn read_resource<H: ToolHost>(host: &mut H, uri: &str) -> Result<ResourceContents, HostError> {
+async fn read_resource<H: ToolHost>(
+    host: &mut H,
+    uri: &str,
+) -> Result<ResourceContents, HostError> {
     let text = if uri == INDEX_RESOURCE_URI {
         host.memory_index().await?
     } else if let Some(path) = uri.strip_prefix(NOTE_RESOURCE_PREFIX) {
@@ -565,7 +567,9 @@ async fn call_tool<H: ToolHost>(
         "context" => host.context().await,
         "search" => {
             let query = parse_search_query(&arguments)?;
-            host.search(&query).await.map(|hits| render_hits(&query, &hits))
+            host.search(&query)
+                .await
+                .map(|hits| render_hits(&query, &hits))
         }
         "read" => {
             let target = parse_read_target(&arguments)?;
@@ -579,28 +583,34 @@ async fn call_tool<H: ToolHost>(
                 .unwrap_or(DEFAULT_RECENT_DAYS)
                 .clamp(1, MAX_RECENT_DAYS);
             let folder = arguments.get("folder").and_then(Value::as_str);
-            host.recent(days, folder).await.map(|notes| render_recent(days, &notes))
+            host.recent(days, folder)
+                .await
+                .map(|notes| render_recent(days, &notes))
         }
         "remember" => {
             let fact = arguments
                 .get("fact")
                 .and_then(Value::as_str)
                 .ok_or_else(|| HostError("remember needs a `fact` string".into()))?;
-            host.remember(fact, &meta).await.map(|outcome| match outcome {
-                WriteOutcome::Queued => QUEUED_SENTENCE.to_string(),
-                WriteOutcome::Noop => "That line is already in memory/inbox.md (noop).".into(),
-                other => format!(
-                    "Noted in memory/inbox.md; the Reflect ritual files it ({}).",
-                    other.word()
-                ),
-            })
+            host.remember(fact, &meta)
+                .await
+                .map(|outcome| match outcome {
+                    WriteOutcome::Queued => QUEUED_SENTENCE.to_string(),
+                    WriteOutcome::Noop => "That line is already in memory/inbox.md (noop).".into(),
+                    other => format!(
+                        "Noted in memory/inbox.md; the Reflect ritual files it ({}).",
+                        other.word()
+                    ),
+                })
         }
         "note_today" => {
             let lines = parse_lines(&arguments)?;
-            host.note_today(&lines, &meta).await.map(|outcome| match outcome {
-                WriteOutcome::Queued => QUEUED_SENTENCE.to_string(),
-                other => format!("Added to today's note ({}).", other.word()),
-            })
+            host.note_today(&lines, &meta)
+                .await
+                .map(|outcome| match outcome {
+                    WriteOutcome::Queued => QUEUED_SENTENCE.to_string(),
+                    other => format!("Added to today's note ({}).", other.word()),
+                })
         }
         other => return Err(HostError(format!("no tool named {other}"))),
     };
@@ -610,8 +620,7 @@ async fn call_tool<H: ToolHost>(
     })
 }
 
-pub const QUEUED_SENTENCE: &str =
-    "queued: the desk is unreachable; this will land when it is back";
+pub const QUEUED_SENTENCE: &str = "queued: the desk is unreachable; this will land when it is back";
 
 fn parse_search_query(arguments: &Value) -> Result<SearchQuery, HostError> {
     let query = arguments
@@ -763,7 +772,11 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn remember(&mut self, fact: &str, meta: &CallMeta) -> Result<WriteOutcome, HostError> {
+        async fn remember(
+            &mut self,
+            fact: &str,
+            meta: &CallMeta,
+        ) -> Result<WriteOutcome, HostError> {
             if fact.contains("secret") {
                 return Err(HostError("that looks like a secret".into()));
             }
@@ -788,8 +801,8 @@ mod tests {
     #[test]
     fn initialize_and_lists_need_no_host() {
         let mut host = FakeHost::default();
-        let response = pollster::block_on(dispatch(&mut host, call("initialize", json!({})), "1.0"))
-            .unwrap();
+        let response =
+            pollster::block_on(dispatch(&mut host, call("initialize", json!({})), "1.0")).unwrap();
         let result = response.result.unwrap();
         assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
@@ -803,19 +816,33 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["context", "search", "read", "recent", "remember", "note_today"]
+            [
+                "context",
+                "search",
+                "read",
+                "recent",
+                "remember",
+                "note_today"
+            ]
         );
-        let response =
-            pollster::block_on(dispatch(&mut host, call("resources/list", json!({})), "1.0"))
-                .unwrap();
-        assert_eq!(response.result.unwrap()["resources"][0]["uri"], INDEX_RESOURCE_URI);
+        let response = pollster::block_on(dispatch(
+            &mut host,
+            call("resources/list", json!({})),
+            "1.0",
+        ))
+        .unwrap();
+        assert_eq!(
+            response.result.unwrap()["resources"][0]["uri"],
+            INDEX_RESOURCE_URI
+        );
     }
 
     #[test]
     fn unknown_methods_and_notifications() {
         let mut host = FakeHost::default();
         let response =
-            pollster::block_on(dispatch(&mut host, call("prompts/list", json!({})), "1.0")).unwrap();
+            pollster::block_on(dispatch(&mut host, call("prompts/list", json!({})), "1.0"))
+                .unwrap();
         assert_eq!(response.error.unwrap().code, METHOD_NOT_FOUND);
         let notification = JsonRpcRequest {
             jsonrpc: "2.0".into(),
@@ -835,7 +862,8 @@ mod tests {
         assert_eq!(error.error.unwrap().code, INVALID_REQUEST);
         let error = JsonRpcRequest::parse(r#"{"jsonrpc":"2.0","id":1}"#).unwrap_err();
         assert_eq!(error.error.unwrap().code, INVALID_REQUEST);
-        let parsed = JsonRpcRequest::parse(r#"{"jsonrpc":"2.0","id":"a","method":"ping"}"#).unwrap();
+        let parsed =
+            JsonRpcRequest::parse(r#"{"jsonrpc":"2.0","id":"a","method":"ping"}"#).unwrap();
         assert_eq!(parsed.id, Some(json!("a")));
     }
 
@@ -845,7 +873,10 @@ mod tests {
         host.notes.insert("daily/x.md".into(), "hello world".into());
         let response = pollster::block_on(dispatch(
             &mut host,
-            call("tools/call", json!({"name": "read", "arguments": {"path": "daily/x.md"}})),
+            call(
+                "tools/call",
+                json!({"name": "read", "arguments": {"path": "daily/x.md"}}),
+            ),
             "1.0",
         ))
         .unwrap();
@@ -855,7 +886,10 @@ mod tests {
 
         let response = pollster::block_on(dispatch(
             &mut host,
-            call("tools/call", json!({"name": "read", "arguments": {"path": "daily/y.md"}})),
+            call(
+                "tools/call",
+                json!({"name": "read", "arguments": {"path": "daily/y.md"}}),
+            ),
             "1.0",
         ))
         .unwrap();
@@ -877,17 +911,26 @@ mod tests {
             "1.0",
         ))
         .unwrap();
-        assert!(response.error.unwrap().message.contains("no tool named nope"));
+        assert!(
+            response
+                .error
+                .unwrap()
+                .message
+                .contains("no tool named nope")
+        );
     }
 
     #[test]
     fn writes_carry_their_meta_and_outcome_words() {
         let mut host = FakeHost::default();
-        let request = call("tools/call", json!({"name": "remember", "arguments": {"fact": "Likes tea"}}))
-            .with_meta(&CallMeta {
-                call_id: Some("abc".into()),
-                date: NaiveDate::from_ymd_opt(2026, 11, 1),
-            });
+        let request = call(
+            "tools/call",
+            json!({"name": "remember", "arguments": {"fact": "Likes tea"}}),
+        )
+        .with_meta(&CallMeta {
+            call_id: Some("abc".into()),
+            date: NaiveDate::from_ymd_opt(2026, 11, 1),
+        });
         let response = pollster::block_on(dispatch(&mut host, request, "1.0")).unwrap();
         assert_eq!(
             response.tool_result().unwrap().first_text(),
@@ -895,11 +938,17 @@ mod tests {
         );
         assert_eq!(host.remembered[0].0, "Likes tea");
         assert_eq!(host.remembered[0].1.call_id.as_deref(), Some("abc"));
-        assert_eq!(host.remembered[0].1.date, NaiveDate::from_ymd_opt(2026, 11, 1));
+        assert_eq!(
+            host.remembered[0].1.date,
+            NaiveDate::from_ymd_opt(2026, 11, 1)
+        );
 
         let response = pollster::block_on(dispatch(
             &mut host,
-            call("tools/call", json!({"name": "remember", "arguments": {"fact": "the secret"}})),
+            call(
+                "tools/call",
+                json!({"name": "remember", "arguments": {"fact": "the secret"}}),
+            ),
             "1.0",
         ))
         .unwrap();
@@ -923,8 +972,10 @@ mod tests {
 
     #[test]
     fn search_arguments_are_parsed_and_rendered() {
-        let query = parse_search_query(&json!({"query": " ana ", "limit": 500, "since": "2026-01-01", "folder": "/daily/"}))
-            .unwrap();
+        let query = parse_search_query(
+            &json!({"query": " ana ", "limit": 500, "since": "2026-01-01", "folder": "/daily/"}),
+        )
+        .unwrap();
         assert_eq!(query.query, "ana");
         assert_eq!(query.limit, MAX_SEARCH_LIMIT);
         assert_eq!(query.since, NaiveDate::from_ymd_opt(2026, 1, 1));
@@ -937,8 +988,14 @@ mod tests {
             modified: NaiveDate::from_ymd_opt(2026, 11, 4).unwrap(),
             snippet: "- Met Ana".into(),
         }];
-        assert_eq!(render_hits(&query, &hits), "- `daily/x.md` — X (2026-11-04)\n  - Met Ana");
-        assert_eq!(render_recent(7, &[]), "No notes changed in the last 7 days.");
+        assert_eq!(
+            render_hits(&query, &hits),
+            "- `daily/x.md` — X (2026-11-04)\n  - Met Ana"
+        );
+        assert_eq!(
+            render_recent(7, &[]),
+            "No notes changed in the last 7 days."
+        );
     }
 
     #[test]
@@ -951,7 +1008,10 @@ mod tests {
             "1.0",
         ))
         .unwrap();
-        assert_eq!(response.result.unwrap()["contents"][0]["text"], "# Learned\n- one\n");
+        assert_eq!(
+            response.result.unwrap()["contents"][0]["text"],
+            "# Learned\n- one\n"
+        );
         let response = pollster::block_on(dispatch(
             &mut host,
             call("resources/read", json!({"uri": "thock://note/daily/x.md"})),

@@ -100,7 +100,7 @@ script/generate-licenses
 rustup target add $target_triple
 
 echo "Compiling Thock binaries"
-cargo build ${build_flag} --package thock_app --package cli --target $target_triple
+cargo build ${build_flag} --package thock_app --package cli --package thock_bridge --target $target_triple
 
 echo "Creating application bundle"
 pushd crates/thock_app
@@ -213,6 +213,7 @@ function sign_app_binaries() {
         echo "Code signing binaries"
         # sequence of codesign commands modeled after this example: https://developer.apple.com/forums/thread/701514
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/cli" -v
+        /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/thock-bridge" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/git" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/thock_app/resources/thock.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/thock" -v
         /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/thock_app/resources/thock.entitlements --sign "$IDENTITY" "${app_path}" -v
@@ -292,8 +293,11 @@ function sign_app_binaries() {
 
 cp target/${target_triple}/${target_dir}/thock "${app_path}/Contents/MacOS/thock"
 cp target/${target_triple}/${target_dir}/cli "${app_path}/Contents/MacOS/cli"
+# The agents bridge client (V55), beside the CLI so Install CLI links both.
+cp target/${target_triple}/${target_dir}/thock-bridge "${app_path}/Contents/MacOS/thock-bridge"
 # Ship stripped binaries; symbolication uses the unstripped binaries left in
 # target/.
 strip "${app_path}/Contents/MacOS/thock"
 strip "${app_path}/Contents/MacOS/cli"
+strip "${app_path}/Contents/MacOS/thock-bridge"
 sign_app_binaries

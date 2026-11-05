@@ -16,7 +16,7 @@ the same thing. The path → suite mapping lives in `suites_for` in that script 
 
 | Suite | Covers | Runs | Takes (warm) |
 |---|---|---|---|
-| `rust` | `crates/thock/` and anything upstream the fork touches | `cargo nextest run -p thock` (falls back to `cargo test`) | ~10 s rebuild + 1 s for ~470 tests |
+| `rust` | `crates/thock/`, `crates/thock-bridge/` (the agents bridge library and the `thock-bridge` client, V55) and anything upstream the fork touches | `cargo nextest run -p thock -p thock_bridge` (falls back to `cargo test`) | ~10 s rebuild + 1 s for ~500 tests |
 | `app` | `crates/thock_app/`, `crates/cli/`, the bundled keymaps and `default.json`: the app shell's own tests, among them the guard that every keymap binding names a registered action, and the `thock` command's | `cargo nextest run -p thock_app -p cli` (Linux only in CI) | ~1 min rebuild + tests |
 | `sync-core` | `crates/thock-sync-core/`: the rules the desk and the phone must agree on | `cargo test -p thock_sync_core` | ~10 s |
 | `go-plus` | `thock/services/plus/`: the Plus backend and vault sync API | `go vet` + `go test`, against an embedded Postgres it starts itself | ~30 s |
@@ -43,7 +43,7 @@ The slow loop on this repo has never been the Thock tests; it is building things
 - **Never `cargo test` or `cargo build` without `-p`.** The workspace is all of Zed: hundreds of
   crates, tens of minutes, tens of gigabytes in `target/`.
 - **Never `./script/clippy` bare.** It means `--workspace --release` and builds a second artifact
-  tree. Lint with `cargo clippy -p thock -p thock_sync_core --all-targets -- --deny warnings`; add
+  tree. Lint with `cargo clippy -p thock -p thock_bridge -p thock_sync_core --all-targets -- --deny warnings`; add
   `-p thock_app -p cli` only when `crates/thock_app` or `crates/cli` changed.
 - **Don't build the app (`cargo run`, `cargo build -p thock_app`) to check logic.** Write a test. Build
   the app only to look at it, and say so when handing over.
@@ -54,7 +54,7 @@ The slow loop on this repo has never been the Thock tests; it is building things
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy -p thock -p thock_sync_core --all-targets -- --deny warnings   # when Rust changed
+cargo clippy -p thock -p thock_bridge -p thock_sync_core --all-targets -- --deny warnings   # when Rust changed
 thock/script/test
 ```
 
@@ -71,6 +71,11 @@ two parts that each passed their own tests. Prefer the test that crosses the sea
   under vim mode, the primary action, `escape`. The keymap is part of the feature.
 - **A skill that tells the agent to write a file needs a contract test**: parse the exact snippet
   the skill's Markdown prescribes with the Rust type that will read it.
+- **The agents bridge is tested at three seams**: the library's rules in `crates/thock-bridge/`
+  (filters have fixtures under `fixtures/filters/`), the client binary against a stand-in desk in
+  `crates/thock-bridge/tests/` (pair, call, go offline, drain), and the desk's `BridgeService` in
+  `crates/thock/src/bridge_service.rs` over a `FakeFs` and a real loopback port. The desk tests
+  call `allow_parking()` because the listener is a real thread.
 - **A sync rule change needs a fixture** in `crates/thock-sync-core/fixtures/v1`. The Rust and
   Swift runners both read that directory, so one case tests both implementations.
 - **A service route needs an auth case** in `thock/services/plus/security_test.go`, which walks the
