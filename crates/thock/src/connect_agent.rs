@@ -491,10 +491,13 @@ mod tests {
         };
         let robin = client("robin", "2026-11-04T08:00:00Z");
         let hp = client("hp", "2026-11-04T09:00:00Z");
-        assert_eq!(modal_change(false, 1, &[robin.clone()]), ModalChange::Stay);
+        assert_eq!(
+            modal_change(false, 1, std::slice::from_ref(&robin)),
+            ModalChange::Stay
+        );
         assert_eq!(modal_change(false, 1, &[]), ModalChange::Close);
         assert_eq!(
-            modal_change(true, 1, &[robin.clone(), hp.clone()]),
+            modal_change(true, 1, &[robin, hp.clone()]),
             ModalChange::Paired("hp".into())
         );
         // A known name re-pairing: the count stays, the code is spent, and
