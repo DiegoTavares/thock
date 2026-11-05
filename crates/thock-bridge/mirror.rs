@@ -17,13 +17,26 @@ pub struct MirrorFile {
     pub relative: String,
     pub absolute: PathBuf,
     pub modified_secs: u64,
+    pub size: u64,
 }
 
-/// `mirror-state.json`: the mtime each file had when it last went up.
+/// A file the desk refused, as it was then: tried again only once it
+/// changes, so a refusal is reported once per version, not per pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusedFile {
+    pub modified_secs: u64,
+    pub size: u64,
+    pub reason: String,
+}
+
+/// `mirror-state.json`: the mtime each file had when it last went up, and
+/// what the desk refused.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MirrorState {
     #[serde(default)]
     pub uploaded: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub refused: BTreeMap<String, RefusedFile>,
 }
 
 impl MirrorState {
@@ -45,6 +58,26 @@ impl MirrorState {
 
     pub fn record(&mut self, relative: &str, modified_secs: u64) {
         self.uploaded.insert(relative.to_string(), modified_secs);
+        self.refused.remove(relative);
+    }
+
+    pub fn record_refusal(&mut self, relative: &str, modified_secs: u64, size: u64, reason: &str) {
+        self.refused.insert(
+            relative.to_string(),
+            RefusedFile {
+                modified_secs,
+                size,
+                reason: reason.to_string(),
+            },
+        );
+    }
+
+    /// Whether `relative` at this mtime and size is one the desk already
+    /// refused.
+    pub fn is_refused(&self, relative: &str, modified_secs: u64, size: u64) -> bool {
+        self.refused
+            .get(relative)
+            .is_some_and(|refused| refused.modified_secs == modified_secs && refused.size == size)
     }
 }
 
@@ -59,9 +92,9 @@ pub fn is_mirrored_path(relative: &str) -> bool {
         })
 }
 
-/// The files under `root` newer than their last upload, in path order.
-/// Oversized files and dot-paths are skipped in silence: they are the
-/// harness's business.
+/// The files under `root` newer than their last upload and not refused as
+/// they are, in path order. Oversized files and dot-paths are skipped in
+/// silence: they are the harness's business.
 pub fn plan_mirror(root: &Path, state: &MirrorState) -> Vec<MirrorFile> {
     let mut found = Vec::new();
     walk(root, root, state, &mut found);
@@ -112,10 +145,15 @@ fn walk(root: &Path, dir: &Path, state: &MirrorState, found: &mut Vec<MirrorFile
         if already.is_some_and(|uploaded| uploaded >= modified_secs) {
             continue;
         }
+        let size = metadata.len();
+        if state.is_refused(&relative, modified_secs, size) {
+            continue;
+        }
         found.push(MirrorFile {
             relative,
             absolute: path,
             modified_secs,
+            size,
         });
     }
 }
@@ -174,6 +212,35 @@ mod tests {
             MirrorState::load(&root.join("missing.json")),
             MirrorState::default()
         );
+    }
+
+    #[test]
+    fn a_refused_file_waits_until_it_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("MEMORY.md"), "# index").unwrap();
+        let planned = plan_mirror(root, &MirrorState::default());
+        assert_eq!(planned.len(), 1);
+        let mut state = MirrorState::default();
+        state.record_refusal(
+            "MEMORY.md",
+            planned[0].modified_secs,
+            planned[0].size,
+            "422: line 1 looks like a secret",
+        );
+        assert!(
+            plan_mirror(root, &state).is_empty(),
+            "refused as it is: not tried again"
+        );
+        // Edited: a different size, so it is tried again.
+        fs::write(root.join("MEMORY.md"), "# index, fixed").unwrap();
+        let again = plan_mirror(root, &state);
+        assert_eq!(again.len(), 1);
+        state.record("MEMORY.md", again[0].modified_secs);
+        assert!(state.refused.is_empty(), "an upload clears the refusal");
+        let path = root.join("state.json");
+        state.save(&path).unwrap();
+        assert_eq!(MirrorState::load(&path), state);
     }
 
     #[test]

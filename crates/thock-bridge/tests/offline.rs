@@ -618,6 +618,26 @@ fn pair_call_go_offline_and_drain_once() {
         stdout.contains("0 file(s) mirrored"),
         "nothing newer: {stdout}"
     );
+    assert!(
+        !stdout.contains("refused"),
+        "a refused file is not retried as it is: {stdout}"
+    );
+    let refused_log = client.home.path().join("data/refused.log");
+    let refused_lines = std::fs::read_to_string(&refused_log).unwrap_or_default();
+    assert_eq!(
+        refused_lines
+            .lines()
+            .filter(|line| line.contains("topics/secret.md"))
+            .count(),
+        1,
+        "logged once: {refused_lines}"
+    );
+    // Fixed on the harness side: tried again, and it lands.
+    std::fs::write(mirror_dir.join("topics/secret.md"), "nothing secret here\n").expect("write");
+    let (ok, stdout, _) = client.run(&["mirror"]);
+    assert!(ok);
+    assert!(stdout.contains("1 file(s) mirrored"), "{stdout}");
+    assert!(!stdout.contains("refused"), "{stdout}");
 
     // `update` fetches the skill; `connect --dry-run` only plans.
     let (ok, stdout, stderr) = client.run(&["update"]);

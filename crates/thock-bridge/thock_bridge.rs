@@ -17,7 +17,9 @@ pub use http::{
     parse_route, percent_decode, percent_encode, read_body, read_request_head, request,
     response_json, write_response,
 };
-pub use mirror::{MIRROR_MAX_BYTES, MirrorFile, MirrorState, is_mirrored_path, plan_mirror};
+pub use mirror::{
+    MIRROR_MAX_BYTES, MirrorFile, MirrorState, RefusedFile, is_mirrored_path, plan_mirror,
+};
 pub use offline::{
     Cache, CachedText, DrainFailure, DrainReport, DrainStop, Outbox, OutboxEntry, offline_suffix,
 };

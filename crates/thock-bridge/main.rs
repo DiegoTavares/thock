@@ -816,8 +816,8 @@ struct MirrorReport {
 }
 
 /// Uploads every harness folder's newer files (§9.6). A file the desk
-/// refuses (a 4xx) is skipped, reported and tried again next pass; only a
-/// desk that does not answer stops the pass.
+/// refuses (a 4xx) is skipped and reported once, and tried again only when
+/// it changes; only a desk that does not answer stops the pass.
 fn mirror_pass(home: &Home, config: &ClientConfig, verbose: bool) -> Result<MirrorReport, String> {
     let agents_dir = home.agents_dir();
     let mut report = MirrorReport {
@@ -836,13 +836,22 @@ fn mirror_pass(home: &Home, config: &ClientConfig, verbose: bool) -> Result<Mirr
         if !harness.path().is_dir() {
             continue;
         }
+        let prefix = format!("{name}/");
         let scoped = MirrorState {
             uploaded: state
                 .uploaded
                 .iter()
                 .filter_map(|(key, value)| {
-                    key.strip_prefix(&format!("{name}/"))
+                    key.strip_prefix(&prefix)
                         .map(|rest| (rest.to_string(), *value))
+                })
+                .collect(),
+            refused: state
+                .refused
+                .iter()
+                .filter_map(|(key, value)| {
+                    key.strip_prefix(&prefix)
+                        .map(|rest| (rest.to_string(), value.clone()))
                 })
                 .collect(),
         };
@@ -872,6 +881,8 @@ fn mirror_pass(home: &Home, config: &ClientConfig, verbose: bool) -> Result<Mirr
                     .and_then(|value| value.get("error")?.as_str().map(str::to_string))
                     .unwrap_or_else(|| response.text().trim().to_string());
                 let reason = format!("{}: {reason}", response.status);
+                state.record_refusal(&label, file.modified_secs, file.size, &reason);
+                state.save(&state_file).map_err(|error| error.to_string())?;
                 home.record_refusal(&label, &reason);
                 if verbose {
                     println!("refused {label}: {reason}");
