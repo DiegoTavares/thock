@@ -128,6 +128,7 @@ members = [
     "crates/theme_settings",
     "crates/theme_selector",
     "crates/thock",
+    "crates/thock-bridge",
     "crates/thock-sync-core",
     "crates/thock_app",
     "crates/time_format",
@@ -309,6 +310,7 @@ theme_settings = { path = "crates/theme_settings" }
 theme_selector = { path = "crates/theme_selector" }
 thock = { path = "crates/thock" }
 thock_app = { path = "crates/thock_app" }
+thock_bridge = { path = "crates/thock-bridge" }
 thock_sync_core = { path = "crates/thock-sync-core" }
 time_format = { path = "crates/time_format" }
 platform_title_bar = { path = "crates/platform_title_bar" }
@@ -435,6 +437,7 @@ dunce = "1.0"
 ec4rs = { version = "1.2", features = ["allow-empty-values"] }
 emojis = "0.6.1"
 env_logger = "0.11"
+gethostname = "1.1"
 encoding_rs = "0.8"
 etagere = "0.2"
 exec = "0.3.1"
