@@ -25,7 +25,7 @@ const USAGE: &str = "thock-bridge — your other agents share the vault's memory
                                                 install the skill and register the server
   thock-bridge status                           desk reachability, cache age, outbox, mirror
   thock-bridge mirror                           one mirror pass of the harness memory folders
-  thock-bridge update                           refresh the installed skill from the desk
+  thock-bridge update [--yes]                   refresh the installed skill from the desk
 ";
 
 /// Where the client keeps its config and state (§6.2). `THOCK_BRIDGE_HOME`
@@ -1016,6 +1016,49 @@ fn canonical_skill_file() -> PathBuf {
         .join("SKILL.md")
 }
 
+/// What the person sees before a fetched skill is written over the
+/// installed one: its SHA-256 and a short line-level diff. The channel is
+/// plain HTTP, so the file is shown, not trusted silently.
+fn skill_report(installed: &Path, fetched: &str) -> String {
+    let mut report = format!("SHA-256 {}", thock_bridge::sha256_hex(fetched));
+    let current = std::fs::read_to_string(installed).unwrap_or_default();
+    if current == fetched {
+        report.push_str("\n  (identical to the installed file)");
+        return report;
+    }
+    if current.is_empty() {
+        report.push_str(&format!("\n  new file, {} lines", fetched.lines().count()));
+        return report;
+    }
+    let old_lines: Vec<&str> = current.lines().collect();
+    let new_lines: Vec<&str> = fetched.lines().collect();
+    let removed: Vec<&str> = old_lines
+        .iter()
+        .filter(|line| !new_lines.contains(line))
+        .copied()
+        .collect();
+    let added: Vec<&str> = new_lines
+        .iter()
+        .filter(|line| !old_lines.contains(line))
+        .copied()
+        .collect();
+    report.push_str(&format!(
+        "\n  {} line(s) added, {} removed against the installed file",
+        added.len(),
+        removed.len()
+    ));
+    for line in removed.iter().take(6) {
+        report.push_str(&format!("\n  - {line}"));
+    }
+    for line in added.iter().take(6) {
+        report.push_str(&format!("\n  + {line}"));
+    }
+    if removed.len() > 6 || added.len() > 6 {
+        report.push_str("\n  …");
+    }
+    report
+}
+
 fn fetch_skill(config: &ClientConfig) -> Result<String, String> {
     let response = thock_bridge::request(
         &desk_request(config, "GET", "/v1/skill", Vec::new(), Vec::new()),
@@ -1216,7 +1259,7 @@ fn connect(args: &[String]) -> Result<(), String> {
     let canonical = canonical_skill_file();
     steps.push(Step {
         describe: format!("write {}", canonical.display()),
-        warning: None,
+        warning: Some(skill_report(&canonical, &skill)),
         apply: Box::new({
             let canonical = canonical.clone();
             move || write_text(&canonical, &skill)
@@ -1372,12 +1415,20 @@ fn set_auto_memory_directory(settings: &Path, mirror_dir: &Path) -> Result<(), S
 }
 
 fn update() -> Result<(), String> {
+    let yes = std::env::args()
+        .skip(2)
+        .any(|arg| arg == "--yes" || arg == "-y");
     let home = Home::resolve();
     let config = home
         .load_config()
         .ok_or("not paired; run `thock-bridge pair` first")?;
     let skill = fetch_skill(&config)?;
     let canonical = canonical_skill_file();
+    println!("{}", skill_report(&canonical, &skill));
+    if !confirm(&format!("write {}?", canonical.display()), yes)? {
+        println!("Nothing written.");
+        return Ok(());
+    }
     write_text(&canonical, &skill)?;
     println!("Updated {}", canonical.display());
     Ok(())

@@ -578,8 +578,13 @@ machine disconnects it) with `j`/`k` bound for the modal's address list under vi
 
 ## 18. Risks
 
-- **A token in the clear on the LAN.** Mitigated by opt-in, by the pairing step being a human
-  act, by hashes on the desk and revocation by name; closed by the TLS follow-up.
+- **A token in the clear on the LAN, and everything that rides with it.** The same plain-HTTP
+  channel carries the bearer token, the `SKILL.md` that `connect`/`update` install on the other
+  machine (instructions the agent will follow), and every tool result the agent reads; a peer on
+  the network that can read the token can also feed the agent. Mitigated by opt-in, by the pairing
+  step being a human act, by hashes on the desk and revocation by name, and by `connect`/`update`
+  showing the skill's SHA-256 and a diff before writing it; closed, for all of it, by the TLS pin
+  follow-up.
 - **The app must be open.** Stated in the Routine's doc and the status row; the cache and
   outbox make the fleet degrade gracefully rather than fail.
 - **An agent that over-remembers.** Capped by the filters, by the inbox being the only path, and

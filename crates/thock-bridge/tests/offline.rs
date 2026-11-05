@@ -639,10 +639,27 @@ fn pair_call_go_offline_and_drain_once() {
     assert!(stdout.contains("1 file(s) mirrored"), "{stdout}");
     assert!(!stdout.contains("refused"), "{stdout}");
 
-    // `update` fetches the skill; `connect --dry-run` only plans.
+    // `update` shows the fetched skill's hash and diff and writes nothing
+    // until it is confirmed; with stdin closed that is a no.
+    let skill_file = client
+        .home
+        .path()
+        .join(".agents/skills/thock-memory/SKILL.md");
     let (ok, stdout, stderr) = client.run(&["update"]);
     assert!(ok, "{stderr}");
+    assert!(stdout.contains("SHA-256 "), "{stdout}");
+    assert!(stdout.contains("new file"), "{stdout}");
+    assert!(stdout.contains("Nothing written"), "{stdout}");
+    assert!(!skill_file.exists(), "declined: nothing on disk");
+    let (ok, stdout, stderr) = client.run(&["update", "--yes"]);
+    assert!(ok, "{stderr}");
     assert!(stdout.contains("Updated"), "{stdout}");
+    let (ok, stdout, _) = client.run(&["update", "--yes"]);
+    assert!(ok);
+    assert!(
+        stdout.contains("identical to the installed file"),
+        "{stdout}"
+    );
     let skill = std::fs::read_to_string(
         client
             .home
@@ -658,6 +675,10 @@ fn pair_call_go_offline_and_drain_once() {
         "{stdout}"
     );
     assert!(stdout.contains("autoMemoryDirectory"), "{stdout}");
+    assert!(
+        stdout.contains("SHA-256 "),
+        "the skill's hash is shown before any y/N: {stdout}"
+    );
     assert!(stdout.contains("dry run"), "{stdout}");
     assert!(!client.home.path().join(".claude/settings.json").exists());
 
