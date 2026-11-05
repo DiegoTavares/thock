@@ -128,15 +128,20 @@ pub struct OutboxEntry {
     pub at: String,
     pub tool: String,
     pub args: Value,
+    /// The harness that queued it, so the line lands under its own name
+    /// whichever `serve` drains it.
+    #[serde(default)]
+    pub harness: String,
 }
 
 impl OutboxEntry {
-    pub fn new(tool: &str, args: Value) -> Self {
+    pub fn new(tool: &str, args: Value, harness: &str) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             tool: tool.to_string(),
             args,
+            harness: harness.to_string(),
         }
     }
 
@@ -148,18 +153,67 @@ impl OutboxEntry {
     }
 }
 
-/// Why a drain stopped: the desk was unreachable (keep the rest), or it
-/// answered with a protocol error (keep the rest too; the person will see
-/// it in `status`).
+/// How sending a queued call went wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrainFailure {
+    /// The desk did not answer: keep the entry and stop, so order holds.
+    Transport(String),
+    /// The desk answered and said no (a 4xx, a `-32602`/`-32601`): the entry
+    /// can never land; drop it and carry on.
+    Refused(String),
+}
+
+/// Where a drain stopped: at a desk that did not answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrainStop {
     pub entry: OutboxEntry,
     pub reason: String,
 }
 
+/// What a drain did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DrainReport {
+    pub sent: usize,
+    /// Entries the desk refused for good, with its reason.
+    pub refused: Vec<(OutboxEntry, String)>,
+    pub stopped: Option<DrainStop>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Outbox {
     path: PathBuf,
+}
+
+/// An advisory lock over the outbox, held while one `serve` pushes or
+/// drains so two harnesses on one machine never interleave half-written
+/// lines or drain the same entry twice.
+struct OutboxLock {
+    _file: fs::File,
+}
+
+impl OutboxLock {
+    fn take(path: &Path) -> std::io::Result<Self> {
+        let lock_path = path.with_extension("lock");
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd as _;
+            // SAFETY: the descriptor is ours for as long as `file` lives;
+            // the lock goes when it closes.
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if result != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(Self { _file: file })
+    }
 }
 
 impl Outbox {
@@ -172,9 +226,7 @@ impl Outbox {
     }
 
     pub fn push(&self, entry: &OutboxEntry) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        let _lock = OutboxLock::take(&self.path)?;
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -221,32 +273,48 @@ impl Outbox {
     }
 
     /// Sends the queued calls in order through `send`, dropping each one
-    /// the moment it lands, and stops at the first failure so order holds.
-    /// The desk treats the entry's id as idempotent, so a reply lost in
-    /// flight is retried without a second write.
+    /// the moment it lands or the desk refuses it for good, and stopping at
+    /// the first desk that does not answer so order holds. The desk treats
+    /// the entry's id as idempotent, so a reply lost in flight is retried
+    /// without a second write.
     pub fn drain(
         &self,
-        mut send: impl FnMut(&OutboxEntry) -> Result<(), String>,
-    ) -> Result<usize, Box<DrainStop>> {
+        mut send: impl FnMut(&OutboxEntry) -> Result<(), DrainFailure>,
+    ) -> DrainReport {
+        let mut report = DrainReport::default();
+        let _lock = match OutboxLock::take(&self.path) {
+            Ok(lock) => lock,
+            Err(error) => {
+                report.stopped = self.entries().into_iter().next().map(|entry| DrainStop {
+                    entry,
+                    reason: format!("couldn't lock the outbox: {error}"),
+                });
+                return report;
+            }
+        };
         let mut remaining = self.entries();
-        let mut sent = 0;
         while !remaining.is_empty() {
             let entry = remaining[0].clone();
             match send(&entry) {
-                Ok(()) => {
-                    remaining.remove(0);
-                    sent += 1;
-                    if let Err(error) = self.rewrite(&remaining) {
-                        return Err(Box::new(DrainStop {
-                            entry,
-                            reason: format!("couldn't update the outbox: {error}"),
-                        }));
-                    }
+                Ok(()) => report.sent += 1,
+                Err(DrainFailure::Refused(reason)) => {
+                    report.refused.push((entry.clone(), reason));
                 }
-                Err(reason) => return Err(Box::new(DrainStop { entry, reason })),
+                Err(DrainFailure::Transport(reason)) => {
+                    report.stopped = Some(DrainStop { entry, reason });
+                    return report;
+                }
+            }
+            remaining.remove(0);
+            if let Err(error) = self.rewrite(&remaining) {
+                report.stopped = Some(DrainStop {
+                    entry,
+                    reason: format!("couldn't update the outbox: {error}"),
+                });
+                return report;
             }
         }
-        Ok(sent)
+        report
     }
 }
 
@@ -283,33 +351,71 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let outbox = Outbox::new(dir.path().join("outbox.jsonl"));
         assert!(outbox.is_empty());
-        let first = OutboxEntry::new("remember", json!({"fact": "one"}));
-        let second = OutboxEntry::new("note_today", json!({"line": "two"}));
-        let third = OutboxEntry::new("remember", json!({"fact": "three"}));
+        let first = OutboxEntry::new("remember", json!({"fact": "one"}), "claude-code");
+        let second = OutboxEntry::new("note_today", json!({"line": "two"}), "codex");
+        let third = OutboxEntry::new("remember", json!({"fact": "three"}), "claude-code");
         outbox.push(&first).unwrap();
         outbox.push(&second).unwrap();
         outbox.push(&third).unwrap();
         assert_eq!(outbox.len(), 3);
         assert!(first.date().is_some());
+        assert_eq!(outbox.entries()[1].harness, "codex");
 
         let mut sent = Vec::new();
-        let stop = outbox
-            .drain(|entry| {
-                if entry.id == second.id {
-                    return Err("the desk is unreachable".into());
-                }
-                sent.push(entry.id.clone());
-                Ok(())
-            })
-            .unwrap_err();
-        assert_eq!(stop.entry, second);
+        let report = outbox.drain(|entry| {
+            if entry.id == second.id {
+                return Err(DrainFailure::Transport("the desk is unreachable".into()));
+            }
+            sent.push(entry.id.clone());
+            Ok(())
+        });
+        assert_eq!(report.sent, 1);
+        assert_eq!(
+            report.stopped.as_ref().map(|stop| &stop.entry),
+            Some(&second)
+        );
         assert_eq!(sent, vec![first.id]);
-        assert_eq!(outbox.entries(), vec![second, third]);
+        assert_eq!(outbox.entries(), vec![second.clone(), third]);
 
-        let count = outbox.drain(|_| Ok(())).unwrap();
-        assert_eq!(count, 2);
+        let report = outbox.drain(|_| Ok(()));
+        assert_eq!(report.sent, 2);
+        assert!(report.stopped.is_none());
         assert!(outbox.is_empty());
         assert!(!outbox.path().exists());
-        assert_eq!(outbox.drain(|_| Ok(())).unwrap(), 0);
+        assert_eq!(outbox.drain(|_| Ok(())).sent, 0);
+    }
+
+    #[test]
+    fn a_refused_entry_is_dropped_and_the_rest_still_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = Outbox::new(dir.path().join("outbox.jsonl"));
+        let bad = OutboxEntry::new("remember", json!({"fact": ""}), "codex");
+        let good = OutboxEntry::new("remember", json!({"fact": "fine"}), "codex");
+        outbox.push(&bad).unwrap();
+        outbox.push(&good).unwrap();
+        let report = outbox.drain(|entry| {
+            if entry.id == bad.id {
+                Err(DrainFailure::Refused("the line is empty".into()))
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(report.sent, 1);
+        assert_eq!(report.refused, vec![(bad, "the line is empty".to_string())]);
+        assert!(report.stopped.is_none());
+        assert!(outbox.is_empty());
+    }
+
+    #[test]
+    fn the_lock_file_sits_beside_the_outbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = Outbox::new(dir.path().join("outbox.jsonl"));
+        outbox
+            .push(&OutboxEntry::new("remember", json!({"fact": "x"}), "codex"))
+            .unwrap();
+        assert!(dir.path().join("outbox.lock").exists());
+        let held = OutboxLock::take(outbox.path()).unwrap();
+        drop(held);
+        assert_eq!(outbox.drain(|_| Ok(())).sent, 1);
     }
 }

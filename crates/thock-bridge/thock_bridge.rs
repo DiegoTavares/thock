@@ -13,20 +13,25 @@ mod rules;
 mod search;
 
 pub use http::{
-    HttpRequest, HttpResponse, Route, bearer_token, parse_route, percent_decode, percent_encode,
-    request, response_json,
+    HttpRequest, HttpResponse, MAX_HEAD_BYTES, RequestHead, Route, bearer_token, parse_route,
+    percent_decode, percent_encode, read_body, read_request_head, request, response_json,
+    write_response,
 };
 pub use mirror::{MIRROR_MAX_BYTES, MirrorFile, MirrorState, is_mirrored_path, plan_mirror};
-pub use offline::{Cache, CachedText, DrainStop, Outbox, OutboxEntry, offline_suffix};
+pub use offline::{
+    Cache, CachedText, DrainFailure, DrainReport, DrainStop, Outbox, OutboxEntry, offline_suffix,
+};
 pub use rpc::{
-    CallMeta, CallToolResponse, HostError, INDEX_RESOURCE_URI, INVALID_PARAMS, JsonRpcError,
+    CALL_DATE_WINDOW_DAYS, CallMeta, CallToolResponse, HostError, INDEX_RESOURCE_URI, INVALID_PARAMS, JsonRpcError,
     JsonRpcRequest, JsonRpcResponse, METHOD_NOT_FOUND, NOTE_RESOURCE_PREFIX, PROTOCOL_VERSION,
     QUEUED_SENTENCE, ReadTarget, RecentNote, Resource, ResourceContents, SearchHit, SearchQuery,
-    Tool, ToolHost, ToolResponseContent, WriteOutcome, dispatch, error_response, initialize_result,
-    render_hits, render_recent, resources, result_response, tools,
+    Tool, ToolHost, ToolResponseContent, WriteOutcome, accepted_call_date, dispatch, error_response,
+    initialize_result,
+    render_hits, render_recent, resources, result_response, tools, validate_tool_arguments,
 };
 pub use rules::{
     FACT_MAX_CHARS, FilterRefusal, INBOX_PATH, InboxLine, PathError, Refusal, check_fact,
+    find_unkeepable,
     forbidden_topics, inbox_line, inbox_write, parse_inbox_line, parse_today_line,
     sanitize_harness, today_line, today_write, validate_vault_path,
 };

@@ -629,6 +629,46 @@ async fn call_tool<H: ToolHost>(
     })
 }
 
+/// How far back a client's `_meta.date` may reach (M1): a queued line keeps
+/// the day it was written on, up to the outbox's own horizon; anything
+/// older or in the future is not a day an agent may write into.
+pub const CALL_DATE_WINDOW_DAYS: i64 = 7;
+
+/// `Some(date)` when it is within the window ending today, else `None`.
+pub fn accepted_call_date(date: Option<NaiveDate>, today: NaiveDate) -> Option<NaiveDate> {
+    let date = date?;
+    let oldest = today - chrono::Duration::days(CALL_DATE_WINDOW_DAYS);
+    (oldest..=today).contains(&date).then_some(date)
+}
+
+/// Checks a write's arguments the way the desk will, minus the person's
+/// do-not-keep list, so a line that can never land is refused before it is
+/// queued (M3).
+pub fn validate_tool_arguments(name: &str, arguments: &Value) -> Result<(), HostError> {
+    match name {
+        "remember" => {
+            let fact = arguments
+                .get("fact")
+                .and_then(Value::as_str)
+                .ok_or_else(|| HostError("remember needs a `fact` string".into()))?;
+            crate::rules::check_fact(fact, &[])?;
+        }
+        "note_today" => {
+            for line in parse_lines(arguments)? {
+                crate::rules::check_fact(&line, &[])?;
+            }
+        }
+        "search" => {
+            parse_search_query(arguments)?;
+        }
+        "read" => {
+            parse_read_target(arguments)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub const QUEUED_SENTENCE: &str = "queued: the desk is unreachable; this will land when it is back";
 
 fn parse_search_query(arguments: &Value) -> Result<SearchQuery, HostError> {
@@ -1035,6 +1075,31 @@ mod tests {
         ))
         .unwrap();
         assert!(response.error.is_some());
+    }
+
+    #[test]
+    fn call_dates_stay_within_the_window() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 4).unwrap();
+        let day = |d: u32| NaiveDate::from_ymd_opt(2026, 10, d);
+        assert_eq!(accepted_call_date(None, today), None);
+        assert_eq!(accepted_call_date(Some(today), today), Some(today));
+        assert_eq!(accepted_call_date(day(28), today), day(28));
+        assert_eq!(accepted_call_date(day(27), today), None);
+        assert_eq!(
+            accepted_call_date(NaiveDate::from_ymd_opt(2026, 11, 5), today),
+            None
+        );
+    }
+
+    #[test]
+    fn write_arguments_are_checked_before_they_queue() {
+        assert!(validate_tool_arguments("remember", &json!({"fact": "Likes tea"})).is_ok());
+        assert!(validate_tool_arguments("remember", &json!({"fact": ""})).is_err());
+        assert!(validate_tool_arguments("remember", &json!({})).is_err());
+        assert!(validate_tool_arguments("note_today", &json!({"lines": ["a", "- b"]})).is_err());
+        assert!(validate_tool_arguments("note_today", &json!({"line": "Shipped it."})).is_ok());
+        assert!(validate_tool_arguments("search", &json!({"query": "  "})).is_err());
+        assert!(validate_tool_arguments("context", &json!({})).is_ok());
     }
 
     #[test]

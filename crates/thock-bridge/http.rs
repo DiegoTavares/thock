@@ -87,18 +87,145 @@ pub fn percent_decode(text: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            let hex = &text[index + 1..index + 3];
-            if let Ok(value) = u8::from_str_radix(hex, 16) {
-                out.push(value);
-                index += 3;
-                continue;
-            }
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Some(value) = hex_pair(bytes[index + 1], bytes[index + 2])
+        {
+            out.push(value);
+            index += 3;
+            continue;
         }
         out.push(bytes[index]);
         index += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_pair(high: u8, low: u8) -> Option<u8> {
+    let digit = |byte: u8| (byte as char).to_digit(16).map(|d| d as u8);
+    Some(digit(high)? << 4 | digit(low)?)
+}
+
+/// The head of a request the desk accepted: enough to route and
+/// authenticate before a byte of the body is read (so an unpaired peer
+/// can't stall the desk with a body it never sends).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestHead {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub content_length: usize,
+}
+
+impl RequestHead {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(field, _)| field.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// Longest request head the desk reads, in bytes.
+pub const MAX_HEAD_BYTES: usize = 16 * 1024;
+
+/// Reads a request line and its headers. The error is the status to answer
+/// with: `400` for a malformed head, `431` for one over the cap, `408` when
+/// the socket timed out first.
+pub fn read_request_head(reader: &mut impl std::io::BufRead) -> Result<RequestHead, u16> {
+    let mut consumed = 0usize;
+    let mut line = String::new();
+    let mut read_line = |line: &mut String| -> Result<usize, u16> {
+        line.clear();
+        let read = reader.read_line(line).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || error.kind() == std::io::ErrorKind::TimedOut
+            {
+                408u16
+            } else {
+                400u16
+            }
+        })?;
+        consumed += read;
+        if consumed > MAX_HEAD_BYTES {
+            return Err(431u16);
+        }
+        Ok(read)
+    };
+    if read_line(&mut line)? == 0 {
+        return Err(400u16);
+    }
+    let mut parts = line.split_whitespace();
+    let method = parts.next().ok_or(400u16)?.to_string();
+    let url = parts.next().ok_or(400u16)?.to_string();
+    let mut headers = Vec::new();
+    let mut content_length = 0usize;
+    loop {
+        if read_line(&mut line)? == 0 {
+            return Err(400u16);
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        let (name, value) = trimmed.split_once(':').ok_or(400u16)?;
+        let (name, value) = (name.trim(), value.trim());
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.parse().map_err(|_| 400u16)?;
+        }
+        headers.push((name.to_string(), value.to_string()));
+    }
+    Ok(RequestHead {
+        method,
+        url,
+        headers,
+        content_length,
+    })
+}
+
+/// Reads exactly `length` bytes of body; a short or slow read is `408u16`.
+pub fn read_body(reader: &mut impl std::io::Read, length: usize) -> Result<Vec<u8>, u16> {
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body).map_err(|_| 408u16)?;
+    Ok(body)
+}
+
+/// Writes one response and leaves the connection to be closed.
+pub fn write_response(
+    stream: &mut impl std::io::Write,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        reason(status),
+        body.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
+fn reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        202 => "Accepted",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        410 => "Gone",
+        413 => "Payload Too Large",
+        422 => "Unprocessable Content",
+        431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
+        _ => "Status",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,6 +407,36 @@ mod tests {
         assert_eq!(percent_decode(&percent_encode(original)), original);
         assert_eq!(percent_encode("a b"), "a%20b");
         assert_eq!(percent_decode("a%2"), "a%2");
+        assert_eq!(percent_decode("%ç%20"), "%ç ");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn request_heads_are_read_without_the_body() {
+        let raw = b"POST /v1/pair HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\nAuthorization: Bearer t\r\n\r\n{\"code\":1}";
+        let mut reader = std::io::BufReader::new(&raw[..]);
+        let head = read_request_head(&mut reader).unwrap();
+        assert_eq!(head.method, "POST");
+        assert_eq!(head.url, "/v1/pair");
+        assert_eq!(head.content_length, 12);
+        assert_eq!(head.header("authorization"), Some("Bearer t"));
+        assert_eq!(read_body(&mut reader, 10).unwrap(), b"{\"code\":1}");
+        assert_eq!(read_body(&mut reader, 5).unwrap_err(), 408);
+        assert_eq!(
+            read_request_head(&mut std::io::BufReader::new(&b"garbage"[..])).unwrap_err(),
+            400
+        );
+        let long = format!("GET / HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(MAX_HEAD_BYTES));
+        assert_eq!(
+            read_request_head(&mut std::io::BufReader::new(long.as_bytes())).unwrap_err(),
+            431
+        );
+        let mut out = Vec::new();
+        write_response(&mut out, 204, "text/plain", b"").unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "HTTP/1.1 204 No Content\r\nContent-Type: text/plain\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
     }
 
     #[test]

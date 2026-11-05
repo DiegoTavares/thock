@@ -290,6 +290,32 @@ fn is_iban(token: &str) -> bool {
         && bytes[4..].iter().any(|b| b.is_ascii_digit())
 }
 
+/// The first line of a whole file that the vault must not keep (M5a): a
+/// credential shape or a do-not-keep topic. Mirrored harness memory goes
+/// through this before it lands under `memory/agents/`.
+pub fn find_unkeepable(text: &str, forbidden: &[String]) -> Option<String> {
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(kind) = looks_like_credential(trimmed) {
+            return Some(format!("line {} looks like {kind}", index + 1));
+        }
+        let line_words = words(trimmed);
+        if let Some(topic) = forbidden
+            .iter()
+            .find(|topic| line_words.iter().any(|word| word == *topic))
+        {
+            return Some(format!(
+                "line {} touches a topic on the person's do-not-keep list ({topic})",
+                index + 1
+            ));
+        }
+    }
+    None
+}
+
 /// The inbox line a `remember` lands as (§6.3):
 /// `- 2026-11-04 · Prefers PR titles in the imperative · via claude-code@robin`.
 pub fn inbox_line(date: NaiveDate, fact: &str, identity: &ClientIdentity) -> String {
@@ -565,6 +591,21 @@ mod tests {
             appended
                 .text
                 .contains("- codex@hp · Earlier.\n- claude-code@robin · Shipped it.\n")
+        );
+    }
+
+    #[test]
+    fn whole_files_are_scanned_line_by_line() {
+        let forbidden = vec!["salary".to_string()];
+        assert_eq!(find_unkeepable("# Memory\n- cmake 3.31 on robin\n", &forbidden), None);
+        assert_eq!(
+            find_unkeepable("# Memory\n\n- token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef12\n", &forbidden)
+                .as_deref(),
+            Some("line 3 looks like an API token")
+        );
+        assert_eq!(
+            find_unkeepable("- Their salary is private\n", &forbidden).as_deref(),
+            Some("line 1 touches a topic on the person's do-not-keep list (salary)")
         );
     }
 

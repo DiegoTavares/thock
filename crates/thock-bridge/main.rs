@@ -9,9 +9,9 @@ use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thock_bridge::{
-    Cache, ClientConfig, HARNESS_HEADER, HttpRequest, JsonRpcRequest, JsonRpcResponse, MirrorState,
-    Outbox, OutboxEntry, PROTOCOL_HEADER, PROTOCOL_VERSION, PairRequest, PairResponse,
-    error_response, offline_suffix, plan_mirror, sanitize_harness,
+    Cache, ClientConfig, DrainFailure, HARNESS_HEADER, HttpRequest, JsonRpcRequest,
+    JsonRpcResponse, MirrorState, Outbox, OutboxEntry, PROTOCOL_HEADER, PROTOCOL_VERSION,
+    PairRequest, PairResponse, error_response, offline_suffix, plan_mirror, sanitize_harness,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -21,7 +21,7 @@ const USAGE: &str = "thock-bridge — your other agents share the vault's memory
 
   thock-bridge pair <host:port> <code>          pair this machine with the desk
   thock-bridge serve [--harness <name>]         the stdio MCP server a harness launches
-  thock-bridge connect <claude|codex|gemini> [--dry-run] [--yes]
+  thock-bridge connect <claude|codex|gemini> [--dry-run] [--yes] [--import]
                                                 install the skill and register the server
   thock-bridge status                           desk reachability, cache age, outbox, mirror
   thock-bridge mirror                           one mirror pass of the harness memory folders
@@ -68,6 +68,34 @@ impl Home {
         self.data_dir.join("mirror-state.json")
     }
 
+    /// What the desk refused for good, one line each, so `status` can show
+    /// it after the moment has passed.
+    fn refused_log(&self) -> PathBuf {
+        self.data_dir.join("refused.log")
+    }
+
+    fn record_refusal(&self, what: &str, reason: &str) {
+        let line = format!(
+            "{} · {what} · {reason}\n",
+            Local::now().format("%Y-%m-%d %H:%M")
+        );
+        if let Some(parent) = self.refused_log().parent()
+            && std::fs::create_dir_all(parent).is_ok()
+            && let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.refused_log())
+        {
+            file.write_all(line.as_bytes()).ok();
+        }
+    }
+
+    fn refusals(&self) -> Vec<String> {
+        std::fs::read_to_string(self.refused_log())
+            .map(|raw| raw.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
     fn load_config(&self) -> Option<ClientConfig> {
         let raw = std::fs::read_to_string(&self.config_file).ok()?;
         match ClientConfig::parse(&raw) {
@@ -82,14 +110,27 @@ impl Home {
         }
     }
 
+    /// The token file is private from its first byte.
     fn save_config(&self, config: &ClientConfig) -> Result<(), String> {
         if let Some(parent) = self.config_file.parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        std::fs::write(&self.config_file, config.render()).map_err(|error| error.to_string())?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&self.config_file)
+            .map_err(|error| error.to_string())?;
+        file.write_all(config.render().as_bytes())
+            .map_err(|error| error.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
+            // An existing file keeps its old mode through `open`; make sure.
             std::fs::set_permissions(&self.config_file, std::fs::Permissions::from_mode(0o600))
                 .map_err(|error| error.to_string())?;
         }
@@ -187,10 +228,7 @@ fn pair(args: &[String]) -> Result<(), String> {
     )?;
     if !response.is_success() {
         return Err(match response.status {
-            410 => {
-                "that code was already used or has expired; run Connect an agent on the desk again"
-                    .into()
-            }
+            410 => "that code was already used or has expired; run Connect an agent on the desk again".into(),
             403 => "the desk refused the code; check it and try again".into(),
             other => format!("the desk answered {other}: {}", response.text().trim()),
         });
@@ -224,6 +262,14 @@ struct Proxy {
     online: Option<bool>,
 }
 
+/// Why a forwarded call did not come back as a JSON-RPC reply.
+enum ForwardFailure {
+    /// No usable answer: the desk is away, or broke.
+    Transport(String),
+    /// The desk answered a plain refusal (a 4xx without JSON-RPC in it).
+    Refused(u16, String),
+}
+
 impl Proxy {
     fn desk_label(&self) -> String {
         self.config
@@ -247,21 +293,35 @@ impl Proxy {
         }
     }
 
-    fn harness_header(&self) -> Vec<(String, String)> {
-        vec![(HARNESS_HEADER.to_string(), self.harness.clone())]
+    fn harness_header(&self, harness: &str) -> Vec<(String, String)> {
+        let harness = if harness.is_empty() {
+            self.harness.as_str()
+        } else {
+            harness
+        };
+        vec![(HARNESS_HEADER.to_string(), harness.to_string())]
     }
 
-    /// Forwards one request to the desk. `Err` means the desk did not
-    /// answer usefully, which is the cue for the offline path.
-    fn forward(&self, request: &JsonRpcRequest) -> Result<JsonRpcResponse, String> {
+    /// Forwards one request to the desk under `harness`'s name.
+    fn forward(
+        &self,
+        request: &JsonRpcRequest,
+        harness: &str,
+    ) -> Result<JsonRpcResponse, ForwardFailure> {
         let config = self.config.as_ref().ok_or_else(|| {
-            "not paired with a desk yet; run `thock-bridge pair <host:port> <code>`".to_string()
+            ForwardFailure::Transport(
+                "not paired with a desk yet; run `thock-bridge pair <host:port> <code>`".into(),
+            )
         })?;
-        let body = serde_json::to_vec(request).map_err(|error| error.to_string())?;
-        let http = desk_request(config, "POST", "/mcp", body, self.harness_header());
-        let response = thock_bridge::request(&http, TIMEOUT)?;
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ForwardFailure::Transport(error.to_string()))?;
+        let http = desk_request(config, "POST", "/mcp", body, self.harness_header(harness));
+        let response = thock_bridge::request(&http, TIMEOUT).map_err(ForwardFailure::Transport)?;
         if response.status >= 500 {
-            return Err(format!("the desk answered {}", response.status));
+            return Err(ForwardFailure::Transport(format!(
+                "the desk answered {}",
+                response.status
+            )));
         }
         if response.status == 401 {
             return Ok(error_response(
@@ -271,10 +331,24 @@ impl Proxy {
             ));
         }
         if response.status == 202 {
-            return Err("the desk accepted a notification without a reply".into());
+            return Err(ForwardFailure::Transport(
+                "the desk accepted a notification without a reply".into(),
+            ));
         }
-        JsonRpcResponse::parse(&response.text())
-            .map_err(|error| format!("the desk's answer wasn't readable: {error}"))
+        let text = response.text();
+        match JsonRpcResponse::parse(&text) {
+            Ok(parsed) => Ok(parsed),
+            Err(_) if response.status >= 400 => {
+                let reason = serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|value| value.get("error")?.as_str().map(str::to_string))
+                    .unwrap_or_else(|| text.trim().to_string());
+                Err(ForwardFailure::Refused(response.status, reason))
+            }
+            Err(error) => Err(ForwardFailure::Transport(format!(
+                "the desk's answer wasn't readable: {error}"
+            ))),
+        }
     }
 
     fn drain_outbox(&mut self) {
@@ -282,7 +356,7 @@ impl Proxy {
             return;
         }
         let outbox = self.outbox.clone();
-        let result = outbox.drain(|entry| {
+        let report = outbox.drain(|entry| {
             let request = JsonRpcRequest::new(
                 json!(format!("outbox-{}", entry.id)),
                 "tools/call",
@@ -292,32 +366,63 @@ impl Proxy {
                 call_id: Some(entry.id.clone()),
                 date: entry.date(),
             });
-            let response = self.forward(&request)?;
-            match response.error {
-                Some(error) => Err(error.message),
-                None => Ok(()),
+            let response = match self.forward(&request, &entry.harness) {
+                Ok(response) => response,
+                Err(ForwardFailure::Transport(reason)) => {
+                    return Err(DrainFailure::Transport(reason));
+                }
+                Err(ForwardFailure::Refused(status, reason)) => {
+                    return Err(DrainFailure::Refused(format!("{status}: {reason}")));
+                }
+            };
+            if let Some(error) = response.error {
+                // -32602 and -32601 are permanent: the arguments or the tool
+                // are wrong. -32001 (unknown client) is worth retrying once
+                // the machine pairs again.
+                return Err(if matches!(error.code, -32602 | -32601) {
+                    DrainFailure::Refused(error.message)
+                } else {
+                    DrainFailure::Transport(error.message)
+                });
+            }
+            match response.tool_result() {
+                Some(result) if result.is_error => {
+                    Err(DrainFailure::Refused(result.first_text().to_string()))
+                }
+                _ => Ok(()),
             }
         });
-        match result {
-            Ok(sent) if sent > 0 => {
-                eprintln!("thock-bridge: {sent} queued line(s) landed on the desk");
-                self.note_online(true);
-            }
-            Ok(_) => {}
-            Err(stop) => {
-                eprintln!(
-                    "thock-bridge: a queued {} is still waiting: {}",
-                    stop.entry.tool, stop.reason
-                );
-            }
+        if report.sent > 0 {
+            eprintln!(
+                "thock-bridge: {} queued line(s) landed on the desk",
+                report.sent
+            );
+            self.note_online(true);
+        }
+        for (entry, reason) in &report.refused {
+            let what = format!("{} {}", entry.tool, entry.args);
+            eprintln!("thock-bridge: the desk refused a queued {}: {reason}", entry.tool);
+            self.home.record_refusal(&what, reason);
+        }
+        if let Some(stop) = report.stopped {
+            eprintln!(
+                "thock-bridge: a queued {} is still waiting: {}",
+                stop.entry.tool, stop.reason
+            );
         }
     }
 
     fn mirror(&mut self) {
         if let Some(config) = &self.config {
             match mirror_pass(&self.home, config, false) {
-                Ok(count) if count > 0 => eprintln!("thock-bridge: mirrored {count} file(s)"),
-                Ok(_) => {}
+                Ok(report) => {
+                    if report.uploaded > 0 {
+                        eprintln!("thock-bridge: mirrored {} file(s)", report.uploaded);
+                    }
+                    for (path, reason) in report.refused {
+                        eprintln!("thock-bridge: the desk refused {path}: {reason}");
+                    }
+                }
                 Err(error) => eprintln!("thock-bridge: mirror skipped: {error}"),
             }
         }
@@ -337,9 +442,7 @@ impl Proxy {
         }
         let id = request.id.clone()?;
         match request.method.as_str() {
-            "initialize" | "ping" | "tools/list" | "resources/list" => {
-                pollster_free_local(request, VERSION)
-            }
+            "initialize" | "ping" | "tools/list" | "resources/list" => local_answer(request, VERSION),
             "tools/call" | "resources/read" => {
                 self.drain_outbox();
                 let tool = request.tool_name().map(str::to_string);
@@ -353,7 +456,8 @@ impl Proxy {
                 } else {
                     request
                 };
-                match self.forward(&request) {
+                let harness = self.harness.clone();
+                match self.forward(&request, &harness) {
                     Ok(response) => {
                         self.note_online(true);
                         self.remember_answer(&request, tool.as_deref(), &arguments, &response);
@@ -362,15 +466,18 @@ impl Proxy {
                         }
                         Some(response)
                     }
-                    Err(reason) => {
-                        self.note_online(false);
-                        Some(self.offline_answer(
+                    Err(ForwardFailure::Refused(status, reason)) => {
+                        self.note_online(true);
+                        Some(thock_bridge::result_response(
                             id,
-                            &request,
-                            tool.as_deref(),
-                            &arguments,
-                            &reason,
+                            json!(thock_bridge::CallToolResponse::error(format!(
+                                "the desk refused it ({status}): {reason}"
+                            ))),
                         ))
+                    }
+                    Err(ForwardFailure::Transport(reason)) => {
+                        self.note_online(false);
+                        Some(self.offline_answer(id, &request, tool.as_deref(), &arguments, &reason))
                     }
                 }
             }
@@ -505,7 +612,15 @@ impl Proxy {
                 "recent needs the desk, and the desk at {desk} is unreachable ({reason})"
             )),
             Some(name @ ("remember" | "note_today")) => {
-                let entry = OutboxEntry::new(name, arguments.clone());
+                // A line the desk would refuse anyway never enters the queue,
+                // so one bad call can't hold the rest back (M3).
+                if let Err(refusal) = thock_bridge::validate_tool_arguments(name, arguments) {
+                    return thock_bridge::result_response(
+                        id,
+                        json!(thock_bridge::CallToolResponse::error(refusal.0)),
+                    );
+                }
+                let entry = OutboxEntry::new(name, arguments.clone(), &self.harness);
                 match self.outbox.push(&entry) {
                     Ok(()) => thock_bridge::CallToolResponse::text(thock_bridge::QUEUED_SENTENCE),
                     Err(error) => thock_bridge::CallToolResponse::error(format!(
@@ -526,12 +641,13 @@ impl Proxy {
     }
 }
 
-/// `initialize`, `ping` and the lists need no host, so the library's
-/// dispatcher answers them with a host that is never called.
-fn pollster_free_local(request: JsonRpcRequest, version: &str) -> Option<JsonRpcResponse> {
+/// `initialize`, `ping` and the lists need no desk.
+fn local_answer(request: JsonRpcRequest, version: &str) -> Option<JsonRpcResponse> {
     let id = request.id.clone()?;
     Some(match request.method.as_str() {
-        "initialize" => thock_bridge::result_response(id, thock_bridge::initialize_result(version)),
+        "initialize" => {
+            thock_bridge::result_response(id, thock_bridge::initialize_result(version))
+        }
         "ping" => thock_bridge::result_response(id, json!({})),
         "tools/list" => thock_bridge::result_response(id, json!({"tools": thock_bridge::tools()})),
         "resources/list" => {
@@ -639,15 +755,26 @@ fn serve(args: &[String]) -> Result<(), String> {
 
 // --- mirror ---
 
-/// Uploads every harness folder's newer files (§9.6). Returns how many went.
-fn mirror_pass(home: &Home, config: &ClientConfig, verbose: bool) -> Result<usize, String> {
+struct MirrorReport {
+    uploaded: usize,
+    /// `harness/path` the desk refused, with its reason; never silent.
+    refused: Vec<(String, String)>,
+}
+
+/// Uploads every harness folder's newer files (§9.6). A file the desk
+/// refuses (a 4xx) is skipped, reported and tried again next pass; only a
+/// desk that does not answer stops the pass.
+fn mirror_pass(home: &Home, config: &ClientConfig, verbose: bool) -> Result<MirrorReport, String> {
     let agents_dir = home.agents_dir();
+    let mut report = MirrorReport {
+        uploaded: 0,
+        refused: Vec::new(),
+    };
     let Ok(harnesses) = std::fs::read_dir(&agents_dir) else {
-        return Ok(0);
+        return Ok(report);
     };
     let state_file = home.mirror_state_file();
     let mut state = MirrorState::load(&state_file);
-    let mut count = 0;
     for harness in harnesses.flatten() {
         let Some(name) = harness.file_name().to_str().map(sanitize_harness) else {
             continue;
@@ -681,24 +808,35 @@ fn mirror_pass(home: &Home, config: &ClientConfig, verbose: bool) -> Result<usiz
                 vec![("Content-Type".into(), "application/octet-stream".into())],
             );
             let response = thock_bridge::request(&request, TIMEOUT)?;
-            if !response.is_success() {
+            let label = format!("{name}/{}", file.relative);
+            if response.status >= 500 {
                 return Err(format!(
-                    "the desk refused {}/{}: {} {}",
-                    name,
-                    file.relative,
-                    response.status,
-                    response.text().trim()
+                    "the desk answered {} for {label}",
+                    response.status
                 ));
             }
-            state.record(&format!("{name}/{}", file.relative), file.modified_secs);
+            if !response.is_success() {
+                let reason = serde_json::from_slice::<Value>(&response.body)
+                    .ok()
+                    .and_then(|value| value.get("error")?.as_str().map(str::to_string))
+                    .unwrap_or_else(|| response.text().trim().to_string());
+                let reason = format!("{}: {reason}", response.status);
+                home.record_refusal(&label, &reason);
+                if verbose {
+                    println!("refused {label}: {reason}");
+                }
+                report.refused.push((label, reason));
+                continue;
+            }
+            state.record(&label, file.modified_secs);
             state.save(&state_file).map_err(|error| error.to_string())?;
-            count += 1;
+            report.uploaded += 1;
             if verbose {
-                println!("mirrored {name}/{}", file.relative);
+                println!("mirrored {label}");
             }
         }
     }
-    Ok(count)
+    Ok(report)
 }
 
 fn mirror_command() -> Result<(), String> {
@@ -706,10 +844,16 @@ fn mirror_command() -> Result<(), String> {
     let config = home
         .load_config()
         .ok_or("not paired; run `thock-bridge pair` first")?;
-    let count = mirror_pass(&home, &config, true)?;
+    let report = mirror_pass(&home, &config, true)?;
     println!(
-        "{count} file(s) mirrored into {}'s memory/agents/",
-        config.vault
+        "{} file(s) mirrored into {}'s memory/agents/{}",
+        report.uploaded,
+        config.vault,
+        if report.refused.is_empty() {
+            String::new()
+        } else {
+            format!("; {} refused (see above)", report.refused.len())
+        }
     );
     Ok(())
 }
@@ -751,6 +895,14 @@ fn status() -> Result<(), String> {
     }
     let outbox = home.outbox();
     println!("Outbox: {} queued line(s)", outbox.len());
+    let refusals = home.refusals();
+    match refusals.last() {
+        Some(last) => println!(
+            "Refused by the desk: {} line(s), last: {last}",
+            refusals.len()
+        ),
+        None => println!("Refused by the desk: none"),
+    }
     let state = MirrorState::load(&home.mirror_state_file());
     println!(
         "Mirror: {} file(s) recorded from {}",
@@ -819,6 +971,9 @@ fn fetch_skill(config: &ClientConfig) -> Result<String, String> {
 /// The plan `connect` prints before touching anything.
 struct Step {
     describe: String,
+    /// Said before the question, when the step changes something the
+    /// person would want to know about first.
+    warning: Option<String>,
     apply: Box<dyn FnOnce() -> Result<(), String>>,
 }
 
@@ -912,25 +1067,78 @@ fn manual_block(harness: &Harness, binary: &str) -> String {
     }
 }
 
+/// Claude Code's per-project memory folders, as `connect --import` finds
+/// them: `(project slug, memory dir)`.
+fn claude_project_memories() -> Vec<(String, PathBuf)> {
+    let projects = home_dir().join(".claude/projects");
+    let Ok(entries) = std::fs::read_dir(&projects) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let memory = entry.path().join("memory");
+            let has_files = std::fs::read_dir(&memory)
+                .ok()?
+                .flatten()
+                .any(|file| file.path().is_file());
+            has_files.then(|| (entry.file_name().to_string_lossy().into_owned(), memory))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Copies each project's existing memory files into the mirror folder under
+/// `imported/<project-slug>/`, so what Claude already learned reaches the
+/// vault for Reflect and search while its new flat `MEMORY.md` starts empty.
+fn import_claude_memories(mirror_dir: &Path) -> Result<usize, String> {
+    let mut copied = 0;
+    for (slug, memory) in claude_project_memories() {
+        let destination = mirror_dir.join("imported").join(&slug);
+        std::fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
+        for entry in std::fs::read_dir(&memory)
+            .map_err(|error| error.to_string())?
+            .flatten()
+        {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            std::fs::copy(&path, destination.join(name)).map_err(|error| error.to_string())?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
+}
+
 // Running the CLI's own `mcp add` and waiting on it is the point: this binary
 // has no runtime and the person is watching.
 #[allow(clippy::disallowed_methods)]
 fn connect(args: &[String]) -> Result<(), String> {
     let mut dry_run = false;
     let mut yes = false;
+    let mut import = false;
     let mut name = None;
     for arg in args {
         match arg.as_str() {
             "--dry-run" => dry_run = true,
             "--yes" | "-y" => yes = true,
+            "--import" => import = true,
             other if name.is_none() => name = Some(other.to_string()),
             other => return Err(format!("unexpected argument {other}")),
         }
     }
-    let name =
-        name.ok_or("usage: thock-bridge connect <claude|codex|gemini> [--dry-run] [--yes]")?;
+    let name = name.ok_or(
+        "usage: thock-bridge connect <claude|codex|gemini> [--dry-run] [--yes] [--import]",
+    )?;
     let harness = harness_for(&name).ok_or_else(|| {
-        format!("{name} isn't a harness this command knows; the skill and the server work from any MCP client, see the printed config block")
+        format!(
+            "{name} isn't a harness this command knows; the skill and the server work from any MCP client, see the printed config block"
+        )
     })?;
     let home = Home::resolve();
     let config = home
@@ -946,6 +1154,7 @@ fn connect(args: &[String]) -> Result<(), String> {
     let canonical = canonical_skill_file();
     steps.push(Step {
         describe: format!("write {}", canonical.display()),
+        warning: None,
         apply: Box::new({
             let canonical = canonical.clone();
             move || write_text(&canonical, &skill)
@@ -962,12 +1171,14 @@ fn connect(args: &[String]) -> Result<(), String> {
                 .map(|p| p.to_string())
                 .unwrap_or_default()
         ),
+        warning: None,
         apply: Box::new(move || link_skill(&skills_dir)),
     });
     let command = mcp_add_command(&harness, &binary);
     let block = manual_block(&harness, &binary);
     steps.push(Step {
         describe: format!("run `{}`", command.join(" ")),
+        warning: None,
         apply: Box::new(move || {
             let status = std::process::Command::new(&command[0])
                 .args(&command[1..])
@@ -990,25 +1201,61 @@ fn connect(args: &[String]) -> Result<(), String> {
             }
         }),
     });
+    let mirror_dir = home.agents_dir().join(harness.id);
     if harness.id == "claude-code" {
-        let mirror_dir = home.agents_dir().join(harness.id);
         let settings = home_dir().join(".claude/settings.json");
+        let projects = claude_project_memories();
+        let warning = format!(
+            "This points Claude Code's auto memory for EVERY project at one folder. {} \
+             Pass --import to copy them into the mirror first (under imported/), where \
+             Reflect and search can still reach them.",
+            match projects.len() {
+                0 => "No per-project memory exists under ~/.claude/projects yet.".to_string(),
+                1 => format!(
+                    "The existing memory of 1 project ({}) stops loading in Claude Code.",
+                    projects[0].0
+                ),
+                n => format!(
+                    "The existing memories of {n} projects under ~/.claude/projects/*/memory stop \
+                     loading in Claude Code."
+                ),
+            }
+        );
+        if import {
+            steps.push(Step {
+                describe: format!(
+                    "copy {} project memory folder(s) into {}/imported/",
+                    projects.len(),
+                    mirror_dir.display()
+                ),
+                warning: None,
+                apply: Box::new({
+                    let mirror_dir = mirror_dir.clone();
+                    move || {
+                        let copied = import_claude_memories(&mirror_dir)?;
+                        println!("  imported {copied} file(s)");
+                        Ok(())
+                    }
+                }),
+            });
+        }
         steps.push(Step {
             describe: format!(
                 "set autoMemoryDirectory = {} in {}",
                 mirror_dir.display(),
                 settings.display()
             ),
+            warning: Some(warning),
             apply: Box::new(move || set_auto_memory_directory(&settings, &mirror_dir)),
         });
     } else {
-        let mirror_dir = home.agents_dir().join(harness.id);
         steps.push(Step {
             describe: format!(
                 "create the mirror folder {} (point {}'s memory there to mirror it)",
                 mirror_dir.display(),
                 harness.label
             ),
+            warning: None,
             apply: Box::new(move || {
                 std::fs::create_dir_all(&mirror_dir).map_err(|error| error.to_string())
             }),
@@ -1018,12 +1265,18 @@ fn connect(args: &[String]) -> Result<(), String> {
     println!("Connecting {} to {}:", harness.label, config.vault);
     for step in &steps {
         println!("  - {}", step.describe);
+        if let Some(warning) = &step.warning {
+            println!("    note: {warning}");
+        }
     }
     if dry_run {
         println!("(dry run: nothing changed)");
         return Ok(());
     }
     for step in steps {
+        if let Some(warning) = &step.warning {
+            eprintln!("{warning}");
+        }
         if confirm(&format!("{}?", step.describe), yes)? {
             (step.apply)()?;
             println!("  done: {}", step.describe);
