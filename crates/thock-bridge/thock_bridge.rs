@@ -16,7 +16,7 @@ pub use http::{
     HttpRequest, HttpResponse, Route, bearer_token, parse_route, percent_decode, percent_encode,
     request, response_json,
 };
-pub use mirror::{MIRROR_MAX_BYTES, MirrorFile, MirrorState, plan_mirror};
+pub use mirror::{MIRROR_MAX_BYTES, MirrorFile, MirrorState, is_mirrored_path, plan_mirror};
 pub use offline::{Cache, CachedText, DrainStop, Outbox, OutboxEntry, offline_suffix};
 pub use rpc::{
     CallMeta, CallToolResponse, HostError, INDEX_RESOURCE_URI, INVALID_PARAMS, JsonRpcError,
