@@ -1,11 +1,14 @@
 pub mod agent;
+pub mod agent_details;
 pub mod agent_panel;
 pub mod backlog;
 pub mod backlog_panel;
+pub mod bridge_service;
 pub mod calendar;
 pub mod calendar_google;
 pub mod calendar_service;
 pub mod chat_panel;
+pub mod connect_agent;
 pub mod connect_phone;
 pub mod day_plan;
 pub mod day_planner_panel;
@@ -199,6 +202,7 @@ pub fn init(cx: &mut App) {
     reminder_notifier::init(cx);
     sync_status::init(cx);
     vault_sync::init(cx);
+    bridge_service::init(cx);
     // After vault sync, so a vault's sync service exists before the
     // today-note service asks whether its first pass has settled.
     today_note::init(cx);

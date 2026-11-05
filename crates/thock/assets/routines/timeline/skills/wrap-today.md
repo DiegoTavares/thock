@@ -120,6 +120,8 @@ Append a `# Daily Closure` section at the end of today's note with the `append` 
 - One or two concrete, actionable nudges (don't pad)
 ```
 
+When the note has a `## From your agents` section (the Agents Routine's other machines write there), you may sum it up in one line under `## Done`, in your words; leave the section itself untouched.
+
 When step 3 actually pulled something in, add one section for it above `## Suggestions`: `## Commits` for code (`- repo@abc123 · commit message`), `## Calendar` for meetings. **Omit the heading entirely when there is nothing to put under it**; never write `N/A` or "not configured" under it. An empty `## Commits` on a day with no code is noise, and on a vault that doesn't track code it's someone else's life. Under `## Open (carried forward)` copy each task line exactly as `- [ ] text`, one dash, not a dash in front of another dash, and without its `(@…)` reminder token and its `<!--rem:…-->` id: the closure is a record of the day, not a second reminder. The two tasks above are quoted as `- [ ] Call the plumber → backlog (Soon)` and `- [ ] Renew the passport → backlog (Soon)`.
 
 Write it in the tone the profile names, and use the profile's area names when you group anything. Keep it short and factual. Base "carried forward" on the still-unchecked tasks (those answered **Done** in step 5 belong under `## Done`, not here) plus anything the recent-days scan shows lingering. Suffix each task that moved in step 5 with `→ backlog (Soon)` (or `(Someday)`) so the note records where it went; tasks the footnote named as already in the backlog get `→ already in backlog`.

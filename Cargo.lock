@@ -12562,6 +12562,7 @@ dependencies = [
  "fs",
  "futures 0.3.32",
  "fuzzy",
+ "gethostname",
  "git",
  "gpui",
  "hex",
@@ -12591,6 +12592,7 @@ dependencies = [
  "settings",
  "sha2",
  "shlex",
+ "socket2",
  "task",
  "tempfile",
  "terminal",
@@ -12598,6 +12600,7 @@ dependencies = [
  "text",
  "theme",
  "theme_settings",
+ "thock_bridge",
  "thock_sync_core",
  "title_bar",
  "toml 0.8.23",
@@ -12728,6 +12731,27 @@ dependencies = [
  "zlog",
  "zlog_settings",
  "ztracing",
+]
+
+[[package]]
+name = "thock_bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gethostname",
+ "hex",
+ "libc",
+ "paths",
+ "pollster 0.4.0",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thock_sync_core",
+ "toml 0.8.23",
+ "uuid",
 ]
 
 [[package]]

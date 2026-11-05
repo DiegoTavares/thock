@@ -95,6 +95,11 @@ preferences, patterns): open one when the conversation touches it, not before.
 - Never note passwords, account or card numbers, or amounts from the money
   ritual, and nothing from a topic `profile.md` lists under **What Thock should
   not keep**.
+- When the Agents Routine is installed, the person's other agents reach the
+  vault too. Their inbox lines end in `via <harness>@<machine>`, their day's
+  doings sit under `## From your agents` in the daily note, and their own
+  memory files mirror under `memory/agents/`. Read those pages when they help;
+  never edit them, and never copy them into the other memory pages yourself.
 
 ## Rituals and Routines
 

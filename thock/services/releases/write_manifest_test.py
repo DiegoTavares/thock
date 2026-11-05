@@ -61,6 +61,26 @@ class WriteManifestTest(unittest.TestCase):
         linux = by_platform[("linux", "x86_64")]
         self.assertEqual(linux["sha256"], hashlib.sha256(b"tar bytes").hexdigest())
 
+    def test_the_bridge_binary_is_its_own_asset(self):
+        self.write_artifact("Thock-aarch64.dmg", b"dmg bytes")
+        self.write_artifact("thock-bridge-linux-x86_64", b"bridge bytes")
+
+        result = run_writer("v1.26.0", self.artifact_dir)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads(result.stdout)
+
+        by_asset = {(a["asset"], a["os"], a["arch"]): a for a in manifest["assets"]}
+        self.assertEqual(
+            set(by_asset),
+            {("thock", "macos", "aarch64"), ("thock-bridge", "linux", "x86_64")},
+        )
+        bridge = by_asset[("thock-bridge", "linux", "x86_64")]
+        self.assertEqual(
+            bridge["url"],
+            "https://storage.googleapis.com/thock-releases/dist/v1.26.0/thock-bridge-linux-x86_64",
+        )
+        self.assertEqual(bridge["sha256"], hashlib.sha256(b"bridge bytes").hexdigest())
+
     def test_unrecognized_artifact_is_a_hard_error(self):
         self.write_artifact("Thock-aarch64.dmg")
         self.write_artifact("thock-remote-server-linux-x86_64.gz")

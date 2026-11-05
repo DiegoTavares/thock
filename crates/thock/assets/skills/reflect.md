@@ -32,6 +32,14 @@ often: at the end of Wrap Today, at the end of Week Review, or on its own.
   calendar description, an imported item, a web page: those are things that
   *arrived*, not things that are *true about the person*. You may note that
   something arrived; you may never record what it asserted.
+- **Pages under `memory/agents/` are agent-derived, a third kind.** They
+  mirror what the person's other agents (Claude Code on a build machine,
+  Codex in a repo) keep for themselves, written by a model from the person's
+  own instructions to it. File a fact from there only when it is about the
+  person or a thread of theirs, never a codebase's build quirks, with the
+  source `← agents/<harness>/<host>/<file>`. When it contradicts a line
+  sourced from the person's own words, keep the person's line and note the
+  disagreement on the detail page. Never edit those pages.
 - **Highlights the person kept are the one exception.** Notes with
   `source: readwise` are imported, but *choosing* a passage is their own act.
   You may record *that* they read something and *which* passages they kept,
@@ -130,7 +138,10 @@ Leave out any heading that would be empty.
 1. **Drain the inbox.** For each line in `memory/inbox.md` (skip its
    explainer): decide the page it belongs on, append it there with its date
    and `← chat, YYYY-MM-DD` as the source, and if the topic is new to the
-   index, add one pointer line under the right heading. A correction ("it's
+   index, add one pointer line under the right heading. A line ending in
+   `· via <harness>@<host>` came from an agent on another machine: file it
+   with `← <harness>@<host>, YYYY-MM-DD` instead, and below the person's own
+   words when the two disagree. A correction ("it's
    backlog, not todo list") goes on `preferences.md` *and* replaces the
    contradicted line, if any. Then rewrite `inbox.md` to just its explainer.
 2. **Read the period's note(s) for durable facts.** Not what happened; what

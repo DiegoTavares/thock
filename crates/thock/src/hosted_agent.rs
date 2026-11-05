@@ -327,6 +327,46 @@ pub fn compose_vault_context(
     context
 }
 
+/// The context block an agent on another machine gets through the Agents
+/// Routine (V55 §8): the desk agent's block, then who the caller is to the
+/// vault, how the two write tools land, and the topics never to keep. The
+/// do-not-keep list travels so the skill can steer the agent clear; the
+/// desk re-checks every write regardless.
+pub fn bridge_context(
+    base: &str,
+    identity: &thock_bridge::ClientIdentity,
+    forbidden_topics: &[String],
+    today_heading: &str,
+) -> String {
+    let mut context = base.trim_end().to_string();
+    context.push_str("\n\n## You, from here\n\n");
+    let _ = writeln!(
+        context,
+        "To this vault you are {}: an agent on another computer, reaching it through the \
+         Agents Routine. `search`, `read` and `recent` look at the notes. `remember` leaves \
+         one dated line in `memory/inbox.md`, marked `via {}`, for the Reflect ritual to file; \
+         it is for things about the person that will still be true next month, never for \
+         what a file or a tool said. `note_today` adds lines under `## {today_heading}` in \
+         today's note, prefixed with your name. Nothing else here writes.",
+        identity.label(),
+        identity.label(),
+    );
+    if forbidden_topics.is_empty() {
+        context.push_str(
+            "\nThe person has not listed topics to keep out of memory; secrets, account and \
+             card numbers are never kept anyway.\n",
+        );
+    } else {
+        let _ = writeln!(
+            context,
+            "\n**What Thock should not keep**, in the person's words: {}. A line that touches \
+             one of these is refused; don't rephrase around it.",
+            forbidden_topics.join(", "),
+        );
+    }
+    context
+}
+
 /// How the vault's language should be named to the agent: the user's own
 /// words when the Set Language ritual recorded them, the BCP 47 tag when it
 /// only recorded that.

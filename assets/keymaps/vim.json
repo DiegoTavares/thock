@@ -1043,6 +1043,20 @@
     },
   },
   {
+    "context": "ThockConnectAgentModal",
+    "bindings": {
+      "j": "menu::SelectNext",
+      "k": "menu::SelectPrevious",
+    },
+  },
+  {
+    "context": "ThockAgentDetailsModal",
+    "bindings": {
+      "j": "menu::SelectNext",
+      "k": "menu::SelectPrevious",
+    },
+  },
+  {
     "context": "ThockRoutinesPanel",
     "bindings": {
       "j": "vim::MenuSelectNext",

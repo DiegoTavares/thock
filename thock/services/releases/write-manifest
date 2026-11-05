@@ -16,12 +16,18 @@ import os
 import re
 import sys
 
-# The filename contract with script/bundle-mac and script/bundle-linux.
+# The filename contract with script/bundle-mac, script/bundle-linux and the
+# release workflow: artifact name -> (asset, os, arch). `thock` is the app;
+# `thock-bridge` is the agents bridge client on its own (V55 §12).
 ARTIFACT_PLATFORMS = {
-    "Thock-aarch64.dmg": ("macos", "aarch64"),
-    "Thock-x86_64.dmg": ("macos", "x86_64"),
-    "thock-linux-x86_64.tar.gz": ("linux", "x86_64"),
-    "thock-linux-aarch64.tar.gz": ("linux", "aarch64"),
+    "Thock-aarch64.dmg": ("thock", "macos", "aarch64"),
+    "Thock-x86_64.dmg": ("thock", "macos", "x86_64"),
+    "thock-linux-x86_64.tar.gz": ("thock", "linux", "x86_64"),
+    "thock-linux-aarch64.tar.gz": ("thock", "linux", "aarch64"),
+    "thock-bridge-macos-aarch64": ("thock-bridge", "macos", "aarch64"),
+    "thock-bridge-macos-x86_64": ("thock-bridge", "macos", "x86_64"),
+    "thock-bridge-linux-x86_64": ("thock-bridge", "linux", "x86_64"),
+    "thock-bridge-linux-aarch64": ("thock-bridge", "linux", "aarch64"),
 }
 
 NOTES_URL_TEMPLATE = "https://github.com/DiegoTavares/thock/releases/tag/{tag}"
@@ -67,10 +73,10 @@ def main():
                 f"unrecognized artifact {name!r}; known names: "
                 + ", ".join(sorted(ARTIFACT_PLATFORMS))
             )
-        operating_system, arch = platform
+        asset, operating_system, arch = platform
         assets.append(
             {
-                "asset": "thock",
+                "asset": asset,
                 "os": operating_system,
                 "arch": arch,
                 "url": f"https://storage.googleapis.com/{bucket}/dist/{tag}/{name}",

@@ -27,9 +27,24 @@ async fn install_script(cx: &AsyncApp) -> Result<Option<PathBuf>> {
     let cli_path = cx.update(|cx| cx.path_for_auxiliary_executable("cli"))?;
     let link_path = Path::new("/usr/local/bin/thock");
     let bin_dir_path = link_path.parent().unwrap();
+    // Thock ships the agents bridge client beside the CLI (V55 §12); it is
+    // linked in the same pass so one install puts both on PATH. A bundle
+    // without it (a dev build) links the CLI alone.
+    let bridge_path = cx.update(|cx| cx.path_for_auxiliary_executable("thock-bridge"))?;
+    let bridge_link_path = Path::new("/usr/local/bin/thock-bridge");
+    let bridge = smol::fs::metadata(&bridge_path)
+        .await
+        .is_ok()
+        .then_some((bridge_path, bridge_link_path));
 
     // Don't re-create symlink if it points to the same CLI binary.
-    if smol::fs::read_link(link_path).await.ok().as_ref() == Some(&cli_path) {
+    let bridge_linked = match &bridge {
+        Some((bridge_path, bridge_link_path)) => {
+            smol::fs::read_link(bridge_link_path).await.ok().as_ref() == Some(bridge_path)
+        }
+        None => true,
+    };
+    if smol::fs::read_link(link_path).await.ok().as_ref() == Some(&cli_path) && bridge_linked {
         return Ok(Some(link_path.into()));
     }
 
@@ -41,22 +56,39 @@ async fn install_script(cx: &AsyncApp) -> Result<Option<PathBuf>> {
         .log_err()
         .is_some()
     {
+        if let Some((bridge_path, bridge_link_path)) = &bridge {
+            smol::fs::remove_file(bridge_link_path).await.log_err();
+            smol::fs::unix::symlink(bridge_path, bridge_link_path)
+                .await
+                .log_err();
+        }
         return Ok(Some(link_path.into()));
     }
 
     // The symlink could not be created without escalating, so use osascript
     // with admin privileges to create it.
+    let bridge_script = bridge
+        .as_ref()
+        .map(|(bridge_path, bridge_link_path)| {
+            format!(
+                " && ln -sf \'{}\' \'{}\'",
+                bridge_path.to_string_lossy(),
+                bridge_link_path.to_string_lossy(),
+            )
+        })
+        .unwrap_or_default();
     let output = smol::process::Command::new("/usr/bin/osascript")
         .args([
             "-e",
             &format!(
                 "do shell script \" \
                     mkdir -p \'{}\' && \
-                    ln -sf \'{}\' \'{}\' \
+                    ln -sf \'{}\' \'{}\'{} \
                 \" with administrator privileges",
                 bin_dir_path.to_string_lossy(),
                 cli_path.to_string_lossy(),
                 link_path.to_string_lossy(),
+                bridge_script,
             ),
         ])
         .output()
