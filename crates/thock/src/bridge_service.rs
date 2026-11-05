@@ -367,6 +367,9 @@ pub struct BridgeService {
     start_task: Option<Task<()>>,
     index: Rc<RefCell<Option<SearchIndex>>>,
     seen: Rc<RefCell<SeenCalls>>,
+    /// How many history checkpoints the bridge asked for, so a test can see
+    /// that every write that changes a file took one first.
+    checkpoints: Rc<std::cell::Cell<usize>>,
     serving_since: String,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -394,6 +397,7 @@ impl BridgeService {
             start_task: None,
             index: Rc::new(RefCell::new(None)),
             seen: Rc::new(RefCell::new(SeenCalls::default())),
+            checkpoints: Rc::new(std::cell::Cell::new(0)),
             serving_since: String::new(),
             _subscriptions: subscriptions,
         }
@@ -1114,8 +1118,17 @@ struct RequestContext {
     shared: Arc<Mutex<Shared>>,
     index: Rc<RefCell<Option<SearchIndex>>>,
     seen: Rc<RefCell<SeenCalls>>,
+    checkpoints: Rc<std::cell::Cell<usize>>,
     project: Entity<Project>,
     serving_since: String,
+}
+
+/// The restore point every bridge write that changes a file takes first,
+/// like the hosted agent's `append`.
+fn take_checkpoint(context: &RequestContext, cx: &mut AsyncApp) {
+    context.checkpoints.set(context.checkpoints.get() + 1);
+    let project = context.project.clone();
+    cx.update(|cx| history::checkpoint_before_ai_write(&project, cx));
 }
 
 async fn handle_incoming(
@@ -1131,6 +1144,7 @@ async fn handle_incoming(
             shared: service.shared.clone(),
             index: service.index.clone(),
             seen: service.seen.clone(),
+            checkpoints: service.checkpoints.clone(),
             project: service.project.clone(),
             serving_since: service.serving_since.clone(),
         })
@@ -1170,6 +1184,7 @@ async fn handle_incoming(
                 &harness,
                 &path,
                 &incoming.body,
+                cx,
             )
             .await
         }
@@ -1331,6 +1346,7 @@ async fn handle_agent_file(
     harness: &str,
     path: &str,
     body: &[u8],
+    cx: &mut AsyncApp,
 ) -> Outgoing {
     let Some(client) = client else {
         return Outgoing::error(401, "unknown client; pair again from the desk");
@@ -1370,6 +1386,14 @@ async fn handle_agent_file(
     if let Some(reason) = thock_bridge::find_unkeepable(&text, &forbidden) {
         return Outgoing::error(422, &format!("{path}: {reason}; the vault doesn't keep it"));
     }
+    // The same bytes again (a mirror pass re-sending an unchanged file)
+    // change nothing: no checkpoint, no write, no file event.
+    if context.fs.is_file(&absolute).await
+        && context.fs.load(&absolute).await.ok().as_deref() == Some(text.as_str())
+    {
+        return Outgoing::empty(204);
+    }
+    take_checkpoint(context, cx);
     let written = async {
         context.fs.create_dir(&parent).await?;
         context.fs.atomic_write(absolute, text).await
@@ -1531,9 +1555,7 @@ impl DeskHost<'_> {
         if applied.outcome == Outcome::Noop || existing.as_deref() == Some(applied.text.as_str()) {
             return Ok(WriteOutcome::Noop);
         }
-        let project = self.context.project.clone();
-        self.cx
-            .update(|cx| history::checkpoint_before_ai_write(&project, cx));
+        take_checkpoint(self.context, &mut self.cx);
         if let Some(parent) = absolute.parent() {
             self.context
                 .fs
@@ -2767,6 +2789,87 @@ mod tests {
                 .contains("9f86d081"),
             "the refused version never replaced the mirrored one"
         );
+    }
+
+    /// A mirrored file takes a restore point before it changes, and the
+    /// same bytes again change nothing: no checkpoint, no file event.
+    #[gpui::test]
+    async fn mirrored_files_checkpoint_once_and_skip_unchanged_bytes(cx: &mut TestAppContext) {
+        let desk = serve(cx, true).await;
+        let token = pair(cx, &desk, "robin").await;
+        let auth = format!("Bearer {token}");
+        let project = desk
+            .service
+            .read_with(cx, |service, _| service.project.clone());
+        let events: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update({
+            let events = events.clone();
+            move |cx| {
+                cx.subscribe(&project, move |_, event, _| {
+                    if let project::Event::WorktreeUpdatedEntries(_, changes) = event {
+                        for (path, _, _) in changes.iter() {
+                            events.borrow_mut().push(path.as_unix_str().to_string());
+                        }
+                    }
+                })
+            }
+        });
+        let counter = desk
+            .service
+            .read_with(cx, |service, _| service.checkpoints.clone());
+        let checkpoints = || counter.get();
+        assert_eq!(checkpoints(), 0);
+        let (status, _) = roundtrip(
+            cx,
+            desk.port,
+            "PUT",
+            "/v1/agents/claude-code/MEMORY.md",
+            &[("Authorization", auth.as_str())],
+            "# Memory\n- one\n",
+        );
+        assert_eq!(status, 204);
+        cx.run_until_parked();
+        assert_eq!(
+            checkpoints(),
+            1,
+            "a changed file took a restore point first"
+        );
+        let mirrored = "memory/agents/claude-code/robin/MEMORY.md";
+        let writes = |events: &Rc<RefCell<Vec<String>>>| {
+            events
+                .borrow()
+                .iter()
+                .filter(|path| *path == mirrored)
+                .count()
+        };
+        assert!(writes(&events) >= 1);
+        let before = writes(&events);
+
+        let (status, _) = roundtrip(
+            cx,
+            desk.port,
+            "PUT",
+            "/v1/agents/claude-code/MEMORY.md",
+            &[("Authorization", auth.as_str())],
+            "# Memory\n- one\n",
+        );
+        assert_eq!(status, 204);
+        cx.run_until_parked();
+        assert_eq!(checkpoints(), 1, "the same bytes took no restore point");
+        assert_eq!(writes(&events), before, "and fired no file event");
+
+        let (status, _) = roundtrip(
+            cx,
+            desk.port,
+            "PUT",
+            "/v1/agents/claude-code/MEMORY.md",
+            &[("Authorization", auth.as_str())],
+            "# Memory\n- two\n",
+        );
+        assert_eq!(status, 204);
+        cx.run_until_parked();
+        assert_eq!(checkpoints(), 2);
+        assert!(writes(&events) > before);
     }
 
     /// The desk's write goes through the `Fs`, so the worktree sees it
