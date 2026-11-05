@@ -261,9 +261,16 @@ struct Proxy {
     outbox: Outbox,
     harness: String,
     /// Set once the desk answers, cleared when it stops; drives the log
-    /// lines so a flapping desk is visible without a line per call.
+    /// lines so a flapping desk is visible without a line per call, and
+    /// spares an offline call the outbox's own attempt first.
     online: Option<bool>,
+    /// When the last mirror pass ran, so a tool call never waits on one
+    /// that just happened.
+    last_mirror: Option<std::time::Instant>,
 }
+
+/// How long after a mirror pass the next write may trigger another.
+const MIRROR_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Why a forwarded call did not come back as a JSON-RPC reply.
 enum ForwardFailure {
@@ -361,7 +368,7 @@ impl Proxy {
     }
 
     fn drain_outbox(&mut self) {
-        if self.outbox.is_empty() || self.config.is_none() {
+        if self.outbox.is_empty() || self.config.is_none() || self.online == Some(false) {
             return;
         }
         let outbox = self.outbox.clone();
@@ -429,7 +436,19 @@ impl Proxy {
         }
     }
 
+    /// A pass now, or nothing when one ran a moment ago: a tool call must
+    /// not pay for the mirror.
+    fn mirror_if_due(&mut self) {
+        let due = self
+            .last_mirror
+            .is_none_or(|last| last.elapsed() >= MIRROR_INTERVAL);
+        if due {
+            self.mirror();
+        }
+    }
+
     fn mirror(&mut self) {
+        self.last_mirror = Some(std::time::Instant::now());
         if let Some(config) = &self.config {
             match mirror_pass(&self.home, config, false) {
                 Ok(report) => {
@@ -463,6 +482,8 @@ impl Proxy {
                 local_answer(request, VERSION)
             }
             "tools/call" | "resources/read" => {
+                // Known to be offline: the call goes straight to the cache
+                // instead of paying for the outbox's own attempt first.
                 self.drain_outbox();
                 let tool = request.tool_name().map(str::to_string);
                 let arguments = request.arguments();
@@ -481,10 +502,16 @@ impl Proxy {
                 let harness = self.harness.clone();
                 match self.forward(&request, &harness) {
                     Ok(response) => {
+                        let was_offline = self.online == Some(false);
                         self.note_online(true);
+                        if was_offline {
+                            // The desk is back: what queued while it was
+                            // away goes now, after the call that found out.
+                            self.drain_outbox();
+                        }
                         self.remember_answer(&request, tool.as_deref(), &arguments, &response);
                         if is_write {
-                            self.mirror();
+                            self.mirror_if_due();
                         }
                         Some(response)
                     }
@@ -744,6 +771,7 @@ fn serve(args: &[String]) -> Result<(), String> {
         config,
         harness,
         online: None,
+        last_mirror: None,
     };
     proxy.drain_outbox();
     proxy.mirror();
