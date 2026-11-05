@@ -11,7 +11,7 @@ use fs::Fs;
 use futures::channel::{mpsc, oneshot};
 use futures::future::{Shared as SharedFuture, select};
 use futures::{FutureExt as _, StreamExt as _};
-use gpui::{App, AppContext as _, AsyncApp, Context, Entity, EntityId, Global, Task, TaskExt as _};
+use gpui::{App, AppContext as _, AsyncApp, Context, Entity, EntityId, Global, Task};
 use project::Project;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -364,6 +364,10 @@ pub struct BridgeService {
     /// The previous listener's join, awaited before the next bind so the
     /// port is free again (a pause followed by a resume).
     stopping: Option<SharedFuture<Task<()>>>,
+    /// The one writer of `clients.toml`: each write waits for the previous
+    /// and renders the list as it is at that moment, so a stale snapshot
+    /// can never put a revoked token back on disk.
+    clients_write: Option<SharedFuture<Task<Result<(), String>>>>,
     start_task: Option<Task<()>>,
     /// Shared with the background thread a query runs on; the foreground
     /// only writes it, one entry per file event.
@@ -396,6 +400,7 @@ impl BridgeService {
             receiver_task: None,
             listener: None,
             stopping: None,
+            clients_write: None,
             start_task: None,
             index: Arc::new(std::sync::RwLock::new(None)),
             seen: Rc::new(RefCell::new(SeenCalls::default())),
@@ -841,28 +846,60 @@ impl BridgeService {
 
     /// Forgets a paired machine; its token stops working at once.
     pub fn disconnect(&mut self, name: &str, cx: &mut Context<Self>) {
-        let Some(vault) = self.vault.clone() else {
-            return;
-        };
-        let clients = match self.shared.lock() {
-            Ok(mut shared) => {
-                shared.clients.retain(|client| client.name != name);
-                shared.clients.clone()
-            }
-            Err(_) => return,
-        };
-        let fs = self.fs(cx);
-        cx.background_spawn(async move {
-            write_state_file(
-                &fs,
-                &vault.root,
-                CLIENTS_PATH,
-                &thock_bridge::render_clients(&clients),
-            )
-            .await
-        })
-        .detach_and_log_err(cx);
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.clients.retain(|client| client.name != name);
+        }
+        self.persist_clients_later(cx);
         cx.notify();
+    }
+
+    /// `persist_clients` for a caller with nothing to wait for: the write
+    /// runs on the executor whether or not its handle is polled, and
+    /// `clients_write` keeps it alive; a failure is logged by the task.
+    fn persist_clients_later(&mut self, cx: &App) {
+        drop(self.persist_clients(cx));
+    }
+
+    /// Queues one write of `clients.toml` behind any write still running.
+    /// The list is read under the lock when the write runs, not when it is
+    /// asked for.
+    fn persist_clients(&mut self, cx: &App) -> SharedFuture<Task<Result<(), String>>> {
+        let previous = self.clients_write.take();
+        let shared = self.shared.clone();
+        let fs = self.fs(cx);
+        let root = self
+            .vault
+            .as_ref()
+            .map(|vault| vault.root.clone())
+            .unwrap_or_default();
+        let write = cx
+            .background_spawn(async move {
+                if let Some(previous) = previous {
+                    previous.await.ok();
+                }
+                if root.as_os_str().is_empty() {
+                    return Err("the vault is closed".to_string());
+                }
+                let clients = shared
+                    .lock()
+                    .map(|shared| shared.clients.clone())
+                    .map_err(|_| "the client list is poisoned".to_string())?;
+                let written = write_state_file(
+                    &fs,
+                    &root,
+                    CLIENTS_PATH,
+                    &thock_bridge::render_clients(&clients),
+                )
+                .await
+                .map_err(|error| format!("{error:#}"));
+                if let Err(error) = &written {
+                    log::error!("Thock: couldn't write {CLIENTS_PATH}: {error}");
+                }
+                written
+            })
+            .shared();
+        self.clients_write = Some(write.clone());
+        write
     }
 }
 
@@ -1243,39 +1280,32 @@ async fn handle_incoming(
         Route::NotFound => Outgoing::error(404, "nothing here"),
     };
     if let Some(name) = incoming.client {
-        touch_client(&context, &name).await;
-        service.update(cx, |_, cx| cx.notify());
+        let persist = touch_client(&context, &name);
+        service.update(cx, |service, cx| {
+            if persist {
+                service.persist_clients_later(cx);
+            }
+            cx.notify();
+        });
     }
     outgoing
 }
 
-/// Records when a paired machine last called, persisted once a minute.
-async fn touch_client(context: &RequestContext, name: &str) {
+/// Records when a paired machine last called; says whether the list is
+/// worth persisting (once a minute per client).
+fn touch_client(context: &RequestContext, name: &str) -> bool {
     let now = Utc::now();
-    let clients = {
-        let Ok(mut shared) = context.shared.lock() else {
-            return;
-        };
-        let Some(client) = shared.clients.iter_mut().find(|client| client.name == name) else {
-            return;
-        };
-        let stale = chrono::DateTime::parse_from_rfc3339(&client.last_seen)
-            .map(|seen| (now - seen.with_timezone(&Utc)).num_seconds() >= 60)
-            .unwrap_or(true);
-        client.last_seen = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        if !stale {
-            return;
-        }
-        shared.clients.clone()
+    let Ok(mut shared) = context.shared.lock() else {
+        return false;
     };
-    write_state_file(
-        &context.fs,
-        &context.vault.root,
-        CLIENTS_PATH,
-        &thock_bridge::render_clients(&clients),
-    )
-    .await
-    .log_err();
+    let Some(client) = shared.clients.iter_mut().find(|client| client.name == name) else {
+        return false;
+    };
+    let stale = chrono::DateTime::parse_from_rfc3339(&client.last_seen)
+        .map(|seen| (now - seen.with_timezone(&Utc)).num_seconds() >= 60)
+        .unwrap_or(true);
+    client.last_seen = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    stale
 }
 
 fn vault_name(vault: &Vault) -> String {
@@ -1339,15 +1369,12 @@ async fn handle_pair(
         }
         Err(_) => return Outgoing::error(500, "the desk couldn't record the pairing"),
     };
-    let persisted = write_state_file(
-        &context.fs,
-        &context.vault.root,
-        CLIENTS_PATH,
-        &thock_bridge::render_clients(&clients),
-    )
-    .await;
+    drop(clients);
+    let persisted = service
+        .update(cx, |service, cx| service.persist_clients(cx))
+        .await;
     if let Err(error) = persisted {
-        log::error!("Thock: couldn't write {CLIENTS_PATH}: {error:#}");
+        log::error!("Thock: couldn't write {CLIENTS_PATH}: {error}");
         return Outgoing::error(500, "the desk couldn't record the pairing");
     }
     context
@@ -2858,6 +2885,37 @@ mod tests {
                 .contains("9f86d081"),
             "the refused version never replaced the mirrored one"
         );
+    }
+
+    /// A write of the client list queued before a disconnect still runs
+    /// after it, and renders the list as it is then: the revoked machine
+    /// never comes back on disk.
+    #[gpui::test]
+    async fn a_disconnect_during_a_pending_write_never_resurrects_the_client(
+        cx: &mut TestAppContext,
+    ) {
+        let desk = serve(cx, true).await;
+        pair(cx, &desk, "robin").await;
+        pair(cx, &desk, "hp").await;
+        cx.run_until_parked();
+        let clients_path = Path::new("/vault/.thock/state/bridge/clients.toml");
+        assert!(
+            desk.fs
+                .load(clients_path)
+                .await
+                .unwrap()
+                .contains("name = \"robin\"")
+        );
+        // A touch-style write is queued, then the disconnect lands before
+        // either has run.
+        desk.service.update(cx, |service, cx| {
+            service.persist_clients_later(cx);
+            service.disconnect("robin", cx);
+        });
+        cx.run_until_parked();
+        let on_disk = desk.fs.load(clients_path).await.unwrap();
+        assert!(!on_disk.contains("robin"), "{on_disk}");
+        assert!(on_disk.contains("name = \"hp\""), "{on_disk}");
     }
 
     /// Editing `bridge.toml` while serving rebinds on a new port and takes
