@@ -34,6 +34,10 @@ machine pairs; you never touch `.thock/`.
    notarised on its own, so one saved through a browser is quarantined:
    `xattr -d com.apple.quarantine thock-bridge` once, or fetch it with `curl`,
    which sets no quarantine.
+   On the machine that runs the desk itself the same steps apply against
+   its own address (`127.0.0.1:7557` works); from a source build, run
+   `cargo build --release -p thock_bridge` and put `target/release/thock-bridge`
+   on the path.
 2. Run the copied command there. It answers `Paired with <vault> on <desk>`
    and the modal on the desk closes by itself. The code is spent; a second
    machine needs a new one.

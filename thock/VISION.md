@@ -590,8 +590,8 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   (lines under `## From your agents`). A harness's own memory can live under
   `memory/agents/<harness>/<host>/`, mirrored one way; Reflect files it with provenance and still
   owns the index. Pair with a one-time code, revoke by name; offline, the client answers from a
-  cache and queues writes. Spec `specs/v55-agents-bridge.md`. _(implemented 2026-11-04 on
-  `v55-agents-bridge`; ships with its PR)_
+  cache and queues writes. Spec `specs/v55-agents-bridge.md`. _(shipped 2026-11-05: merged as #190,
+  TestFlight build 25)_
 
 ---
 
