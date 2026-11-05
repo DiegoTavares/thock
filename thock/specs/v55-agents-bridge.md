@@ -1,6 +1,6 @@
 # Thock V55 - The Agents Routine: your other agents share the vault's memory
 
-**Status:** Draft
+**Status:** Implemented (2026-11-04)
 **Owner:** Diego · **Date:** 2026-11-04
 **Companion docs:** `v28-agent-memory.md` (the memory tiers, Reflect, decisions 9 and 12 amended
 here), `v27-*` and `crates/thock/src/hosted_agent.rs` (`compose_vault_context`, the block the
@@ -120,10 +120,11 @@ and subject to the forbidden list like everything else. See §10.
 | Amended core files | `assets/AGENTS.md`, `assets/skills/reflect.md`, `assets/hosted-agent/SYSTEM.md` | Rule 6 and Reflect learn about `memory/agents/` and the `via` marker (§10). |
 
 The library is the contract: both halves and the tests depend on it, the app only implements
-`ToolHost`. The JSON-RPC types come from `context_server::types` where they fit (`Tool`,
-`CallToolResponse`, `ToolResponseContent`, `Resource`); the library re-exports what it uses so the
-binary does not depend on `context_server`'s GPUI side. If `context_server` cannot be depended on
-without pulling GPUI, the library defines the handful of structs itself, field-compatible.
+`ToolHost`. `context_server` depends on `gpui` outright (verified in its `Cargo.toml`), so the
+library defines the handful of JSON-RPC structs itself, field-compatible with
+`context_server::types` (`Tool` with `inputSchema`, `CallToolResponse` with `isError`,
+`ToolResponseContent`, `Resource`, `ResourceContents`), and both halves depend on nothing heavier
+than `serde` (decision 13).
 
 ## 6. Files and state
 
@@ -309,6 +310,14 @@ whole file under `memory/agents/<harness>/<client>/<path>`. Only `.md`, `.txt` a
 1 MiB, paths through §9.1. The client runs a mirror pass at `serve` start, after every
 `remember`/`note_today`, and at `serve` exit. Deletions do not propagate in V1.
 
+Verified at implementation (Claude Code docs, `/memory`, 2026-11-04): `autoMemoryDirectory` names
+**one flat directory** holding `MEMORY.md` and one topic file per memory; the default is
+`~/.claude/projects/<project>/memory/`, one per repository, and a value set at user scope replaces
+that for every project, so all of them share the one directory. The mirror folder
+`~/.local/share/thock/bridge/agents/claude-code/` is therefore that one directory, mirrored as-is
+(`MEMORY.md`, `user_role.md`, …) under `memory/agents/claude-code/<host>/`. The value must be an
+absolute path or start with `~/`; `connect claude` writes the absolute path.
+
 ## 10. Memory rules, amended
 
 Changes to shipped core files, upgraded in place by the V29 reconcile:
@@ -370,16 +379,31 @@ Subcommands:
   `~/.gemini/skills/`), registers the server with the harness's own command (`claude mcp add
   --scope user thock -- thock-bridge serve`, `codex mcp add thock -- thock-bridge serve`,
   `gemini mcp add -s user thock thock-bridge serve`; exact flags verified against each CLI's
-  `--help` at implementation, falling back to printing the config block to add), and for Claude
-  Code offers to set `autoMemoryDirectory` to the mirror folder in `~/.claude/settings.json`.
+  docs at implementation, see below, falling back to printing the config block to add), and for
+  Claude Code offers to set `autoMemoryDirectory` to the mirror folder in `~/.claude/settings.json`.
   Every file it would change is printed first and confirmed with `y`, except under `--yes`.
+
+  Verified 2026-11-04 against the official docs; the commands `connect` runs, each with
+  `serve --harness <id>` so the desk can name the harness behind the machine:
+
+  | Harness | Command | Stored in | Manual block |
+  |---|---|---|---|
+  | Claude Code | `claude mcp add --scope user --transport stdio thock -- thock-bridge serve --harness claude-code` | `~/.claude.json` | `mcpServers.thock = {type: stdio, command, args}` |
+  | Codex | `codex mcp add thock -- thock-bridge serve --harness codex` | `~/.codex/config.toml` | `[mcp_servers.thock] command = …, args = […]` |
+  | Gemini CLI | `gemini mcp add -s user thock thock-bridge serve --harness gemini` | `~/.gemini/settings.json` | `mcpServers.thock = {command, args}` |
+
+  Gemini's `--scope` defaults to `project`, hence `-s user`; its transport defaults to stdio.
+  Codex's `--env` goes before `--`; none is needed.
 - `thock-bridge status` — desk reachability, cache age, outbox length, mirror state.
 - `thock-bridge mirror` — one mirror pass.
 - `thock-bridge update` — refresh the installed skill from `/v1/skill`.
 
 Logging goes to stderr only; stdout is the MCP channel. The binary builds without GPUI, `fs` or
-`project`; its HTTP client is `ureq` (blocking, rustls, already a transitive dependency of the
-workspace; confirm in `Cargo.lock`, else `reqwest` blocking through `reqwest_client`'s features).
+`project`. Its HTTP client is the library's own: `ureq` is not in `Cargo.lock`, and `reqwest`'s
+blocking client drags tokio into a binary that otherwise needs no runtime, so the client speaks
+plain HTTP/1.0 over `std::net::TcpStream` (one request per connection, `Content-Length` bodies,
+chunked replies unwrapped), which is all the V1 contract asks for (decision 14). TLS, when it
+comes, is the moment to pick a crate.
 
 Distribution: `script/bundle-linux` and `script/bundle-mac` add `--package thock_bridge` next to
 `cli`, and the bundle places the binary beside the `thock` CLI so *Install CLI* puts both on
@@ -484,14 +508,28 @@ rules apply with file tools against the vault path in `$THOCK_VAULT`.
 | 11 | Mirror direction | **Client to vault only.** |
 | 12 | Daily section name | **`## From your agents`**, overridable in `bridge.toml`. |
 
+Added at implementation (2026-11-04):
+
+| # | Decision | Choice |
+|---|---|---|
+| 13 | JSON-RPC types | **The library's own**, field-compatible with `context_server::types`; that crate pulls GPUI (§5). |
+| 14 | Client HTTP | **`std::net` HTTP/1.0** in the library; `ureq` is not in the lock file and `reqwest` blocking brings tokio (§12). |
+| 15 | Who is `via <harness>@<host>` | **`host` is the paired machine's name** from `pair`; **`harness`** comes from `serve --harness <id>` (set by `connect`), else from MCP `initialize`'s `clientInfo.name`, else `agent`. It travels as the `X-Thock-Harness` header and the desk sanitises it (`[a-z0-9-]`, ≤ 40). |
+| 16 | Idempotency carrier | **`params._meta.call_id`** and **`_meta.date`** on `tools/call`, set by the client on every `remember`/`note_today` (online too), kept from the queued entry on a drain. The desk answers a seen id with the recorded outcome and writes nothing. |
+| 17 | `ToolHost` shape | **Async methods, generic dispatch** (`dispatch<H: ToolHost>`), so the desk implements it over the async `Fs`; the client answers offline directly from its cache and outbox without a host. |
+| 18 | Action name | **`thock::ConnectOtherAgent`**: `thock::ConnectAgent` already exists (the terminal agent's connect flow). `DisconnectAgent` and `ToggleBridge` as specced. |
+| 19 | Upgradeable scaffold files | `routine.toml` scaffold files gain **`upgrade = true`** (documented in `ROUTINES.md`), so `SKILL.md` and `AGENT.md` upgrade with the app and an edited copy is staged, without declaring the protocol as a runnable `[[skill]]`. |
+| 20 | `context` composition | **`compose_vault_context` is reused whole** and the bridge appends a `## You, from here` block (identity, how the two writes land, the do-not-keep topics). Its lines about `append`/templates read fine through `read`/`note_today`; factoring Pi-specific lines out was more churn than the block is worth. |
+| 21 | Disconnect on a row | **`enter` on a client row disconnects it** (the row says `Disconnect`); the toast says it can pair again. `thock::DisconnectAgent` opens a picker over the clients. |
+| 22 | Release asset | `thock-bridge-<os>-<arch>` is published as its own artifact and the update manifest lists it under **asset `thock-bridge`**, so the releases index can serve it by `?asset=thock-bridge`. |
+
 ## 16. Open decisions, for the first iterations
 
 - **TLS.** A self-signed certificate generated at activation, its fingerprint carried in the
   pairing command and pinned by the client, would make the token safe on an untrusted network at
   the cost of a `rustls` server in the app. Decide after the first week on a trusted LAN.
-- **Claude Code's `autoMemoryDirectory` granularity.** If it is one directory for every project,
-  the mirror folder is that one directory; if per-project subfolders appear under it, they mirror
-  as-is. Verify against the current docs during implementation and record the answer in §9.6.
+- **Claude Code's `autoMemoryDirectory` granularity.** Resolved, see §9.6: one flat directory,
+  shared by every project when set at user scope; the mirror folder is that directory.
 - **Desk address in the pairing command.** `.local` names depend on mDNS; a tailnet name may be
   what the person wants. The modal shows the alternatives it can see.
 - **Index growth.** A vault with tens of thousands of notes makes the in-memory index heavy;

@@ -624,7 +624,7 @@ fn serve(args: &[String]) -> Result<(), String> {
         }
         let response = match JsonRpcRequest::parse(trimmed) {
             Ok(request) => proxy.handle(request),
-            Err(error) => Some(error),
+            Err(error) => Some(*error),
         };
         if let Some(response) = response {
             let mut out = stdout.lock();

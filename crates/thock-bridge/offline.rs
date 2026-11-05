@@ -227,7 +227,7 @@ impl Outbox {
     pub fn drain(
         &self,
         mut send: impl FnMut(&OutboxEntry) -> Result<(), String>,
-    ) -> Result<usize, DrainStop> {
+    ) -> Result<usize, Box<DrainStop>> {
         let mut remaining = self.entries();
         let mut sent = 0;
         while !remaining.is_empty() {
@@ -237,13 +237,13 @@ impl Outbox {
                     remaining.remove(0);
                     sent += 1;
                     if let Err(error) = self.rewrite(&remaining) {
-                        return Err(DrainStop {
+                        return Err(Box::new(DrainStop {
                             entry,
                             reason: format!("couldn't update the outbox: {error}"),
-                        });
+                        }));
                     }
                 }
-                Err(reason) => return Err(DrainStop { entry, reason }),
+                Err(reason) => return Err(Box::new(DrainStop { entry, reason })),
             }
         }
         Ok(sent)
