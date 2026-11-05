@@ -497,10 +497,13 @@ impl BridgeService {
             project::Event::WorktreeUpdatedEntries(_, changes) => {
                 let vault_config = format!("{VAULT_MARKER_DIR}/{VAULT_CONFIG_FILE}");
                 let mut reload = false;
+                let mut bridge_config_changed = false;
                 for (path, _, change) in changes.iter() {
                     let path = path.as_unix_str();
-                    if path == vault_config || path == BRIDGE_CONFIG_PATH {
+                    if path == vault_config {
                         reload = true;
+                    } else if path == BRIDGE_CONFIG_PATH {
+                        bridge_config_changed = true;
                     } else if SearchIndex::indexes(path) {
                         self.index_changed(
                             path,
@@ -511,10 +514,52 @@ impl BridgeService {
                 }
                 if reload {
                     self.reload(cx);
+                } else if bridge_config_changed {
+                    self.reload_bridge_config(cx);
                 }
             }
             _ => {}
         }
+    }
+
+    /// `bridge.toml` was edited while serving: a new port or bind address
+    /// rebinds, a new daily heading applies in place (the connect-agent
+    /// skill promises "the desk rebinds on save").
+    fn reload_bridge_config(&mut self, cx: &mut Context<Self>) {
+        if self.listener.is_none() {
+            self.apply_state(cx);
+            return;
+        }
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let fs = self.fs(cx);
+        cx.spawn(async move |this, cx| {
+            let path = vault.root.join(BRIDGE_CONFIG_PATH);
+            let config = match fs.load(&path).await {
+                Ok(raw) => match BridgeConfig::parse(&raw) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        log::warn!("Thock: {BRIDGE_CONFIG_PATH} is not readable: {error}");
+                        return;
+                    }
+                },
+                // Deleted: the next start writes the defaults back.
+                Err(_) => BridgeConfig::default(),
+            };
+            this.update(cx, |service, cx| {
+                let rebind =
+                    config.port != service.config.port || config.bind != service.config.bind;
+                service.config = config;
+                if rebind {
+                    service.stop(BridgeState::Starting, cx);
+                    service.apply_state(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Keeps the search index current from the worktree's events (§9.3).
@@ -2813,6 +2858,66 @@ mod tests {
                 .contains("9f86d081"),
             "the refused version never replaced the mirrored one"
         );
+    }
+
+    /// Editing `bridge.toml` while serving rebinds on a new port and takes
+    /// a new daily heading in place.
+    #[gpui::test]
+    async fn editing_the_config_while_serving_rebinds(cx: &mut TestAppContext) {
+        let desk = serve(cx, true).await;
+        let first_port = desk.port;
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let new_port = free.local_addr().unwrap().port();
+        drop(free);
+        desk.fs
+            .atomic_write(
+                PathBuf::from("/vault/.thock/routines/agents/bridge.toml"),
+                format!("port = {new_port}\nbind = \"127.0.0.1\"\ntoday_heading = \"Agentes\"\n"),
+            )
+            .await
+            .unwrap();
+        let mut rebound = false;
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if desk.service.read_with(cx, |service, _| {
+                matches!(service.state(), BridgeState::Serving { port, .. } if *port == new_port)
+            }) {
+                rebound = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            rebound,
+            "{:?}",
+            desk.service
+                .read_with(cx, |service, _| service.state().clone())
+        );
+        assert_ne!(first_port, new_port);
+        assert_eq!(
+            desk.service
+                .read_with(cx, |service, _| service.config.today_heading.clone()),
+            "Agentes"
+        );
+        // A heading-only edit changes nothing about the port.
+        desk.fs
+            .atomic_write(
+                PathBuf::from("/vault/.thock/routines/agents/bridge.toml"),
+                format!(
+                    "port = {new_port}\nbind = \"127.0.0.1\"\ntoday_heading = \"Agents said\"\n"
+                ),
+            )
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            desk.service
+                .read_with(cx, |service, _| service.config.today_heading.clone()),
+            "Agents said"
+        );
+        assert!(desk.service.read_with(cx, |service, _| {
+            matches!(service.state(), BridgeState::Serving { port, .. } if *port == new_port)
+        }));
     }
 
     /// A mirrored file takes a restore point before it changes, and the
