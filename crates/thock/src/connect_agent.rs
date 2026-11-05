@@ -15,8 +15,9 @@ use ui::{Headline, HeadlineSize, Icon, IconName, IconSize, KeyBinding, Label, Li
 use util::ResultExt as _;
 use workspace::ModalView;
 
-use crate::bridge_service::{BridgeService, ClientView, PairingInvite};
+use crate::bridge_service::{BridgeService, ClientView, PairingInvite, ShowAgentDetails};
 use crate::calendar_service::ManualSyncFinished;
+use gpui::Action as _;
 
 pub struct ConnectAgentModal {
     focus_handle: FocusHandle,
@@ -289,14 +290,13 @@ pub struct DisconnectAgentPicker {
 
 impl DisconnectAgentPicker {
     pub fn new(
-        service: WeakEntity<BridgeService>,
+        _service: WeakEntity<BridgeService>,
         clients: Vec<ClientView>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let delegate = DisconnectAgentDelegate {
             picker_entity: cx.entity().downgrade(),
-            service,
             clients,
             selected_index: 0,
         };
@@ -325,7 +325,6 @@ impl Render for DisconnectAgentPicker {
 
 pub struct DisconnectAgentDelegate {
     picker_entity: WeakEntity<DisconnectAgentPicker>,
-    service: WeakEntity<BridgeService>,
     clients: Vec<ClientView>,
     selected_index: usize,
 }
@@ -367,18 +366,18 @@ impl PickerDelegate for DisconnectAgentDelegate {
         Task::ready(())
     }
 
-    fn confirm(&mut self, _secondary: bool, _window: &mut Window, cx: &mut Context<Picker<Self>>) {
+    /// Opens the chosen machine's details, where Disconnect asks first;
+    /// deferred by `dispatch_action`, so the modal swaps in after this one
+    /// has closed.
+    fn confirm(&mut self, _secondary: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
         if let Some(client) = self.clients.get(self.selected_index) {
-            let name = client.name.clone();
-            self.service
-                .update(cx, |service, cx| {
-                    service.disconnect(&name, cx);
-                    cx.emit(ManualSyncFinished {
-                        message: format!("{name} is disconnected; pair it again any time").into(),
-                        icon: IconName::Check,
-                    });
-                })
-                .log_err();
+            window.dispatch_action(
+                ShowAgentDetails {
+                    name: client.name.clone(),
+                }
+                .boxed_clone(),
+                cx,
+            );
         }
         self.picker_entity
             .update(cx, |_, cx| cx.emit(DismissEvent))
@@ -488,6 +487,8 @@ mod tests {
             name: name.into(),
             last_seen: String::new(),
             paired_at: paired_at.into(),
+            last_harness: String::new(),
+            paired_via: String::new(),
         };
         let robin = client("robin", "2026-11-04T08:00:00Z");
         let hp = client("hp", "2026-11-04T09:00:00Z");

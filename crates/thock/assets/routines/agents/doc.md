@@ -37,7 +37,9 @@ your words.
 The section's status row says what the desk is doing: `Serving on
 palloma.local:7557 · 2 agents`, `Not serving: port 7557 is in use`, `Paused`.
 **Connected agents** lists each paired machine with when it last called;
-**Disconnect agent** forgets one, and it can pair again any time.
+open one (enter, or a click) for its details — when it paired, which agent
+called last, the address it reached — and a **Disconnect** that asks first.
+A disconnected machine can pair again any time with a new code.
 
 ## What lives in the vault
 

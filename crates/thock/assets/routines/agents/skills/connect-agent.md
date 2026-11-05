@@ -62,5 +62,8 @@ machine pairs; you never touch `.thock/`.
   touches it, or that looks like a credential.
 - With the desk off, the other machine answers from its cache and queues its
   writes; they land, once and in order, when the desk is back.
-- **Disconnect agent** in the palette forgets a machine; **Toggle Bridge**
-  pauses serving without removing the Routine.
+- A machine's row under **Connected agents** (or **Disconnect agent** in the
+  palette) opens its details: when it paired, when it last called and
+  through which agent. **Disconnect** there asks first; the machine needs a
+  new code to pair again. **Toggle Bridge** pauses serving without removing
+  the Routine.

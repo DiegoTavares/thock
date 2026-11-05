@@ -139,6 +139,12 @@ pub struct PairedClient {
     pub paired_at: String,
     #[serde(default)]
     pub last_seen: String,
+    /// The harness behind the machine's last call (`claude-code`, …).
+    #[serde(default)]
+    pub last_harness: String,
+    /// The desk address the machine paired against (its `Host` header).
+    #[serde(default)]
+    pub paired_via: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -306,11 +312,18 @@ mod tests {
             token_sha256: sha256_hex("secret"),
             paired_at: "2026-11-04T08:00:00Z".into(),
             last_seen: String::new(),
+            last_harness: "claude-code".into(),
+            paired_via: "palloma.local:7557".into(),
         }];
         let rendered = render_clients(&clients);
         assert!(rendered.contains("[[client]]"));
         assert_eq!(parse_clients(&rendered).unwrap(), clients);
         assert!(parse_clients("").unwrap().is_empty());
+        // A file from before the harness and address were recorded.
+        let older = "[[client]]\nname = \"hp\"\ntoken_sha256 = \"x\"\npaired_at = \"2026-11-04T08:00:00Z\"\n";
+        let parsed = parse_clients(older).unwrap();
+        assert_eq!(parsed[0].last_harness, "");
+        assert_eq!(parsed[0].paired_via, "");
     }
 
     #[test]

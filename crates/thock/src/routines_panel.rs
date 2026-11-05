@@ -32,7 +32,9 @@ use workspace::notifications::NotificationId;
 use workspace::{OpenOptions, OpenVisible, Toast, Workspace};
 
 use crate::agent_panel::RunSkill;
-use crate::bridge_service::{self, BridgeService, BridgeState, ClientView, ConnectOtherAgent};
+use crate::bridge_service::{
+    self, BridgeService, BridgeState, ClientView, ConnectOtherAgent, ShowAgentDetails,
+};
 use crate::chat_panel::ChatPanel;
 use crate::getting_started;
 use crate::notes::{EnsureNoteOutcome, NoteKind, TimelineEntry, ensure_note};
@@ -680,7 +682,7 @@ enum NavRowKind {
     GettingStarted(GettingStartedStep),
     /// The Agents Routine's status row; `enter` opens *Connect an agent*.
     BridgeStatus,
-    /// A paired machine, by name; `enter` disconnects it.
+    /// A paired machine, by name; `enter` opens its details.
     BridgeClient(String),
 }
 
@@ -796,9 +798,8 @@ pub struct RoutinesPanel {
     onboarding_recheck: bool,
     /// The chat, for the running dot on a ritual's row (V44 §5.13).
     chat: Option<Entity<ChatPanel>>,
-    /// The agents bridge, for the Agents section's status row; refreshed
+    /// The agents bridge's state, for the Agents section's rows; refreshed
     /// whenever the service changes.
-    bridge: Option<Entity<BridgeService>>,
     bridge_summary: Option<BridgeSummary>,
     _subscriptions: Vec<Subscription>,
 }
@@ -912,7 +913,6 @@ impl RoutinesPanel {
                 onboarding_check_running: false,
                 onboarding_recheck: false,
                 chat,
-                bridge,
                 bridge_summary,
                 _subscriptions: vec![
                     project_subscription,
@@ -2406,23 +2406,12 @@ impl RoutinesPanel {
             // Deferred by `dispatch_action`, so the workspace that opens the
             // modal is not leased while this panel is.
             NavRowKind::BridgeStatus => window.dispatch_action(ConnectOtherAgent.boxed_clone(), cx),
-            NavRowKind::BridgeClient(name) => self.disconnect_agent(&name, cx),
+            // The details modal is where Disconnect lives, behind a
+            // confirmation; a row never disconnects on its own.
+            NavRowKind::BridgeClient(name) => {
+                window.dispatch_action(ShowAgentDetails { name }.boxed_clone(), cx)
+            }
         }
-    }
-
-    /// Forgets a paired machine from its row; the toast says it can pair
-    /// again.
-    fn disconnect_agent(&mut self, name: &str, cx: &mut Context<Self>) {
-        let Some(bridge) = self.bridge.clone() else {
-            return;
-        };
-        bridge.update(cx, |service, cx| {
-            service.disconnect(name, cx);
-            cx.emit(crate::calendar_service::ManualSyncFinished {
-                message: format!("{name} is disconnected; pair it again any time").into(),
-                icon: IconName::Check,
-            });
-        });
     }
 
     fn view_skill(&mut self, _: &ViewSkill, window: &mut Window, cx: &mut Context<Self>) {
@@ -2857,7 +2846,8 @@ impl RoutinesPanel {
             .into_any_element()
     }
 
-    /// `robin · last seen 3 min ago`, with Disconnect on the row.
+    /// `robin · last seen 3 min ago`; `enter` or a click opens the
+    /// machine's details, where Disconnect asks first.
     fn render_bridge_client_row(
         &self,
         client: &ClientView,
@@ -2884,16 +2874,9 @@ impl RoutinesPanel {
                 .size(LabelSize::Small)
                 .truncate(),
         )
-        .end_slot(
-            Label::new("Disconnect")
-                .size(LabelSize::XSmall)
-                .color(Color::Muted),
-        )
-        .tooltip(Tooltip::text(
-            "Disconnect this computer; it can pair again any time",
-        ))
-        .on_click(cx.listener(move |this, _, _window, cx| {
-            this.disconnect_agent(&name, cx);
+        .tooltip(Tooltip::text("This computer's details, and Disconnect"))
+        .on_click(cx.listener(move |_, _, window, cx| {
+            window.dispatch_action(ShowAgentDetails { name: name.clone() }.boxed_clone(), cx);
         }))
         .into_any_element()
     }
@@ -3809,6 +3792,8 @@ mod tests {
                 name: "robin".into(),
                 last_seen: String::new(),
                 paired_at: String::new(),
+                last_harness: String::new(),
+                paired_via: String::new(),
             }],
         };
         let items = section_items(&manifest, &HashSet::new(), &[], Some(&bridge));
@@ -3939,13 +3924,19 @@ mod tests {
         assert_eq!(DASHBOARD_ICON, "icons/thock/dashboard.svg");
     }
 
-    /// The Agents section's rows work from the keyboard (CLAUDE.md panels
-    /// rule): `enter` on the status row opens *Connect an agent*, `escape`
-    /// hands focus back, and `enter` on a machine's row disconnects it.
-    #[gpui::test]
-    async fn enter_on_the_agents_rows_connects_and_disconnects(cx: &mut gpui::TestAppContext) {
+    /// A workspace over a real tempdir vault with the Agents Routine, the
+    /// shipped Linux keymap bound, the bridge serving on a loopback port
+    /// with one paired machine, and the Routines panel focused.
+    async fn agents_panel(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        gpui::Entity<Workspace>,
+        gpui::Entity<RoutinesPanel>,
+        gpui::Entity<crate::bridge_service::BridgeService>,
+        tempfile::TempDir,
+        &mut gpui::VisualTestContext,
+    ) {
         use crate::bridge_service::{self, BridgeService};
-        use crate::connect_agent::ConnectAgentModal;
         use fs::FakeFs;
         use gpui::{KeyBinding, VisualTestContext};
         use settings::{KeymapFile, KeymapFileLoadResult, SettingsStore};
@@ -4008,23 +3999,66 @@ mod tests {
             panel
         });
         cx.run_until_parked();
+        (workspace, panel, service, dir, cx)
+    }
 
-        let (status_index, rows) = panel.read_with(cx, |panel, _| {
-            let rows = panel.nav_rows();
-            let index = rows
+    /// Puts the keyboard cursor on the Agents section's status row.
+    fn select_status_row(
+        panel: &gpui::Entity<RoutinesPanel>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> usize {
+        let status_index = panel.read_with(cx, |panel, _| {
+            panel
+                .nav_rows()
                 .iter()
                 .position(|row| matches!(row.kind, NavRowKind::BridgeStatus))
-                .expect("the Agents section leads with its status row");
-            (index, rows.len())
+                .expect("the Agents section leads with its status row")
         });
-        assert!(
-            rows > status_index + 1,
-            "a Connected agents row follows the status"
-        );
         panel.update(cx, |panel, cx| {
             panel.selected_index = Some(status_index);
             cx.notify();
         });
+        status_index
+    }
+
+    /// Opens the Connected agents group and lands the cursor on robin's row.
+    fn select_robin(panel: &gpui::Entity<RoutinesPanel>, cx: &mut gpui::VisualTestContext) {
+        let status_index = select_status_row(panel, cx);
+        panel.update(cx, |panel, cx| {
+            panel.selected_index = Some(status_index + 1);
+            cx.notify();
+        });
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        let selected = panel.read_with(cx, |panel, cx| {
+            panel.selected_row(cx).map(|row| row_key(&row))
+        });
+        assert_eq!(
+            selected.as_deref(),
+            Some(nav_key(bridge_service::AGENTS_ROUTINE_ID, "client", "robin").as_str())
+        );
+    }
+
+    fn details_open(
+        workspace: &gpui::Entity<Workspace>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<gpui::Entity<crate::agent_details::AgentDetailsModal>> {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<crate::agent_details::AgentDetailsModal>(cx)
+        })
+    }
+
+    /// The Agents section's rows work from the keyboard (CLAUDE.md panels
+    /// rule): `enter` on the status row opens *Connect an agent* and
+    /// `escape` hands focus back.
+    #[gpui::test]
+    async fn enter_on_the_status_row_opens_connect_an_agent(cx: &mut gpui::TestAppContext) {
+        use crate::connect_agent::ConnectAgentModal;
+        let (workspace, panel, _service, _dir, cx) = agents_panel(cx).await;
+        let status_index = select_status_row(&panel, cx);
+        assert!(panel.read_with(cx, |panel, _| panel.nav_rows().len() > status_index + 1));
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert!(
@@ -4043,32 +4077,82 @@ mod tests {
             cx.update(|window, _| panel_focus.is_focused(window)),
             "escape gives the panel its focus back"
         );
+    }
 
-        // The group row, then into it, then the machine's row.
-        panel.update(cx, |panel, cx| {
-            panel.selected_index = Some(status_index + 1);
-            cx.notify();
-        });
-        cx.simulate_keystrokes("right");
+    /// `enter` on a machine's row opens its details and nothing else;
+    /// Disconnect is behind a confirmation that `escape` backs out of, and
+    /// confirming it removes the machine and closes the modal.
+    #[gpui::test]
+    async fn a_machine_row_opens_details_and_disconnect_asks_first(cx: &mut gpui::TestAppContext) {
+        use crate::agent_details::Choice;
+        let (workspace, panel, service, _dir, cx) = agents_panel(cx).await;
+        let connected = |cx: &mut gpui::VisualTestContext| {
+            service.read_with(cx, |service, _| service.clients().len() == 1)
+        };
+        select_robin(&panel, cx);
+        cx.simulate_keystrokes("enter");
         cx.run_until_parked();
-        cx.simulate_keystrokes("down");
-        cx.run_until_parked();
-        let (selected, keys) = panel.read_with(cx, |panel, cx| {
-            (
-                panel.selected_row(cx).map(|row| row_key(&row)),
-                panel.nav_rows().iter().map(row_key).collect::<Vec<_>>(),
-            )
-        });
-        assert_eq!(
-            selected.as_deref(),
-            Some(nav_key(bridge_service::AGENTS_ROUTINE_ID, "client", "robin").as_str()),
-            "rows: {keys:?}"
-        );
+        let modal = details_open(&workspace, cx).expect("enter opens the details");
+        assert!(connected(cx), "opening the details disconnects nothing");
+        assert!(!modal.read_with(cx, |modal, _| modal.confirming));
+
+        // Disconnect is the first button: enter asks first.
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         assert!(
-            service.read_with(cx, |service, _| service.clients().is_empty()),
-            "enter on a machine's row disconnects it"
+            modal.read_with(cx, |modal, _| modal.confirming),
+            "the confirmation is shown"
         );
+        assert!(connected(cx));
+
+        // escape on the confirmation goes back to the details, not out.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(details_open(&workspace, cx).is_some());
+        assert!(!modal.read_with(cx, |modal, _| modal.confirming));
+
+        // down reaches Close; up comes back to Disconnect.
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(modal.read_with(cx, |modal, _| modal.selected), Choice::Keep);
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        assert_eq!(
+            modal.read_with(cx, |modal, _| modal.selected),
+            Choice::Disconnect
+        );
+
+        // enter on Disconnect, then enter on the confirmed Disconnect.
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(modal.read_with(cx, |modal, _| modal.confirming));
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(details_open(&workspace, cx).is_none(), "the modal closed");
+        assert!(
+            service.read_with(cx, |service, _| service.clients().is_empty()),
+            "the machine is disconnected"
+        );
+    }
+
+    /// `escape` from the details closes them with the machine still
+    /// connected.
+    #[gpui::test]
+    async fn escape_from_the_details_keeps_the_machine(cx: &mut gpui::TestAppContext) {
+        let (workspace, panel, service, _dir, cx) = agents_panel(cx).await;
+        select_robin(&panel, cx);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(details_open(&workspace, cx).is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(details_open(&workspace, cx).is_none());
+        assert_eq!(
+            service.read_with(cx, |service, _| service.clients().len()),
+            1,
+            "escape disconnects nothing"
+        );
+        let panel_focus = panel.read_with(cx, |panel, _| panel.focus_handle.clone());
+        assert!(cx.update(|window, _| panel_focus.is_focused(window)));
     }
 }

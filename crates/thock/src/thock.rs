@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_details;
 pub mod agent_panel;
 pub mod backlog;
 pub mod backlog_panel;

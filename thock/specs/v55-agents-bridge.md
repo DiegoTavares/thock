@@ -357,10 +357,15 @@ Changes to shipped core files, upgraded in place by the V29 reconcile:
 - **UI.** In the Routines panel the Agents section gets a status row above its links:
   `Serving on palloma.local:7557 · 2 agents` / `Not serving: port 7557 is in use` / `Off`.
   Enter on the row opens *Connect an agent*; a `Connected agents` collapsed row lists clients with
-  `last seen` and a Disconnect action. Actions: `thock::ConnectAgent` (opens the modal),
-  `thock::DisconnectAgent` (picker over clients), `thock::ToggleBridge` (stop/start without
-  removing the Routine). All three in the command palette; the modal is `menu`-navigable and
-  `escape` closes it.
+  `last seen`. Enter or a click on a client row opens its **details modal** (decision 36): paired
+  on, last seen, last harness seen, the desk address it paired against, and a Disconnect that
+  switches to a confirmation (`Disconnect robin? It will need a new code to pair again.`) with
+  Disconnect / Keep; nothing disconnects on a bare row. Actions: `thock::ConnectOtherAgent` (opens
+  the pairing modal), `thock::DisconnectAgent` (picker over clients, opening the chosen machine's
+  details), `thock::ShowAgentDetails { name }` (the row path), `thock::ToggleBridge` (stop/start
+  without removing the Routine). The palette lists the first three; both modals are
+  `menu`-navigable (`j`/`k` under vim) and `escape` closes them — on the confirmation it goes
+  back to the details.
 - **Keymap.** No new chords; the actions are palette-reachable. The modal's `KeyContext` is
   `ThockConnectAgentModal`.
 
@@ -536,6 +541,7 @@ Added at implementation (2026-11-04):
 | 33 | Connection budget (verification R1, R2) | **An absolute deadline per connection** (10 s for the head, 30 s in all) set as the socket timeout before every read through `DeadlineStream`; a head line is read through `Take` so a newline-less stream is 431 at 16 KiB; **two pre-head connections per address** (503 beyond), so a trickling peer holds at most two of the sixteen workers for ten seconds. |
 | 34 | Drain retries (verification R3) | **408 and 429 are transport** (keep, stop), as is an `is_error` tool result the desk did not mark; a refusal is a result carrying `_meta.thock.refused = true` (`CallToolResponse::refused`, from `HostError::Refused`; `HostError::Transient` for the file system and the like). |
 | 35 | Stop, resume, wake (verification R4, R5, R6, R8) | The listener's join is a `Shared` task chained behind any earlier one and kept on the service, every resume awaits it with a 5 s cap and shows `Failed` past it; an IPv6 bind is woken on `::1`; the outbox lock covers reads and removals, never a send; the modal closes with a toast naming the newest `paired_at` when the code is spent, quietly when the list shrank. |
+| 36 | A machine's row (by-hand finding) | **Enter or a click opens the machine's details**, never a disconnect: `AgentDetailsModal` (`ThockAgentDetailsModal` + `menu`) shows paired-on, last seen, the last harness seen (recorded per client from `X-Thock-Harness` on every authenticated call, `last_harness` in `clients.toml`) and the address it paired against (its `Host` header, `paired_via`); Disconnect asks first, through the serialised `persist_clients` path, then closes and toasts. `thock::DisconnectAgent`'s picker opens the same modal. |
 
 ## 16. Open decisions, for the first iterations
 

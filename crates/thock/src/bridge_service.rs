@@ -82,6 +82,16 @@ gpui::actions!(
     ]
 );
 
+/// Opens a connected computer's details — when it paired, when it last
+/// called, which agent — with Disconnect behind a confirmation. The
+/// Routines panel's machine rows and the Disconnect agent picker open it.
+#[derive(Clone, PartialEq, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+#[action(namespace = thock)]
+#[serde(deny_unknown_fields)]
+pub struct ShowAgentDetails {
+    pub name: String,
+}
+
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _window, cx| {
         let project = workspace.project().clone();
@@ -148,6 +158,27 @@ pub(crate) fn register_workspace_actions(workspace: &mut Workspace) {
                 service.update(cx, |service, cx| service.toggle(cx));
             }
         });
+        workspace.register_action(|workspace, action: &ShowAgentDetails, window, cx| {
+            let Some(service) = service_for_project(workspace.project(), cx) else {
+                return;
+            };
+            let Some(client) = service
+                .read(cx)
+                .clients()
+                .into_iter()
+                .find(|client| client.name == action.name)
+            else {
+                workspace.show_error(
+                    format!("{} isn't connected to this vault.", action.name),
+                    cx,
+                );
+                return;
+            };
+            let service = service.downgrade();
+            workspace.toggle_modal(window, cx, |window, cx| {
+                crate::agent_details::AgentDetailsModal::new(service, client, window, cx)
+            });
+        });
     }
 }
 
@@ -208,27 +239,46 @@ pub struct ClientView {
     pub name: String,
     pub last_seen: String,
     pub paired_at: String,
+    /// The harness behind its last call, empty before the first.
+    pub last_harness: String,
+    /// The desk address it paired against, as it typed it.
+    pub paired_via: String,
 }
 
 impl ClientView {
     /// `robin · last seen 3 min ago`, or just the name before the first call.
     pub fn label(&self, now: chrono::DateTime<Utc>) -> String {
-        match chrono::DateTime::parse_from_rfc3339(&self.last_seen) {
-            Ok(seen) => {
-                let minutes = (now - seen.with_timezone(&Utc)).num_minutes();
-                let ago = if minutes < 1 {
-                    "just now".to_string()
-                } else if minutes < 60 {
-                    format!("{minutes} min ago")
-                } else if minutes < 60 * 24 {
-                    format!("{} h ago", minutes / 60)
-                } else {
-                    format!("{} days ago", minutes / (60 * 24))
-                };
-                format!("{} · last seen {ago}", self.name)
-            }
-            Err(_) => self.name.clone(),
+        match self.last_seen_ago(now) {
+            Some(ago) => format!("{} · last seen {ago}", self.name),
+            None => self.name.clone(),
         }
+    }
+
+    /// `just now`, `3 min ago`, `2 h ago`, `5 days ago`; `None` before the
+    /// first call.
+    pub fn last_seen_ago(&self, now: chrono::DateTime<Utc>) -> Option<String> {
+        let seen = chrono::DateTime::parse_from_rfc3339(&self.last_seen).ok()?;
+        let minutes = (now - seen.with_timezone(&Utc)).num_minutes();
+        Some(if minutes < 1 {
+            "just now".to_string()
+        } else if minutes < 60 {
+            format!("{minutes} min ago")
+        } else if minutes < 60 * 24 {
+            format!("{} h ago", minutes / 60)
+        } else {
+            format!("{} days ago", minutes / (60 * 24))
+        })
+    }
+
+    /// The day it paired, `2026-11-04`, or the raw value when unreadable.
+    pub fn paired_on(&self) -> String {
+        chrono::DateTime::parse_from_rfc3339(&self.paired_at)
+            .map(|at| {
+                at.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d")
+                    .to_string()
+            })
+            .unwrap_or_else(|_| self.paired_at.clone())
     }
 }
 
@@ -300,6 +350,8 @@ struct Incoming {
     /// `/v1/pair`.
     client: Option<String>,
     harness: String,
+    /// The `Host` header: the desk address the machine reached.
+    host: String,
     body: Vec<u8>,
 }
 
@@ -464,6 +516,8 @@ impl BridgeService {
                 token_sha256: thock_bridge::sha256_hex(token),
                 paired_at: "2026-11-04T08:00:00Z".into(),
                 last_seen: "2026-11-04T08:00:00Z".into(),
+                last_harness: "claude-code".into(),
+                paired_via: "palloma.local:7557".into(),
             });
         }
     }
@@ -479,6 +533,8 @@ impl BridgeService {
                         name: client.name.clone(),
                         last_seen: client.last_seen.clone(),
                         paired_at: client.paired_at.clone(),
+                        last_harness: client.last_harness.clone(),
+                        paired_via: client.paired_via.clone(),
                     })
                     .collect()
             })
@@ -1183,10 +1239,18 @@ fn answer(
         Err(status) => return Outgoing::error(status, "the request's body didn't arrive in time"),
     };
     let harness = head.header(thock_bridge::HARNESS_HEADER).unwrap_or("agent");
+    let host: String = head
+        .header("host")
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_' | '[' | ']'))
+        .take(120)
+        .collect();
     let incoming = Incoming {
         route,
         client,
         harness: thock_bridge::sanitize_harness(harness),
+        host,
         body,
     };
     let (reply_sender, reply_receiver) = oneshot::channel();
@@ -1242,7 +1306,7 @@ async fn handle_incoming(
         return Outgoing::error(503, "the vault is closed");
     };
     let outgoing = match incoming.route {
-        Route::Pair => handle_pair(&context, &incoming.body, &service, cx).await,
+        Route::Pair => handle_pair(&context, &incoming.body, &incoming.host, &service, cx).await,
         Route::Health => Outgoing::json(
             200,
             serde_json::to_string(&thock_bridge::HealthResponse {
@@ -1280,7 +1344,7 @@ async fn handle_incoming(
         Route::NotFound => Outgoing::error(404, "nothing here"),
     };
     if let Some(name) = incoming.client {
-        let persist = touch_client(&context, &name);
+        let persist = touch_client(&context, &name, &incoming.harness);
         service.update(cx, |service, cx| {
             if persist {
                 service.persist_clients_later(cx);
@@ -1293,7 +1357,7 @@ async fn handle_incoming(
 
 /// Records when a paired machine last called; says whether the list is
 /// worth persisting (once a minute per client).
-fn touch_client(context: &RequestContext, name: &str) -> bool {
+fn touch_client(context: &RequestContext, name: &str, harness: &str) -> bool {
     let now = Utc::now();
     let Ok(mut shared) = context.shared.lock() else {
         return false;
@@ -1304,8 +1368,10 @@ fn touch_client(context: &RequestContext, name: &str) -> bool {
     let stale = chrono::DateTime::parse_from_rfc3339(&client.last_seen)
         .map(|seen| (now - seen.with_timezone(&Utc)).num_seconds() >= 60)
         .unwrap_or(true);
+    let harness_changed = client.last_harness != harness;
     client.last_seen = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    stale
+    client.last_harness = harness.to_string();
+    stale || harness_changed
 }
 
 fn vault_name(vault: &Vault) -> String {
@@ -1319,6 +1385,7 @@ fn vault_name(vault: &Vault) -> String {
 async fn handle_pair(
     context: &RequestContext,
     body: &[u8],
+    host: &str,
     service: &Entity<BridgeService>,
     cx: &mut AsyncApp,
 ) -> Outgoing {
@@ -1364,6 +1431,8 @@ async fn handle_pair(
                 token_sha256: thock_bridge::sha256_hex(&token),
                 paired_at: now.clone(),
                 last_seen: now,
+                last_harness: String::new(),
+                paired_via: host.to_string(),
             });
             shared.clients.clone()
         }
@@ -2154,6 +2223,16 @@ mod tests {
             .await
             .unwrap();
         assert!(clients.contains("name = \"robin\""));
+        assert!(clients.contains("paired_via = \"127.0.0.1:"), "{clients}");
+        let robin = desk
+            .service
+            .read_with(cx, |service, _| service.clients())
+            .remove(0);
+        assert!(robin.paired_via.starts_with("127.0.0.1:"));
+        assert_eq!(
+            robin.last_harness, "agent",
+            "a health call named no harness"
+        );
         assert!(
             !clients.contains(&token),
             "tokens are never stored in the clear"
