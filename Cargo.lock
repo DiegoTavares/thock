@@ -12618,7 +12618,7 @@ dependencies = [
 
 [[package]]
 name = "thock_app"
-version = "1.26.0"
+version = "1.26.1"
 dependencies = [
  "agent_settings",
  "anyhow",
