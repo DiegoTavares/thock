@@ -30,7 +30,10 @@ machine pairs; you never touch `.thock/`.
 1. `thock-bridge` ships beside the `thock` command (Thock installs both with
    *Install CLI*). On a machine without the app, download
    `thock-bridge-<os>-<arch>` from the release page, `chmod +x` it, and put
-   it on the path.
+   it on the path. The macOS file is signed with Thock's identity but not
+   notarised on its own, so one saved through a browser is quarantined:
+   `xattr -d com.apple.quarantine thock-bridge` once, or fetch it with `curl`,
+   which sets no quarantine.
 2. Run the copied command there. It answers `Paired with <vault> on <desk>`
    and the modal on the desk closes by itself. The code is spent; a second
    machine needs a new one.
