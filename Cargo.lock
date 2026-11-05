@@ -12601,7 +12601,6 @@ dependencies = [
  "theme_settings",
  "thock_bridge",
  "thock_sync_core",
- "tiny_http",
  "title_bar",
  "toml 0.8.23",
  "toml_edit 0.22.27",

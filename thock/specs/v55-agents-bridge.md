@@ -340,13 +340,14 @@ Changes to shipped core files, upgraded in place by the V29 reconcile:
 
 - **`BridgeService`**, one per workspace with a valid vault, created by `thock.rs` init like
   `VaultSyncService`. It observes the Routine list: when `agents` becomes enabled it reads or
-  creates `bridge.toml`, binds `bind:port` on a background thread (`tiny_http`, the crate
-  `oauth_callback_server` already uses), and starts the foreground task that drains the request
-  channel. When the Routine is removed or the vault closes it stops the thread and drops the
+  creates `bridge.toml`, binds `bind:port` on a background thread (a `std::net` accept loop with
+  one worker per connection; see decision 24 for why not `tiny_http`), and starts the foreground
+  task that drains the request channel. When the Routine is removed or the vault closes it stops the thread and drops the
   listener. A bind failure (port taken) is a visible holding state in the section, with the port.
-- **Request handling.** The thread parses the HTTP request, checks the token against
-  `clients.toml` (constant-time compare of hashes), and sends `(Incoming, oneshot::Sender)` over a
-  `smol::channel`. The foreground task implements `ToolHost` with the project `Fs`: reads through
+- **Request handling.** A worker thread reads the request head, routes it and checks the token
+  against `clients.toml` (constant-time compare of hashes) before reading a byte of body (capped
+  at 1 KiB for `/v1/pair`, 2 MiB once paired, 10 s socket timeouts), then sends
+  `(Incoming, oneshot::Sender)` over a `futures` channel. The foreground task implements `ToolHost` with the project `Fs`: reads through
   `Fs`, writes through `thock_sync_core::apply` with a `Write` built by the library, so every
   write fires file events and takes the same history checkpoint (`history::checkpoint_before_ai_write`)
   the hosted agent's `append` takes. The thread writes the reply and closes.

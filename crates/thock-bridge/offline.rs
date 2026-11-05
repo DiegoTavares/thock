@@ -375,7 +375,7 @@ mod tests {
             Some(&second)
         );
         assert_eq!(sent, vec![first.id]);
-        assert_eq!(outbox.entries(), vec![second.clone(), third]);
+        assert_eq!(outbox.entries(), vec![second, third]);
 
         let report = outbox.drain(|_| Ok(()));
         assert_eq!(report.sent, 2);
