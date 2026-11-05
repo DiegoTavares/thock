@@ -246,7 +246,7 @@ impl Proxy {
 
     /// Forwards one request to the desk. `Err` means the desk did not
     /// answer usefully, which is the cue for the offline path.
-    fn forward(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse, String> {
+    fn forward(&self, request: &JsonRpcRequest) -> Result<JsonRpcResponse, String> {
         let config = self.config.as_ref().ok_or_else(|| {
             "not paired with a desk yet; run `thock-bridge pair <host:port> <code>`".to_string()
         })?;
@@ -274,7 +274,8 @@ impl Proxy {
         if self.outbox.is_empty() || self.config.is_none() {
             return;
         }
-        let result = self.outbox.drain(|entry| {
+        let outbox = self.outbox.clone();
+        let result = outbox.drain(|entry| {
             let request = JsonRpcRequest::new(
                 json!(format!("outbox-{}", entry.id)),
                 "tools/call",

@@ -18,7 +18,6 @@ pub const PARSE_ERROR: i64 = -32700;
 pub const INVALID_REQUEST: i64 = -32600;
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
-pub const INTERNAL_ERROR: i64 = -32603;
 pub const INDEX_RESOURCE_URI: &str = "thock://memory/index";
 pub const NOTE_RESOURCE_PREFIX: &str = "thock://note/";
 const DEFAULT_SEARCH_LIMIT: usize = 10;

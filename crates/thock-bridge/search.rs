@@ -276,7 +276,6 @@ fn snippet(body: &str, term: &Term) -> String {
         if chars + length > SNIPPET_CHARS {
             if collected.is_empty() {
                 collected.push(line);
-                chars += length;
             }
             break;
         }

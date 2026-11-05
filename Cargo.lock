@@ -12731,6 +12731,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "thock_bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "gethostname",
+ "hex",
+ "paths",
+ "pollster 0.4.0",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thock_sync_core",
+ "toml 0.8.23",
+ "uuid",
+]
+
+[[package]]
 name = "thock_sync_core"
 version = "0.1.0"
 dependencies = [
