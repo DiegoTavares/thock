@@ -32,6 +32,7 @@ use workspace::notifications::NotificationId;
 use workspace::{OpenOptions, OpenVisible, Toast, Workspace};
 
 use crate::agent_panel::RunSkill;
+use crate::bridge_service::{self, BridgeService, BridgeState, ClientView, ConnectOtherAgent};
 use crate::chat_panel::ChatPanel;
 use crate::getting_started;
 use crate::notes::{EnsureNoteOutcome, NoteKind, TimelineEntry, ensure_note};
@@ -424,6 +425,8 @@ fn row_key(row: &NavRow) -> String {
         NavRowKind::Group(key) => nav_key(&row.routine_id, "group", key),
         NavRowKind::Entry(entry) => nav_key(&row.routine_id, "entry", &entry.link_id),
         NavRowKind::GettingStarted(step) => nav_key(&row.routine_id, "step", step.key()),
+        NavRowKind::BridgeStatus => nav_key(&row.routine_id, "bridge", "status"),
+        NavRowKind::BridgeClient(name) => nav_key(&row.routine_id, "client", name),
     }
 }
 
@@ -446,10 +449,30 @@ fn reanchor_selection(rows: &[NavRow], anchor: &str, group_row: &str) -> Option<
 /// places and verbs — with nothing to separate they would be decoration.
 /// Collections sit with the places, after the link groups; an empty one
 /// (no notes in its folder yet) takes no row.
+/// The Agents Routine's server as its section shows it (V55 §11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BridgeSummary {
+    state: BridgeState,
+    clients: Vec<ClientView>,
+}
+
+impl BridgeSummary {
+    fn of(service: &BridgeService) -> Self {
+        Self {
+            state: service.state().clone(),
+            clients: service.clients(),
+        }
+    }
+}
+
+/// The group row that lists the paired machines.
+const CONNECTED_AGENTS_GROUP: &str = "Connected agents";
+
 fn section_items(
     manifest: &RoutineManifest,
     expanded_groups: &HashSet<String>,
     collections: &[CollectionView],
+    bridge: Option<&BridgeSummary>,
 ) -> Vec<SectionItem> {
     fn item(kind: SectionItemKind) -> SectionItem {
         SectionItem {
@@ -479,6 +502,31 @@ fn section_items(
     let captioned =
         (!manifest.links.is_empty() || !collections.is_empty()) && !manifest.skills.is_empty();
 
+    // The server's status row sits above the Routine's links, and the paired
+    // machines behind a collapsed row, so the rail says what the desk is
+    // doing before it says where to go.
+    if manifest.id == bridge_service::AGENTS_ROUTINE_ID
+        && let Some(bridge) = bridge
+    {
+        items.push(item(SectionItemKind::BridgeStatus(
+            bridge.state.label(bridge.clients.len()).into(),
+        )));
+        if !bridge.clients.is_empty() {
+            let expanded = is_expanded(CONNECTED_AGENTS_GROUP);
+            items.push(item(group(
+                CONNECTED_AGENTS_GROUP.to_string(),
+                CONNECTED_AGENTS_GROUP.into(),
+                expanded,
+            )));
+            if expanded {
+                items.extend(bridge.clients.iter().map(|client| SectionItem {
+                    group: Some(CONNECTED_AGENTS_GROUP.into()),
+                    depth: 1,
+                    kind: SectionItemKind::BridgeClient(client.clone()),
+                }));
+            }
+        }
+    }
     if captioned {
         items.push(item(SectionItemKind::Caption(NOTES_CAPTION.into())));
     }
@@ -630,6 +678,10 @@ enum NavRowKind {
     /// A note listed by a `[[collection]]`.
     Entry(CollectionEntry),
     GettingStarted(GettingStartedStep),
+    /// The Agents Routine's status row; `enter` opens *Connect an agent*.
+    BridgeStatus,
+    /// A paired machine, by name; `enter` disconnects it.
+    BridgeClient(String),
 }
 
 struct NavRow {
@@ -648,6 +700,8 @@ fn nav_row(routine_id: &str, item: SectionItem) -> Option<NavRow> {
         SectionItemKind::Skill(skill) => NavRowKind::Skill(skill),
         SectionItemKind::Entry(entry) => NavRowKind::Entry(entry),
         SectionItemKind::Group { key, .. } => NavRowKind::Group(key),
+        SectionItemKind::BridgeStatus(_) => NavRowKind::BridgeStatus,
+        SectionItemKind::BridgeClient(client) => NavRowKind::BridgeClient(client.name),
     };
     Some(NavRow {
         routine_id: routine_id.to_string(),
@@ -680,6 +734,9 @@ enum SectionItemKind {
         label: SharedString,
         expanded: bool,
     },
+    /// The agents bridge's state, as words.
+    BridgeStatus(SharedString),
+    BridgeClient(ClientView),
 }
 
 pub struct RoutinesPanel {
@@ -739,6 +796,10 @@ pub struct RoutinesPanel {
     onboarding_recheck: bool,
     /// The chat, for the running dot on a ritual's row (V44 §5.13).
     chat: Option<Entity<ChatPanel>>,
+    /// The agents bridge, for the Agents section's status row; refreshed
+    /// whenever the service changes.
+    bridge: Option<Entity<BridgeService>>,
+    bridge_summary: Option<BridgeSummary>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -773,11 +834,21 @@ impl RoutinesPanel {
         let weak_workspace = workspace.weak_handle();
         let workspace_entity = cx.entity();
         let chat = ChatPanel::in_workspace(workspace);
+        let bridge = bridge_service::service_for_project(&project, cx);
         cx.new(|cx| {
             // A ritual's row shows a dot while its session runs (V44 §5.13).
             let chat_subscription = chat
                 .as_ref()
                 .map(|chat| cx.observe(chat, |_, _, cx| cx.notify()));
+            let bridge_subscription = bridge.as_ref().map(|bridge| {
+                cx.observe(bridge, |this: &mut Self, bridge, cx| {
+                    this.bridge_summary = Some(BridgeSummary::of(bridge.read(cx)));
+                    cx.notify();
+                })
+            });
+            let bridge_summary = bridge
+                .as_ref()
+                .map(|bridge| BridgeSummary::of(bridge.read(cx)));
             let project_subscription =
                 cx.subscribe_in(&project, window, |this: &mut Self, _, event, window, cx| {
                     if matches!(
@@ -841,6 +912,8 @@ impl RoutinesPanel {
                 onboarding_check_running: false,
                 onboarding_recheck: false,
                 chat,
+                bridge,
+                bridge_summary,
                 _subscriptions: vec![
                     project_subscription,
                     workspace_subscription,
@@ -851,6 +924,7 @@ impl RoutinesPanel {
                 ]
                 .into_iter()
                 .chain(chat_subscription)
+                .chain(bridge_subscription)
                 .collect(),
             };
             this.refresh_vault_status(cx);
@@ -1990,7 +2064,12 @@ impl RoutinesPanel {
             .collections
             .get(&manifest.id)
             .map_or(&[][..], Vec::as_slice);
-        section_items(manifest, &self.expanded_groups, collections)
+        section_items(
+            manifest,
+            &self.expanded_groups,
+            collections,
+            self.bridge_summary.as_ref(),
+        )
     }
 
     fn touches_collection<'a>(&self, mut changed: impl Iterator<Item = &'a str>) -> bool {
@@ -2238,7 +2317,11 @@ impl RoutinesPanel {
                 .is_some_and(|path| path == active_path),
             NavRowKind::Entry(entry) => routines::vault_file_path(&vault.root, &entry.rel_path)
                 .is_ok_and(|path| path == active_path),
-            NavRowKind::Skill(_) | NavRowKind::Group(_) | NavRowKind::GettingStarted(_) => false,
+            NavRowKind::Skill(_)
+            | NavRowKind::Group(_)
+            | NavRowKind::GettingStarted(_)
+            | NavRowKind::BridgeStatus
+            | NavRowKind::BridgeClient(_) => false,
         })
     }
 
@@ -2320,7 +2403,28 @@ impl RoutinesPanel {
             }
             NavRowKind::Group(key) => self.toggle_group(&row.routine_id, &key, cx),
             NavRowKind::GettingStarted(step) => self.run_getting_started_step(step, window, cx),
+            // Deferred by `dispatch_action`, so the workspace that opens the
+            // modal is not leased while this panel is.
+            NavRowKind::BridgeStatus => {
+                window.dispatch_action(ConnectOtherAgent.boxed_clone(), cx)
+            }
+            NavRowKind::BridgeClient(name) => self.disconnect_agent(&name, cx),
         }
+    }
+
+    /// Forgets a paired machine from its row; the toast says it can pair
+    /// again.
+    fn disconnect_agent(&mut self, name: &str, cx: &mut Context<Self>) {
+        let Some(bridge) = self.bridge.clone() else {
+            return;
+        };
+        bridge.update(cx, |service, cx| {
+            service.disconnect(name, cx);
+            cx.emit(crate::calendar_service::ManualSyncFinished {
+                message: format!("{name} is disconnected; pair it again any time").into(),
+                icon: IconName::Check,
+            });
+        });
     }
 
     fn view_skill(&mut self, _: &ViewSkill, window: &mut Window, cx: &mut Context<Self>) {
@@ -2531,6 +2635,20 @@ impl RoutinesPanel {
                         Some(index),
                     )
                 }
+                SectionItemKind::BridgeStatus(label) => {
+                    let index = next_index();
+                    (
+                        self.render_bridge_status_row(label, indent, index, selected_index, cx),
+                        Some(index),
+                    )
+                }
+                SectionItemKind::BridgeClient(client) => {
+                    let index = next_index();
+                    (
+                        self.render_bridge_client_row(&client, indent, index, selected_index, cx),
+                        Some(index),
+                    )
+                }
             };
             let dimmed = index.is_some() && index == dimmed_index;
             rows.push(self.dim_if_selected(row, dimmed, cx));
@@ -2706,6 +2824,76 @@ impl RoutinesPanel {
             move |this, _, window, cx| {
                 this.open_collection_entry(routine_id.clone(), entry.clone(), window, cx);
             }
+        }))
+        .into_any_element()
+    }
+
+    /// `Serving on palloma.local:7557 · 2 agents`; `enter` or a click opens
+    /// *Connect an agent*.
+    fn render_bridge_status_row(
+        &self,
+        label: SharedString,
+        indent: usize,
+        index: usize,
+        selected_index: Option<usize>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        ListItem::new(ElementId::Name("thock-bridge-status".into()))
+            .indent_level(indent)
+            .indent_step_size(px(12.))
+            .toggle_state(selected_index == Some(index))
+            .start_slot(
+                Icon::new(IconName::Terminal)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(Label::new(label.clone()).size(LabelSize::Small).truncate())
+            .tooltip(Tooltip::text(label))
+            .end_slot(
+                KeyBinding::for_action_in(&ConnectOtherAgent, &self.focus_handle, cx)
+                    .size(rems_from_px(10.)),
+            )
+            .on_click(cx.listener(|_, _, window, cx| {
+                window.dispatch_action(ConnectOtherAgent.boxed_clone(), cx)
+            }))
+            .into_any_element()
+    }
+
+    /// `robin · last seen 3 min ago`, with Disconnect on the row.
+    fn render_bridge_client_row(
+        &self,
+        client: &ClientView,
+        indent: usize,
+        index: usize,
+        selected_index: Option<usize>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let name = client.name.clone();
+        ListItem::new(ElementId::Name(SharedString::from(format!(
+            "thock-bridge-client-{}",
+            client.name
+        ))))
+        .indent_level(indent)
+        .indent_step_size(px(12.))
+        .toggle_state(selected_index == Some(index))
+        .start_slot(
+            Icon::new(IconName::Screen)
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+        )
+        .child(
+            Label::new(client.label(Utc::now()))
+                .size(LabelSize::Small)
+                .truncate(),
+        )
+        .end_slot(
+            Label::new("Disconnect")
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+        )
+        .tooltip(Tooltip::text("Disconnect this computer; it can pair again any time"))
+        .on_click(cx.listener(move |this, _, _window, cx| {
+            this.disconnect_agent(&name, cx);
         }))
         .into_any_element()
     }
@@ -3401,6 +3589,10 @@ mod tests {
                     SectionItemKind::Skill(skill) => format!("{indent}skill {}", skill.id),
                     SectionItemKind::Entry(entry) => format!("{indent}entry {}", entry.title),
                     SectionItemKind::Group { label, .. } => format!("{indent}> {label}"),
+                    SectionItemKind::BridgeStatus(label) => format!("{indent}status {label}"),
+                    SectionItemKind::BridgeClient(client) => {
+                        format!("{indent}client {}", client.name)
+                    }
                 }
             })
             .collect()
@@ -3449,7 +3641,7 @@ mod tests {
         let manifest = manifest(Vec::new(), vec![named_skill("connect", SkillKind::Setup)]);
         // Closed by default; the empty Podcasts collection takes no row.
         assert_eq!(
-            transcript(&section_items(&manifest, &HashSet::new(), &books())),
+            transcript(&section_items(&manifest, &HashSet::new(), &books(), None)),
             ["# Notes", "> Books", "> Authors", "> Setup"]
         );
 
@@ -3458,7 +3650,7 @@ mod tests {
             group_key("x", &collection_group_key("authors")),
             group_key("x", &collection_subgroup_key("authors", "Timothy Keller")),
         ]);
-        let items = section_items(&manifest, &expanded, &books());
+        let items = section_items(&manifest, &expanded, &books(), None);
         assert_eq!(
             transcript(&items),
             [
@@ -3492,7 +3684,7 @@ mod tests {
     fn collections_count_as_places_for_captions() {
         let manifest = manifest(Vec::new(), vec![named_skill("wrap", SkillKind::Ritual)]);
         assert_eq!(
-            transcript(&section_items(&manifest, &HashSet::new(), &books())),
+            transcript(&section_items(&manifest, &HashSet::new(), &books(), None)),
             ["# Notes", "> Books", "> Authors", "# Rituals", "skill wrap"]
         );
     }
@@ -3516,7 +3708,7 @@ mod tests {
         // Groups start closed: the two demoted links and both setup steps
         // cost one row each, not four.
         assert_eq!(
-            transcript(&section_items(&manifest, &HashSet::new(), &[])),
+            transcript(&section_items(&manifest, &HashSet::new(), &[], None)),
             vec![
                 "# Notes",
                 "link today",
@@ -3541,7 +3733,7 @@ mod tests {
         );
         let expanded = HashSet::from([group_key("x", "Older notes")]);
         assert_eq!(
-            transcript(&section_items(&manifest, &expanded, &[])),
+            transcript(&section_items(&manifest, &expanded, &[], None)),
             vec![
                 "# Notes",
                 "link today",
@@ -3556,7 +3748,7 @@ mod tests {
     fn a_section_with_nothing_to_separate_gets_no_captions() {
         let links_only = manifest(vec![named_link("today", None)], Vec::new());
         assert_eq!(
-            transcript(&section_items(&links_only, &HashSet::new(), &[])),
+            transcript(&section_items(&links_only, &HashSet::new(), &[], None)),
             vec!["link today"]
         );
         let skills_only = manifest(
@@ -3564,7 +3756,7 @@ mod tests {
             vec![named_skill("wrap-today", SkillKind::Ritual)],
         );
         assert_eq!(
-            transcript(&section_items(&skills_only, &HashSet::new(), &[])),
+            transcript(&section_items(&skills_only, &HashSet::new(), &[], None)),
             vec!["skill wrap-today"]
         );
     }
@@ -3580,7 +3772,7 @@ mod tests {
                 named_skill("setup", SkillKind::Setup),
             ],
         );
-        let items = section_items(&manifest, &HashSet::new(), &[]);
+        let items = section_items(&manifest, &HashSet::new(), &[], None);
         let selectable = items
             .iter()
             .filter(|item| !matches!(item.kind, SectionItemKind::Caption(_)))
@@ -3598,10 +3790,65 @@ mod tests {
         expanded: &HashSet<String>,
         collections: &[CollectionView],
     ) -> Vec<NavRow> {
-        section_items(manifest, expanded, collections)
+        section_items(manifest, expanded, collections, None)
             .into_iter()
             .filter_map(|item| nav_row(&manifest.id, item))
             .collect()
+    }
+
+    #[test]
+    fn the_agents_section_leads_with_its_status_and_lists_its_machines() {
+        let mut manifest = manifest(vec![named_link("agent-memory", None)], vec![]);
+        manifest.id = bridge_service::AGENTS_ROUTINE_ID.to_string();
+        let bridge = BridgeSummary {
+            state: BridgeState::Serving {
+                address: "palloma.local".into(),
+                port: 7557,
+            },
+            clients: vec![ClientView {
+                name: "robin".into(),
+                last_seen: String::new(),
+            }],
+        };
+        let items = section_items(&manifest, &HashSet::new(), &[], Some(&bridge));
+        assert_eq!(
+            transcript(&items),
+            vec![
+                "status Serving on palloma.local:7557 · 1 agent",
+                "> Connected agents",
+                "link agent-memory",
+            ]
+        );
+        let mut expanded = HashSet::new();
+        expanded.insert(group_key(&manifest.id, CONNECTED_AGENTS_GROUP));
+        let items = section_items(&manifest, &expanded, &[], Some(&bridge));
+        assert_eq!(
+            transcript(&items),
+            vec![
+                "status Serving on palloma.local:7557 · 1 agent",
+                "> Connected agents",
+                "  client robin",
+                "link agent-memory",
+            ]
+        );
+        let rows: Vec<NavRow> = items
+            .into_iter()
+            .filter_map(|item| nav_row(&manifest.id, item))
+            .collect();
+        assert!(matches!(rows[0].kind, NavRowKind::BridgeStatus));
+        assert!(matches!(&rows[2].kind, NavRowKind::BridgeClient(name) if name == "robin"));
+        assert_eq!(rows[2].group.as_deref(), Some(CONNECTED_AGENTS_GROUP));
+
+        // Any other Routine, or no service, shows nothing of the bridge.
+        let other = self::manifest(vec![named_link("today", None)], vec![]);
+        assert_eq!(
+            transcript(&section_items(&other, &HashSet::new(), &[], Some(&bridge))),
+            vec!["link today"]
+        );
+        assert_eq!(
+            transcript(&section_items(&manifest, &HashSet::new(), &[], None)),
+            vec!["link agent-memory"]
+        );
     }
 
     #[test]
