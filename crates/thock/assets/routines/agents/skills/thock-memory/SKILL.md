@@ -62,5 +62,6 @@ The same rules hold with plain file tools against the vault folder in
   `- YYYY-MM-DD · the fact · via <harness>@<machine>`.
 - `note_today` is lines appended under a `## From your agents` section at the
   end of `daily/YYYY-MM-DD.md` (create the section, and the note from
-  `templates/daily.md`, when missing): `- <harness>@<machine> · what you did`.
+  `templates/daily.md`, when missing):
+  `- <harness>@<machine> · what you did`.
 - Never write any other memory page; `routines/agents/AGENT.md` says why.

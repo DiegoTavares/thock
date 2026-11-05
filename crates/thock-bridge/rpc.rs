@@ -53,19 +53,28 @@ impl JsonRpcRequest {
 
     /// Parses one request; a malformed body is the error response to send
     /// back, with a null id as JSON-RPC asks.
-    pub fn parse(body: &str) -> Result<Self, JsonRpcResponse> {
+    pub fn parse(body: &str) -> Result<Self, Box<JsonRpcResponse>> {
         let value: Value = serde_json::from_str(body).map_err(|error| {
-            error_response(Value::Null, PARSE_ERROR, &format!("not JSON: {error}"))
+            Box::new(error_response(
+                Value::Null,
+                PARSE_ERROR,
+                &format!("not JSON: {error}"),
+            ))
         })?;
         if !value.is_object() {
-            return Err(error_response(
+            return Err(Box::new(error_response(
                 Value::Null,
                 INVALID_REQUEST,
                 "one JSON-RPC request object per POST",
-            ));
+            )));
         }
-        serde_json::from_value(value)
-            .map_err(|error| error_response(Value::Null, INVALID_REQUEST, &error.to_string()))
+        serde_json::from_value(value).map_err(|error| {
+            Box::new(error_response(
+                Value::Null,
+                INVALID_REQUEST,
+                &error.to_string(),
+            ))
+        })
     }
 
     /// A notification carries no id and gets no reply.

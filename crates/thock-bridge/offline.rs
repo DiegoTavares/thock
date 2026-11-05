@@ -303,8 +303,8 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(stop.entry, second);
-        assert_eq!(sent, vec![first.id.clone()]);
-        assert_eq!(outbox.entries(), vec![second.clone(), third.clone()]);
+        assert_eq!(sent, vec![first.id]);
+        assert_eq!(outbox.entries(), vec![second, third]);
 
         let count = outbox.drain(|_| Ok(())).unwrap();
         assert_eq!(count, 2);

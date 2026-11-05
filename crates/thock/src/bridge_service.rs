@@ -2115,6 +2115,62 @@ mod tests {
         );
     }
 
+    /// The lines the skill tells an agent to write by hand, when the tools
+    /// are absent, parse with the same functions the desk writes them with
+    /// (V55 §14).
+    #[test]
+    fn the_skill_prescribes_the_lines_the_desk_writes() {
+        let skill = include_str!("../assets/routines/agents/skills/thock-memory/SKILL.md");
+        let snippet = |prefix: &str| -> String {
+            skill
+                .lines()
+                .map(str::trim)
+                .find(|line| line.starts_with(prefix))
+                .unwrap_or_else(|| panic!("the skill no longer shows {prefix:?}"))
+                .trim_end_matches('.')
+                .trim_matches('`')
+                .replace("YYYY-MM-DD", "2026-11-04")
+                .replace("<harness>@<machine>", "claude-code@robin")
+                .replace("the fact", "Prefers short PR titles")
+                .replace("what you did", "Shipped the PR.")
+        };
+        let inbox = thock_bridge::parse_inbox_line(&snippet("`- YYYY-MM-DD ·")).unwrap();
+        assert_eq!(inbox.fact, "Prefers short PR titles");
+        assert_eq!(
+            inbox.via,
+            Some(thock_bridge::ClientIdentity::new("claude-code", "robin"))
+        );
+        assert_eq!(
+            thock_bridge::inbox_line(inbox.date, &inbox.fact, &inbox.via.unwrap()),
+            snippet("`- YYYY-MM-DD ·")
+        );
+        let (identity, text) =
+            thock_bridge::parse_today_line(&snippet("`- <harness>@<machine> ·")).unwrap();
+        assert_eq!(identity.label(), "claude-code@robin");
+        assert_eq!(text, "Shipped the PR.");
+        assert!(skill.contains("## From your agents"));
+        assert!(skill.starts_with("---\nname: thock-memory\n"));
+        let description = skill
+            .lines()
+            .find_map(|line| line.strip_prefix("description: "))
+            .unwrap();
+        assert!(description.len() <= 80, "{description}");
+
+        // The core files learned about the bridge (V55 §10).
+        let agents_md = include_str!("../assets/AGENTS.md");
+        assert!(agents_md.contains(
+            "Pages under
+   `memory/agents/` belong to the agent named in their path"
+        ));
+        let reflect = include_str!("../assets/skills/reflect.md");
+        assert!(reflect.contains("← agents/<harness>/<host>/<file>"));
+        assert!(reflect.contains("`· via <harness>@<host>`"));
+        let system = include_str!("../assets/hosted-agent/SYSTEM.md");
+        assert!(system.contains("## From your agents"));
+        let wrap_today = include_str!("../assets/routines/timeline/skills/wrap-today.md");
+        assert!(wrap_today.contains("`## From your agents`"));
+    }
+
     #[gpui::test]
     async fn a_port_in_use_is_a_visible_failure(cx: &mut TestAppContext) {
         init_test(cx);

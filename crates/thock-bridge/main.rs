@@ -912,6 +912,9 @@ fn manual_block(harness: &Harness, binary: &str) -> String {
     }
 }
 
+// Running the CLI's own `mcp add` and waiting on it is the point: this binary
+// has no runtime and the person is watching.
+#[allow(clippy::disallowed_methods)]
 fn connect(args: &[String]) -> Result<(), String> {
     let mut dry_run = false;
     let mut yes = false;

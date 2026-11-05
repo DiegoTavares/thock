@@ -4,6 +4,10 @@
 //! in-memory `ToolHost` behind a plain `TcpListener`; the real one lives in
 //! the app and is tested there.
 
+// The test drives the real binary over piped stdio and waits on it; there is
+// no executor here for `smol::process` to be the right answer.
+#![allow(clippy::disallowed_methods)]
+
 use chrono::NaiveDate;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
