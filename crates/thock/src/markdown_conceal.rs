@@ -26,8 +26,8 @@ use crate::ThockSettings;
 use crate::markdown_syntax::{self, ConcealSpan, SpanKind};
 use crate::markdown_text;
 use crate::reminders::{
-    ChipState, DayChanged, ReminderClock, ReminderDay, ReminderSettings, is_reminder_note,
-    load_reminder_settings, reminder_chip,
+    ChipState, DayChanged, ReminderChip, ReminderClock, ReminderDay, ReminderSettings,
+    carried_chip, is_reminder_note, load_reminder_settings, reminder_chip,
 };
 use crate::thock_theme::{on_accent_color, task_box};
 use crate::vault::{Vault, VaultStatus};
@@ -62,7 +62,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use thock_sync_core::{ReminderConfig, parse_note};
+use thock_sync_core::{MirrorLine, ReminderConfig, parse_note};
 use ui::prelude::FluentBuilder as _;
 use ui::{ActiveTheme as _, Color, Icon, IconName, IconSize};
 use util::ResultExt as _;
@@ -1983,32 +1983,43 @@ fn is_folded(kind: &SpanKind) -> bool {
     )
 }
 
-/// The reminder chips of `text`, as fold spans (V45 §8.4).
+/// The reminder chips of `text`, as fold spans (V45 §8.4): each token, and
+/// each carried due on today's mirror lines (§7.1).
 fn reminder_spans(text: &str, note: &ReminderNote, today: NaiveDate) -> Vec<ConcealSpan> {
     let mut line_starts = vec![0];
     line_starts.extend(text.match_indices('\n').map(|(index, _)| index + 1));
+    let note_day = note.config.daily.day_of(&note.path);
     parse_note(text, &note.path, &note.config)
         .into_iter()
         .filter_map(|appearance| {
-            let token = appearance.reminder.token.as_ref()?;
             let line_start = *line_starts.get(appearance.line)?;
             let line = text[line_start..].split('\n').next()?;
             let line = line.strip_suffix('\r').unwrap_or(line);
-            // A struck token's `~~` fold on their own, as every struck run's do.
-            let mut range = token.range.clone();
-            if token.struck {
-                range = range.start + 2..range.end - 2;
-            }
-            // A token inside a link or an image line would fold across the
-            // link's own folds; it stays text.
-            if markdown_syntax::image_line(line).is_some()
-                || markdown_syntax::inline_links(line)
-                    .iter()
-                    .any(|link| link.range.start < range.end && range.start < link.range.end)
-            {
-                return None;
-            }
-            let chip = reminder_chip(&appearance.reminder, today)?;
+            let (range, chip) = if appearance.mirror {
+                // A past day's mirrors are never reconciled, so its box can't
+                // say the reminder is still overdue; the date stays text.
+                if note_day != Some(today) {
+                    return None;
+                }
+                carried_due_chip(line, today)?
+            } else {
+                let token = appearance.reminder.token.as_ref()?;
+                // A struck token's `~~` fold on their own, as every struck run's do.
+                let mut range = token.range.clone();
+                if token.struck {
+                    range = range.start + 2..range.end - 2;
+                }
+                // A token inside a link or an image line would fold across the
+                // link's own folds; it stays text.
+                if markdown_syntax::image_line(line).is_some()
+                    || markdown_syntax::inline_links(line)
+                        .iter()
+                        .any(|link| link.range.start < range.end && range.start < link.range.end)
+                {
+                    return None;
+                }
+                (range, reminder_chip(&appearance.reminder, today)?)
+            };
             Some(ConcealSpan {
                 range: line_start + range.start..line_start + range.end,
                 kind: SpanKind::Reminder {
@@ -2018,6 +2029,18 @@ fn reminder_spans(text: &str, note: &ReminderNote, today: NaiveDate) -> Vec<Conc
             })
         })
         .collect()
+}
+
+/// The chip of a mirror line's carried due, and the range it folds: the due
+/// and the separator before it, so the chip follows the words as a token's
+/// does.
+fn carried_due_chip(line: &str, today: NaiveDate) -> Option<(Range<usize>, ReminderChip)> {
+    let chip = carried_chip(&MirrorLine::parse(line)?, today)?;
+    // Found by its separators, as a hand-typed due needn't read as `Due` prints
+    // it, and from the link back, whose target can itself read as a date.
+    let end = line.rfind(" · [[")?;
+    let start = line[..end].rfind("· ")?;
+    Some((start..end, chip))
 }
 
 /// Placeholder for a reminder token: a chip with its label, outlined in the
@@ -4754,6 +4777,76 @@ mod tests {
             " ☐ Dentist Today 17:00\nplain tail\n"
         );
         assert_eq!(chip_states(&editor, &mut cx), [ChipState::Today]);
+    }
+
+    #[gpui::test]
+    async fn a_carried_due_on_a_mirror_line_draws_as_a_chip(cx: &mut TestAppContext) {
+        let note = "## Day planner\n\
+                    ### Reminders\n\
+                    - [ ] Bins · 2026-10-19 18:00 · [[reminders]] <!--rem:111111111111-->\n\
+                    - [ ] Dated · 2026-10-20 · [[daily/2026-10-20]] <!--rem:222222222222-->\n\
+                    - [x] Paid · 2026-10-19 · [[reminders]] <!--rem:333333333333-->\n\
+                    - [ ] Typed · 2026-10-19 9:00 · [[reminders]] <!--rem:444444444444-->\n\
+                    - [ ] Not · 2026-10-19 · a mirror\n\
+                    plain tail\n";
+        let settings = ConcealSettings {
+            reminder_note: Some(ReminderNote {
+                path: "daily/2026-10-21.md".to_string(),
+                config: ReminderConfig::default(),
+                vault_root: PathBuf::from("/vault"),
+            }),
+            ..test_settings()
+        };
+        let (editor, mut cx) = setup_with(cx, note, settings).await;
+        move_cursor_to(&editor, 7, &mut cx);
+        let display = display_text(&editor, &mut cx);
+        assert!(
+            display.contains("Bins Mon 19 Oct 18:00 · overdue · "),
+            "{display}"
+        );
+        assert!(
+            display.contains("Dated Yesterday · overdue · "),
+            "{display}"
+        );
+        assert!(display.contains("Paid Mon 19 Oct · "), "{display}");
+        assert!(
+            display.contains("Typed Mon 19 Oct 09:00 · overdue · "),
+            "{display}"
+        );
+        assert!(display.contains("Not · 2026-10-19 · a mirror"), "{display}");
+        assert_eq!(
+            chip_states(&editor, &mut cx),
+            [
+                ChipState::Overdue,
+                ChipState::Overdue,
+                ChipState::Closed,
+                ChipState::Overdue
+            ]
+        );
+        editor.update(&mut cx, |editor, cx| {
+            assert_eq!(editor.buffer().read(cx).snapshot(cx).text(), note);
+        });
+    }
+
+    #[gpui::test]
+    async fn a_past_days_carried_due_stays_text(cx: &mut TestAppContext) {
+        let note = "## Day planner\n\
+                    ### Reminders\n\
+                    - [ ] Bins · 2026-10-19 · [[reminders]] <!--rem:111111111111-->\n\
+                    plain tail\n";
+        let settings = ConcealSettings {
+            reminder_note: Some(ReminderNote {
+                path: "daily/2026-10-20.md".to_string(),
+                config: ReminderConfig::default(),
+                vault_root: PathBuf::from("/vault"),
+            }),
+            ..test_settings()
+        };
+        let (editor, mut cx) = setup_with(cx, note, settings).await;
+        move_cursor_to(&editor, 3, &mut cx);
+        let display = display_text(&editor, &mut cx);
+        assert!(display.contains("Bins · 2026-10-19 · "), "{display}");
+        assert!(chip_states(&editor, &mut cx).is_empty());
     }
 
     #[gpui::test]

@@ -344,7 +344,9 @@ left as they were. A future day's note, created ahead, gets its own reminders an
 - **Mirror lines** are planner lines: a timed reminder carries its time as the planner time, so the
   V4 parser, the Next card, the phone's planner card and the Today widget read it with no change.
   A date-only reminder is an untimed line. A carried one shows its original due before the link,
-  which the desk and the phone draw as *from Tue 20 Oct* in the warning colour.
+  which the Day Planner and the phone draw as *from Tue 20 Oct* in the warning colour, and the
+  editor folds into the chip a token would draw (§8.4). The file keeps the plain date. Only today's
+  note draws the chip: past days are left as they were, so their lines can't say what is overdue.
 - **The text** is the home line's text without its checkbox, planner time, token and comments, cut
   at 80 characters on a word boundary. It is a copy for the planner's sake; the id ties it to the
   original.
