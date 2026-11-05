@@ -338,6 +338,12 @@ impl Proxy {
                 "the desk accepted a notification without a reply".into(),
             ));
         }
+        if matches!(response.status, 408 | 429) {
+            return Err(ForwardFailure::Transport(format!(
+                "the desk answered {}; try again",
+                response.status
+            )));
+        }
         let text = response.text();
         match JsonRpcResponse::parse(&text) {
             Ok(parsed) => Ok(parsed),
@@ -388,9 +394,14 @@ impl Proxy {
                     DrainFailure::Transport(error.message)
                 });
             }
+            // Only a refusal the desk marked as such is final; an unmarked
+            // error (its disk, a lock) is tried again next time (R3).
             match response.tool_result() {
-                Some(result) if result.is_error => {
+                Some(result) if result.is_refusal() => {
                     Err(DrainFailure::Refused(result.first_text().to_string()))
+                }
+                Some(result) if result.is_error => {
+                    Err(DrainFailure::Transport(result.first_text().to_string()))
                 }
                 _ => Ok(()),
             }
@@ -631,7 +642,7 @@ impl Proxy {
                 if let Err(refusal) = thock_bridge::validate_tool_arguments(name, arguments) {
                     return thock_bridge::result_response(
                         id,
-                        json!(thock_bridge::CallToolResponse::error(refusal.0)),
+                        json!(thock_bridge::CallToolResponse::refused(refusal.message())),
                     );
                 }
                 let entry = OutboxEntry::new(name, arguments.clone(), &self.harness);

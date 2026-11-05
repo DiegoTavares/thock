@@ -81,27 +81,28 @@ impl ConnectAgentModal {
         }
     }
 
-    /// The code was typed somewhere: the desk spent it (a known name
-    /// re-pairing replaces its entry, so the count may not move) or the
-    /// client list changed. Either way the modal's job is done.
     fn service_changed(&mut self, service: gpui::Entity<BridgeService>, cx: &mut Context<Self>) {
-        let clients = service.read(cx).clients();
-        let code_spent = !service.read(cx).has_pending_code();
-        if self.invite.is_none() || (!code_spent && clients.len() == self.clients_before) {
+        if self.invite.is_none() {
             return;
         }
-        let name = clients
-            .last()
-            .map(|client| client.name.clone())
-            .unwrap_or_else(|| "A machine".to_string());
-        service.update(cx, |_, cx| {
-            cx.emit(ManualSyncFinished {
-                message: format!("{name} is connected — its agents can reach this vault now")
-                    .into(),
-                icon: IconName::Check,
-            })
-        });
-        cx.emit(DismissEvent);
+        let clients = service.read(cx).clients();
+        let code_spent = !service.read(cx).has_pending_code();
+        match modal_change(code_spent, self.clients_before, &clients) {
+            ModalChange::Stay => {}
+            ModalChange::Close => cx.emit(DismissEvent),
+            ModalChange::Paired(name) => {
+                service.update(cx, |_, cx| {
+                    cx.emit(ManualSyncFinished {
+                        message: format!(
+                            "{name} is connected — its agents can reach this vault now"
+                        )
+                        .into(),
+                        icon: IconName::Check,
+                    })
+                });
+                cx.emit(DismissEvent);
+            }
+        }
     }
 
     fn command(&self) -> Option<String> {
@@ -253,6 +254,31 @@ impl Render for ConnectAgentModal {
                      Agent in the command palette brings this back.",
                 )))
             })
+    }
+}
+
+/// What a change in the service means for the open modal (R8).
+#[derive(Debug, PartialEq, Eq)]
+enum ModalChange {
+    Stay,
+    /// The list changed without a pairing (a disconnect): close quietly.
+    Close,
+    /// The code was spent: close and say which machine paired.
+    Paired(String),
+}
+
+fn modal_change(code_spent: bool, clients_before: usize, clients: &[ClientView]) -> ModalChange {
+    if code_spent {
+        let newest = clients
+            .iter()
+            .max_by(|a, b| a.paired_at.cmp(&b.paired_at))
+            .map(|client| client.name.clone())
+            .unwrap_or_else(|| "A machine".to_string());
+        ModalChange::Paired(newest)
+    } else if clients.len() != clients_before {
+        ModalChange::Close
+    } else {
+        ModalChange::Stay
     }
 }
 
@@ -454,6 +480,30 @@ mod tests {
                 workspace.active_modal::<ConnectAgentModal>(cx)
             })
             .expect("the modal is open")
+    }
+
+    #[test]
+    fn the_modal_closes_for_the_right_reason() {
+        let client = |name: &str, paired_at: &str| ClientView {
+            name: name.into(),
+            last_seen: String::new(),
+            paired_at: paired_at.into(),
+        };
+        let robin = client("robin", "2026-11-04T08:00:00Z");
+        let hp = client("hp", "2026-11-04T09:00:00Z");
+        assert_eq!(modal_change(false, 1, &[robin.clone()]), ModalChange::Stay);
+        assert_eq!(modal_change(false, 1, &[]), ModalChange::Close);
+        assert_eq!(
+            modal_change(true, 1, &[robin.clone(), hp.clone()]),
+            ModalChange::Paired("hp".into())
+        );
+        // A known name re-pairing: the count stays, the code is spent, and
+        // the newest `paired_at` names it.
+        let robin_again = client("robin", "2026-11-04T10:00:00Z");
+        assert_eq!(
+            modal_change(true, 2, &[hp, robin_again]),
+            ModalChange::Paired("robin".into())
+        );
     }
 
     #[gpui::test]

@@ -3808,6 +3808,7 @@ mod tests {
             clients: vec![ClientView {
                 name: "robin".into(),
                 last_seen: String::new(),
+                paired_at: String::new(),
             }],
         };
         let items = section_items(&manifest, &HashSet::new(), &[], Some(&bridge));

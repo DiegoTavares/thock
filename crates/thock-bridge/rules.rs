@@ -203,8 +203,10 @@ pub fn check_fact(text: &str, forbidden: &[String]) -> Result<String, Refusal> {
 }
 
 /// The credential shapes of §9.2, hand-matched so the library carries no
-/// regex engine.
-fn looks_like_credential(text: &str) -> Option<&'static str> {
+/// regex engine. `strict` adds the bare runs (32+ hex or base64, 13–19
+/// digits, IBANs) that a one-line fact never needs but a harness's memory
+/// file is full of (commit SHAs, content hashes; decision 32).
+fn credential_shape(text: &str, strict: bool) -> Option<&'static str> {
     let lower = text.to_lowercase();
     for token in text
         .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | ')' | ',' | ';'))
@@ -220,6 +222,9 @@ fn looks_like_credential(text: &str) -> Option<&'static str> {
             .any(|prefix| token.starts_with(prefix))
         {
             return Some("an API token");
+        }
+        if !strict {
+            continue;
         }
         if token.len() >= 32 && token.chars().all(|c| c.is_ascii_hexdigit()) {
             return Some("a key");
@@ -250,10 +255,14 @@ fn looks_like_credential(text: &str) -> Option<&'static str> {
             from += found + keyword.len();
         }
     }
-    if has_long_digit_run(text) {
+    if strict && has_long_digit_run(text) {
         return Some("an account or card number");
     }
     None
+}
+
+fn looks_like_credential(text: &str) -> Option<&'static str> {
+    credential_shape(text, true)
 }
 
 /// 13 to 19 digits, allowing the single spaces or dashes card numbers are
@@ -299,7 +308,7 @@ pub fn find_unkeepable(text: &str, forbidden: &[String]) -> Option<String> {
         if trimmed.is_empty() {
             continue;
         }
-        if let Some(kind) = looks_like_credential(trimmed) {
+        if let Some(kind) = credential_shape(trimmed, false) {
             return Some(format!("line {} looks like {kind}", index + 1));
         }
         let line_words = words(trimmed);
@@ -612,6 +621,19 @@ mod tests {
         assert_eq!(
             find_unkeepable("- Their salary is private\n", &forbidden).as_deref(),
             Some("line 1 touches a topic on the person's do-not-keep list (salary)")
+        );
+        // A memory file is full of hashes and ids; only prefixed tokens and
+        // `password:`-style lines refuse a whole file.
+        assert_eq!(
+            find_unkeepable(
+                "- fixed in 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b\n- order 1234567890123\n",
+                &forbidden
+            ),
+            None
+        );
+        assert_eq!(
+            find_unkeepable("password: hunter2\n", &forbidden).as_deref(),
+            Some("line 1 looks like a secret")
         );
     }
 

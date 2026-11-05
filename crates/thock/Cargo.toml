@@ -86,6 +86,7 @@ fs = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 remote = { workspace = true, features = ["test-support"] }
 serde_yaml_ng.workspace = true
+socket2.workspace = true
 settings = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

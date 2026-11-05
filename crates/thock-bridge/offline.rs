@@ -184,9 +184,10 @@ pub struct Outbox {
     path: PathBuf,
 }
 
-/// An advisory lock over the outbox, held while one `serve` pushes or
-/// drains so two harnesses on one machine never interleave half-written
-/// lines or drain the same entry twice.
+/// An advisory lock over the outbox, held while one `serve` appends or
+/// rewrites so two harnesses on one machine never interleave half-written
+/// lines or remove the same entry twice. Never held across a network send.
+/// On non-unix it is a plain file with no lock behind it.
 struct OutboxLock {
     _file: fs::File,
 }
@@ -276,25 +277,33 @@ impl Outbox {
     /// the moment it lands or the desk refuses it for good, and stopping at
     /// the first desk that does not answer so order holds. The desk treats
     /// the entry's id as idempotent, so a reply lost in flight is retried
-    /// without a second write.
+    /// without a second write. The lock is taken to read and to remove,
+    /// never across a send (R6).
     pub fn drain(
         &self,
         mut send: impl FnMut(&OutboxEntry) -> Result<(), DrainFailure>,
     ) -> DrainReport {
         let mut report = DrainReport::default();
-        let _lock = match OutboxLock::take(&self.path) {
-            Ok(lock) => lock,
-            Err(error) => {
-                report.stopped = self.entries().into_iter().next().map(|entry| DrainStop {
-                    entry,
-                    reason: format!("couldn't lock the outbox: {error}"),
-                });
+        let mut done: Vec<String> = Vec::new();
+        loop {
+            let next = {
+                let _lock = match OutboxLock::take(&self.path) {
+                    Ok(lock) => lock,
+                    Err(error) => {
+                        report.stopped = self.entries().into_iter().next().map(|entry| DrainStop {
+                            entry,
+                            reason: format!("couldn't lock the outbox: {error}"),
+                        });
+                        return report;
+                    }
+                };
+                self.entries()
+                    .into_iter()
+                    .find(|entry| !done.contains(&entry.id))
+            };
+            let Some(entry) = next else {
                 return report;
-            }
-        };
-        let mut remaining = self.entries();
-        while !remaining.is_empty() {
-            let entry = remaining[0].clone();
+            };
             match send(&entry) {
                 Ok(()) => report.sent += 1,
                 Err(DrainFailure::Refused(reason)) => {
@@ -305,8 +314,8 @@ impl Outbox {
                     return report;
                 }
             }
-            remaining.remove(0);
-            if let Err(error) = self.rewrite(&remaining) {
+            done.push(entry.id.clone());
+            if let Err(error) = self.remove(&entry.id) {
                 report.stopped = Some(DrainStop {
                     entry,
                     reason: format!("couldn't update the outbox: {error}"),
@@ -314,7 +323,18 @@ impl Outbox {
                 return report;
             }
         }
-        report
+    }
+
+    /// Removes one entry under the lock; what another `serve` pushed in the
+    /// meantime stays.
+    fn remove(&self, id: &str) -> std::io::Result<()> {
+        let _lock = OutboxLock::take(&self.path)?;
+        let remaining: Vec<OutboxEntry> = self
+            .entries()
+            .into_iter()
+            .filter(|entry| entry.id != id)
+            .collect();
+        self.rewrite(&remaining)
     }
 }
 

@@ -4,7 +4,7 @@
 //! runtime come along; the desk serves with `tiny_http` and sets
 //! `Content-Length`, so the client reads to end of stream.
 
-use std::io::{Read as _, Write as _};
+use std::io::{BufRead as _, Read as _, Write as _};
 use std::net::{TcpStream, ToSocketAddrs as _};
 use std::time::Duration;
 
@@ -137,17 +137,26 @@ pub fn read_request_head(reader: &mut impl std::io::BufRead) -> Result<RequestHe
     let mut line = String::new();
     let mut read_line = |line: &mut String| -> Result<usize, u16> {
         line.clear();
-        let read = reader.read_line(line).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::WouldBlock
-                || error.kind() == std::io::ErrorKind::TimedOut
-            {
-                408u16
-            } else {
-                400u16
-            }
-        })?;
+        // Bounded before the cap is checked: a stream with no newline in
+        // it would otherwise grow the line without end (R2).
+        let remaining = MAX_HEAD_BYTES.saturating_sub(consumed) as u64 + 1;
+        let read = reader
+            .by_ref()
+            .take(remaining)
+            .read_line(line)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut
+                {
+                    408u16
+                } else {
+                    400u16
+                }
+            })?;
         consumed += read;
-        if consumed > MAX_HEAD_BYTES {
+        // A line cut by the cap (no newline within it) is a head too large;
+        // a stream that simply ends is a malformed one, judged below.
+        if consumed > MAX_HEAD_BYTES || read as u64 == remaining {
             return Err(431u16);
         }
         Ok(read)
@@ -183,7 +192,42 @@ pub fn read_request_head(reader: &mut impl std::io::BufRead) -> Result<RequestHe
     })
 }
 
-/// Reads exactly `length` bytes of body; a short or slow read is `408u16`.
+/// A socket read under an absolute deadline: before every read the
+/// remaining time becomes the socket's timeout, so a peer trickling bytes
+/// can hold a worker no longer than the deadline (R1). `set_deadline` moves
+/// it, for a body budget after the head's.
+pub struct DeadlineStream {
+    stream: std::net::TcpStream,
+    deadline: std::time::Instant,
+}
+
+impl DeadlineStream {
+    pub fn new(stream: std::net::TcpStream, deadline: std::time::Instant) -> Self {
+        Self { stream, deadline }
+    }
+
+    pub fn set_deadline(&mut self, deadline: std::time::Instant) {
+        self.deadline = deadline;
+    }
+}
+
+impl std::io::Read for DeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the connection's time is up",
+            ));
+        }
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(buf)
+    }
+}
+
+/// Reads exactly `length` bytes of body; a short or slow read is `408`.
 pub fn read_body(reader: &mut impl std::io::Read, length: usize) -> Result<Vec<u8>, u16> {
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body).map_err(|_| 408u16)?;
@@ -434,6 +478,12 @@ mod tests {
             read_request_head(&mut std::io::BufReader::new(long.as_bytes())).unwrap_err(),
             431
         );
+        // No newline at all: the read stops at the cap instead of growing.
+        let endless = "a".repeat(MAX_HEAD_BYTES * 4);
+        assert_eq!(
+            read_request_head(&mut std::io::BufReader::new(endless.as_bytes())).unwrap_err(),
+            431
+        );
         let mut out = Vec::new();
         write_response(&mut out, 204, "text/plain", b"").unwrap();
         assert_eq!(
@@ -455,6 +505,30 @@ mod tests {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n";
         assert_eq!(parse_response(raw).unwrap().body, b"abcde");
         assert!(parse_response(b"garbage").is_err());
+    }
+
+    #[test]
+    fn a_deadline_stream_gives_up_when_its_time_is_over() {
+        use std::io::Read as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let mut stream = DeadlineStream::new(
+            server,
+            std::time::Instant::now() + Duration::from_millis(150),
+        );
+        let started = std::time::Instant::now();
+        let mut buf = [0u8; 8];
+        let error = stream.read(&mut buf).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let error = stream.read(&mut buf).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        drop(client);
     }
 
     #[test]

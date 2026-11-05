@@ -205,6 +205,11 @@ pub struct CallToolResponse {
     pub content: Vec<ToolResponseContent>,
     #[serde(rename = "isError", default)]
     pub is_error: bool,
+    /// `{"thock": {"refused": true}}` marks an error the desk means for
+    /// good, so a client draining its outbox drops the call instead of
+    /// trying again (R3).
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
 }
 
 impl CallToolResponse {
@@ -212,14 +217,35 @@ impl CallToolResponse {
         Self {
             content: vec![ToolResponseContent::Text { text: text.into() }],
             is_error: false,
+            meta: None,
         }
     }
 
+    /// A failure that may pass: nothing marks it, so a drain retries it.
     pub fn error(text: impl Into<String>) -> Self {
         Self {
             content: vec![ToolResponseContent::Text { text: text.into() }],
             is_error: true,
+            meta: None,
         }
+    }
+
+    /// A refusal: saying it again changes nothing.
+    pub fn refused(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![ToolResponseContent::Text { text: text.into() }],
+            is_error: true,
+            meta: Some(json!({"thock": {"refused": true}})),
+        }
+    }
+
+    pub fn is_refusal(&self) -> bool {
+        self.is_error
+            && self
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("thock")?.get("refused")?.as_bool())
+                .unwrap_or(false)
     }
 
     /// The text of the first content block.
@@ -324,31 +350,48 @@ impl WriteOutcome {
     }
 }
 
-/// A sentence the agent can relay (G7).
+/// A sentence the agent can relay (G7), and whether saying it again would
+/// change anything: a refusal is final, a transient failure (the file
+/// system, a lock) is worth a retry, which is what a queued line gets.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostError(pub String);
+pub enum HostError {
+    Refused(String),
+    Transient(String),
+}
+
+impl HostError {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Refused(message) | Self::Transient(message) => message,
+        }
+    }
+
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Transient(_))
+    }
+}
 
 impl std::fmt::Display for HostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.message())
     }
 }
 
 impl From<Refusal> for HostError {
     fn from(refusal: Refusal) -> Self {
-        Self(refusal.to_string())
+        Self::Refused(refusal.to_string())
     }
 }
 
 impl From<anyhow::Error> for HostError {
     fn from(error: anyhow::Error) -> Self {
-        Self(format!("{error:#}"))
+        Self::Transient(format!("{error:#}"))
     }
 }
 
 impl From<String> for HostError {
     fn from(message: String) -> Self {
-        Self(message)
+        Self::Refused(message)
     }
 }
 
@@ -527,14 +570,14 @@ pub async fn dispatch<H: ToolHost>(
                 .to_string();
             match read_resource(host, &uri).await {
                 Ok(contents) => result_response(id, json!({"contents": [contents]})),
-                Err(error) => error_response(id, INVALID_PARAMS, &error.0),
+                Err(error) => error_response(id, INVALID_PARAMS, error.message()),
             }
         }
         "tools/call" => {
             let result = call_tool(host, &request).await;
             match result {
                 Ok(response) => result_response(id, json!(response)),
-                Err(error) => error_response(id, INVALID_PARAMS, &error.0),
+                Err(error) => error_response(id, INVALID_PARAMS, error.message()),
             }
         }
         other => error_response(id, METHOD_NOT_FOUND, &format!("{other} is not served here")),
@@ -551,7 +594,7 @@ async fn read_resource<H: ToolHost>(
     } else if let Some(path) = uri.strip_prefix(NOTE_RESOURCE_PREFIX) {
         host.read(&ReadTarget::Path(path.to_string())).await?
     } else {
-        return Err(HostError(format!("{uri} is not a resource here")));
+        return Err(HostError::Refused(format!("{uri} is not a resource here")));
     };
     Ok(ResourceContents {
         uri: uri.to_string(),
@@ -569,7 +612,7 @@ async fn call_tool<H: ToolHost>(
 ) -> Result<CallToolResponse, HostError> {
     let name = request
         .tool_name()
-        .ok_or_else(|| HostError("tools/call needs a tool name".into()))?;
+        .ok_or_else(|| HostError::Refused("tools/call needs a tool name".into()))?;
     let arguments = request.arguments();
     let meta = request.call_meta();
     let outcome: Result<String, HostError> = match name {
@@ -600,7 +643,7 @@ async fn call_tool<H: ToolHost>(
             let fact = arguments
                 .get("fact")
                 .and_then(Value::as_str)
-                .ok_or_else(|| HostError("remember needs a `fact` string".into()))?;
+                .ok_or_else(|| HostError::Refused("remember needs a `fact` string".into()))?;
             host.remember(fact, &meta)
                 .await
                 .map(|outcome| match outcome {
@@ -621,11 +664,12 @@ async fn call_tool<H: ToolHost>(
                     other => format!("Added to today's note ({}).", other.word()),
                 })
         }
-        other => return Err(HostError(format!("no tool named {other}"))),
+        other => return Err(HostError::Refused(format!("no tool named {other}"))),
     };
     Ok(match outcome {
         Ok(text) => CallToolResponse::text(text),
-        Err(error) => CallToolResponse::error(error.0),
+        Err(HostError::Transient(message)) => CallToolResponse::error(message),
+        Err(HostError::Refused(message)) => CallToolResponse::refused(message),
     })
 }
 
@@ -650,7 +694,7 @@ pub fn validate_tool_arguments(name: &str, arguments: &Value) -> Result<(), Host
             let fact = arguments
                 .get("fact")
                 .and_then(Value::as_str)
-                .ok_or_else(|| HostError("remember needs a `fact` string".into()))?;
+                .ok_or_else(|| HostError::Refused("remember needs a `fact` string".into()))?;
             crate::rules::check_fact(fact, &[])?;
         }
         "note_today" => {
@@ -677,7 +721,7 @@ fn parse_search_query(arguments: &Value) -> Result<SearchQuery, HostError> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|query| !query.is_empty())
-        .ok_or_else(|| HostError("search needs a `query` string".into()))?;
+        .ok_or_else(|| HostError::Refused("search needs a `query` string".into()))?;
     let limit = arguments
         .get("limit")
         .and_then(Value::as_u64)
@@ -687,7 +731,7 @@ fn parse_search_query(arguments: &Value) -> Result<SearchQuery, HostError> {
     let since = match arguments.get("since").and_then(Value::as_str) {
         Some(since) => Some(
             NaiveDate::parse_from_str(since.trim(), "%Y-%m-%d")
-                .map_err(|_| HostError("`since` must be a day, YYYY-MM-DD".into()))?,
+                .map_err(|_| HostError::Refused("`since` must be a day, YYYY-MM-DD".into()))?,
         ),
         None => None,
     };
@@ -718,7 +762,7 @@ fn parse_read_target(arguments: &Value) -> Result<ReadTarget, HostError> {
     match (path, link) {
         (Some(path), _) => Ok(ReadTarget::Path(path.to_string())),
         (None, Some(link)) => Ok(ReadTarget::Link(link.to_string())),
-        (None, None) => Err(HostError("read needs a `path` or a `link`".into())),
+        (None, None) => Err(HostError::Refused("read needs a `path` or a `link`".into())),
     }
 }
 
@@ -731,15 +775,17 @@ fn parse_lines(arguments: &Value) -> Result<Vec<String>, HostError> {
         for item in array {
             let line = item
                 .as_str()
-                .ok_or_else(|| HostError("`lines` must hold strings".into()))?;
+                .ok_or_else(|| HostError::Refused("`lines` must hold strings".into()))?;
             lines.push(line.to_string());
         }
     }
     if lines.is_empty() {
-        return Err(HostError("note_today needs a `line` or `lines`".into()));
+        return Err(HostError::Refused(
+            "note_today needs a `line` or `lines`".into(),
+        ));
     }
     if lines.len() > MAX_TODAY_LINES {
-        return Err(HostError(format!(
+        return Err(HostError::Refused(format!(
             "note_today takes at most {MAX_TODAY_LINES} lines per call"
         )));
     }
@@ -812,13 +858,13 @@ mod tests {
                     .notes
                     .get(path)
                     .cloned()
-                    .ok_or_else(|| HostError(format!("{path} is not in the vault"))),
-                ReadTarget::Link(link) => Err(HostError(format!("no note titled {link}"))),
+                    .ok_or_else(|| HostError::Refused(format!("{path} is not in the vault"))),
+                ReadTarget::Link(link) => Err(HostError::Refused(format!("no note titled {link}"))),
             }
         }
 
         async fn recent(&mut self, _: u32, _: Option<&str>) -> Result<Vec<RecentNote>, HostError> {
-            Ok(Vec::new())
+            Err(HostError::Transient("the disk is away".into()))
         }
 
         async fn remember(
@@ -827,7 +873,7 @@ mod tests {
             meta: &CallMeta,
         ) -> Result<WriteOutcome, HostError> {
             if fact.contains("secret") {
-                return Err(HostError("that looks like a secret".into()));
+                return Err(HostError::Refused("that looks like a secret".into()));
             }
             self.remembered.push((fact.to_string(), meta.clone()));
             Ok(WriteOutcome::Applied)
@@ -944,6 +990,7 @@ mod tests {
         .unwrap();
         let result = response.tool_result().unwrap();
         assert!(result.is_error);
+        assert!(result.is_refusal());
         assert_eq!(result.first_text(), "daily/y.md is not in the vault");
 
         let response = pollster::block_on(dispatch(
@@ -1075,6 +1122,36 @@ mod tests {
         ))
         .unwrap();
         assert!(response.error.is_some());
+    }
+
+    #[test]
+    fn transient_failures_are_errors_without_the_refusal_mark() {
+        let mut host = FakeHost::default();
+        let response = pollster::block_on(dispatch(
+            &mut host,
+            call("tools/call", json!({"name": "recent", "arguments": {}})),
+            "1.0",
+        ))
+        .unwrap();
+        let result = response.tool_result().unwrap();
+        assert!(result.is_error);
+        assert!(!result.is_refusal());
+        assert_eq!(result.first_text(), "the disk is away");
+        let refused = CallToolResponse::refused("no");
+        let json = serde_json::to_string(&refused).unwrap();
+        assert!(json.contains("\"_meta\""));
+        assert!(
+            serde_json::from_str::<CallToolResponse>(&json)
+                .unwrap()
+                .is_refusal()
+        );
+        assert!(
+            !serde_json::from_str::<CallToolResponse>(
+                &serde_json::to_string(&CallToolResponse::error("x")).unwrap()
+            )
+            .unwrap()
+            .is_refusal()
+        );
     }
 
     #[test]

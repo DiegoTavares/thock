@@ -532,6 +532,10 @@ Added at implementation (2026-11-04):
 | 29 | Outbox sharing (review L2, L3) | Each entry records the **harness** that queued it and drains under that name; an advisory `flock` on `outbox.lock` wraps every push and drain. |
 | 30 | Modal close (review L6) | The modal closes when the **pending code is spent** or the client list changes, so a known machine re-pairing closes it too. |
 | 31 | Pairing address (§7) | `.local` leads **only when it resolves here**; otherwise the IPv4 leads and the name follows as a hint. |
+| 32 | Whole-file filters (verification R7) | **A mirrored file is refused only for prefixed tokens** (`sk-`, `ghp_`, `xox?-`, `AKIA`), a `password|secret|token|api key` followed by `:`/`=`, or a do-not-keep word; the bare runs (32+ hex or base64, 13–19 digits, IBAN) stay for `remember`/`note_today` lines only. A harness's memory is made of commit SHAs and content hashes; refusing a whole page for one is worse than the line it would catch. |
+| 33 | Connection budget (verification R1, R2) | **An absolute deadline per connection** (10 s for the head, 30 s in all) set as the socket timeout before every read through `DeadlineStream`; a head line is read through `Take` so a newline-less stream is 431 at 16 KiB; **two pre-head connections per address** (503 beyond), so a trickling peer holds at most two of the sixteen workers for ten seconds. |
+| 34 | Drain retries (verification R3) | **408 and 429 are transport** (keep, stop), as is an `is_error` tool result the desk did not mark; a refusal is a result carrying `_meta.thock.refused = true` (`CallToolResponse::refused`, from `HostError::Refused`; `HostError::Transient` for the file system and the like). |
+| 35 | Stop, resume, wake (verification R4, R5, R6, R8) | The listener's join is a `Shared` task chained behind any earlier one and kept on the service, every resume awaits it with a 5 s cap and shows `Failed` past it; an IPv6 bind is woken on `::1`; the outbox lock covers reads and removals, never a send; the modal closes with a toast naming the newest `paired_at` when the code is spent, quietly when the list shrank. |
 
 ## 16. Open decisions, for the first iterations
 

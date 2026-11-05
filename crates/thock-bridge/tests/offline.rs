@@ -33,6 +33,12 @@ struct Vault {
     seen: BTreeMap<String, WriteOutcome>,
     mirrored: BTreeMap<String, String>,
     calls: Vec<String>,
+    /// Facts the desk has already failed once, so the second try lands.
+    failed_once: Vec<String>,
+    /// Call ids in the order they landed.
+    seen_ids: Vec<String>,
+    /// Whether the next `/mcp` POST is answered 408 instead of served.
+    time_out_next: bool,
 }
 
 struct VaultHost<'a> {
@@ -71,8 +77,8 @@ impl ToolHost for VaultHost<'_> {
                 .notes
                 .get(path)
                 .cloned()
-                .ok_or_else(|| HostError(format!("{path} is not in the vault"))),
-            ReadTarget::Link(link) => Err(HostError(format!("no note titled {link}"))),
+                .ok_or_else(|| HostError::Refused(format!("{path} is not in the vault"))),
+            ReadTarget::Link(link) => Err(HostError::Refused(format!("no note titled {link}"))),
         }
     }
 
@@ -86,9 +92,13 @@ impl ToolHost for VaultHost<'_> {
         }
         let fact = thock_bridge::check_fact(fact, &[])?;
         if fact.contains("refuse-me") {
-            return Err(HostError(
+            return Err(HostError::Refused(
                 "that topic is on the person's do-not-keep list".into(),
             ));
+        }
+        if fact.contains("transient-once") && !self.vault.failed_once.contains(&fact) {
+            self.vault.failed_once.push(fact);
+            return Err(HostError::Transient("the disk is away".into()));
         }
         let date = meta
             .date
@@ -98,6 +108,7 @@ impl ToolHost for VaultHost<'_> {
             .push(thock_bridge::inbox_line(date, &fact, &self.identity));
         if let Some(id) = &meta.call_id {
             self.vault.seen.insert(id.clone(), WriteOutcome::Applied);
+            self.vault.seen_ids.push(id.clone());
         }
         Ok(WriteOutcome::Applied)
     }
@@ -233,6 +244,10 @@ fn respond(
                 .to_string()
                 .into_bytes(),
         ),
+        Route::Mcp if vault.time_out_next => {
+            vault.time_out_next = false;
+            (408, "text/plain", Vec::new())
+        }
         Route::Mcp => {
             let request = match JsonRpcRequest::parse(&String::from_utf8_lossy(body)) {
                 Ok(request) => request,
@@ -456,6 +471,10 @@ fn pair_call_go_offline_and_drain_once() {
     // know the person's list) and is dropped on the drain, not kept forever.
     let queued = serve.tool("remember", json!({"fact": "Something to refuse-me later"}));
     assert_eq!(queued.first_text(), thock_bridge::QUEUED_SENTENCE);
+    // A line the desk will fail once and take the second time stays queued
+    // through the failure (R3).
+    let queued = serve.tool("remember", json!({"fact": "A transient-once fact"}));
+    assert_eq!(queued.first_text(), thock_bridge::QUEUED_SENTENCE);
     // A line the client can see is wrong never enters the queue.
     let refused = serve.tool("remember", json!({"fact": "- a bullet"}));
     assert!(refused.is_error);
@@ -464,7 +483,7 @@ fn pair_call_go_offline_and_drain_once() {
         "{}",
         refused.first_text()
     );
-    assert_eq!(client.outbox_lines(), 3);
+    assert_eq!(client.outbox_lines(), 4);
     let stderr = serve.finish();
     assert!(stderr.contains("unreachable"), "{stderr}");
 
@@ -473,36 +492,50 @@ fn pair_call_go_offline_and_drain_once() {
     let pong = serve.call("ping", json!({}));
     assert!(pong.error.is_none());
     serve.finish();
-    assert_eq!(client.outbox_lines(), 3);
+    assert_eq!(client.outbox_lines(), 4);
 
-    // The desk is back: the start-up drain lands both lines, once, and
-    // drops the one the desk refuses.
+    // The desk is back but answers the first call 408: nothing is dropped,
+    // the drain stops where it is and the queue is intact (R3).
     let desk = Desk::start(port, vault.clone());
+    vault.lock().expect("lock").time_out_next = true;
+    let mut serve = client.serve();
+    serve.call("ping", json!({}));
+    let stderr = serve.finish();
+    assert!(stderr.contains("still waiting"), "{stderr}");
+    assert!(stderr.contains("408"), "{stderr}");
+    assert_eq!(client.outbox_lines(), 4);
+    assert_eq!(vault.lock().expect("lock").inbox.len(), 1);
+
+    // Now the start-up drain lands the two good lines, drops the refused
+    // one, and keeps the one that failed transiently (a ping drains
+    // nothing, so the queue is observable between sessions).
     let mut serve = client.serve();
     let pong = serve.call("ping", json!({}));
     assert!(pong.error.is_none());
-    let context = serve.tool("context", json!({}));
-    assert!(!context.first_text().contains("from cache"), "online again");
     let stderr = serve.finish();
     assert!(stderr.contains("2 queued line(s) landed"), "{stderr}");
     assert!(stderr.contains("refused a queued remember"), "{stderr}");
+    assert!(stderr.contains("still waiting"), "{stderr}");
+    assert_eq!(client.outbox_lines(), 1);
+    let mut serve = client.serve();
+    let context = serve.tool("context", json!({}));
+    assert!(!context.first_text().contains("from cache"), "online again");
+    let stderr = serve.finish();
+    assert!(stderr.contains("1 queued line(s) landed"), "{stderr}");
     assert_eq!(client.outbox_lines(), 0);
     {
         let vault = vault.lock().expect("lock");
-        assert_eq!(vault.inbox.len(), 2, "{:?}", vault.inbox);
+        assert_eq!(vault.inbox.len(), 3, "{:?}", vault.inbox);
         assert!(vault.inbox[1].ends_with("Second fact, queued · via claude-code@robin"));
+        assert!(vault.inbox[2].ends_with("A transient-once fact · via claude-code@robin"));
         assert!(
             vault.notes["daily/today.md"].ends_with("- claude-code@robin · Shipped it offline.\n")
         );
-        assert_eq!(vault.seen.len(), 2);
+        assert_eq!(vault.seen.len(), 3);
     }
 
     // A reply lost in flight: the same call id again writes nothing.
-    let (second_id, _) = {
-        let vault = vault.lock().expect("lock");
-        let second = vault.seen.keys().last().expect("an id").clone();
-        (second, ())
-    };
+    let second_id = vault.lock().expect("lock").seen_ids[1].clone();
     let replay = JsonRpcRequest::new(
         json!(99),
         "tools/call",
@@ -528,7 +561,7 @@ fn pair_call_go_offline_and_drain_once() {
     assert_eq!(response.status, 200);
     assert_eq!(
         vault.lock().expect("lock").inbox.len(),
-        2,
+        3,
         "no double write"
     );
 
