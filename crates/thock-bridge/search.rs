@@ -15,6 +15,10 @@ pub struct IndexEntry {
     pub title: String,
     pub modified: NaiveDate,
     pub body: String,
+    /// The title's and body's words, lowercased once at upsert so a query
+    /// never re-tokenises a note.
+    title_words: Vec<String>,
+    body_words: Vec<String>,
 }
 
 /// The first `# ` heading of a note, else its file stem.
@@ -58,6 +62,8 @@ impl SearchIndex {
 
     pub fn upsert(&mut self, path: &str, modified: NaiveDate, body: String) {
         let title = note_title(path, &body);
+        let title_words = word_list(&title);
+        let body_words = word_list(&body);
         self.entries.insert(
             path.to_string(),
             IndexEntry {
@@ -65,6 +71,8 @@ impl SearchIndex {
                 title,
                 modified,
                 body,
+                title_words,
+                body_words,
             },
         );
     }
@@ -113,8 +121,7 @@ impl SearchIndex {
             {
                 continue;
             }
-            let title_words: Vec<String> = word_list(&entry.title);
-            let body_words: Vec<String> = word_list(&entry.body);
+            let (title_words, body_words) = (&entry.title_words, &entry.body_words);
             let mut score = 0.0;
             let mut all_match = true;
             for term in &terms {

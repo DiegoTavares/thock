@@ -365,7 +365,9 @@ pub struct BridgeService {
     /// port is free again (a pause followed by a resume).
     stopping: Option<SharedFuture<Task<()>>>,
     start_task: Option<Task<()>>,
-    index: Rc<RefCell<Option<SearchIndex>>>,
+    /// Shared with the background thread a query runs on; the foreground
+    /// only writes it, one entry per file event.
+    index: Arc<std::sync::RwLock<Option<SearchIndex>>>,
     seen: Rc<RefCell<SeenCalls>>,
     /// How many history checkpoints the bridge asked for, so a test can see
     /// that every write that changes a file took one first.
@@ -395,7 +397,7 @@ impl BridgeService {
             listener: None,
             stopping: None,
             start_task: None,
-            index: Rc::new(RefCell::new(None)),
+            index: Arc::new(std::sync::RwLock::new(None)),
             seen: Rc::new(RefCell::new(SeenCalls::default())),
             checkpoints: Rc::new(std::cell::Cell::new(0)),
             serving_since: String::new(),
@@ -518,11 +520,13 @@ impl BridgeService {
     /// Keeps the search index current from the worktree's events (§9.3).
     /// Nothing happens before a first `search` builds it.
     fn index_changed(&mut self, path: &str, removed: bool, cx: &mut Context<Self>) {
-        if self.index.borrow().is_none() {
+        if self.index.read().ok().is_none_or(|index| index.is_none()) {
             return;
         }
         if removed {
-            if let Some(index) = self.index.borrow_mut().as_mut() {
+            if let Ok(mut index) = self.index.write()
+                && let Some(index) = index.as_mut()
+            {
                 index.remove(path);
             }
             return;
@@ -535,7 +539,8 @@ impl BridgeService {
         let path = path.to_string();
         cx.spawn(async move |_, _| {
             if let Some(entry) = read_index_entry(&fs, &vault.root, &path).await
-                && let Some(index) = index.borrow_mut().as_mut()
+                && let Ok(mut index) = index.write()
+                && let Some(index) = index.as_mut()
             {
                 index.upsert(&path, entry.0, entry.1);
             }
@@ -562,7 +567,9 @@ impl BridgeService {
         self.vault = vault;
         if changed_root {
             self.stop(BridgeState::Off, cx);
-            *self.index.borrow_mut() = None;
+            if let Ok(mut index) = self.index.write() {
+                *index = None;
+            }
             *self.seen.borrow_mut() = SeenCalls::default();
         }
         self.apply_state(cx);
@@ -1116,7 +1123,7 @@ struct RequestContext {
     vault: Vault,
     config: BridgeConfig,
     shared: Arc<Mutex<Shared>>,
-    index: Rc<RefCell<Option<SearchIndex>>>,
+    index: Arc<std::sync::RwLock<Option<SearchIndex>>>,
     seen: Rc<RefCell<SeenCalls>>,
     checkpoints: Rc<std::cell::Cell<usize>>,
     project: Entity<Project>,
@@ -1451,12 +1458,35 @@ impl DeskHost<'_> {
     }
 
     async fn ensure_index(&self) -> Result<(), HostError> {
-        if self.context.index.borrow().is_some() {
+        if self
+            .context
+            .index
+            .read()
+            .ok()
+            .is_some_and(|index| index.is_some())
+        {
             return Ok(());
         }
         let index = build_index(&self.context.fs, self.root()).await?;
-        *self.context.index.borrow_mut() = Some(index);
+        if let Ok(mut slot) = self.context.index.write() {
+            *slot = Some(index);
+        }
         Ok(())
+    }
+
+    /// Runs a read over the index off the foreground thread, so a big vault
+    /// never stalls the app for a query.
+    async fn with_index<R: Send + 'static>(
+        &self,
+        read: impl FnOnce(&SearchIndex) -> R + Send + 'static,
+    ) -> Option<R> {
+        let index = self.context.index.clone();
+        self.cx
+            .background_spawn(async move {
+                let guard = index.read().ok()?;
+                guard.as_ref().map(read)
+            })
+            .await
     }
 
     /// The absolute path of a vault-relative note, refused when it leaves
@@ -1607,12 +1637,10 @@ impl ToolHost for DeskHost<'_> {
     async fn search(&mut self, query: &SearchQuery) -> Result<Vec<SearchHit>, HostError> {
         self.ensure_index().await?;
         let today = Local::now().date_naive();
+        let query = query.clone();
         Ok(self
-            .context
-            .index
-            .borrow()
-            .as_ref()
-            .map(|index| index.search(query, today))
+            .with_index(move |index| index.search(&query, today))
+            .await
             .unwrap_or_default())
     }
 
@@ -1621,12 +1649,10 @@ impl ToolHost for DeskHost<'_> {
             ReadTarget::Path(path) => path.trim().to_string(),
             ReadTarget::Link(link) => {
                 self.ensure_index().await?;
+                let wanted = link.clone();
                 let resolution = self
-                    .context
-                    .index
-                    .borrow()
-                    .as_ref()
-                    .map(|index| index.resolve_link(link))
+                    .with_index(move |index| index.resolve_link(&wanted))
+                    .await
                     .unwrap_or(thock_bridge::LinkResolution::Missing);
                 match resolution {
                     thock_bridge::LinkResolution::Found(path) => path,
@@ -1664,12 +1690,10 @@ impl ToolHost for DeskHost<'_> {
     ) -> Result<Vec<RecentNote>, HostError> {
         self.ensure_index().await?;
         let today = Local::now().date_naive();
+        let folder = folder.map(str::to_string);
         Ok(self
-            .context
-            .index
-            .borrow()
-            .as_ref()
-            .map(|index| index.recent(days, folder, today))
+            .with_index(move |index| index.recent(days, folder.as_deref(), today))
+            .await
             .unwrap_or_default())
     }
 
