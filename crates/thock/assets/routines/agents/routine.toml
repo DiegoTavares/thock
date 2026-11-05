@@ -1,0 +1,51 @@
+schema  = 2
+id      = "agents"
+name    = "Agents"
+version = 1
+summary = "Let the agents you use elsewhere read what this vault knows and leave notes in it."
+icon    = "terminal"
+doc     = "routines/agents/Agents.md"
+agent_doc = "routines/agents/AGENT.md"
+
+[[link]]
+id   = "agent-memory"
+name = "What your agents keep"
+open = "memory/agents/README.md"
+kind = "editor"
+
+[[collection]]
+name = "Agent pages"
+path = "memory/agents"
+
+[[scaffold]]
+kind = "dir"
+path = "memory/agents"
+
+[[scaffold]]
+kind   = "file"
+path   = "memory/agents/README.md"
+source = "assets/agents-readme.md"
+
+# What an agent should know before acting here, and the portable protocol
+# `thock-bridge connect` installs on the other machine. Both are upgraded
+# with the app; an edited copy is staged for Update Rituals instead.
+[[scaffold]]
+kind    = "file"
+path    = "routines/agents/AGENT.md"
+source  = "AGENT.md"
+upgrade = true
+
+[[scaffold]]
+kind    = "file"
+path    = "routines/agents/skills/thock-memory/SKILL.md"
+source  = "skills/thock-memory/SKILL.md"
+upgrade = true
+
+[[skill]]
+id      = "connect-agent"
+name    = "Connect an agent"
+kind    = "setup"
+file    = "routines/agents/skills/connect-agent.md"
+summary = "Pair a machine, install the skill, point the agent at this vault."
+reads   = ["routines/agents/AGENT.md"]
+writes  = []

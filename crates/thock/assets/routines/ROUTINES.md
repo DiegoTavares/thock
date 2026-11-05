@@ -84,6 +84,16 @@ group_by = "account"            # optional
 kind = "dir"
 path = "finance"
 
+# A shipped file is create-if-missing: once written it is the user's. Set
+# `upgrade = true` for a file the app should keep current (a protocol, a
+# reference); an unmodified copy is replaced in place and an edited one is
+# staged for the Update Rituals ritual, like a skill file.
+[[scaffold]]
+kind    = "file"
+path    = "routines/finance/REFERENCE.md"
+source  = "REFERENCE.md"
+upgrade = true
+
 # Skills are rituals the user's agent runs — plain markdown instructions.
 [[skill]]
 id      = "friday-finance"

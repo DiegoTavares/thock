@@ -19,7 +19,6 @@ use crate::bridge_service::{BridgeService, ClientView, PairingInvite};
 use crate::calendar_service::ManualSyncFinished;
 
 pub struct ConnectAgentModal {
-    service: WeakEntity<BridgeService>,
     focus_handle: FocusHandle,
     invite: Option<PairingInvite>,
     /// Which of the desk's addresses the command names; `up`/`down` cycle it.
@@ -71,7 +70,6 @@ impl ConnectAgentModal {
             })
         });
         Self {
-            service,
             focus_handle: cx.focus_handle(),
             invite: None,
             address_index: 0,

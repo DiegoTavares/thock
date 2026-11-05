@@ -22,6 +22,7 @@ pub const TIMELINE_ROUTINE_ID: &str = "timeline";
 pub const INBOX_ROUTINE_ID: &str = "inbox";
 pub const LIFESTYLE_ROUTINE_ID: &str = "lifestyle";
 pub const READING_ROUTINE_ID: &str = "reading";
+pub const AGENTS_ROUTINE_ID: &str = "agents";
 /// Vault-visible home of Routine definitions: `routines/<id>/routine.toml`.
 pub const ROUTINES_DIR: &str = "routines";
 pub const ROUTINE_MANIFEST_FILE: &str = "routine.toml";
@@ -93,6 +94,15 @@ const READING_DOC: &str = include_str!("../assets/routines/reading/doc.md");
 const READING_CONNECT_READWISE_SKILL: &str =
     include_str!("../assets/routines/reading/skills/connect-readwise.md");
 const READING_WEEK_SKILL: &str = include_str!("../assets/routines/reading/skills/reading-week.md");
+
+const AGENTS_MANIFEST: &str = include_str!("../assets/routines/agents/routine.toml");
+const AGENTS_DOC: &str = include_str!("../assets/routines/agents/doc.md");
+const AGENTS_AGENT_DOC: &str = include_str!("../assets/routines/agents/AGENT.md");
+const AGENTS_CONNECT_SKILL: &str =
+    include_str!("../assets/routines/agents/skills/connect-agent.md");
+const AGENTS_MEMORY_SKILL: &str =
+    include_str!("../assets/routines/agents/skills/thock-memory/SKILL.md");
+const AGENTS_README_SEED: &str = include_str!("../assets/routines/agents/assets/agents-readme.md");
 
 const LIFESTYLE_MANIFEST: &str = include_str!("../assets/routines/lifestyle/routine.toml");
 const LIFESTYLE_DOC: &str = include_str!("../assets/routines/lifestyle/doc.md");
@@ -339,6 +349,7 @@ struct ScaffoldEntryContent {
     kind: String,
     path: String,
     source: Option<String>,
+    upgrade: Option<bool>,
     #[serde(flatten)]
     unknown: toml::Table,
 }
@@ -351,6 +362,7 @@ impl ScaffoldEntryContent {
             "file" => Ok(ScaffoldEntry::File {
                 path: self.path,
                 source: self.source,
+                upgrade: self.upgrade.unwrap_or(false),
             }),
             other => bail!("unknown scaffold kind {other:?} (expected \"dir\" or \"file\")"),
         }
@@ -538,6 +550,10 @@ pub enum ScaffoldEntry {
     File {
         path: String,
         source: Option<String>,
+        /// Whether a newer shipped version replaces an unmodified copy in
+        /// place, like a skill file (V29). Off by default: most scaffold
+        /// files are seeds the user owns once written.
+        upgrade: bool,
     },
 }
 
@@ -631,6 +647,8 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
         path: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         source: Option<&'a str>,
+        #[serde(skip_serializing_if = "is_false")]
+        upgrade: bool,
     }
 
     #[derive(Serialize)]
@@ -723,11 +741,17 @@ fn render_manifest_toml(manifest: &RoutineManifest) -> Result<String> {
                     kind: "dir",
                     path,
                     source: None,
+                    upgrade: false,
                 },
-                ScaffoldEntry::File { path, source } => ScaffoldOut {
+                ScaffoldEntry::File {
+                    path,
+                    source,
+                    upgrade,
+                } => ScaffoldOut {
                     kind: "file",
                     path,
                     source: source.as_deref(),
+                    upgrade: *upgrade,
                 },
             })
             .collect(),
@@ -916,9 +940,14 @@ fn declared_files(manifest: &RoutineManifest) -> Vec<DeclaredFile> {
         });
     }
     for entry in &manifest.scaffold {
-        if let ScaffoldEntry::File { path, source } = entry {
+        if let ScaffoldEntry::File {
+            path,
+            source,
+            upgrade,
+        } = entry
+        {
             files.push(DeclaredFile {
-                upgradeable: false,
+                upgradeable: *upgrade,
                 destination: path.clone(),
                 source: source.clone(),
             });
@@ -1144,6 +1173,18 @@ pub fn catalog() -> Result<Vec<CatalogRoutine>> {
                 ("doc.md", READING_DOC),
                 ("skills/connect-readwise.md", READING_CONNECT_READWISE_SKILL),
                 ("skills/reading-week.md", READING_WEEK_SKILL),
+            ],
+        },
+        CatalogRoutine {
+            manifest: parse_manifest(AGENTS_MANIFEST)
+                .context("parsing the bundled Agents Routine manifest")?,
+            manifest_toml: AGENTS_MANIFEST,
+            assets: &[
+                ("doc.md", AGENTS_DOC),
+                ("AGENT.md", AGENTS_AGENT_DOC),
+                ("skills/connect-agent.md", AGENTS_CONNECT_SKILL),
+                ("skills/thock-memory/SKILL.md", AGENTS_MEMORY_SKILL),
+                ("assets/agents-readme.md", AGENTS_README_SEED),
             ],
         },
     ])
@@ -2429,7 +2470,7 @@ mod tests {
     #[test]
     fn catalog_parses() {
         let catalog = catalog().unwrap();
-        assert_eq!(catalog.len(), 4);
+        assert_eq!(catalog.len(), 5);
         let manifest = &catalog[0].manifest;
         assert_eq!(manifest.id, TIMELINE_ROUTINE_ID);
         assert_eq!(manifest.schema, 2);

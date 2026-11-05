@@ -51,6 +51,11 @@ These are binding for any agent working in this vault:
    record what an email or an imported item asserted (highlights the
    person kept are the exception; see `skills/thock/reflect.md`), and never
    note anything `profile.md` lists under **What Thock should not keep**.
+   An agent working from another machine reaches this folder through the
+   Agents Routine's tools; the rules are the same. Pages under
+   `memory/agents/` belong to the agent named in their path: read them,
+   never edit them, and never copy their contents into the other memory
+   pages yourself; Reflect does that with provenance.
 
 When a **`## Language`** section exists in this file (the Set Language
 ritual appends one), it is as binding as the rules above: speak and write
