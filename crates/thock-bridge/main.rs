@@ -467,10 +467,13 @@ impl Proxy {
                 let tool = request.tool_name().map(str::to_string);
                 let arguments = request.arguments();
                 let is_write = matches!(tool.as_deref(), Some("remember" | "note_today"));
+                // Only a queued line carries a date (the day it was queued,
+                // set on the drain); a live call is today by the desk's own
+                // clock, which may differ from this machine's.
                 let request = if is_write {
                     request.with_meta(&thock_bridge::CallMeta {
                         call_id: Some(uuid::Uuid::new_v4().to_string()),
-                        date: Some(Local::now().date_naive()),
+                        date: None,
                     })
                 } else {
                     request

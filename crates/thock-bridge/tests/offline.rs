@@ -37,6 +37,8 @@ struct Vault {
     failed_once: Vec<String>,
     /// Call ids in the order they landed.
     seen_ids: Vec<String>,
+    /// The `_meta.date` each `remember` carried, in order.
+    dates: Vec<Option<NaiveDate>>,
     /// Whether the next `/mcp` POST is answered 408 instead of served.
     time_out_next: bool,
 }
@@ -110,6 +112,7 @@ impl ToolHost for VaultHost<'_> {
             self.vault.seen.insert(id.clone(), WriteOutcome::Applied);
             self.vault.seen_ids.push(id.clone());
         }
+        self.vault.dates.push(meta.date);
         Ok(WriteOutcome::Applied)
     }
 
@@ -436,6 +439,7 @@ fn pair_call_go_offline_and_drain_once() {
         assert_eq!(vault.inbox.len(), 1);
         assert!(vault.inbox[0].ends_with("Likes short PR titles · via claude-code@robin"));
         assert_eq!(vault.seen.len(), 1, "the call carried an id");
+        assert_eq!(vault.dates, vec![None], "a live call carries no date");
     }
 
     // The desk goes away: reads come from the cache, writes queue.
@@ -528,6 +532,11 @@ fn pair_call_go_offline_and_drain_once() {
         assert_eq!(vault.inbox.len(), 3, "{:?}", vault.inbox);
         assert!(vault.inbox[1].ends_with("Second fact, queued · via claude-code@robin"));
         assert!(vault.inbox[2].ends_with("A transient-once fact · via claude-code@robin"));
+        assert!(
+            vault.dates[1..].iter().all(|date| date.is_some()),
+            "a drained line keeps the day it was queued: {:?}",
+            vault.dates
+        );
         assert!(
             vault.notes["daily/today.md"].ends_with("- claude-code@robin · Shipped it offline.\n")
         );
