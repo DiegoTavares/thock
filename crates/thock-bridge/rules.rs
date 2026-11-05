@@ -88,9 +88,84 @@ pub fn sanitize_harness(raw: &str) -> String {
     }
 }
 
-/// The words of four letters or more under `## What Thock should not keep`
-/// in `profile.md`, lowercased and deduplicated (§9.2). Empty when the
-/// section is missing.
+/// Words a do-not-keep line is written with rather than about: "Anything
+/// about my salary" names one topic. Short on purpose; a line that is
+/// nothing but these keeps its words anyway, so a rule is never lost.
+const STOP_WORDS: &[&str] = &[
+    "about",
+    "after",
+    "again",
+    "also",
+    "anything",
+    "around",
+    "before",
+    "between",
+    "could",
+    "during",
+    "else",
+    "ever",
+    "every",
+    "everything",
+    "from",
+    "have",
+    "into",
+    "just",
+    "keep",
+    "kept",
+    "like",
+    "mine",
+    "more",
+    "most",
+    "much",
+    "never",
+    "none",
+    "nothing",
+    "only",
+    "other",
+    "ours",
+    "over",
+    "please",
+    "same",
+    "should",
+    "some",
+    "something",
+    "such",
+    "than",
+    "that",
+    "their",
+    "theirs",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "thing",
+    "things",
+    "this",
+    "thock",
+    "those",
+    "through",
+    "under",
+    "until",
+    "upon",
+    "very",
+    "want",
+    "what",
+    "whatever",
+    "when",
+    "where",
+    "which",
+    "while",
+    "with",
+    "without",
+    "would",
+    "your",
+    "yours",
+];
+
+/// The topic words of four letters or more under `## What Thock should not
+/// keep` in `profile.md`, lowercased and deduplicated (§9.2), minus the
+/// `STOP_WORDS` a line is phrased with. Empty when the section is missing.
 pub fn forbidden_topics(profile: &str) -> Vec<String> {
     let mut topics: Vec<String> = Vec::new();
     let mut inside = false;
@@ -113,9 +188,20 @@ pub fn forbidden_topics(profile: &str) -> Vec<String> {
             .trim_start_matches("[ ]")
             .trim_start_matches("[x]")
             .trim();
-        for word in words(body) {
-            if word.chars().count() >= 4 && !topics.contains(&word) {
-                topics.push(word);
+        let long_words: Vec<String> = words(body)
+            .into_iter()
+            .filter(|word| word.chars().count() >= 4)
+            .collect();
+        let mut kept: Vec<&String> = long_words
+            .iter()
+            .filter(|word| !STOP_WORDS.contains(&word.as_str()))
+            .collect();
+        if kept.is_empty() {
+            kept = long_words.iter().collect();
+        }
+        for word in kept {
+            if !topics.contains(word) {
+                topics.push(word.clone());
             }
         }
     }
@@ -461,9 +547,13 @@ mod tests {
         let profile = "# Diego\n\n## What Thock may pull in\n- [x] Calendar\n\n\
                        ## What Thock should not keep\n- My salary and anything about pay\n\
                        - the divorce\n\n## Areas\n- Health\n";
+        assert_eq!(forbidden_topics(profile), vec!["salary", "divorce"]);
+        // A line that is nothing but stop words keeps them: the rule is the
+        // person's, not ours to lose.
+        let only_stop_words = "## What Thock should not keep\n- anything about them\n";
         assert_eq!(
-            forbidden_topics(profile),
-            vec!["salary", "anything", "about", "divorce"]
+            forbidden_topics(only_stop_words),
+            vec!["anything", "about", "them"]
         );
         assert!(forbidden_topics("# Nothing here\n").is_empty());
     }
