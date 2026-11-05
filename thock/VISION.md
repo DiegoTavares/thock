@@ -583,6 +583,15 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   `.thock/gmail.toml`, and nothing decided before the opt-in moves. Spec
   `specs/v53-gmail-archive-on-triage.md`. _(shipped 2026-11-02: merged as #179)_
 
+- [ ] **Your other agents share the vault's memory:** an opt-in **Agents** Routine makes the
+  running desk serve the vault's memory on the local network, and a small `thock-bridge` client
+  gives any MCP harness (Claude Code, Codex, Gemini, Hermes, Pi, Goose…) six tools: `context`,
+  `search`, `read`, `recent`, `remember` (one dated line to `memory/inbox.md`) and `note_today`
+  (lines under `## From your agents`). A harness's own memory can live under
+  `memory/agents/<harness>/<host>/`, mirrored one way; Reflect files it with provenance and still
+  owns the index. Pair with a one-time code, revoke by name; offline, the client answers from a
+  cache and queues writes. Spec `specs/v55-agents-bridge.md`. _(in progress)_
+
 ---
 
 _This is a starting point, not a spec. It exists to give designers and engineers a shared picture of the destination so we can argue productively about the route._
