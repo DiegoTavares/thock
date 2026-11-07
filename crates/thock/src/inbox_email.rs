@@ -54,8 +54,8 @@ pub struct EmailMessage {
 pub enum EmailBlock {
     /// Markdown.
     Text(String),
-    /// Markdown: what a ticketing system wrote around a person's words, set
-    /// apart by `quiet_system_lines`.
+    /// Markdown: a ticketing system's line that stays beside a person's words,
+    /// set apart by `quiet_system_lines`.
     Meta(String),
     /// A run of `Key: value` lines. `shown` holds what this message
     /// introduced or changed, `unchanged` what it only repeated.
@@ -78,6 +78,8 @@ pub enum FoldKind {
     /// The trail of a reply: `On … wrote:` and its `>` lines.
     Quoted,
     Signature,
+    /// What a ticketing system wrote above a person's words.
+    System,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -159,15 +161,18 @@ pub fn drop_restated_subject(thread: &mut EmailThread, title: &str) {
 }
 
 /// Tells a relayed message's system text from its person's words, so the
-/// reader can draw only the words at full strength: all that comes before the
-/// `(by …)` line, that line, and any line restating `title` or noting the
-/// ticket's own edit. This is the reading alone; the note keeps every line.
+/// message opens on the words: all that comes before the `(by …)` line and any
+/// line restating `title` fold, the `(by …)` line goes where a card's header
+/// gives it, and a note of the ticket's own edit stays quiet, or goes when a
+/// changed field already says it. This is the reading alone; the note keeps
+/// every line.
 pub fn quiet_system_lines(thread: &mut EmailThread, title: &str) {
     let carded = thread.messages.len() > 1;
     for message in &mut thread.messages {
         if message.author.is_none() {
             continue;
         }
+        let shown_fields = shown_fields(&message.blocks);
         let mut before_author = message.blocks.iter().any(
             |block| matches!(block, EmailBlock::Text(text) if text.lines().any(|line| parse_author(line).is_some())),
         );
@@ -177,6 +182,7 @@ pub fn quiet_system_lines(thread: &mut EmailThread, title: &str) {
                     &text,
                     title,
                     carded,
+                    &shown_fields,
                     &mut before_author,
                     &mut message.blocks,
                 ),
@@ -186,38 +192,84 @@ pub fn quiet_system_lines(thread: &mut EmailThread, title: &str) {
     }
 }
 
+/// The fields a message keeps on screen, as `(key, value)`.
+fn shown_fields(blocks: &[EmailBlock]) -> Vec<(String, String)> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            EmailBlock::Fields { shown, unchanged } => Some(split_fields(shown, unchanged).0),
+            _ => None,
+        })
+        .flatten()
+        .map(|field| (field.key.clone(), field.value.clone()))
+        .collect()
+}
+
 fn split_system_text(
     text: &str,
     title: &str,
     carded: bool,
+    shown_fields: &[(String, String)],
     before_author: &mut bool,
     blocks: &mut Vec<EmailBlock>,
 ) {
     for paragraph in text.split("\n\n") {
         let lines: Vec<&str> = paragraph.lines().collect();
-        let (quiet, own) = match lines.iter().rposition(|line| parse_author(line).is_some()) {
+        match lines.iter().rposition(|line| parse_author(line).is_some()) {
             Some(author_line) => {
                 *before_author = false;
-                lines.split_at(author_line + 1)
+                let by_line = by_line_start(&lines, author_line);
+                push_system_fold(blocks, &lines[..by_line]);
+                // A card's header already gives the author and the date; a
+                // lone message has no card, so its line stays.
+                if !(carded && is_author_line(lines[author_line])) {
+                    let by_line = lines[by_line..=author_line].join("\n");
+                    push_block(blocks, EmailBlock::Meta(by_line));
+                }
+                let own = &lines[author_line + 1..];
+                if !own.is_empty() {
+                    push_block(blocks, EmailBlock::Text(own.join("\n")));
+                }
             }
-            None if *before_author || lines.iter().all(|line| is_system_line(line, title)) => {
-                (lines.as_slice(), [].as_slice())
+            None if *before_author => push_system_fold(blocks, &lines),
+            None if lines.iter().all(|line| is_system_line(line, title)) => {
+                for line in lines {
+                    if is_change_line(line) {
+                        if !change_is_shown(line, shown_fields) {
+                            push_block(blocks, EmailBlock::Meta(line.to_string()));
+                        }
+                    } else {
+                        push_system_fold(blocks, &[line]);
+                    }
+                }
             }
-            None => ([].as_slice(), lines.as_slice()),
-        };
-        // A card's header already gives the author and the date; a lone
-        // message has no card, so its line stays.
-        let quiet: Vec<&str> = quiet
-            .iter()
-            .filter(|line| !(carded && is_author_line(line)))
-            .copied()
-            .collect();
-        if !quiet.is_empty() {
-            push_block(blocks, EmailBlock::Meta(quiet.join("\n")));
+            None => push_block(blocks, EmailBlock::Text(lines.join("\n"))),
         }
-        if !own.is_empty() {
-            push_block(blocks, EmailBlock::Text(own.join("\n")));
-        }
+    }
+}
+
+/// Where the `(by …)` line starts: a system may set its label on the line
+/// above (`Description` then `(by ana on …):`).
+fn by_line_start(lines: &[&str], author_line: usize) -> usize {
+    let label_above = lines[author_line].trim_start().starts_with("(by ")
+        && author_line
+            .checked_sub(1)
+            .and_then(|index| lines.get(index))
+            .is_some_and(|line| line.split_whitespace().count() <= MAX_FIELD_KEY_WORDS);
+    author_line - usize::from(label_above)
+}
+
+fn push_system_fold(blocks: &mut Vec<EmailBlock>, lines: &[&str]) {
+    let count = lines.iter().filter(|line| !is_blank(line)).count();
+    if count > 0 {
+        push_block(
+            blocks,
+            EmailBlock::Fold {
+                kind: FoldKind::System,
+                text: lines.join("\n"),
+                lines: count,
+            },
+        );
     }
 }
 
@@ -225,15 +277,28 @@ fn is_system_line(line: &str, title: &str) -> bool {
     restates_subject(line, title) || is_change_line(line)
 }
 
-/// `Changing Status to CLOSED`: a ticket noting its own edit.
-fn is_change_line(line: &str) -> bool {
+/// `Changing Status to CLOSED`: a ticket noting its own edit, as its key and
+/// value.
+fn parse_change(line: &str) -> Option<(&str, &str)> {
     line.trim()
         .strip_prefix("Changing ")
         .and_then(|rest| rest.split_once(" to "))
-        .is_some_and(|(key, value)| {
+        .filter(|(key, value)| {
             key.split_whitespace().count() <= MAX_FIELD_KEY_WORDS
                 && value.split_whitespace().count() == 1
         })
+}
+
+fn is_change_line(line: &str) -> bool {
+    parse_change(line).is_some()
+}
+
+fn change_is_shown(line: &str, shown_fields: &[(String, String)]) -> bool {
+    parse_change(line).is_some_and(|(key, value)| {
+        shown_fields.iter().any(|(shown_key, shown_value)| {
+            shown_key.eq_ignore_ascii_case(key) && shown_value.eq_ignore_ascii_case(value)
+        })
+    })
 }
 
 /// Splits `HD 42: The farm is down` into the ticket and its subject, for a
@@ -652,6 +717,22 @@ fn push_block(blocks: &mut Vec<EmailBlock>, block: EmailBlock) {
         | (Some(EmailBlock::Meta(last)), EmailBlock::Meta(added)) => {
             last.push_str("\n\n");
             last.push_str(added);
+        }
+        (
+            Some(EmailBlock::Fold {
+                kind: FoldKind::System,
+                text,
+                lines,
+            }),
+            EmailBlock::Fold {
+                kind: FoldKind::System,
+                text: added,
+                lines: more,
+            },
+        ) => {
+            text.push_str("\n\n");
+            text.push_str(added);
+            *lines += more;
         }
         _ => blocks.push(block),
     }
@@ -1098,16 +1179,88 @@ Team:        render-ops
         assert_eq!(
             blocks,
             [
-                EmailBlock::Meta(
-                    "This ticket is now closed. Please fill out this survey.\n\n\
-                     Ticket 42:The farm stopped taking jobs\n\n\
-                     Comment #4 (by ana on 11/06/26 08:38am):"
-                        .to_string()
-                ),
+                EmailBlock::Fold {
+                    kind: FoldKind::System,
+                    text: "This ticket is now closed. Please fill out this survey.\n\n\
+                           Ticket 42:The farm stopped taking jobs"
+                        .to_string(),
+                    lines: 2,
+                },
+                EmailBlock::Meta("Comment #4 (by ana on 11/06/26 08:38am):".to_string()),
                 EmailBlock::Text("Glad the publishes succeeded!".to_string()),
                 EmailBlock::Meta("Changing Status to CLOSED".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn a_card_opens_on_the_words_and_the_status_row_says_the_change() {
+        let mut thread = thread(
+            "## helpdesk@example.com — 2026-11-05 09:38\n\n\
+             Description\n(by bo on 11/05/26 08:38am):\n\n\
+             Looking into it.\n\n\
+             Status:  OPEN\n\nTeam:  ops\n\nHost:  a1\n\n\
+             ## helpdesk@example.com — 2026-11-06 09:38\n\n\
+             This ticket is now closed.\n\n\
+             Ticket 42:The farm stopped taking jobs\n\n\
+             Comment #4 (by ana on 11/06/26 08:38am):\n\n\
+             Glad the publishes succeeded!\n\n\
+             Changing Status to CLOSED\n\n\
+             Changing Team to infra\n\n\
+             Status:  CLOSED\n\nTeam:  ops\n\nHost:  a1\n",
+        );
+        quiet_system_lines(&mut thread, "HD 42: The farm stopped taking jobs");
+        assert_eq!(
+            thread.messages[0].blocks[0],
+            EmailBlock::Text("Looking into it.".to_string())
+        );
+        let blocks = &thread.messages[1].blocks;
+        assert!(
+            matches!(
+                &blocks[0],
+                EmailBlock::Fold { kind: FoldKind::System, lines: 2, text }
+                    if text.starts_with("This ticket is now closed.")
+            ),
+            "{blocks:?}"
+        );
+        assert_eq!(
+            blocks[1],
+            EmailBlock::Text("Glad the publishes succeeded!".to_string())
+        );
+        // The Status row says the first; nothing on screen says the second.
+        assert_eq!(
+            blocks[2],
+            EmailBlock::Meta("Changing Team to infra".to_string())
+        );
+    }
+
+    #[test]
+    fn a_change_a_folded_record_holds_stays_on_screen() {
+        let blocks = quieted(
+            "## helpdesk@example.com — 2026-11-06 09:38\n\n\
+             Comment #4 (by ana on 11/06/26 08:38am):\n\n\
+             Done.\n\n\
+             Changing Status to CLOSED\n\n\
+             Status:  CLOSED\n\nTeam:  ops\n\nHost:  a1\n",
+            "Anything long enough",
+        );
+        assert!(
+            blocks.contains(&EmailBlock::Meta("Changing Status to CLOSED".to_string())),
+            "{blocks:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_above_the_by_line_is_only_its_label_when_short() {
+        let lines = [
+            "Please see the long note below",
+            "(by ana on 11/06/26 12:55pm):",
+        ];
+        assert_eq!(by_line_start(&lines, 1), 1);
+        let lines = ["Description", "(by ana on 11/06/26 12:55pm):"];
+        assert_eq!(by_line_start(&lines, 1), 0);
+        let lines = ["Comment #2 (by ana on 11/06/26 12:55pm):"];
+        assert_eq!(by_line_start(&lines, 0), 0);
     }
 
     #[test]

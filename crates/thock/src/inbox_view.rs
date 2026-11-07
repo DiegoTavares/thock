@@ -33,7 +33,8 @@ use thock_sync_core::{Operation, Write, apply, archive_path, inbox_task_line, tr
 use ui::{
     ActiveTheme as _, Button, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle,
     Clickable as _, Color, ContextMenu, FixedWidth as _, HeadlineSize, Icon, IconButton, IconName,
-    IconSize, KeyBinding, Label, LabelCommon as _, LabelSize, Tooltip, h_flex, v_flex,
+    IconSize, KeyBinding, Label, LabelCommon as _, LabelSize, StyledTypography as _, TextSize,
+    Tooltip, h_flex, v_flex,
 };
 use util::ResultExt as _;
 use util::paths::PathStyle;
@@ -80,11 +81,12 @@ const BAR_GAP: Pixels = px(8.);
 const FIELD_MIN_WIDTH: Pixels = px(300.);
 const FIELD_KEY_WIDTH: Pixels = px(104.);
 const SENDER_BADGE_SIZE: Pixels = px(28.);
-/// Holds `13 days`, so a suggestion beside it doesn't drift between rows.
-const AGE_COLUMN_WIDTH: Pixels = px(48.);
-const MARK_BADGE_SIZE: Pixels = px(14.);
+/// Holds `13d`, so a suggestion beside it doesn't drift between rows.
+const AGE_COLUMN_WIDTH: Pixels = px(32.);
+const ROW_LINE_HEIGHT: f32 = 1.25;
+const MARK_BADGE_SIZE: Rems = rems(0.75);
 /// Hangs in the row's left padding, so a mark moves no text.
-const MARK_BADGE_INSET: Pixels = px(16.);
+const MARK_BADGE_INSET: Rems = rems(-1.);
 const FOCUS_RAIL_WIDTH: Pixels = px(3.);
 const TITLE_SIZE: HeadlineSize = HeadlineSize::Large;
 const TITLE_LINE_HEIGHT: f32 = 1.3;
@@ -93,13 +95,28 @@ const CAPTION_SLOT_HEIGHT: Pixels = px(18.);
 const KEYCAP_HEIGHT: Rems = rems(1.125);
 const KEYCAP_TEXT_SIZE: Rems = rems(0.75);
 const FILTER_BOX_HEIGHT: Pixels = px(30.);
-/// A list longer than this draws its first items and a count of the rest.
+/// A quiet button's own padding, given back so its words end on the column.
+const ACTION_PADDING: Pixels = px(4.);
+/// Reader widths, in rems, where the header's sender stops fitting: under the
+/// first it needs the room of the glyph and the link's long name, past the
+/// second there's room for an address.
+const HEADER_TIGHT_WIDTH: f32 = 35.5;
+const HEADER_ROOMY_WIDTH: f32 = 44.;
+/// Holds `shift-n`, so the sheet's words start together close to their keys.
+const KEYS_COLUMN_WIDTH: Rems = rems(3.75);
+/// Below this a group of the keys sheet wraps under the one before it.
+const KEYS_GROUP_MIN_WIDTH: Rems = rems(13.5);
+/// A list longer than this draws its first items and a count of the rest
+/// until the folds open.
 const MAX_FIELD_LIST_ITEMS: usize = 3;
 /// Past this a field's old value is more to read than it tells.
 const MAX_PREVIOUS_VALUE_LENGTH: usize = 32;
 const EARLIER_CUE_HEIGHT: Pixels = px(28.);
-/// Where a revealed card's top sits in the reader: clear of the earlier cue.
+/// Where a revealed card's top sits in the reader: one gap under the earlier
+/// cue, so the card before ends behind it.
 const REVEAL_CLEARANCE: Pixels = px(36.);
+/// A card's header, which a landing keeps on screen.
+const CARD_HEADER_HEIGHT: Pixels = px(44.);
 /// A fill on a dark ground reads weaker than the same fill on a light one.
 /// Past this the accent label on it drops below 4.5:1.
 const FILLED_OPACITY_DARK: f32 = 0.3;
@@ -285,6 +302,7 @@ pub struct InboxView {
     scroll: UniformListScrollHandle,
     reader_scroll: ScrollHandle,
     reader_note: ReaderNote,
+    header_fit: HeaderFit,
     list_fraction: f32,
     layout_save: Option<Task<()>>,
     last_decision: Option<Decision>,
@@ -431,6 +449,7 @@ impl InboxView {
             scroll: UniformListScrollHandle::new(),
             reader_scroll: ScrollHandle::new(),
             reader_note: ReaderNote::default(),
+            header_fit: HeaderFit::default(),
             list_fraction: DEFAULT_LIST_FRACTION,
             layout_save: None,
             last_decision: None,
@@ -971,23 +990,30 @@ impl InboxView {
             return;
         };
         let preamble = usize::from(!thread.preamble.is_empty());
-        let card = self
-            .reader_scroll
-            .bounds_for_item(self.reader_note.current_message + preamble);
-        self.reader_note.reveal_current = self
+        let current = self.reader_note.current_message;
+        let viewport = self.reader_scroll.bounds();
+        let landings: Option<Vec<Pixels>> = (0..=current)
+            .map(|index| {
+                let card = self.reader_scroll.bounds_for_item(index + preamble)?;
+                Some((card.top() - viewport.top() - REVEAL_CLEARANCE).max(px(0.)))
+            })
+            .collect();
+        let parsing = self
             .reader_note
             .markdown
             .values()
             .any(|markdown| markdown.read(cx).is_parsing());
-        let Some(card) = card else {
+        self.reader_note.reveal_current = parsing;
+        let Some(landings) = landings else {
             return;
         };
-        let viewport_top = self.reader_scroll.bounds().top();
         let farthest = self.reader_scroll.max_offset().y;
-        let scrolled = (card.top() - viewport_top - REVEAL_CLEARANCE).clamp(px(0.), farthest);
+        let scrolled = landing(&landings, farthest, viewport.size.height);
         let offset = self.reader_scroll.offset();
         if offset.y != -scrolled {
             self.reader_scroll.set_offset(point(offset.x, -scrolled));
+            // Looked at again on the next frame, until the layout holds still.
+            self.reader_note.reveal_current = true;
             cx.notify();
         }
     }
@@ -1658,7 +1684,7 @@ impl InboxView {
             div()
                 .flex_none()
                 .w_full()
-                .px_2()
+                .px_1()
                 .pt_2()
                 .child(
                     h_flex()
@@ -1683,14 +1709,16 @@ impl InboxView {
     }
 
     /// An action on the note rather than a place for it, so it sits in the
-    /// header, clear of the destination bar.
+    /// header, clear of the destination bar. While its key is off the keycap
+    /// and the words dim as one hint; a click still works.
     fn render_quiet_action(
         &self,
         name: &'static str,
         action: &dyn Action,
-        keycap: gpui::Div,
+        keycap: KeyBinding,
         label: &'static str,
-        color: Color,
+        dimmed: bool,
+        cx: &App,
     ) -> gpui::Stateful<gpui::Div> {
         let focus = self.focus_handle.clone();
         let boxed_action = action.boxed_clone();
@@ -1702,9 +1730,16 @@ impl InboxView {
                 ButtonLike::new(SharedString::from(format!("inbox-action-{name}")))
                     .child(
                         h_flex()
+                            .when(dimmed, |this| {
+                                this.debug_selector(move || format!("INBOX_DIMMED-{name}"))
+                            })
                             .gap_1()
-                            .child(keycap)
-                            .child(Label::new(label).size(LabelSize::Small).color(color)),
+                            .child(framed_keycap(keycap, dimmed, cx))
+                            .child(
+                                Label::new(label)
+                                    .size(LabelSize::Small)
+                                    .color(hint_color(dimmed)),
+                            ),
                     )
                     .on_click(move |_, window, cx| {
                         focus.dispatch_action(boxed_action.as_ref(), window, cx)
@@ -1716,13 +1751,16 @@ impl InboxView {
         let entry = self.selected_entry();
         let item = entry.map(|entry| &entry.item);
         let source = item.and_then(|item| item.source.as_deref());
+        let fit = self.header_fit;
         let mut meta = h_flex().flex_1().min_w_0().overflow_hidden().gap_2();
         if let Some(item) = item {
-            meta = meta.child(
-                Icon::new(source_icon(source))
-                    .size(IconSize::Small)
-                    .color(Color::Muted),
-            );
+            if fit != HeaderFit::Tight {
+                meta = meta.child(
+                    Icon::new(source_icon(source))
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                );
+            }
             let name = item
                 .from
                 .as_deref()
@@ -1732,9 +1770,11 @@ impl InboxView {
             if let Some(name) = name {
                 let address = item.from.as_deref().and_then(sender_address);
                 let (name, rest) = sender_parts(name, address);
+                let rest = rest.filter(|_| fit == HeaderFit::Roomy);
                 let joined = rest.as_ref().is_some_and(|rest| rest.starts_with('@'));
                 meta = meta.child(
                     h_flex()
+                        .id("inbox-header-sender")
                         .debug_selector(|| "INBOX_HEADER_SENDER".to_string())
                         .min_w_0()
                         .when(!joined, |this| this.gap_1p5())
@@ -1752,7 +1792,10 @@ impl InboxView {
                                     .color(Color::Muted)
                                     .truncate(),
                             )
-                        })),
+                        }))
+                        .when_some(item.from.clone(), |this, from| {
+                            this.tooltip(Tooltip::text(from))
+                        }),
                 );
             }
             let mut when = Vec::new();
@@ -1761,11 +1804,6 @@ impl InboxView {
             }
             if let Some(due) = &item.due {
                 when.push(format!("due {due}"));
-            }
-            if let Some(thread) = &self.reader_note.thread
-                && thread.messages.len() > 1
-            {
-                when.push(format!("{} messages", thread.messages.len()));
             }
             if !when.is_empty() {
                 let separator = if named { "· " } else { "" };
@@ -1782,58 +1820,67 @@ impl InboxView {
                 );
             }
         }
-        let link_text = if source == Some("gmail") {
-            "Open in Gmail ↗"
-        } else {
-            "Open link ↗"
+        let link_text = match (source == Some("gmail"), fit) {
+            (true, HeaderFit::Tight) => "Gmail ↗",
+            (true, _) => "Open in Gmail ↗",
+            (false, HeaderFit::Tight) => "Link ↗",
+            (false, _) => "Open link ↗",
         };
-        let list_key = |action: &dyn Action| {
-            framed_keycap(
-                self.keycap(action, list_key_context(), window, cx),
-                !self.list_keys_live(window, cx),
-                cx,
-            )
-        };
-        // The link's key also answers from the reader, where it's wanted most.
-        let link_keycap = framed_keycap(
-            self.keycap(&OpenInboxLink, list_key_context(), window, cx),
-            self.filter_editor.focus_handle(cx).is_focused(window),
-            cx,
-        );
+        let list_key = |action: &dyn Action| self.keycap(action, list_key_context(), window, cx);
+        let list_keys_off = !self.list_keys_live(window, cx);
         h_flex()
             .size_full()
-            .pl_10()
-            .pr_4()
-            .gap_2()
-            .child(meta)
-            .when(entry.is_some(), |this| {
-                this.child(self.render_quiet_action(
-                    "open",
-                    &OpenInboxItem,
-                    list_key(&OpenInboxItem),
-                    "Open note",
-                    Color::Muted,
-                ))
-                .child(self.render_quiet_action(
-                    "undo",
-                    &UndoInboxMove,
-                    list_key(&UndoInboxMove),
-                    "Undo",
-                    Color::Muted,
-                ))
-            })
-            .when_some(self.selected_link(), |this, link| {
-                this.child(
-                    self.render_quiet_action(
-                        "link",
-                        &OpenInboxLink,
-                        link_keycap,
-                        link_text,
-                        Color::Accent,
-                    )
-                    .tooltip(Tooltip::text(link)),
-                )
-            })
+            .px_10()
+            .child(
+                h_flex()
+                    .w_full()
+                    .max_w(READER_MAX_WIDTH)
+                    .h_full()
+                    .gap_2()
+                    .child(meta)
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .gap_2()
+                            .mr(-ACTION_PADDING)
+                            .when(entry.is_some(), |this| {
+                                this.child(self.render_quiet_action(
+                                    "open",
+                                    &OpenInboxItem,
+                                    list_key(&OpenInboxItem),
+                                    "Open note",
+                                    list_keys_off,
+                                    cx,
+                                ))
+                            })
+                            // A last decision outlives the list it emptied.
+                            .when(entry.is_some() || self.last_decision.is_some(), |this| {
+                                this.child(self.render_quiet_action(
+                                    "undo",
+                                    &UndoInboxMove,
+                                    list_key(&UndoInboxMove),
+                                    "Undo",
+                                    list_keys_off,
+                                    cx,
+                                ))
+                            })
+                            .when_some(self.selected_link(), |this, link| {
+                                // The link's key also answers from the reader,
+                                // where it's wanted most.
+                                this.child(
+                                    self.render_quiet_action(
+                                        "link",
+                                        &OpenInboxLink,
+                                        list_key(&OpenInboxLink),
+                                        link_text,
+                                        self.filter_editor.focus_handle(cx).is_focused(window),
+                                        cx,
+                                    )
+                                    .tooltip(Tooltip::text(link)),
+                                )
+                            }),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -1985,14 +2032,31 @@ impl InboxView {
             .or_else(|| item.source.as_deref().map(source_label))
             .unwrap_or_default();
         let age = age_label(item.captured.as_deref(), Utc::now());
-        let chip = self.render_chip(entry, cx);
+        let chip = self.render_chip(entry, cx).map(|chip| {
+            div()
+                .debug_selector(|| format!("INBOX_CHIP-{position}"))
+                .flex_none()
+                .child(chip)
+                .into_any_element()
+        });
+        let image = item.has_image.then(|| {
+            Icon::new(IconName::Image)
+                .size(IconSize::XSmall)
+                .color(Color::Muted)
+                .into_any_element()
+        });
+        let extras = image.into_iter().chain(chip);
+        let line_height =
+            |size: TextSize| size.rems(cx).to_pixels(window.rem_size()) * ROW_LINE_HEIGHT;
+        let title_line = line_height(TextSize::Default);
+        let meta_line = line_height(TextSize::Small);
         let row = v_flex()
             .id(SharedString::from(format!("inbox-row-{stem}")))
             .size_full()
             .justify_center()
             .gap_0p5()
-            .pl_3()
-            .pr_4()
+            .pl_4()
+            .pr_5()
             .rounded_lg()
             .border_1()
             .border_color(if selected && list_focused {
@@ -2034,24 +2098,17 @@ impl InboxView {
             .child(
                 div()
                     .debug_selector(|| format!("INBOX_TITLE-{position}"))
-                    .w_full()
-                    .line_height(relative(1.25))
-                    .child(Label::new(title.to_string()).line_clamp(2)),
-            )
-            .child(
-                h_flex()
                     .relative()
                     .w_full()
-                    .gap_1p5()
-                    .line_height(relative(1.25))
+                    .line_height(relative(ROW_LINE_HEIGHT))
                     .when(marked, |this| {
                         this.child(
                             h_flex()
                                 .debug_selector(|| format!("INBOX_CHECK-{position}"))
                                 .absolute()
-                                .left(-MARK_BADGE_INSET)
+                                .left(MARK_BADGE_INSET)
                                 .top_0()
-                                .bottom_0()
+                                .h(title_line)
                                 .child(
                                     h_flex()
                                         .size(MARK_BADGE_SIZE)
@@ -2060,33 +2117,55 @@ impl InboxView {
                                         .bg(colors.text_accent)
                                         .child(
                                             Icon::new(IconName::Check)
-                                                .size(IconSize::XSmall)
+                                                .size(IconSize::Custom(rems(0.5625)))
                                                 .color(Color::Custom(colors.editor_background)),
                                         ),
                                 ),
                         )
                     })
+                    .child(Label::new(title.to_string()).line_clamp(2)),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_1()
+                    .line_height(relative(ROW_LINE_HEIGHT))
                     .child(
-                        div().flex_1().min_w_0().child(
-                            Label::new(origin)
-                                .size(LabelSize::Small)
-                                .color(Color::Muted)
-                                .truncate(),
-                        ),
-                    )
-                    .when(item.has_image, |this| {
-                        this.child(
-                            Icon::new(IconName::Image)
-                                .size(IconSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                    })
-                    .children(chip.map(|chip| {
+                        // A ticket's number gives way only to the age: what's
+                        // beside it goes whole first. A name gives way to both.
                         div()
-                            .debug_selector(|| format!("INBOX_CHIP-{position}"))
-                            .flex_none()
-                            .child(chip)
-                    }))
+                            .debug_selector(|| format!("INBOX_ORIGIN-{position}"))
+                            .min_w_0()
+                            .when(ticket.is_none(), |this| this.flex_1())
+                            .child(
+                                Label::new(origin)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                            ),
+                    )
+                    .map(|this| {
+                        if ticket.is_some() {
+                            // One line tall, and the empty first item leaves
+                            // what doesn't fit to wrap onto the clipped second.
+                            this.child(
+                                h_flex()
+                                    .debug_selector(|| format!("INBOX_ROW_EXTRAS-{position}"))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(meta_line)
+                                    .flex_wrap()
+                                    .justify_end()
+                                    .content_start()
+                                    .gap_x_1()
+                                    .overflow_hidden()
+                                    .child(div().w(px(0.)).h(meta_line))
+                                    .children(extras),
+                            )
+                        } else {
+                            this.children(extras)
+                        }
+                    })
                     .child(
                         h_flex()
                             .debug_selector(|| format!("INBOX_AGE-{position}"))
@@ -2119,7 +2198,8 @@ impl InboxView {
             .w_full()
             .justify_end()
             .pb_2()
-            .px_3()
+            .pl_4()
+            .pr_5()
             .child(
                 h_flex()
                     .gap_2p5()
@@ -2155,7 +2235,8 @@ impl InboxView {
         let layout = Rc::new(self.layout());
         sectioned_list("inbox-list", layout, cx)
             .size_full()
-            .p_2()
+            .px_1()
+            .py_2()
             .track_scroll(&self.scroll)
             .into_any_element()
     }
@@ -2483,12 +2564,14 @@ impl InboxView {
             .into_any_element()
     }
 
-    /// A card's one fold row: what's folded, and the way to it. It closes the
-    /// card, under whatever stayed on screen, so it sits in the same place on
-    /// every card.
+    /// A card's fold row: the way to every fold of the note, and what this
+    /// card holds of them. It closes the card, under whatever stayed on screen,
+    /// so it sits in the same place on every card; open, it also heads the
+    /// card, so a long one needn't be read through to close it.
     fn render_fold_row(
         &self,
         message: usize,
+        heads_card: bool,
         label: String,
         window: &Window,
         cx: &mut Context<Self>,
@@ -2500,9 +2583,16 @@ impl InboxView {
             false,
             cx,
         );
+        let place = if heads_card { "TOP" } else { "END" };
         h_flex()
-            .id(SharedString::from(format!("inbox-fold-{message}")))
-            .debug_selector(move || format!("INBOX_FOLD-{message}"))
+            .id(SharedString::from(format!("inbox-fold-{place}-{message}")))
+            .debug_selector(move || {
+                if heads_card {
+                    format!("INBOX_FOLD_TOP-{message}")
+                } else {
+                    format!("INBOX_FOLD-{message}")
+                }
+            })
             .w_full()
             .gap_1p5()
             .px_1()
@@ -2519,6 +2609,7 @@ impl InboxView {
                 .size(IconSize::XSmall)
                 .color(Color::Muted),
             )
+            .child(keycap)
             .child(
                 div().flex_1().min_w_0().child(
                     Label::new(label)
@@ -2527,9 +2618,12 @@ impl InboxView {
                         .truncate(),
                 ),
             )
-            .child(keycap)
             .tooltip(Tooltip::for_action_title(
-                if open { "Fold" } else { "Show" },
+                if open {
+                    "Hide all folds"
+                } else {
+                    "Show all folds"
+                },
                 &ToggleInboxFolds,
             ))
             .on_click(cx.listener(|this, _, window, cx| {
@@ -2557,11 +2651,7 @@ impl InboxView {
             .bg(background)
             .children(fields.iter().enumerate().map(|(index, field)| {
                 let text = field_text(&field.value);
-                let (shown, more) = if whole {
-                    (text.to_string(), 0)
-                } else {
-                    capped_list(text)
-                };
+                let (shown, more) = field_list(text, whole);
                 let value =
                     Label::new(shown)
                         .size(LabelSize::Small)
@@ -2606,7 +2696,7 @@ impl InboxView {
                                 .debug_selector(move || format!("INBOX_CHANGED-{selector}"))
                                 .when(!whole, |this| this.flex_none())
                                 .child(
-                                    Label::new(format!(", was {}", field_text(previous)))
+                                    Label::new(format!(", was {}", was_text(previous, whole)))
                                         .size(LabelSize::Small)
                                         .color(Color::Muted),
                                 ),
@@ -2639,9 +2729,9 @@ impl InboxView {
             .into_any_element()
     }
 
-    /// A message's blocks as drawn, then its one fold row saying what they
-    /// fold, however many places that came from. Opened, each folded stretch
-    /// stands where it was, dimmed.
+    /// A message's blocks as drawn, then its fold row saying what they fold,
+    /// however many places that came from. Opened, each folded stretch stands
+    /// where it was, dimmed, and the row heads the card too.
     fn render_message_blocks(
         &mut self,
         index: usize,
@@ -2716,7 +2806,13 @@ impl InboxView {
         }
         if !folds.is_empty() {
             let label = fold_summary(&folds, open);
-            elements.push(self.render_fold_row(index, label, window, cx));
+            if open {
+                elements.insert(
+                    0,
+                    self.render_fold_row(index, true, label.clone(), window, cx),
+                );
+            }
+            elements.push(self.render_fold_row(index, false, label, window, cx));
         }
         elements
     }
@@ -2912,10 +3008,21 @@ impl InboxView {
                 .child(self.render_keys_sheet(window, cx))
                 .into_any_element();
         }
-        // Selection follows the list, so this is an empty list, which already
-        // says so.
+        // Selection follows the list, so this is an empty list. A filter's
+        // says why itself, and what it hides isn't clear.
         let Some(entry) = self.selected_entry().cloned() else {
-            return div().size_full().into_any_element();
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .when(self.filter.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .debug_selector(|| "INBOX_ALL_CLEAR".to_string())
+                            .child(Label::new("All clear").color(Color::Muted)),
+                    )
+                })
+                .into_any_element();
         };
         let style = self.reader_style(window, cx);
         let body = self.render_note_body(&entry, &style, window, cx);
@@ -2927,7 +3034,8 @@ impl InboxView {
             .iter()
             .filter(|entry| self.marked.contains(&entry.item.stem))
             .count();
-        let percentages = self.bar_state(&entry, cx).probabilities.is_some();
+        let bar_state = self.bar_state(&entry, cx);
+        let percentages = bar_state.probabilities.is_some();
         let caption = if marked_rows > 0 {
             Some((
                 "INBOX_MARKS_NOTE",
@@ -2935,7 +3043,7 @@ impl InboxView {
                 Color::Accent,
             ))
         } else {
-            percentages.then(|| ("INBOX_SUGGESTED", "Suggested".to_string(), Color::Muted))
+            bar_caption(&bar_state).map(|text| ("INBOX_SUGGESTED", text, Color::Muted))
         };
         let earlier = self.reader_note.messages_above;
         let earlier_cue = (earlier > 0).then(|| self.render_earlier_cue(earlier, window, cx));
@@ -3033,8 +3141,9 @@ impl InboxView {
             .into_any_element()
     }
 
-    /// How many of the thread's cards sit wholly above what's on screen, by
-    /// the last frame's layout. One still showing below the cue doesn't count.
+    /// How many of the thread's cards have their header above the cue line,
+    /// by the last frame's layout, so a card still running on below the cue
+    /// counts once its header has gone.
     fn messages_above(&self) -> usize {
         let Some(thread) = self
             .reader_note
@@ -3044,17 +3153,17 @@ impl InboxView {
         else {
             return 0;
         };
-        let scrolled = self.reader_scroll.offset().y;
-        if scrolled >= px(0.) {
+        let scrolled = -self.reader_scroll.offset().y;
+        if scrolled <= px(0.) {
             return 0;
         }
         let preamble = usize::from(!thread.preamble.is_empty());
-        let seen_from = self.reader_scroll.bounds().top() - scrolled + REVEAL_CLEARANCE;
+        let cue_line = self.reader_scroll.bounds().top() + scrolled + EARLIER_CUE_HEIGHT;
         (0..thread.messages.len())
             .take_while(|index| {
                 self.reader_scroll
                     .bounds_for_item(index + preamble)
-                    .is_some_and(|card| card.bottom() <= seen_from)
+                    .is_some_and(|card| card.top() < cue_line)
             })
             .count()
     }
@@ -3066,6 +3175,21 @@ impl InboxView {
         let above = self.messages_above();
         if above != self.reader_note.messages_above {
             self.reader_note.messages_above = above;
+            cx.notify();
+        }
+    }
+
+    /// The header reads the width of the frame just painted, so a resize
+    /// reaches it one frame on. Nothing has measured the pane before its first
+    /// note.
+    fn sync_header_fit(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let width = self.reader_scroll.bounds().size.width;
+        if width == px(0.) {
+            return;
+        }
+        let fit = HeaderFit::for_width(width / window.rem_size());
+        if fit != self.header_fit {
+            self.header_fit = fit;
             cx.notify();
         }
     }
@@ -3378,30 +3502,48 @@ impl InboxView {
             .px_10()
             .pt_5()
             .gap_3()
-            .children(groups.into_iter().map(|(heading, rows)| {
-                v_flex()
-                    .debug_selector(move || format!("INBOX_KEYS_GROUP-{heading}"))
-                    .gap_1()
-                    .child(
-                        div().pb_0p5().child(
-                            Label::new(heading)
-                                .size(LabelSize::Small)
-                                .weight(FontWeight::SEMIBOLD),
-                        ),
-                    )
-                    .children(rows.into_iter().map(|(keycaps, what)| {
-                        h_flex()
-                            .gap_2()
+            .child(
+                h_flex()
+                    .w_full()
+                    .max_w(READER_MAX_WIDTH)
+                    .flex_wrap()
+                    .items_start()
+                    .gap_x_8()
+                    .gap_y_3()
+                    .children(groups.into_iter().map(|(heading, rows)| {
+                        v_flex()
+                            .debug_selector(move || format!("INBOX_KEYS_GROUP-{heading}"))
+                            .flex_1()
+                            .min_w(KEYS_GROUP_MIN_WIDTH)
+                            .gap_1()
                             .child(
-                                h_flex().flex_none().w(px(120.)).gap_1().children(
-                                    keycaps
-                                        .into_iter()
-                                        .map(|keycap| framed_keycap(keycap, false, cx)),
+                                div().pb_0p5().child(
+                                    Label::new(heading)
+                                        .size(LabelSize::Small)
+                                        .weight(FontWeight::SEMIBOLD),
                                 ),
                             )
-                            .child(Label::new(what).size(LabelSize::Small).color(Color::Muted))
-                    }))
-            }))
+                            .children(rows.into_iter().map(|(keycaps, what)| {
+                                h_flex()
+                                    .items_start()
+                                    .gap_2()
+                                    .child(
+                                        h_flex()
+                                            .flex_none()
+                                            .min_w(KEYS_COLUMN_WIDTH)
+                                            .gap_1()
+                                            .children(
+                                                keycaps
+                                                    .into_iter()
+                                                    .map(|keycap| framed_keycap(keycap, false, cx)),
+                                            ),
+                                    )
+                                    .child(div().flex_1().min_w_0().child(
+                                        Label::new(what).size(LabelSize::Small).color(Color::Muted),
+                                    ))
+                            }))
+                    })),
+            )
             .child(
                 Label::new("Any key closes this.")
                     .size(LabelSize::Small)
@@ -3460,6 +3602,29 @@ impl FooterHint {
     fn dimmed(mut self, dimmed: bool) -> Self {
         self.dimmed = dimmed;
         self
+    }
+}
+
+/// How much the reader header can say at the pane's width.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum HeaderFit {
+    /// No glyph, and the link goes by its short name.
+    Tight,
+    #[default]
+    Plain,
+    /// The sender's address joins their name.
+    Roomy,
+}
+
+impl HeaderFit {
+    fn for_width(rems: f32) -> Self {
+        if rems < HEADER_TIGHT_WIDTH {
+            Self::Tight
+        } else if rems < HEADER_ROOMY_WIDTH {
+            Self::Plain
+        } else {
+            Self::Roomy
+        }
     }
 }
 
@@ -3613,7 +3778,10 @@ impl gpui::Render for InboxView {
             // lay the card out.
             cx.defer_in(window, |this, _, cx| this.reveal_current_message(cx));
         }
-        cx.defer_in(window, |this, _, cx| this.sync_earlier_cue(cx));
+        cx.defer_in(window, |this, window, cx| {
+            this.sync_earlier_cue(cx);
+            this.sync_header_fit(window, cx);
+        });
         let list_header = self.render_list_header(cx);
         let filter_bar = self.render_filter_bar(window, cx);
         let reader_header = self.render_reader_header(window, cx);
@@ -3733,9 +3901,11 @@ where
 }
 
 /// One keycap look for every Inbox hint. Dimmed, the frame fades with the key.
+/// Set in the buffer's face, which tells `l` from `I` and from a pipe.
 fn framed_keycap(keycap: KeyBinding, dimmed: bool, cx: &App) -> gpui::Div {
     let colors = cx.theme().colors();
     h_flex()
+        .font_buffer(cx)
         .flex_none()
         .h(KEYCAP_HEIGHT)
         .min_w(KEYCAP_HEIGHT)
@@ -3811,8 +3981,9 @@ fn counted(count: usize, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
-/// A card's fold row as one action: what `z` will show or hide, each kind once
-/// in the order it first appears, with its lines or fields added up.
+/// A card's fold row as one action: `z` shows or hides every fold of the note,
+/// and this says what this card holds of them, each kind once in the order it
+/// first appears, with its lines or fields added up.
 fn fold_summary(pieces: &[FoldPiece], open: bool) -> String {
     let mut totals: Vec<FoldPiece> = Vec::new();
     for piece in pieces {
@@ -3841,35 +4012,56 @@ fn fold_summary(pieces: &[FoldPiece], open: bool) -> String {
                 counted(lines, "quoted line", "quoted lines")
             }
             FoldPiece::Text(FoldKind::Signature, _) => "signature".to_string(),
+            FoldPiece::Text(FoldKind::System, lines) => {
+                counted(lines, "system line", "system lines")
+            }
             FoldPiece::Fields(count) => counted(count, "field", "fields"),
         })
         .collect();
-    let verb = if open { "Hide" } else { "Show" };
+    let action = if open {
+        "Hide all folds"
+    } else {
+        "Show all folds"
+    };
     match parts.pop() {
-        Some(last) if parts.is_empty() => format!("{verb} {last}"),
-        Some(last) => format!("{verb} {} and {last}", parts.join(", ")),
-        None => verb.to_string(),
+        Some(last) if parts.is_empty() => format!("{action} · {last} here"),
+        Some(last) => format!("{action} · {} and {last} here", parts.join(", ")),
+        None => action.to_string(),
     }
 }
 
-/// A comma list's first items and how many more there are, so it holds one
-/// line; anything else comes back whole. Prose has spaces inside its items.
-fn capped_list(value: &str) -> (String, usize) {
+/// How a field's value reads: a comma list as `a, b, c` and how many more
+/// there are, so it holds one line until the folds open; anything else comes
+/// back whole. Prose has spaces inside its items and a number has no letters.
+fn field_list(value: &str, whole: bool) -> (String, usize) {
     let items: Vec<&str> = value.split(',').map(str::trim).collect();
-    let is_list = items.len() > MAX_FIELD_LIST_ITEMS
+    let is_list = items.len() > 1
         && items
             .iter()
-            .all(|item| !item.is_empty() && !item.contains(char::is_whitespace));
+            .all(|item| item.contains(char::is_alphabetic) && !item.contains(char::is_whitespace));
     if !is_list {
         return (value.to_string(), 0);
     }
-    let (shown, rest) = items.split_at(MAX_FIELD_LIST_ITEMS);
-    (shown.join(", "), rest.len())
+    let shown = if whole {
+        items.len()
+    } else {
+        items.len().min(MAX_FIELD_LIST_ITEMS)
+    };
+    (items[..shown].join(", "), items.len() - shown)
 }
 
-/// Whether `was …` tells more than it costs: a whole old list doesn't.
+/// An old value as `was …` gives it: the same reading as the new one.
+fn was_text(previous: &str, whole: bool) -> String {
+    let previous = field_text(previous);
+    match field_list(previous, whole) {
+        (shown, 0) => shown,
+        (shown, more) => format!("{shown} +{more} more"),
+    }
+}
+
+/// Whether `was …` tells more than it costs.
 fn previous_helps(previous: &str) -> bool {
-    previous.chars().count() <= MAX_PREVIOUS_VALUE_LENGTH && capped_list(previous).1 == 0
+    was_text(previous, false).chars().count() <= MAX_PREVIOUS_VALUE_LENGTH
 }
 
 fn match_count_label(count: usize) -> String {
@@ -3878,6 +4070,16 @@ fn match_count_label(count: usize) -> String {
 
 fn earlier_label(count: usize) -> String {
     counted(count, "earlier message", "earlier messages")
+}
+
+/// Says what the bar's look means, so it never promises a suggestion there
+/// isn't: nothing for a tie or no answer.
+fn bar_caption(state: &BarState) -> Option<String> {
+    match (state.suggested, state.leaning) {
+        (Some((destination, _)), _) => Some(format!("Suggested: {}", destination.label())),
+        (None, Some(destination)) => Some(format!("Leaning {}", destination.label())),
+        (None, None) => None,
+    }
 }
 
 /// Said above the bar, where a decision is made: the note on screen isn't the
@@ -3976,7 +4178,7 @@ fn captured_label(captured: &str) -> String {
         .unwrap_or_else(|_| captured.to_string())
 }
 
-/// `2h`, `yesterday`, `3 days`: how long a row has waited since its capture.
+/// `5m`, `2h`, `3d`: how long a row has waited since its capture.
 fn age_label(captured: Option<&str>, now: chrono::DateTime<Utc>) -> Option<String> {
     let captured = chrono::DateTime::parse_from_rfc3339(captured?).ok()?;
     let waited = now - captured.with_timezone(&Utc);
@@ -3985,10 +4187,32 @@ fn age_label(captured: Option<&str>, now: chrono::DateTime<Utc>) -> Option<Strin
             (minutes, _, _) if minutes < 1 => "now".to_string(),
             (minutes, 0, _) => format!("{minutes}m"),
             (_, hours, 0) => format!("{hours}h"),
-            (_, _, 1) => "yesterday".to_string(),
-            (_, _, days) => format!("{days} days"),
+            (_, _, days) => format!("{days}d"),
         },
     )
+}
+
+/// Where a revealed card lands, as a scroll offset. `landings` holds the offset
+/// that brings each card up to the current one, the last, to its place under
+/// the cue. Too near the end of the thread for that, the current card lands on
+/// the nearest card boundary the scroll reaches, so nothing of the card before
+/// shows under the cue, as long as the current card's header stays on screen.
+fn landing(landings: &[Pixels], farthest: Pixels, viewport_height: Pixels) -> Pixels {
+    let Some((&current, earlier)) = landings.split_last() else {
+        return px(0.);
+    };
+    if current <= farthest {
+        return current;
+    }
+    earlier
+        .iter()
+        .rev()
+        .find(|landing| **landing <= farthest)
+        .copied()
+        .filter(|landing| {
+            current - *landing + REVEAL_CLEARANCE + CARD_HEADER_HEIGHT <= viewport_height
+        })
+        .unwrap_or(farthest)
 }
 
 /// The single replacement that turns `old` into `new`: the bytes between
@@ -4852,13 +5076,19 @@ mod tests {
         setup
             .view
             .read_with(&setup.cx, |view, _| assert_eq!(view.marked.len(), 2));
-        // The check hangs in the row's padding, so marking moves no text, and
-        // the reader says the bar now reaches beyond the note on screen.
+        // The check hangs in the row's padding beside the title's first line,
+        // so marking moves no text, and the reader says the bar now reaches
+        // beyond the note on screen.
         let title = drawn(&mut setup, "INBOX_TITLE-0");
         let check = drawn(&mut setup, "INBOX_CHECK-0");
+        let row = drawn(&mut setup, "INBOX_ROW-0");
         assert_eq!(title, title_before);
-        assert!(check.top() >= title.bottom(), "{check:?} below {title:?}");
-        assert!(check.right() <= title.left(), "{check:?} left of {title:?}");
+        assert_eq!(check.top(), title.top(), "{check:?} on {title:?}");
+        assert!(check.left() >= row.left(), "{check:?} in {row:?}");
+        assert!(
+            check.right() + px(3.) <= title.left(),
+            "{check:?} clear of {title:?}"
+        );
         assert_eq!(setup.cx.debug_bounds("INBOX_CHECK-1"), None);
         assert!(setup.cx.debug_bounds("INBOX_MARKS_NOTE").is_some());
         setup.cx.simulate_keystrokes("e");
@@ -5843,9 +6073,22 @@ mod tests {
         let key = drawn(&mut setup, "KEY_BINDING-z");
         assert!(row.contains(&key.center()), "{key:?} in {row:?}");
 
+        // The keycap leads the words, as on every other hint.
+        assert_eq!(setup.cx.debug_bounds("INBOX_FOLD_TOP-1"), None);
         setup.cx.simulate_keystrokes("z");
         let row = drawn(&mut setup, "INBOX_FOLD-1");
         assert!(row.top() >= changed.bottom(), "{row:?} under {changed:?}");
+
+        // Open, the same row heads the card too.
+        let top = drawn(&mut setup, "INBOX_FOLD_TOP-1");
+        let card = drawn(&mut setup, "INBOX_MESSAGE-1");
+        assert!(
+            top.top() > card.top() && top.bottom() < row.top(),
+            "{top:?}"
+        );
+        setup.cx.simulate_keystrokes("z");
+        draw(&mut setup);
+        assert_eq!(setup.cx.debug_bounds("INBOX_FOLD_TOP-1"), None);
     }
 
     #[gpui::test]
@@ -5893,12 +6136,12 @@ mod tests {
             assert_eq!(view.reader_note.messages_above, 1);
         });
 
-        // Scrolled further into the card, it still isn't above the screen.
+        // Scrolled further into the card, its header has gone above the line.
         setup.cx.simulate_keystrokes("tab j");
         draw(&mut setup);
         draw(&mut setup);
         setup.view.read_with(&setup.cx, |view, _| {
-            assert_eq!(view.reader_note.messages_above, 1);
+            assert_eq!(view.reader_note.messages_above, 2);
         });
 
         // A taller reader takes the scroll away during layout, after render
@@ -5914,11 +6157,200 @@ mod tests {
         assert!(first.top() >= reader.top(), "{first:?} whole in {reader:?}");
     }
 
+    /// A four-message thread: each card repeats the ticket's record, so
+    /// opening the folds makes every card tall.
+    fn long_thread() -> String {
+        let mut note = "---\nsource:   gmail\ncapture:  e5e5e5e5e5e5\ncaptured: 2026-10-09T19:30:00Z\ntitle:    Ticket 42\nfrom:     helpdesk@example.com\n---\n\n# Ticket 42\n".to_string();
+        for number in 1..=4 {
+            note.push_str(&format!(
+                "\n## helpdesk@example.com — 2026-10-09 0{number}:00\n\n\
+                 Comment #{number} (by ana on 10/09/26 0{number}:00am):\n\n\
+                 Word {number}.\n\n\
+                 The farm stopped.\nCould someone look?\nIt's urgent.\n\n\
+                 Status:  OPEN\n\nTeam:  render-ops\n\nHost:  a1\n"
+            ));
+        }
+        note
+    }
+
+    fn cards_over_the_cue(setup: &mut Setup) -> usize {
+        let cue = drawn(setup, "INBOX_EARLIER");
+        [
+            "INBOX_MESSAGE-0",
+            "INBOX_MESSAGE-1",
+            "INBOX_MESSAGE-2",
+            "INBOX_MESSAGE-3",
+        ]
+        .into_iter()
+        .filter(|selector| drawn(setup, selector).top() < cue.bottom())
+        .count()
+    }
+
+    #[gpui::test]
+    async fn the_cue_counts_the_headers_above_it_with_the_folds_open(cx: &mut TestAppContext) {
+        let mut setup = setup_with_note(cx, long_thread()).await;
+        setup.cx.simulate_resize(gpui::size(px(1200.), px(620.)));
+        setup.cx.run_until_parked();
+        setup.cx.simulate_keystrokes("z");
+        draw(&mut setup);
+        draw(&mut setup);
+        assert_eq!(current_message(&setup), 3);
+        let above = setup
+            .view
+            .read_with(&setup.cx, |view, _| view.reader_note.messages_above);
+        assert!(above >= 2, "{above}");
+        assert_eq!(above, cards_over_the_cue(&mut setup));
+
+        // Up the thread, a card running on below the cue is above it by its
+        // header, and the count falls as the headers come back.
+        setup.cx.simulate_keystrokes("tab");
+        let mut seen = HashSet::new();
+        for _ in 0..40 {
+            setup.cx.simulate_keystrokes("k");
+            draw(&mut setup);
+            draw(&mut setup);
+            let above = setup
+                .view
+                .read_with(&setup.cx, |view, _| view.reader_note.messages_above);
+            if above == 0 {
+                break;
+            }
+            assert_eq!(above, cards_over_the_cue(&mut setup));
+            seen.insert(above);
+        }
+        assert!(seen.contains(&2), "{seen:?}");
+    }
+
+    #[gpui::test]
+    async fn a_thread_lands_on_a_card_boundary(cx: &mut TestAppContext) {
+        let mut setup = setup_with_note(cx, long_thread()).await;
+        // Too short for the newest card to reach the top only by a little.
+        setup.cx.simulate_resize(gpui::size(px(1200.), px(620.)));
+        setup.cx.run_until_parked();
+        draw(&mut setup);
+        draw(&mut setup);
+        let cue = setup.cx.debug_bounds("INBOX_EARLIER");
+        let reader = setup
+            .view
+            .read_with(&setup.cx, |view, _| view.reader_scroll.bounds());
+        let line = cue.map_or(reader.top(), |cue| cue.bottom());
+        for selector in [
+            "INBOX_MESSAGE-0",
+            "INBOX_MESSAGE-1",
+            "INBOX_MESSAGE-2",
+            "INBOX_MESSAGE-3",
+        ] {
+            let card = drawn(&mut setup, selector);
+            assert!(
+                card.bottom() <= line || card.top() >= line,
+                "{selector}: {card:?} is whole on one side of {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_landing_snaps_to_a_card_it_can_reach() {
+        // The newest card reaches its place.
+        assert_eq!(landing(&[px(0.), px(50.)], px(80.), px(400.)), px(50.));
+        // It can't, so the card before takes the place.
+        assert_eq!(
+            landing(&[px(0.), px(40.), px(100.), px(160.)], px(120.), px(400.)),
+            px(100.)
+        );
+        // That card is so tall the current one would drop off the screen.
+        assert_eq!(
+            landing(&[px(0.), px(40.), px(900.)], px(860.), px(400.)),
+            px(860.)
+        );
+    }
+
+    #[gpui::test]
+    async fn the_keys_of_the_header_dim_with_their_words(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        select(&mut setup, "Ship it — a practical guide");
+        draw(&mut setup);
+        for dimmed in [
+            "INBOX_DIMMED-open",
+            "INBOX_DIMMED-undo",
+            "INBOX_DIMMED-link",
+        ] {
+            assert_eq!(setup.cx.debug_bounds(dimmed), None, "{dimmed}");
+        }
+
+        // `l` still works in the reader, and only there of the three.
+        setup.cx.simulate_keystrokes("tab");
+        drawn(&mut setup, "INBOX_DIMMED-open");
+        drawn(&mut setup, "INBOX_DIMMED-undo");
+        assert_eq!(setup.cx.debug_bounds("INBOX_DIMMED-link"), None);
+
+        setup.cx.simulate_keystrokes("tab /");
+        drawn(&mut setup, "INBOX_DIMMED-link");
+    }
+
+    #[gpui::test]
+    async fn a_reader_column_ends_on_one_right_edge(cx: &mut TestAppContext) {
+        let mut setup = setup_with_ticket(cx).await;
+        for width in [1000., 2400.] {
+            setup.cx.simulate_resize(gpui::size(px(width), px(900.)));
+            setup.cx.run_until_parked();
+            draw(&mut setup);
+            let archive = drawn(&mut setup, "INBOX_BAR-archive");
+            let card = drawn(&mut setup, "INBOX_MESSAGE-1");
+            let title = drawn(&mut setup, "INBOX_READER_TITLE");
+            assert_eq!(archive.right(), card.right(), "{width}");
+            assert_eq!(archive.right(), title.right(), "{width}");
+            let link = setup.cx.debug_bounds("INBOX_ACTION-link");
+            let last = link.unwrap_or_else(|| drawn(&mut setup, "INBOX_ACTION-undo"));
+            assert_eq!(last.right() - ACTION_PADDING, archive.right(), "{width}");
+        }
+    }
+
+    #[gpui::test]
+    async fn the_header_keeps_the_sender_whole_at_macbook_width(cx: &mut TestAppContext) {
+        let note = TICKET.replace("helpdesk@example.com", "helpdesk_submit@example.com");
+        let mut setup = setup_with_note(cx, note).await;
+        let wide = gpui::size(px(2400.), px(900.));
+        setup.cx.simulate_resize(wide);
+        setup.cx.run_until_parked();
+        draw(&mut setup);
+        let roomy = drawn(&mut setup, "INBOX_HEADER_SENDER");
+        setup.view.read_with(&setup.cx, |view, _| {
+            assert_eq!(view.header_fit, HeaderFit::Roomy);
+        });
+
+        // A MacBook's reader, between the docks, in rems.
+        setup.cx.simulate_resize(gpui::size(px(700.), px(900.)));
+        setup.cx.run_until_parked();
+        draw(&mut setup);
+        setup.view.read_with(&setup.cx, |view, _| {
+            assert_eq!(view.header_fit, HeaderFit::Tight);
+        });
+        let tight = drawn(&mut setup, "INBOX_HEADER_SENDER");
+        let when = drawn(&mut setup, "INBOX_HEADER_WHEN");
+        let open = drawn(&mut setup, "INBOX_ACTION-open");
+        assert!(tight.size.width < roomy.size.width, "the domain has gone");
+        assert!(tight.right() <= when.left(), "{tight:?} then {when:?}");
+        assert!(when.right() <= open.left(), "{when:?} then {open:?}");
+    }
+
+    #[test]
+    fn the_header_trades_its_glyph_before_the_senders_room() {
+        // A MacBook's reader at the owner's interface size; a Dell's.
+        assert_eq!(HeaderFit::for_width(34.2), HeaderFit::Tight);
+        assert_eq!(HeaderFit::for_width(40.), HeaderFit::Plain);
+        assert_eq!(HeaderFit::for_width(75.), HeaderFit::Roomy);
+    }
+
     #[gpui::test]
     async fn the_header_gives_way_from_the_sender_and_never_the_date(cx: &mut TestAppContext) {
-        let mut setup = setup_with_ticket(cx).await;
+        let note = TICKET.replace(
+            "from:     helpdesk@example.com",
+            "from:     a_very_long_helpdesk_submission_queue@example.com",
+        );
+        let mut setup = setup_with_note(cx, note).await;
         setup.cx.simulate_resize(gpui::size(px(1000.), px(900.)));
         setup.cx.run_until_parked();
+        draw(&mut setup);
         let sender = drawn(&mut setup, "INBOX_HEADER_SENDER");
         assert!(sender.size.width > px(50.), "{sender:?}");
         let open = drawn(&mut setup, "INBOX_ACTION-open");
@@ -6002,6 +6434,44 @@ mod tests {
         setup.cx.simulate_keystrokes("x");
         drawn(&mut setup, "INBOX_MARKS_NOTE");
         assert_eq!(setup.cx.debug_bounds("INBOX_SUGGESTED"), None);
+    }
+
+    #[gpui::test]
+    async fn the_slot_says_a_lean_as_a_lean(cx: &mut TestAppContext) {
+        let mut setup = setup(
+            cx,
+            Options {
+                grant: true,
+                cached: vec![(Q4, "soon", 0.45)],
+                ..Options::default()
+            },
+        )
+        .await;
+        select(&mut setup, "Re: Q4 planning doc");
+        drawn(&mut setup, "INBOX_SUGGESTED");
+        setup.view.read_with(&setup.cx, |view, cx| {
+            let state = view.bar_state(view.selected_entry().unwrap(), cx);
+            assert_eq!(bar_caption(&state).as_deref(), Some("Leaning Soon"));
+        });
+    }
+
+    #[test]
+    fn the_caption_promises_only_what_the_bar_shows() {
+        let suggested = BarState {
+            suggested: Some((Destination::Soon, Tier::Outlined)),
+            ..BarState::default()
+        };
+        assert_eq!(bar_caption(&suggested).as_deref(), Some("Suggested: Soon"));
+        let leaning = BarState {
+            leaning: Some(Destination::Someday),
+            ..BarState::default()
+        };
+        assert_eq!(bar_caption(&leaning).as_deref(), Some("Leaning Someday"));
+        let tie = BarState {
+            probabilities: Some([0.4, 0.4, 0.1, 0.1]),
+            ..BarState::default()
+        };
+        assert_eq!(bar_caption(&tie), None);
     }
 
     #[gpui::test]
@@ -6131,6 +6601,61 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_ticket_number_outlasts_the_suggestion_beside_it(cx: &mut TestAppContext) {
+        const LONG_NUMBER: &str = "---\nsource:   gmail\ncapture:  d4d4d4d4d4d4\ncaptured: 2026-10-09T19:40:00Z\ntitle:    HD 5197591234: Backups not restarted\nfrom:     helpdesk@example.com\n---\n\n# HD 5197591234: Backups not restarted\n\nThe disk is full.\n";
+        let mut setup = setup(
+            cx,
+            Options {
+                grant: true,
+                cached: vec![(LONG_NUMBER, "someday", 0.91)],
+                ..Options::default()
+            },
+        )
+        .await;
+        setup
+            .fs
+            .insert_tree(
+                setup._vault_dir.path().join("inbox"),
+                json!({ "2026-10-09-1940-hd-519759.md": LONG_NUMBER }),
+            )
+            .await;
+        setup.cx.run_until_parked();
+        select(&mut setup, "HD 5197591234: Backups not restarted");
+        let position = setup
+            .view
+            .read_with(&setup.cx, |view, _| view.selected_index().unwrap());
+        let selector = |name: &str| -> &'static str {
+            Box::leak(format!("{name}-{position}").into_boxed_str())
+        };
+        setup.cx.simulate_resize(gpui::size(px(1600.), px(900.)));
+        setup.cx.run_until_parked();
+        draw(&mut setup);
+        let number = drawn(&mut setup, selector("INBOX_ORIGIN"));
+        let extras = drawn(&mut setup, selector("INBOX_ROW_EXTRAS"));
+        let chip = drawn(&mut setup, selector("INBOX_CHIP"));
+        assert!(chip.top() < extras.bottom(), "{chip:?} shows in {extras:?}");
+
+        // Narrowed until the two can't share the line: the number stays whole
+        // and the suggestion goes, whole, below the clipped line.
+        let age_width = drawn(&mut setup, selector("INBOX_AGE")).size.width;
+        let row_width = drawn(&mut setup, selector("INBOX_ROW")).size.width;
+        let room = number.size.width + age_width + chip.size.width / 2. + px(50.);
+        let fraction = setup
+            .view
+            .read_with(&setup.cx, |view, _| view.list_fraction * (room / row_width));
+        setup
+            .view
+            .update(&mut setup.cx, |view, _| view.list_fraction = fraction);
+        setup.cx.run_until_parked();
+        draw(&mut setup);
+        let narrow = drawn(&mut setup, selector("INBOX_ORIGIN"));
+        let extras = drawn(&mut setup, selector("INBOX_ROW_EXTRAS"));
+        let chip = drawn(&mut setup, selector("INBOX_CHIP"));
+        assert_eq!(narrow.size.width, number.size.width, "the number is whole");
+        assert!(chip.top() >= extras.bottom(), "{chip:?} past {extras:?}");
+    }
+
+    #[gpui::test]
     async fn the_filter_box_sits_inside_the_list_with_its_count(cx: &mut TestAppContext) {
         let mut setup = setup(cx, Options::default()).await;
         setup.cx.simulate_resize(gpui::size(px(1000.), px(900.)));
@@ -6173,10 +6698,51 @@ mod tests {
     async fn the_keys_sheet_groups_keys_by_what_they_do(cx: &mut TestAppContext) {
         let mut setup = setup(cx, Options::default()).await;
         setup.cx.simulate_keystrokes("?");
+        setup.cx.simulate_resize(gpui::size(px(2400.), px(900.)));
+        setup.cx.run_until_parked();
         let decide = drawn(&mut setup, "INBOX_KEYS_GROUP-Decide");
         let moving = drawn(&mut setup, "INBOX_KEYS_GROUP-Move");
         let read = drawn(&mut setup, "INBOX_KEYS_GROUP-Read");
-        assert!(decide.bottom() <= moving.top() && moving.bottom() <= read.top());
+        assert_eq!(decide.top(), moving.top(), "columns where the width allows");
+        assert_eq!(decide.top(), read.top());
+        assert!(decide.right() <= moving.left() && moving.right() <= read.left());
+
+        // Without the width, a group wraps under the ones before it.
+        setup.cx.simulate_resize(gpui::size(px(1000.), px(900.)));
+        setup.cx.run_until_parked();
+        let decide = drawn(&mut setup, "INBOX_KEYS_GROUP-Decide");
+        let read = drawn(&mut setup, "INBOX_KEYS_GROUP-Read");
+        assert!(decide.bottom() <= read.top(), "{decide:?} over {read:?}");
+    }
+
+    #[gpui::test]
+    async fn an_empty_inbox_is_all_clear_and_can_still_undo(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        assert_eq!(setup.cx.debug_bounds("INBOX_ALL_CLEAR"), None);
+        for _ in 0..titles(&setup).len() {
+            setup.cx.simulate_keystrokes("e");
+            setup.cx.run_until_parked();
+        }
+        assert!(titles(&setup).is_empty());
+        let clear = drawn(&mut setup, "INBOX_ALL_CLEAR");
+        let header = drawn(&mut setup, "INBOX_ACTION-undo");
+        assert!(header.bottom() <= clear.top(), "{clear:?} in the reader");
+        assert_eq!(setup.cx.debug_bounds("INBOX_ACTION-open"), None);
+
+        setup.cx.simulate_keystrokes("u");
+        setup.cx.run_until_parked();
+        assert_eq!(titles(&setup).len(), 1);
+        assert_eq!(setup.cx.debug_bounds("INBOX_ALL_CLEAR"), None);
+    }
+
+    #[gpui::test]
+    async fn a_filter_with_no_matches_is_not_all_clear(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        setup.cx.simulate_keystrokes("/");
+        setup.cx.simulate_input("nothing is called this");
+        setup.cx.run_until_parked();
+        draw(&mut setup);
+        assert_eq!(setup.cx.debug_bounds("INBOX_ALL_CLEAR"), None);
     }
 
     #[gpui::test]
@@ -6516,15 +7082,15 @@ mod tests {
         ];
         assert_eq!(
             fold_summary(&pieces, false),
-            "Show 12 earlier lines and 14 fields"
+            "Show all folds · 12 earlier lines and 14 fields here"
         );
         assert_eq!(
             fold_summary(&pieces, true),
-            "Hide 12 earlier lines and 14 fields"
+            "Hide all folds · 12 earlier lines and 14 fields here"
         );
         assert_eq!(
             fold_summary(&[FoldPiece::Text(FoldKind::Signature, 4)], false),
-            "Show signature"
+            "Show all folds · signature here"
         );
         assert_eq!(
             fold_summary(
@@ -6535,7 +7101,7 @@ mod tests {
                 ],
                 false
             ),
-            "Show 1 quoted line, signature and 1 field"
+            "Show all folds · 1 quoted line, signature and 1 field here"
         );
     }
 
@@ -6569,13 +7135,22 @@ mod tests {
     }
 
     #[test]
-    fn only_a_long_comma_list_is_capped() {
-        assert_eq!(capped_list("a,b, c,d,e"), ("a, b, c".to_string(), 2));
-        assert_eq!(capped_list("a,b,c"), ("a,b,c".to_string(), 0));
-        let prose = "Well, this one, as you see, is a sentence";
-        assert_eq!(capped_list(prose), (prose.to_string(), 0));
+    fn every_list_and_its_old_value_read_one_way() {
+        assert_eq!(field_list("a,b, c,d,e", false), ("a, b, c".to_string(), 2));
+        assert_eq!(
+            field_list("a,b, c,d,e", true),
+            ("a, b, c, d, e".to_string(), 0)
+        );
+        assert_eq!(field_list("sosh,lmiller", false).0, "sosh, lmiller");
+        assert_eq!(field_list("1,000", false).0, "1,000");
+        let prose = "first, second thing, third, fourth, fifth";
+        assert_eq!(field_list(prose, false), (prose.to_string(), 0));
+        assert_eq!(was_text("sosh,lmiller", false), "sosh, lmiller");
+        assert_eq!(was_text("a,b,c,d,e", false), "a, b, c +2 more");
+        assert_eq!(was_text("a,b,c,d,e", true), "a, b, c, d, e");
+        assert_eq!(was_text("", false), "—");
         assert!(previous_helps("EDIT"));
-        assert!(!previous_helps("a,b,c,d,e"));
+        assert!(previous_helps("a,b,c,d,e"));
         assert!(!previous_helps(&"long".repeat(20)));
     }
 
@@ -6709,8 +7284,8 @@ mod tests {
         assert_eq!(age("2026-10-11T13:00:00Z").as_deref(), Some("now"));
         assert_eq!(age("2026-10-11T11:35:00Z").as_deref(), Some("25m"));
         assert_eq!(age("2026-10-11T10:00:00Z").as_deref(), Some("2h"));
-        assert_eq!(age("2026-10-10T08:00:00Z").as_deref(), Some("yesterday"));
-        assert_eq!(age("2026-10-08T11:00:00Z").as_deref(), Some("3 days"));
+        assert_eq!(age("2026-10-10T08:00:00Z").as_deref(), Some("1d"));
+        assert_eq!(age("2026-10-08T11:00:00Z").as_deref(), Some("3d"));
         assert_eq!(age_label(None, now), None);
         assert_eq!(age_label(Some("not a date"), now), None);
         assert_eq!(source_label("google-tasks"), "Google Tasks");
