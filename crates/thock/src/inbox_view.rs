@@ -77,9 +77,6 @@ const BAR_GAP: Pixels = px(8.);
 const FIELD_MIN_WIDTH: Pixels = px(300.);
 const FIELD_KEY_WIDTH: Pixels = px(104.);
 const SENDER_BADGE_SIZE: Pixels = px(28.);
-/// How far below the reader's top edge a jump leaves a message's card: the
-/// reader's own top padding, so the first card lands where it started.
-const MESSAGE_JUMP_MARGIN: Pixels = px(24.);
 
 actions!(
     thock,
@@ -855,25 +852,28 @@ impl InboxView {
         self.scroll_reader(-half, cx);
     }
 
-    /// Puts the card after (or before) the reader's top edge at that edge.
-    /// The offsets come from the last frame, so they follow manual scrolling.
+    /// Puts the card after (or before) the reader's top edge as far below
+    /// that edge as the first card starts. The offsets come from the last
+    /// frame, so they follow manual scrolling.
     fn jump_to_message(&mut self, forward: bool, cx: &mut Context<Self>) {
         let scroll = &self.reader_scroll;
         let origin = scroll.bounds().top();
         let offset = scroll.offset();
-        let current = MESSAGE_JUMP_MARGIN - offset.y;
-        let mut tops = (0..scroll.children_count())
+        let tops: Vec<Pixels> = (0..scroll.children_count())
             .filter_map(|index| scroll.bounds_for_item(index))
-            .map(|bounds| bounds.top() - origin);
+            .map(|bounds| bounds.top() - origin)
+            .collect();
+        let Some(margin) = tops.first().copied() else {
+            return;
+        };
+        let current = margin - offset.y;
         let target = if forward {
-            tops.find(|top| *top > current + px(1.))
+            tops.iter().find(|top| **top > current + px(1.))
         } else {
-            tops.rfind(|top| *top < current - px(1.))
+            tops.iter().rfind(|top| **top < current - px(1.))
         };
         if let Some(target) = target {
-            let y = (MESSAGE_JUMP_MARGIN - target)
-                .max(-scroll.max_offset().y)
-                .min(px(0.));
+            let y = (margin - *target).max(-scroll.max_offset().y).min(px(0.));
             scroll.set_offset(point(offset.x, y));
             cx.notify();
         }
@@ -2139,17 +2139,13 @@ impl InboxView {
             .bg(background)
             .children(fields.iter().enumerate().map(|(index, field)| {
                 let changed = field.previous.is_some();
-                let value = Label::new(if field.value.is_empty() {
-                    "—".to_string()
-                } else {
-                    field.value.clone()
-                })
-                .size(LabelSize::Small)
-                .color(if changed || field.link.is_some() {
-                    Color::Accent
-                } else {
-                    Color::Default
-                });
+                let value = Label::new(field_text(&field.value).to_string())
+                    .size(LabelSize::Small)
+                    .color(if changed || field.link.is_some() {
+                        Color::Accent
+                    } else {
+                        Color::Default
+                    });
                 let mut value_cell = v_flex()
                     .id(SharedString::from(format!("inbox-field-{id}-{index}")))
                     .flex_1()
@@ -2157,7 +2153,7 @@ impl InboxView {
                     .child(value)
                     .when_some(field.previous.as_ref(), |this, previous| {
                         this.child(
-                            Label::new(format!("was {previous}"))
+                            Label::new(format!("was {}", field_text(previous)))
                                 .size(LabelSize::XSmall)
                                 .color(Color::Muted),
                         )
@@ -2302,8 +2298,8 @@ impl InboxView {
             )
             .child(
                 div()
-                    .flex_none()
-                    .child(Label::new(name).weight(FontWeight::SEMIBOLD).single_line()),
+                    .min_w_0()
+                    .child(Label::new(name).weight(FontWeight::SEMIBOLD).truncate()),
             )
             .child(div().flex_1().min_w_0().children(detail.map(|detail| {
                 Label::new(detail)
@@ -2320,12 +2316,16 @@ impl InboxView {
                 )
             }))
             .child(
-                div().flex_none().pl_2().child(
-                    Label::new(format!("{} of {total}", index + 1))
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted)
-                        .single_line(),
-                ),
+                div()
+                    .debug_selector(move || format!("INBOX_POSITION-{index}"))
+                    .flex_none()
+                    .pl_2()
+                    .child(
+                        Label::new(format!("{} of {total}", index + 1))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted)
+                            .single_line(),
+                    ),
             );
         v_flex()
             .debug_selector(move || format!("INBOX_MESSAGE-{index}"))
@@ -3004,6 +3004,11 @@ fn without_leading_title<'a>(body: &'a str, title: &str) -> &'a str {
     } else {
         body
     }
+}
+
+/// A field's value as drawn: an empty one still reads as a value.
+fn field_text(value: &str) -> &str {
+    if value.is_empty() { "—" } else { value }
 }
 
 fn fold_label(kind: FoldKind, lines: usize) -> String {
@@ -4953,6 +4958,43 @@ mod tests {
         setup.cx.simulate_keystrokes("shift-n");
         draw(&mut setup);
         assert_eq!(offset(&setup), px(0.));
+    }
+
+    #[gpui::test]
+    async fn n_goes_to_the_next_message_whatever_the_interface_size(cx: &mut TestAppContext) {
+        let mut setup = setup_with_ticket(cx).await;
+        setup.cx.simulate_resize(gpui::size(px(1200.), px(420.)));
+        setup
+            .cx
+            .update(|_, cx| theme_settings::adjust_ui_font_size(cx, |_| px(20.)));
+        setup.cx.run_until_parked();
+        draw(&mut setup);
+        let first = drawn(&mut setup, "INBOX_MESSAGE-0");
+        setup.cx.simulate_keystrokes("n");
+        draw(&mut setup);
+        let second = drawn(&mut setup, "INBOX_MESSAGE-1");
+        assert_eq!(second.top(), first.top());
+    }
+
+    #[gpui::test]
+    async fn a_long_sender_leaves_the_card_its_position(cx: &mut TestAppContext) {
+        let long_sender = format!("{}<help@example.com>", "Automated Notifications ".repeat(6));
+        let note = TICKET.replace("## helpdesk@example.com", &format!("## {long_sender}"));
+        let mut setup = setup(cx, Options::default()).await;
+        setup
+            .fs
+            .insert_tree(
+                setup._vault_dir.path().join("inbox"),
+                json!({ "2026-10-09-1930-ticket-42.md": note }),
+            )
+            .await;
+        setup.cx.run_until_parked();
+        select(&mut setup, "Ticket 42");
+        setup.cx.simulate_resize(gpui::size(px(1000.), px(900.)));
+        setup.cx.run_until_parked();
+        let card = drawn(&mut setup, "INBOX_MESSAGE-0");
+        let position = drawn(&mut setup, "INBOX_POSITION-0");
+        assert!(position.right() <= card.right(), "{position:?} in {card:?}");
     }
 
     #[gpui::test]

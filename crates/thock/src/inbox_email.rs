@@ -208,16 +208,41 @@ fn is_signature_rule(lines: &[&str], index: usize) -> bool {
         && (index == 0 || lines.get(index - 1).is_some_and(|line| is_blank(line)))
 }
 
+/// Which lines belong to a code fence, its own two lines included.
+fn fenced_lines(lines: &[&str]) -> Vec<bool> {
+    let mut in_fence = false;
+    lines
+        .iter()
+        .map(|line| {
+            let edge = is_fence(line);
+            let fenced = in_fence || edge;
+            in_fence ^= edge;
+            fenced
+        })
+        .collect()
+}
+
+/// Whether `wrote` finishes an attribution wrapped over two lines, the first
+/// being `before`: a sentence of the sender's own stays out of the fold.
+fn continues_attribution(before: Option<&&str>, wrote: &str) -> bool {
+    !wrote.trim_start().starts_with("On ")
+        && before.is_some_and(|line| {
+            let line = line.trim();
+            line.starts_with("On ") && !line.ends_with(['.', '!', '?'])
+        })
+}
+
 /// Where the trail of a reply starts, when the message has one. A `>` run with
 /// the sender's words after it is an inline reply, and those stay.
-fn quote_start(lines: &[&str]) -> Option<usize> {
-    let forwarded = lines.iter().enumerate().position(|(index, line)| {
-        let line = line.trim();
-        (line.starts_with("-----") && line.contains("Original Message"))
-            || (line.starts_with("From: ")
-                && lines
-                    .get(index + 1)
-                    .is_some_and(|next| next.trim().starts_with("Sent: ")))
+fn quote_start(lines: &[&str], fenced: &[bool]) -> Option<usize> {
+    let forwarded = (0..lines.len()).find(|&index| {
+        let line = lines[index].trim();
+        !fenced[index]
+            && ((line.starts_with("-----") && line.contains("Original Message"))
+                || (line.starts_with("From: ")
+                    && lines
+                        .get(index + 1)
+                        .is_some_and(|next| next.trim().starts_with("Sent: "))))
     });
     let last_own = lines
         .iter()
@@ -228,8 +253,12 @@ fn quote_start(lines: &[&str]) -> Option<usize> {
         .any(|line| is_quoted(line))
         .then(|| match last_own {
             Some(last) if lines[last].trim_end().ends_with("wrote:") => {
-                let wrapped = last > 0 && lines[last - 1].trim_start().starts_with("On ");
-                if wrapped { last - 1 } else { last }
+                let before = last.checked_sub(1).and_then(|index| lines.get(index));
+                if continues_attribution(before, lines[last]) {
+                    last - 1
+                } else {
+                    last
+                }
             }
             _ => after_own,
         });
@@ -250,8 +279,10 @@ fn fold(kind: FoldKind, lines: &[&str]) -> Option<EmailBlock> {
 
 /// Splits what the sender wrote from the signature and the quoted trail.
 fn split_tail<'a, 'b>(lines: &'a [&'b str]) -> (&'a [&'b str], Vec<EmailBlock>) {
-    let signature = (0..lines.len()).find(|&index| is_signature_rule(lines, index));
-    let quote = quote_start(lines);
+    let fenced = fenced_lines(lines);
+    let signature =
+        (0..lines.len()).find(|&index| !fenced[index] && is_signature_rule(lines, index));
+    let quote = quote_start(lines, &fenced);
     match (signature, quote) {
         (Some(signature), Some(quote)) if signature < quote => (
             &lines[..signature],
@@ -319,10 +350,10 @@ fn parse_fields(paragraph: &[&str]) -> Option<Vec<(String, String)>> {
     paragraph.iter().map(|line| parse_field(line)).collect()
 }
 
-/// The `Key: value` lines from the start of `paragraphs`, and how many
-/// paragraphs they took, when they read as a record. Repeated keys are a log,
-/// not a record.
-fn field_run(paragraphs: &[Vec<&str>]) -> Option<(Vec<(String, String)>, usize)> {
+/// The `Key: value` lines from the start of `paragraphs` when they read as a
+/// record, and how many paragraphs they took either way. Repeated keys are a
+/// log, not a record.
+fn field_run(paragraphs: &[Vec<&str>]) -> (Option<Vec<(String, String)>>, usize) {
     let run: Vec<Vec<(String, String)>> = paragraphs
         .iter()
         .map_while(|paragraph| parse_fields(paragraph))
@@ -330,16 +361,19 @@ fn field_run(paragraphs: &[Vec<&str>]) -> Option<(Vec<(String, String)>, usize)>
     let taken = run.len();
     let fields: Vec<(String, String)> = run.into_iter().flatten().collect();
     let keys: HashSet<&str> = fields.iter().map(|(key, _)| key.as_str()).collect();
-    (fields.len() >= MIN_FIELDS && keys.len() == fields.len()).then_some((fields, taken))
+    let is_record = fields.len() >= MIN_FIELDS && keys.len() == fields.len();
+    (is_record.then_some(fields), taken)
 }
 
 /// `(by ana on 03/02/26 10:25am):` → `ana`.
 fn parse_author(line: &str) -> Option<&str> {
     let (_, rest) = line.split_once("(by ")?;
     let (author, details) = rest.split_once(" on ")?;
+    let (date, _) = details.split_once(')')?;
     let author = author.trim();
-    let shaped = !author.is_empty() && author.len() <= MAX_AUTHOR_LENGTH;
-    (shaped && details.contains(')')).then_some(author)
+    let shaped = !author.is_empty() && author.len() <= MAX_AUTHOR_LENGTH && !author.contains(')');
+    // The date is what tells a ticket's line from prose: `(by the team on Friday)`.
+    (shaped && date.contains(|character: char| character.is_ascii_digit())).then_some(author)
 }
 
 /// A sender with a display name is a person; a bare address may be a system
@@ -464,7 +498,9 @@ impl ThreadReader {
             let field = EmailField {
                 link: first_link(&value),
                 value: display_links(&value),
-                previous: previous.filter(|_| !repeated),
+                previous: previous
+                    .filter(|_| !repeated)
+                    .map(|previous| display_links(&previous)),
                 key,
             };
             if repeated {
@@ -482,11 +518,18 @@ impl ThreadReader {
         let mut parts = Vec::new();
         let mut author = None;
         let mut index = 0;
+        let mut prose_until = 0;
         while let Some(paragraph) = paragraphs.get(index) {
-            if let Some((fields, taken)) = field_run(&paragraphs[index..]) {
-                parts.push(Part::Fields(fields));
-                index += taken;
-                continue;
+            if index >= prose_until {
+                let (fields, taken) = field_run(&paragraphs[index..]);
+                if let Some(fields) = fields {
+                    parts.push(Part::Fields(fields));
+                    index += taken;
+                    continue;
+                }
+                // A log's tail mustn't read as a record once its repeat is
+                // behind it.
+                prose_until = index + taken;
             }
             let repeated = self.is_repeated(paragraph);
             if !repeated && author.is_none() && is_bare_address(section.from) {
@@ -572,11 +615,15 @@ fn shortens(link: &str) -> bool {
 }
 
 fn map_links(line: &str, replace: impl Fn(&str) -> String) -> String {
+    let mut in_code = false;
     line.split_inclusive(char::is_whitespace)
         .map(|token| {
+            let ticks = token.matches('`').count();
+            let is_code = in_code || ticks > 0;
+            in_code ^= ticks % 2 == 1;
             let word = token.trim_end();
             let (link, punctuation) = split_link(word);
-            if shortens(link) {
+            if !is_code && shortens(link) {
                 let space = &token[word.len()..];
                 format!("{}{punctuation}{space}", replace(link))
             } else {
@@ -748,6 +795,17 @@ Team:        render-ops
     }
 
     #[test]
+    fn prose_about_someone_is_not_a_ticket_line() {
+        for line in [
+            "This was fixed (by the team on Friday).",
+            "(by ana) and then on 3 March (see below)",
+        ] {
+            let thread = parse_thread(line, Some("helpdesk@example.com"));
+            assert_eq!(thread.messages[0].author, None, "{line}");
+        }
+    }
+
+    #[test]
     fn what_a_reply_only_repeats_folds_away() {
         let thread = ticket_thread();
         let reply = &thread.messages[1];
@@ -826,6 +884,31 @@ Team:        render-ops
     }
 
     #[test]
+    fn a_log_stays_prose_past_its_repeated_key() {
+        let thread = thread("Error: first\n\nWarning: second\n\nError: third\n\nInfo: fourth\n");
+        assert!(
+            matches!(thread.messages[0].blocks[..], [EmailBlock::Text(_)]),
+            "{:?}",
+            thread.messages[0].blocks
+        );
+    }
+
+    #[test]
+    fn a_changed_field_reads_its_old_link_by_address() {
+        let wrapped = "https://urldefense.com/v3/__https://example.com/old__;Iw!!AC!x$";
+        let thread = thread(&format!(
+            "## helpdesk@example.com — 2026-11-04 08:55\n\n\
+             Link: {wrapped}\nStatus: OPEN\nHost: N/A\n\n\
+             ## helpdesk@example.com — 2026-11-04 09:13\n\n\
+             Link: https://example.com/new\nStatus: OPEN\nHost: N/A\n"
+        ));
+        let EmailBlock::Fields { shown, .. } = &thread.messages[1].blocks[0] else {
+            panic!("fields: {:?}", thread.messages[1].blocks);
+        };
+        assert_eq!(shown[0].previous.as_deref(), Some("example.com/old"));
+    }
+
+    #[test]
     fn a_field_keeps_its_link() {
         let thread = thread("ID: 42, https://example.com/tickets/42\nStatus: OPEN\nHost: N/A\n");
         let EmailBlock::Fields { shown, .. } = &thread.messages[0].blocks[0] else {
@@ -855,6 +938,13 @@ Team:        render-ops
         );
         assert_eq!(text(&thread.messages[0]), "It's done.");
         assert_eq!(folds(&thread.messages[0]), [(FoldKind::Quoted, 3)]);
+    }
+
+    #[test]
+    fn a_sentence_above_the_attribution_stays() {
+        let thread = thread("On Monday I'll ship it.\nAs Ana wrote:\n> Ship it\n");
+        assert_eq!(text(&thread.messages[0]), "On Monday I'll ship it.");
+        assert_eq!(folds(&thread.messages[0]), [(FoldKind::Quoted, 2)]);
     }
 
     #[test]
@@ -901,6 +991,19 @@ Team:        render-ops
     }
 
     #[test]
+    fn a_fence_keeps_what_looks_like_a_tail() {
+        for body in [
+            "```\nargs\n\n--\nmore\n```\n",
+            "```\nFrom: a\nSent: b\n```\n",
+            "```\n-----Original Message-----\n```\n",
+        ] {
+            let thread = thread(body);
+            assert_eq!(folds(&thread.messages[0]), [], "{body}");
+            assert_eq!(text(&thread.messages[0]), body.trim());
+        }
+    }
+
+    #[test]
     fn long_links_read_as_their_address_and_keep_their_target() {
         let wrapped =
             "https://urldefense.com/v3/__https://github.com/acme/repo/pull/36__;Iw!!AC!x$";
@@ -920,12 +1023,15 @@ Team:        render-ops
 
     #[test]
     fn short_links_and_links_in_code_are_left_alone() {
+        let long = format!("https://example.com/{}", "a".repeat(80));
         for text in [
-            "See https://example.com/a for more.",
-            "[named](https://example.com/a)",
-            "```\nhttps://urldefense.com/v3/__https://example.com/a__;Iw!!x$\n```",
+            "See https://example.com/a for more.".to_string(),
+            "[named](https://example.com/a)".to_string(),
+            "```\nhttps://urldefense.com/v3/__https://example.com/a__;Iw!!x$\n```".to_string(),
+            format!("Run `{long}` first."),
+            format!("Run `curl {long} -o out` first."),
         ] {
-            assert_eq!(compact_links(text), text);
+            assert_eq!(compact_links(&text), text);
         }
     }
 

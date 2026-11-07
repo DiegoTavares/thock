@@ -4,7 +4,7 @@
 and awaits its first run against OpenRouter from a Plus vault. **Rev 2 (2026-10-11):** §4.2's layout
 is redesigned around a destination bar above the note; implemented (2026-10-11). **Rev 3
 (2026-11-06):** the view takes the room between the docks, the destination bar stops squeezing its
-buttons, and an email reads as a conversation (§4.4); implemented (2026-11-06)
+buttons, and an email reads as a conversation (§4.4); Implemented (2026-11-06): PR #195
 **Owner:** Diego · **Date:** 2026-10-10
 **Design reference:** the design notes with the Jev study, the gpui-kit evaluation, the component
 map and the decision cards this spec resolves: <https://claude.ai/artifact/FoeWmrEjqsMiTKvZKCvfBp>.
