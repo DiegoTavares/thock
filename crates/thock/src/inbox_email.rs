@@ -23,6 +23,7 @@ const MAX_LINK_LENGTH: usize = 60;
 /// Shorter than this, a cut subject could match any line of the body.
 const MIN_TITLE_STEM_LENGTH: usize = 12;
 const MAX_TITLE_LENGTH: usize = 200;
+const MAX_TICKET_QUEUE_LENGTH: usize = 6;
 
 const SECTION_PREFIX: &str = "## ";
 const SECTION_DATE_SEPARATOR: &str = " — ";
@@ -53,6 +54,9 @@ pub struct EmailMessage {
 pub enum EmailBlock {
     /// Markdown.
     Text(String),
+    /// Markdown: what a ticketing system wrote around a person's words, set
+    /// apart by `quiet_system_lines`.
+    Meta(String),
     /// A run of `Key: value` lines. `shown` holds what this message
     /// introduced or changed, `unchanged` what it only repeated.
     Fields {
@@ -152,6 +156,93 @@ pub fn drop_restated_subject(thread: &mut EmailThread, title: &str) {
             *text = rest;
         }
     }
+}
+
+/// Tells a relayed message's system text from its person's words, so the
+/// reader can draw only the words at full strength: all that comes before the
+/// `(by …)` line, that line, and any line restating `title` or noting the
+/// ticket's own edit. This is the reading alone; the note keeps every line.
+pub fn quiet_system_lines(thread: &mut EmailThread, title: &str) {
+    for message in &mut thread.messages {
+        if message.author.is_none() {
+            continue;
+        }
+        let mut before_author = message.blocks.iter().any(
+            |block| matches!(block, EmailBlock::Text(text) if text.lines().any(|line| parse_author(line).is_some())),
+        );
+        for block in std::mem::take(&mut message.blocks) {
+            match block {
+                EmailBlock::Text(text) if !text.lines().any(is_fence) => {
+                    split_system_text(&text, title, &mut before_author, &mut message.blocks)
+                }
+                other => message.blocks.push(other),
+            }
+        }
+    }
+}
+
+fn split_system_text(
+    text: &str,
+    title: &str,
+    before_author: &mut bool,
+    blocks: &mut Vec<EmailBlock>,
+) {
+    for paragraph in text.split("\n\n") {
+        let lines: Vec<&str> = paragraph.lines().collect();
+        let (quiet, own) = match lines.iter().rposition(|line| parse_author(line).is_some()) {
+            Some(author_line) => {
+                *before_author = false;
+                lines.split_at(author_line + 1)
+            }
+            None if *before_author || lines.iter().all(|line| is_system_line(line, title)) => {
+                (lines.as_slice(), [].as_slice())
+            }
+            None => ([].as_slice(), lines.as_slice()),
+        };
+        if !quiet.is_empty() {
+            push_block(blocks, EmailBlock::Meta(quiet.join("\n")));
+        }
+        if !own.is_empty() {
+            push_block(blocks, EmailBlock::Text(own.join("\n")));
+        }
+    }
+}
+
+fn is_system_line(line: &str, title: &str) -> bool {
+    restates_subject(line, title) || is_change_line(line)
+}
+
+/// `Changing Status to CLOSED`: a ticket noting its own edit.
+fn is_change_line(line: &str) -> bool {
+    line.trim()
+        .strip_prefix("Changing ")
+        .and_then(|rest| rest.split_once(" to "))
+        .is_some_and(|(key, value)| {
+            key.split_whitespace().count() <= MAX_FIELD_KEY_WORDS
+                && value.split_whitespace().count() == 1
+        })
+}
+
+/// Splits `HD 42: The farm is down` into the ticket and its subject, for a
+/// list row, where the number would spend the title's room. `Q4: planning` and
+/// `Re: lunch` aren't tickets.
+pub fn ticket_prefix(title: &str) -> Option<(&str, &str)> {
+    let (prefix, subject) = title.split_once(": ")?;
+    let subject = subject.trim();
+    let is_queue = |word: &str| {
+        (2..=MAX_TICKET_QUEUE_LENGTH).contains(&word.len())
+            && word.chars().all(|character| character.is_ascii_uppercase())
+    };
+    let is_number =
+        |word: &str| !word.is_empty() && word.chars().all(|character| character.is_ascii_digit());
+    let is_ticket = match prefix.split_whitespace().collect::<Vec<_>>()[..] {
+        [word, number] => (word == "Ticket" || is_queue(word)) && is_number(number),
+        [key] => key
+            .split_once('-')
+            .is_some_and(|(word, number)| is_queue(word) && is_number(number)),
+        _ => false,
+    };
+    (is_ticket && !subject.is_empty()).then_some((prefix, subject))
 }
 
 /// The two may name the ticket differently (`Ticket 42:The farm` under
@@ -537,11 +628,13 @@ fn fold_opening_repeat(parts: &mut Vec<Part>) {
 }
 
 fn push_block(blocks: &mut Vec<EmailBlock>, block: EmailBlock) {
-    if let (Some(EmailBlock::Text(last)), EmailBlock::Text(added)) = (blocks.last_mut(), &block) {
-        last.push_str("\n\n");
-        last.push_str(added);
-    } else {
-        blocks.push(block);
+    match (blocks.last_mut(), &block) {
+        (Some(EmailBlock::Text(last)), EmailBlock::Text(added))
+        | (Some(EmailBlock::Meta(last)), EmailBlock::Meta(added)) => {
+            last.push_str("\n\n");
+            last.push_str(added);
+        }
+        _ => blocks.push(block),
     }
 }
 
@@ -963,6 +1056,96 @@ Team:        render-ops
                 matches!(thread.messages[0].blocks[..], [EmailBlock::Text(_)]),
                 "{body}"
             );
+        }
+    }
+
+    fn quieted(body: &str, title: &str) -> Vec<EmailBlock> {
+        let mut thread = thread(body);
+        quiet_system_lines(&mut thread, title);
+        thread.messages.remove(0).blocks
+    }
+
+    #[test]
+    fn a_ticket_reply_keeps_only_the_persons_words_at_full_strength() {
+        let blocks = quieted(
+            "## helpdesk@example.com — 2026-11-06 09:38\n\n\
+             This ticket is now closed. Please fill out this survey.\n\n\
+             Ticket 42:The farm stopped taking jobs\n\n\
+             Comment #4 (by ana on 11/06/26 08:38am):\n\n\
+             Glad the publishes succeeded!\n\n\
+             Changing Status to CLOSED\n",
+            "HD 42: The farm stopped taking jobs",
+        );
+        assert_eq!(
+            blocks,
+            [
+                EmailBlock::Meta(
+                    "This ticket is now closed. Please fill out this survey.\n\n\
+                     Ticket 42:The farm stopped taking jobs\n\n\
+                     Comment #4 (by ana on 11/06/26 08:38am):"
+                        .to_string()
+                ),
+                EmailBlock::Text("Glad the publishes succeeded!".to_string()),
+                EmailBlock::Meta("Changing Status to CLOSED".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn words_sharing_a_paragraph_with_the_author_line_stay_full_strength() {
+        let blocks = quieted(
+            "## helpdesk@example.com — 2026-11-06 09:38\n\n\
+             Description\n(by ana on 11/06/26 12:55pm):\nThe farm is down.\n",
+            "Anything long enough",
+        );
+        assert_eq!(
+            blocks,
+            [
+                EmailBlock::Meta("Description\n(by ana on 11/06/26 12:55pm):".to_string()),
+                EmailBlock::Text("The farm is down.".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_person_writing_directly_has_no_system_lines() {
+        let body = "## Ana <ana@example.com> — 2026-11-06 09:38\n\n\
+                    Changing Status to CLOSED\n\nThanks!\n";
+        let blocks = quieted(body, "Anything long enough");
+        assert!(matches!(blocks[..], [EmailBlock::Text(_)]), "{blocks:?}");
+    }
+
+    #[test]
+    fn a_snippet_skips_the_system_lines() {
+        let mut thread = thread(
+            "## helpdesk@example.com — 2026-11-06 09:38\n\n\
+             This ticket is now closed.\n\n\
+             Comment #4 (by ana on 11/06/26 08:38am):\n\n\
+             Glad it worked.\n",
+        );
+        quiet_system_lines(&mut thread, "Anything long enough");
+        assert_eq!(
+            snippet(&thread.messages[0]).as_deref(),
+            Some("Glad it worked.")
+        );
+    }
+
+    #[test]
+    fn a_ticket_prefix_leaves_the_subject() {
+        for (title, expected) in [
+            (
+                "HD 520596: mxfs not working",
+                Some(("HD 520596", "mxfs not working")),
+            ),
+            ("INC-42: Disk full", Some(("INC-42", "Disk full"))),
+            ("Ticket 7: Printer", Some(("Ticket 7", "Printer"))),
+            ("Re: Q4 planning doc", None),
+            ("Q4: planning", None),
+            ("Phase 2: planning", None),
+            ("HD 42:", None),
+            ("No prefix at all", None),
+        ] {
+            assert_eq!(ticket_prefix(title), expected, "{title}");
         }
     }
 

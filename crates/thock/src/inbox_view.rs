@@ -12,10 +12,11 @@ use editor::{Editor, EditorEvent};
 use fs::Fs;
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, DismissEvent, Entity,
-    EventEmitter, FocusHandle, Focusable, FontWeight, ImageSource, KeyContext, KeyDownEvent,
-    MouseButton, MouseDownEvent, Pixels, Point, Resource, ScrollHandle, SharedString, Subscription,
-    Task, TaskExt as _, UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred,
-    div, point, prelude::*, px, relative, transparent_black,
+    EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, ImageSource, KeyContext, KeyDownEvent,
+    MouseButton, MouseDownEvent, Pixels, Point, Rems, Resource, ScrollHandle, ScrollWheelEvent,
+    SharedString, Subscription, Task, TaskExt as _, UniformListScrollHandle, WeakEntity, Window,
+    actions, anchored, deferred, div, hsla, point, prelude::*, px, relative, rems,
+    transparent_black,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use menu::{Cancel, Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
@@ -30,10 +31,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use thock_sync_core::{Operation, Write, apply, archive_path, inbox_task_line, triage_log_line};
 use ui::{
-    ActiveTheme as _, Button, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, Chip,
+    ActiveTheme as _, Button, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle,
     Clickable as _, Color, ContextMenu, FixedWidth as _, HeadlineSize, Icon, IconButton, IconName,
-    IconSize, KeyBinding, KeybindingPosition, Label, LabelCommon as _, LabelSize, Toggleable as _,
-    Tooltip, h_flex, v_flex,
+    IconSize, KeyBinding, Label, LabelCommon as _, LabelSize, Tooltip, h_flex, v_flex,
 };
 use util::ResultExt as _;
 use util::paths::PathStyle;
@@ -48,7 +48,7 @@ use crate::backlog::{self, DEFAULT_BACKLOG, SectionKind};
 use crate::inbox::{TRIAGE_LOG_PATH, sanitize_title};
 use crate::inbox_email::{
     EmailBlock, EmailField, EmailMessage, EmailThread, FoldKind, drop_restated_subject, full_title,
-    initials, parse_thread, snippet, split_fields,
+    initials, parse_thread, quiet_system_lines, snippet, split_fields, ticket_prefix,
 };
 use crate::inbox_service::{
     self, InboxEntry, InboxEvent, InboxService, MoveOutcome, SuggestionAvailability, TriageInbox,
@@ -72,17 +72,36 @@ const PANE_HEADER_HEIGHT: Pixels = px(52.);
 const ROW_HEIGHT: Pixels = px(76.);
 const ROW_GAP: Pixels = px(2.);
 const FOOTER_HEIGHT: Pixels = px(36.);
-const BAR_BUTTON_HEIGHT: Pixels = px(56.);
+const BAR_BUTTON_HEIGHT: Pixels = px(60.);
 const READER_MAX_WIDTH: Pixels = px(960.);
 /// Holds `space or shift-s`, the widest keycaps a button carries.
 const DESTINATION_MIN_WIDTH: Pixels = px(136.);
-/// One length on every button, so the meters compare at a glance.
-const PROBABILITY_METER_WIDTH: Pixels = px(64.);
+/// One length on every button, so the meters compare at a glance: what the
+/// narrowest button holds inside its padding.
+const PROBABILITY_METER_WIDTH: Pixels = px(112.);
 const BAR_GAP: Pixels = px(8.);
 const FIELD_MIN_WIDTH: Pixels = px(300.);
 const FIELD_KEY_WIDTH: Pixels = px(104.);
 const SENDER_BADGE_SIZE: Pixels = px(28.);
 const FOCUS_RAIL_WIDTH: Pixels = px(3.);
+const TITLE_SIZE: HeadlineSize = HeadlineSize::Large;
+const TITLE_LINE_HEIGHT: f32 = 1.3;
+/// Kept whether or not rows are marked, so marking doesn't move the bar.
+const MARKS_SLOT_HEIGHT: Pixels = px(18.);
+const KEYCAP_HEIGHT: Rems = rems(1.125);
+const KEYCAP_TEXT_SIZE: Rems = rems(0.75);
+const FILTER_BOX_HEIGHT: Pixels = px(30.);
+/// A list longer than this draws its first items and a count of the rest.
+const MAX_FIELD_LIST_ITEMS: usize = 3;
+/// Past this a field's old value is more to read than it tells.
+const MAX_PREVIOUS_VALUE_LENGTH: usize = 32;
+const EARLIER_CUE_HEIGHT: Pixels = px(28.);
+/// Where a revealed card's top sits in the reader: clear of the earlier cue.
+const REVEAL_CLEARANCE: Pixels = px(36.);
+/// Spread round the wheel, past the reds that read as an error and the
+/// accent's amber. Shared by both themes, so a person's colour doesn't change
+/// with the appearance; only the lightness does.
+const SENDER_HUES: [f32; 6] = [212., 268., 176., 134., 322., 88.];
 
 actions!(
     thock,
@@ -217,6 +236,8 @@ struct ReaderNote {
 struct ReaderStyle {
     body: MarkdownStyle,
     folded: MarkdownStyle,
+    /// A ticketing system's own lines, under the person's words.
+    meta: MarkdownStyle,
     images: Rc<dyn Fn(&str) -> Option<ImageSource>>,
 }
 
@@ -901,6 +922,40 @@ impl InboxView {
         self.step_message(false, cx);
     }
 
+    /// Brings the current card to the top of the reader, under the earlier
+    /// cue. A body takes its height once parsed, so while any is still parsing
+    /// this runs again on the frame that lands it.
+    fn reveal_current_message(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self
+            .reader_note
+            .thread
+            .as_ref()
+            .filter(|thread| thread.messages.len() > 1)
+        else {
+            return;
+        };
+        let preamble = usize::from(!thread.preamble.is_empty());
+        let card = self
+            .reader_scroll
+            .bounds_for_item(self.reader_note.current_message + preamble);
+        self.reader_note.reveal_current = self
+            .reader_note
+            .markdown
+            .values()
+            .any(|markdown| markdown.read(cx).is_parsing());
+        let Some(card) = card else {
+            return;
+        };
+        let viewport_top = self.reader_scroll.bounds().top();
+        let farthest = self.reader_scroll.max_offset().y;
+        let scrolled = (card.top() - viewport_top - REVEAL_CLEARANCE).clamp(px(0.), farthest);
+        let offset = self.reader_scroll.offset();
+        if offset.y != -scrolled {
+            self.reader_scroll.set_offset(point(offset.x, -scrolled));
+            cx.notify();
+        }
+    }
+
     fn toggle_folds(&mut self, _: &ToggleInboxFolds, _: &mut Window, cx: &mut Context<Self>) {
         self.reader_note.folds_open = !self.reader_note.folds_open;
         self.reader_note.reveal_current = true;
@@ -1444,9 +1499,6 @@ impl InboxView {
 
     /// The list footer's quiet stats (§4.2).
     fn footer_stats(&self, cx: &App) -> FooterStats {
-        if !self.marked.is_empty() {
-            return FooterStats::Marked(self.marked.len());
-        }
         let availability = self.availability(cx);
         if availability == Some(SuggestionAvailability::NoGrant) && !self.plus_banner_dismissed {
             return FooterStats::PlusOffer;
@@ -1472,10 +1524,7 @@ impl InboxView {
         FooterStats::Stats(parts.join(" · "))
     }
 
-    fn render_list_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let filtering =
-            self.filter_editor.focus_handle(cx).is_focused(window) || !self.filter.is_empty();
-        let border = cx.theme().colors().border;
+    fn render_list_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let counts = self.section_counts().into_iter().map(|count| {
             let selector = if count.section == 0 {
                 "INBOX_SECTION-new"
@@ -1520,27 +1569,70 @@ impl InboxView {
             )
             .children(counts)
             .child(div().flex_1())
-            .child(if filtering {
-                div()
-                    .w(px(180.))
-                    .min_w(px(80.))
-                    .px_2()
-                    .py_0p5()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(border)
-                    .child(self.filter_editor.clone())
-                    .into_any_element()
-            } else {
+            .child(
                 IconButton::new("inbox-filter", IconName::MagnifyingGlass)
                     .icon_size(IconSize::Small)
                     .tooltip(Tooltip::for_action_title("Filter", &FilterInbox))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.filter(&FilterInbox, window, cx);
-                    }))
-                    .into_any_element()
-            })
+                    })),
+            )
             .into_any_element()
+    }
+
+    /// The filter box, on its own line at the top of the list so it keeps a
+    /// whole edge inside the pane however narrow the pane is.
+    fn render_filter_bar(&self, window: &Window, cx: &App) -> Option<AnyElement> {
+        let focused = self.filter_editor.focus_handle(cx).is_focused(window);
+        if !focused && self.filter.is_empty() {
+            return None;
+        }
+        let colors = cx.theme().colors();
+        let leave = self.move_keycap(
+            &["menu::Cancel"],
+            ["escape", "escape"],
+            &Cancel,
+            list_key_context(),
+            window,
+            cx,
+        );
+        let matches = (!self.filter.is_empty()).then(|| {
+            div()
+                .debug_selector(|| "INBOX_FILTER_COUNT".to_string())
+                .flex_none()
+                .child(
+                    Label::new(match_count_label(self.visible.len()))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .single_line(),
+                )
+        });
+        Some(
+            div()
+                .flex_none()
+                .w_full()
+                .px_2()
+                .pt_2()
+                .child(
+                    h_flex()
+                        .debug_selector(|| "INBOX_FILTER".to_string())
+                        .w_full()
+                        .h(FILTER_BOX_HEIGHT)
+                        .px_2()
+                        .gap_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(if focused {
+                            colors.border_focused
+                        } else {
+                            colors.border
+                        })
+                        .child(div().flex_1().min_w_0().child(self.filter_editor.clone()))
+                        .children(matches)
+                        .child(framed_keycap(leave, false, cx)),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Open or Undo: an action on the note rather than a place for it, so it
@@ -1553,20 +1645,24 @@ impl InboxView {
         window: &Window,
         cx: &App,
     ) -> AnyElement {
-        let keycap = self
-            .keycap(action, list_key_context(), window, cx)
-            .disabled(!self.list_keys_live(window, cx));
+        let keycap = framed_keycap(
+            self.keycap(action, list_key_context(), window, cx),
+            !self.list_keys_live(window, cx),
+            cx,
+        );
         let focus = self.focus_handle.clone();
         let boxed_action = action.boxed_clone();
         div()
             .debug_selector(move || format!("INBOX_ACTION-{name}"))
             .flex_none()
             .child(
-                Button::new(SharedString::from(format!("inbox-action-{name}")), label)
-                    .label_size(LabelSize::Small)
-                    .color(Color::Muted)
-                    .key_binding(keycap)
-                    .key_binding_position(KeybindingPosition::Start)
+                ButtonLike::new(SharedString::from(format!("inbox-action-{name}")))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(keycap)
+                            .child(Label::new(label).size(LabelSize::Small).color(Color::Muted)),
+                    )
                     .on_click(move |_, window, cx| {
                         focus.dispatch_action(boxed_action.as_ref(), window, cx)
                     }),
@@ -1574,7 +1670,7 @@ impl InboxView {
             .into_any_element()
     }
 
-    fn render_reader_header(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_reader_header(&self, window: &Window, cx: &App) -> AnyElement {
         let entry = self.selected_entry();
         let item = entry.map(|entry| &entry.item);
         let source = item.and_then(|item| item.source.as_deref());
@@ -1592,14 +1688,24 @@ impl InboxView {
                 .or_else(|| source.map(source_label));
             let named = name.is_some();
             if let Some(name) = name {
-                meta = meta.child(Label::new(name).size(LabelSize::Small).truncate());
+                // Who it's from is the first thing asked of this line, so the
+                // name keeps its room and what follows gives way.
+                meta = meta.child(
+                    div()
+                        .debug_selector(|| "INBOX_HEADER_SENDER".to_string())
+                        .flex_none()
+                        .max_w(relative(0.6))
+                        .child(Label::new(name).size(LabelSize::Small).truncate()),
+                );
             }
             if let Some(address) = item.from.as_deref().and_then(sender_address) {
                 meta = meta.child(
-                    Label::new(address)
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .truncate(),
+                    div().min_w_0().child(
+                        Label::new(address)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .truncate(),
+                    ),
                 );
             }
             let mut when = Vec::new();
@@ -1617,11 +1723,11 @@ impl InboxView {
             if !when.is_empty() {
                 let separator = if named { "· " } else { "" };
                 meta = meta.child(
-                    div().flex_none().child(
+                    div().min_w_0().child(
                         Label::new(format!("{separator}{}", when.join(" · ")))
                             .size(LabelSize::Small)
                             .color(Color::Muted)
-                            .single_line(),
+                            .truncate(),
                     ),
                 );
             }
@@ -1655,15 +1761,6 @@ impl InboxView {
                         .on_click(move |_, _, cx| cx.open_url(&link)),
                 )
             })
-            .child(
-                IconButton::new("inbox-keys", IconName::Keyboard)
-                    .icon_size(IconSize::Small)
-                    .toggle_state(self.keys_sheet)
-                    .tooltip(Tooltip::for_action_title("Keys", &ShowInboxKeys))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.show_keys(&ShowInboxKeys, window, cx);
-                    })),
-            )
             .into_any_element()
     }
 
@@ -1733,29 +1830,39 @@ impl InboxView {
         notices
     }
 
-    /// The row's suggestion chip (§7.4): the destination only, filled or
-    /// outlined by tier, and nothing below the line. A failed request shows
-    /// a warning glyph with the reason (§7.3).
+    /// The row's suggestion (§7.4): an arrow and the destination, so it reads
+    /// as where the note could go rather than a state it's in. Accent at the
+    /// filled tier, muted at the outlined one, nothing below the line. A failed
+    /// request shows a warning glyph with the reason (§7.3).
     fn render_chip(&self, entry: &InboxEntry, cx: &App) -> Option<AnyElement> {
         let service = self.service.as_ref()?.read(cx);
         if service.suggestion_availability(cx) != SuggestionAvailability::On {
             return None;
         }
-        let accent = cx.theme().colors().text_accent;
+        let suggestion_hint = |destination: Destination, color: Color| {
+            h_flex()
+                .gap_0p5()
+                .child(
+                    Icon::new(IconName::ArrowRight)
+                        .size(IconSize::XSmall)
+                        .color(color),
+                )
+                .child(
+                    Label::new(destination.label())
+                        .size(LabelSize::Small)
+                        .color(color)
+                        .single_line(),
+                )
+                .into_any_element()
+        };
         match service.suggestion_for(&entry.hash) {
             Some(suggestion) => match (tier(suggestion), suggestion.destination) {
-                (Tier::Filled, Some(destination)) => Some(
-                    Chip::new(destination.label())
-                        .bg_color(accent.opacity(0.15))
-                        .border_color(accent)
-                        .label_color(Color::Accent)
-                        .into_any_element(),
-                ),
-                (Tier::Outlined, Some(destination)) => Some(
-                    Chip::new(destination.label())
-                        .border_color(accent)
-                        .into_any_element(),
-                ),
+                (Tier::Filled, Some(destination)) => {
+                    Some(suggestion_hint(destination, Color::Accent))
+                }
+                (Tier::Outlined, Some(destination)) => {
+                    Some(suggestion_hint(destination, Color::Muted))
+                }
                 _ => None,
             },
             None => service.suggestion_failure(&entry.hash).map(|reason| {
@@ -1787,22 +1894,22 @@ impl InboxView {
         let list_focused = self.focus_handle.is_focused(window);
         let stem = item.stem.clone();
         let colors = cx.theme().colors();
-        let (ring, marked_background, hover_background) = (
-            colors.text_accent.opacity(0.4),
-            colors.text_accent.opacity(0.08),
-            colors.ghost_element_hover,
-        );
+        let (ring, hover_background) =
+            (colors.text_accent.opacity(0.4), colors.ghost_element_hover);
         let selected_background = if list_focused {
             colors.ghost_element_selected
         } else {
             colors.ghost_element_selected.opacity(0.5)
         };
-        // The source says little beside a sender, and every character here
-        // comes out of a narrow column.
-        let origin = item
-            .from
-            .as_deref()
-            .map(short_sender)
+        // A ticket's number says more than the one address every ticket comes
+        // from, and off the title it leaves both lines to the subject. The
+        // source says little beside a sender, and every character here comes
+        // out of a narrow column.
+        let ticket = ticket_prefix(&item.title);
+        let title = ticket.map_or(item.title.as_str(), |(_, subject)| subject);
+        let origin = ticket
+            .map(|(number, _)| number.to_string())
+            .or_else(|| item.from.as_deref().map(short_sender))
             .or_else(|| item.source.as_deref().map(source_label))
             .unwrap_or_default();
         let age = age_label(item.captured.as_deref(), Utc::now());
@@ -1822,7 +1929,6 @@ impl InboxView {
                 transparent_black()
             })
             .cursor_pointer()
-            .when(marked, |this| this.bg(marked_background))
             .when(selected, |this| this.bg(selected_background))
             .when(!selected, |this| {
                 this.hover(|style| style.bg(hover_background))
@@ -1858,7 +1964,7 @@ impl InboxView {
                     .debug_selector(|| format!("INBOX_TITLE-{position}"))
                     .w_full()
                     .line_height(relative(1.25))
-                    .child(Label::new(item.title.clone()).line_clamp(2)),
+                    .child(Label::new(title.to_string()).line_clamp(2)),
             )
             .child(
                 h_flex()
@@ -1892,7 +1998,12 @@ impl InboxView {
                                 .color(Color::Muted),
                         )
                     })
-                    .children(chip)
+                    .children(chip.map(|chip| {
+                        div()
+                            .debug_selector(|| format!("INBOX_CHIP-{position}"))
+                            .flex_none()
+                            .child(chip)
+                    }))
                     .children(age.map(|age| {
                         div()
                             .debug_selector(|| format!("INBOX_AGE-{position}"))
@@ -2055,13 +2166,25 @@ impl InboxView {
         }
         let context = list_key_context();
         let dimmed = !self.list_keys_live(window, cx);
-        let key = |action: &dyn Action| {
+        let key = |action: &dyn Action| vec![self.keycap(action, context.clone(), window, cx)];
+        let keys = FooterHint::new("keys", key(&ShowInboxKeys)).dimmed(dimmed);
+        if self.visible.is_empty() {
+            return (Vec::new(), keys);
+        }
+        (
             vec![
-                self.keycap(action, context.clone(), window, cx)
-                    .disabled(dimmed),
-            ]
-        };
-        let moving = vec![
+                FooterHint::new("move", self.row_keycaps(window, cx)).dimmed(dimmed),
+                FooterHint::new("mark", key(&MarkInboxItem)).dimmed(dimmed),
+                FooterHint::new("filter", key(&FilterInbox)).dimmed(dimmed),
+            ],
+            keys,
+        )
+    }
+
+    /// The two keys that step through the list.
+    fn row_keycaps(&self, window: &Window, cx: &App) -> Vec<KeyBinding> {
+        let context = list_key_context();
+        vec![
             self.move_keycap(
                 &["vim::MenuSelectPrevious", "menu::SelectPrevious"],
                 ["k", "up"],
@@ -2069,87 +2192,74 @@ impl InboxView {
                 context.clone(),
                 window,
                 cx,
-            )
-            .disabled(dimmed),
+            ),
             self.move_keycap(
                 &["vim::MenuSelectNext", "menu::SelectNext"],
                 ["j", "down"],
                 &SelectNext,
-                context.clone(),
+                context,
                 window,
                 cx,
-            )
-            .disabled(dimmed),
-        ];
-        (
-            vec![
-                FooterHint::new("move", moving),
-                FooterHint::new("mark", key(&MarkInboxItem)),
-                FooterHint::new("filter", key(&FilterInbox)),
-            ],
-            FooterHint::new("keys", key(&ShowInboxKeys)),
-        )
+            ),
+        ]
     }
 
     /// Hints give way whole. They sit in a wrapping row one line tall, so the
     /// first that doesn't fit drops to a clipped second line and takes the
-    /// ones after it along; only the last hint and the marks stay put.
+    /// ones after it along; only the last hint stays put.
     fn render_list_footer(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let hint = |hint: FooterHint| {
+        let hint = |hint: FooterHint, cx: &App| {
             let label = hint.label;
+            let dimmed = hint.dimmed;
             h_flex()
                 .debug_selector(move || format!("INBOX_HINT-{label}"))
                 .flex_none()
                 .h(FOOTER_HEIGHT)
                 .gap_1()
-                .children(hint.keycaps)
-                .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
+                .children(
+                    hint.keycaps
+                        .into_iter()
+                        .map(|keycap| framed_keycap(keycap, dimmed, cx)),
+                )
+                .child(
+                    Label::new(label)
+                        .size(LabelSize::Small)
+                        .color(hint_color(dimmed)),
+                )
         };
         let (hints, pinned_hint) = self.footer_hints(window, cx);
-        let (marked, stats) = match self.footer_stats(cx) {
-            FooterStats::Marked(count) => (
-                Some(
-                    Label::new(format!("{count} marked"))
-                        .size(LabelSize::Small)
-                        .color(Color::Accent)
-                        .single_line(),
-                ),
-                None,
+        let stats = match self.footer_stats(cx) {
+            FooterStats::PlusOffer => Some(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Label::new("Suggestions come with Thock Plus")
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .single_line(),
+                    )
+                    .child(
+                        IconButton::new("inbox-dismiss-plus", IconName::Close)
+                            .icon_size(IconSize::XSmall)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.plus_banner_dismissed = true;
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
             ),
-            FooterStats::PlusOffer => (
-                None,
-                Some(
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Label::new("Suggestions come with Thock Plus")
-                                .size(LabelSize::Small)
-                                .color(Color::Muted)
-                                .single_line(),
-                        )
-                        .child(
-                            IconButton::new("inbox-dismiss-plus", IconName::Close)
-                                .icon_size(IconSize::XSmall)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.plus_banner_dismissed = true;
-                                    cx.notify();
-                                })),
-                        )
-                        .into_any_element(),
-                ),
-            ),
-            FooterStats::Stats(text) if text.is_empty() => (None, None),
-            FooterStats::Stats(text) => (
-                None,
-                Some(
-                    Label::new(text)
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .single_line()
-                        .into_any_element(),
-                ),
+            FooterStats::Stats(text) if text.is_empty() => None,
+            FooterStats::Stats(text) => Some(
+                Label::new(text)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .single_line()
+                    .into_any_element(),
             ),
         };
+        let opens_keys = pinned_hint.label == "keys";
+        let hints: Vec<_> = hints.into_iter().map(|h| hint(h, cx)).collect();
+        let pinned = hint(pinned_hint, cx);
         h_flex()
             .flex_none()
             .h(FOOTER_HEIGHT)
@@ -2168,7 +2278,7 @@ impl InboxView {
                     .content_start()
                     .overflow_hidden()
                     .gap_x_3p5()
-                    .children(hints.into_iter().map(hint))
+                    .children(hints)
                     .children(stats.map(|stats| {
                         h_flex()
                             .debug_selector(|| "INBOX_STATS".to_string())
@@ -2178,8 +2288,18 @@ impl InboxView {
                             .child(stats)
                     })),
             )
-            .children(marked.map(|marked| h_flex().flex_none().h(FOOTER_HEIGHT).child(marked)))
-            .child(hint(pinned_hint))
+            .child(
+                div()
+                    .id("inbox-pinned-hint")
+                    .flex_none()
+                    .child(pinned)
+                    .when(opens_keys, |this| {
+                        this.cursor_pointer()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_keys(&ShowInboxKeys, window, cx);
+                            }))
+                    }),
+            )
             .into_any_element()
     }
 
@@ -2200,9 +2320,13 @@ impl InboxView {
         }
         let mut folded = body.clone();
         folded.base_text_style.color = cx.theme().colors().text_muted;
+        let mut meta = folded.clone();
+        meta.base_text_style.font_size = px(12.).into();
+        meta.base_text_style.line_height = relative(1.4);
         ReaderStyle {
             body,
             folded,
+            meta,
             images: self.image_resolver(cx),
         }
     }
@@ -2221,8 +2345,10 @@ impl InboxView {
         let body = without_leading_title(&item.body, &item.title);
         let title = is_email.then(|| full_title(&item.title, body)).flatten();
         let thread = is_email.then(|| {
+            let subject = title.as_deref().unwrap_or(&item.title);
             let mut thread = parse_thread(body, item.from.as_deref());
-            drop_restated_subject(&mut thread, title.as_deref().unwrap_or(&item.title));
+            drop_restated_subject(&mut thread, subject);
+            quiet_system_lines(&mut thread, subject);
             Rc::new(thread)
         });
         let current_message = thread
@@ -2262,28 +2388,34 @@ impl InboxView {
             .into_any_element()
     }
 
-    /// A folded stretch's one line: what it holds, and the way to it.
+    /// A folded stretch's one line: what it holds, and the way to it. `z` acts
+    /// on every fold at once, so only a card's first row carries its keycap.
     fn render_fold_row(
         &self,
         key: (usize, usize),
         label: String,
+        carries_key: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (message, block) = key;
         let open = self.reader_note.folds_open;
-        let colors = cx.theme().colors();
-        let (background, hover) = (colors.element_background, colors.element_hover);
-        let keycap = self.keycap(&ToggleInboxFolds, list_key_context(), window, cx);
+        let hover = cx.theme().colors().element_hover;
+        let keycap = carries_key.then(|| {
+            framed_keycap(
+                self.keycap(&ToggleInboxFolds, list_key_context(), window, cx),
+                false,
+                cx,
+            )
+        });
         h_flex()
             .id(SharedString::from(format!("inbox-fold-{message}-{block}")))
             .debug_selector(move || format!("INBOX_FOLD-{message}-{block}"))
             .w_full()
             .gap_1p5()
-            .px_2()
-            .py_1()
+            .px_1()
+            .py_0p5()
             .rounded_md()
-            .bg(background)
             .hover(|style| style.bg(hover))
             .cursor_pointer()
             .child(
@@ -2303,7 +2435,7 @@ impl InboxView {
                         .truncate(),
                 ),
             )
-            .child(keycap)
+            .children(keycap)
             .tooltip(Tooltip::for_action_title(
                 if open { "Fold" } else { "Show" },
                 &ToggleInboxFolds,
@@ -2315,9 +2447,13 @@ impl InboxView {
     }
 
     /// A record as a grid: as many columns as the reader has room for. What
-    /// was folded reads dimmed, behind the people's words.
+    /// was folded reads dimmed, behind the people's words. Values stay plain
+    /// so the message leads: accent is for a real link and the dot beside what
+    /// changed. A value holds one line until `z` opens it whole.
     fn render_fields(&self, id: &str, fields: &[&EmailField], dim: bool, cx: &App) -> AnyElement {
-        let background = cx.theme().colors().element_background;
+        let colors = cx.theme().colors();
+        let (background, accent) = (colors.element_background, colors.text_accent);
+        let whole = self.reader_note.folds_open;
         h_flex()
             .w_full()
             .flex_wrap()
@@ -2329,22 +2465,64 @@ impl InboxView {
             .rounded_md()
             .bg(background)
             .children(fields.iter().enumerate().map(|(index, field)| {
-                let changed = field.previous.is_some();
-                let value = Label::new(field_text(&field.value).to_string())
-                    .size(LabelSize::Small)
-                    .color(if changed || field.link.is_some() {
-                        Color::Accent
-                    } else if dim {
-                        Color::Muted
-                    } else {
-                        Color::Default
+                let text = field_text(&field.value);
+                let (shown, more) = if whole {
+                    (text.to_string(), 0)
+                } else {
+                    capped_list(text)
+                };
+                let value =
+                    Label::new(shown)
+                        .size(LabelSize::Small)
+                        .color(if field.link.is_some() {
+                            Color::Accent
+                        } else if dim {
+                            Color::Muted
+                        } else {
+                            Color::Default
+                        });
+                let value = if whole { value } else { value.truncate() };
+                let selector = format!("{id}-{index}");
+                let line = h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1p5()
+                    .when(field.previous.is_some(), |this| {
+                        let selector = selector.clone();
+                        this.child(
+                            div()
+                                .debug_selector(move || format!("INBOX_CHANGED-{selector}"))
+                                .flex_none()
+                                .size(px(5.))
+                                .rounded_full()
+                                .bg(accent),
+                        )
+                    })
+                    .child(div().min_w_0().child(value))
+                    .when(more > 0, |this| {
+                        let selector = selector.clone();
+                        this.child(
+                            div()
+                                .debug_selector(move || format!("INBOX_MORE-{selector}"))
+                                .flex_none()
+                                .child(
+                                    Label::new(format!("+{more} more"))
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted)
+                                        .single_line(),
+                                ),
+                        )
                     });
+                let previous = field
+                    .previous
+                    .as_ref()
+                    .filter(|previous| whole || previous_helps(previous));
                 let mut value_cell = v_flex()
-                    .id(SharedString::from(format!("inbox-field-{id}-{index}")))
+                    .id(SharedString::from(format!("inbox-field-{selector}")))
                     .flex_1()
                     .min_w_0()
-                    .child(value)
-                    .when_some(field.previous.as_ref(), |this, previous| {
+                    .child(line)
+                    .when_some(previous, |this, previous| {
                         this.child(
                             Label::new(format!("was {}", field_text(previous)))
                                 .size(LabelSize::XSmall)
@@ -2356,6 +2534,8 @@ impl InboxView {
                         .cursor_pointer()
                         .tooltip(Tooltip::text(link.clone()))
                         .on_click(move |_, _, cx| cx.open_url(&link));
+                } else if more > 0 {
+                    value_cell = value_cell.tooltip(Tooltip::text(text.to_string()));
                 }
                 h_flex()
                     .flex_grow_1()
@@ -2376,62 +2556,104 @@ impl InboxView {
             .into_any_element()
     }
 
-    fn render_email_block(
+    /// A message's blocks as drawn. While closed, folds that meet become one
+    /// row saying what they hold together; opened, each stands above its text.
+    fn render_message_blocks(
         &mut self,
-        key: (usize, usize),
-        block: &EmailBlock,
+        index: usize,
+        message: &EmailMessage,
         style: &ReaderStyle,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Vec<AnyElement> {
         let open = self.reader_note.folds_open;
-        let (message, block_index) = key;
-        match block {
-            EmailBlock::Text(text) => {
-                self.render_markdown(key, text, style.body.clone(), &style.images, cx)
-            }
-            EmailBlock::Fields { shown, unchanged } => {
-                let id = format!("{message}-{block_index}");
-                let (visible, folded) = split_fields(shown, unchanged);
-                let visible =
-                    (!visible.is_empty()).then(|| self.render_fields(&id, &visible, false, cx));
-                let fold = (!folded.is_empty()).then(|| {
-                    self.render_fold_row(key, fold_label_for_fields(folded.len()), window, cx)
-                });
-                let revealed = (open && !folded.is_empty())
-                    .then(|| self.render_fields(&format!("{id}-same"), &folded, true, cx));
-                v_flex()
-                    .w_full()
-                    .gap_2()
-                    .children(visible)
-                    .children(fold)
-                    .children(revealed)
-                    .into_any_element()
-            }
-            EmailBlock::Fold { kind, text, lines } => {
-                let row = self.render_fold_row(key, fold_label(*kind, *lines), window, cx);
-                let revealed = open.then(|| {
-                    let text =
-                        self.render_markdown(key, text, style.folded.clone(), &style.images, cx);
-                    div()
-                        .pl_3()
-                        .border_l_2()
-                        .border_color(cx.theme().colors().border_variant)
-                        .child(text)
-                });
-                v_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(row)
-                    .children(revealed)
-                    .into_any_element()
+        let mut elements = Vec::new();
+        let mut folds = FoldRun::default();
+        for (block_index, block) in message.blocks.iter().enumerate() {
+            let key = (index, block_index);
+            match block {
+                EmailBlock::Text(text) => {
+                    self.end_fold_run(&mut folds, &mut elements, window, cx);
+                    elements.push(self.render_markdown(
+                        key,
+                        text,
+                        style.body.clone(),
+                        &style.images,
+                        cx,
+                    ));
+                }
+                EmailBlock::Meta(text) => {
+                    self.end_fold_run(&mut folds, &mut elements, window, cx);
+                    elements.push(self.render_markdown(
+                        key,
+                        text,
+                        style.meta.clone(),
+                        &style.images,
+                        cx,
+                    ));
+                }
+                EmailBlock::Fields { shown, unchanged } => {
+                    let id = format!("{index}-{block_index}");
+                    let (visible, folded) = split_fields(shown, unchanged);
+                    if !visible.is_empty() {
+                        self.end_fold_run(&mut folds, &mut elements, window, cx);
+                        elements.push(self.render_fields(&id, &visible, false, cx));
+                    }
+                    if !folded.is_empty() {
+                        folds.add(key, FoldPiece::Fields(folded.len()));
+                    }
+                    if open && !folded.is_empty() {
+                        self.end_fold_run(&mut folds, &mut elements, window, cx);
+                        elements.push(self.render_fields(&format!("{id}-same"), &folded, true, cx));
+                    }
+                }
+                EmailBlock::Fold { kind, text, lines } => {
+                    folds.add(key, FoldPiece::Text(*kind, *lines));
+                    if open {
+                        self.end_fold_run(&mut folds, &mut elements, window, cx);
+                        let text = self.render_markdown(
+                            key,
+                            text,
+                            style.folded.clone(),
+                            &style.images,
+                            cx,
+                        );
+                        elements.push(
+                            div()
+                                .pl_3()
+                                .border_l_2()
+                                .border_color(cx.theme().colors().border_variant)
+                                .child(text)
+                                .into_any_element(),
+                        );
+                    }
+                }
             }
         }
+        self.end_fold_run(&mut folds, &mut elements, window, cx);
+        elements
     }
 
-    /// One message: a card headed by who wrote it, in that person's colour,
-    /// so a reply's start can't be missed and the author reads at a glance.
-    /// A lone message has only its blocks, since the header says the rest.
+    /// Draws the run's row, if it has one, and starts the next.
+    fn end_fold_run(
+        &self,
+        folds: &mut FoldRun,
+        elements: &mut Vec<AnyElement>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = folds.key.take() else {
+            return;
+        };
+        let label = fold_summary(&folds.pieces);
+        folds.pieces.clear();
+        let carries_key = !std::mem::replace(&mut folds.key_shown, true);
+        elements.push(self.render_fold_row(key, label, carries_key, window, cx));
+    }
+
+    /// One message: a neutral card headed by who wrote it, with their colour
+    /// on the badge alone, so a reply's start can't be missed and the words
+    /// keep the most weight. A lone message has only its blocks, since the header says the rest.
     /// While the folds are closed only the current message is open; the rest
     /// are their header, with a snippet where the address would be.
     fn render_message(
@@ -2446,15 +2668,8 @@ impl InboxView {
         let current = index == self.reader_note.current_message;
         let folds_open = self.reader_note.folds_open;
         let open = total < 2 || current || folds_open;
-        let blocks: Vec<AnyElement> = if open {
-            message
-                .blocks
-                .iter()
-                .enumerate()
-                .map(|(block, content)| {
-                    self.render_email_block((index, block), content, style, window, cx)
-                })
-                .collect()
+        let blocks = if open {
+            self.render_message_blocks(index, message, style, window, cx)
         } else {
             Vec::new()
         };
@@ -2467,11 +2682,7 @@ impl InboxView {
                 .into_any_element();
         }
         let colors = cx.theme().colors();
-        let accent = cx
-            .theme()
-            .players()
-            .color_for_participant(message.participant)
-            .cursor;
+        let accent = sender_color(message.participant, cx.theme().appearance().is_light());
         let sender = sender_name(&message.from);
         let (name, detail) = match &message.author {
             Some(author) => (author.clone(), Some(format!("via {sender}"))),
@@ -2491,7 +2702,6 @@ impl InboxView {
             .pl_4()
             .pr_3()
             .py_2()
-            .bg(accent.opacity(0.08))
             .when(open, |this| {
                 this.border_b_1().border_color(colors.border_variant)
             })
@@ -2555,7 +2765,6 @@ impl InboxView {
         v_flex()
             .id(SharedString::from(format!("inbox-message-{index}")))
             .debug_selector(move || format!("INBOX_MESSAGE-{index}"))
-            .relative()
             .flex_none()
             .w_full()
             .max_w(READER_MAX_WIDTH)
@@ -2580,16 +2789,6 @@ impl InboxView {
                 this.cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.open_message(index, cx)))
             })
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top_0()
-                    .bottom_0()
-                    .w(px(3.))
-                    .rounded_l_lg()
-                    .bg(accent),
-            )
             .into_any_element()
     }
 
@@ -2640,18 +2839,10 @@ impl InboxView {
                 .child(self.render_keys_sheet(window, cx))
                 .into_any_element();
         }
+        // Selection follows the list, so this is an empty list, which already
+        // says so.
         let Some(entry) = self.selected_entry().cloned() else {
-            return v_flex()
-                .relative()
-                .size_full()
-                .px_10()
-                .pt_7()
-                .child(
-                    Label::new("Select an item to read it here.")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .into_any_element();
+            return div().size_full().into_any_element();
         };
         let style = self.reader_style(window, cx);
         let body = self.render_note_body(&entry, &style, window, cx);
@@ -2663,6 +2854,8 @@ impl InboxView {
             .iter()
             .filter(|entry| self.marked.contains(&entry.item.stem))
             .count();
+        let earlier = self.messages_above();
+        let earlier_cue = (earlier > 0).then(|| self.render_earlier_cue(earlier, cx));
         v_flex()
             .relative()
             .size_full()
@@ -2679,47 +2872,68 @@ impl InboxView {
                         v_flex()
                             .w_full()
                             .max_w(READER_MAX_WIDTH)
-                            .gap_3()
+                            .gap_1()
+                            // A fixed block and a fixed slot: whatever the
+                            // title's length and the marks, the four targets
+                            // stay where the hand expects them.
                             .child(
-                                div().line_height(relative(1.3)).child(
-                                    Label::new(
-                                        self.reader_note
-                                            .title
-                                            .clone()
-                                            .unwrap_or_else(|| entry.item.title.clone()),
-                                    )
-                                    .size(LabelSize::Custom(HeadlineSize::XLarge.rems()))
-                                    .weight(FontWeight::SEMIBOLD)
-                                    .line_clamp(2),
-                                ),
+                                div()
+                                    .debug_selector(|| "INBOX_READER_TITLE".to_string())
+                                    .flex_none()
+                                    .h(rems(TITLE_SIZE.rems().0 * TITLE_LINE_HEIGHT * 2.))
+                                    .line_height(relative(TITLE_LINE_HEIGHT))
+                                    .child(
+                                        Label::new(
+                                            self.reader_note
+                                                .title
+                                                .clone()
+                                                .unwrap_or_else(|| entry.item.title.clone()),
+                                        )
+                                        .size(LabelSize::Custom(TITLE_SIZE.rems()))
+                                        .weight(FontWeight::SEMIBOLD)
+                                        .line_clamp(2),
+                                    ),
                             )
-                            .when(marked_rows > 0, |this| {
-                                this.child(
-                                    div()
-                                        .debug_selector(|| "INBOX_MARKS_NOTE".to_string())
-                                        .child(
-                                            Label::new(marks_note(marked_rows))
-                                                .size(LabelSize::Small)
-                                                .color(Color::Accent),
-                                        ),
-                                )
-                            })
+                            .child(div().flex_none().h(MARKS_SLOT_HEIGHT).when(
+                                marked_rows > 0,
+                                |this| {
+                                    this.child(
+                                        div()
+                                            .debug_selector(|| "INBOX_MARKS_NOTE".to_string())
+                                            .child(
+                                                Label::new(marks_note(marked_rows))
+                                                    .size(LabelSize::Small)
+                                                    .color(Color::Accent)
+                                                    .single_line(),
+                                            ),
+                                    )
+                                },
+                            ))
                             .child(self.render_destination_bar(&entry, window, cx)),
                     ),
             )
             .child(
-                v_flex()
-                    .id("inbox-reader")
+                div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .track_focus(&self.reader_focus)
-                    .overflow_y_scroll()
-                    .track_scroll(&self.reader_scroll)
-                    .px_10()
-                    .py_4()
-                    .gap_2()
-                    .children(body),
+                    .child(
+                        v_flex()
+                            .id("inbox-reader")
+                            .size_full()
+                            .track_focus(&self.reader_focus)
+                            .overflow_y_scroll()
+                            .track_scroll(&self.reader_scroll)
+                            .on_scroll_wheel(cx.listener(|_, _: &ScrollWheelEvent, _, cx| {
+                                cx.notify();
+                            }))
+                            .px_10()
+                            .py_4()
+                            .gap_2()
+                            .children(body),
+                    )
+                    .children(earlier_cue),
             )
             // Drawn over the pane rather than beside it, so nothing moves
             // when focus does.
@@ -2735,6 +2949,67 @@ impl InboxView {
                         .bg(focus_edge),
                 )
             })
+            .into_any_element()
+    }
+
+    /// How many of the thread's cards sit above what's on screen, by the last
+    /// frame's layout. A card under the earlier cue counts as above it.
+    fn messages_above(&self) -> usize {
+        let Some(thread) = self
+            .reader_note
+            .thread
+            .as_ref()
+            .filter(|thread| thread.messages.len() > 1)
+        else {
+            return 0;
+        };
+        let scrolled = self.reader_scroll.offset().y;
+        if scrolled >= px(0.) {
+            return 0;
+        }
+        let preamble = usize::from(!thread.preamble.is_empty());
+        let seen_from = self.reader_scroll.bounds().top() - scrolled + EARLIER_CUE_HEIGHT;
+        (0..thread.messages.len())
+            .take_while(|index| {
+                self.reader_scroll
+                    .bounds_for_item(index + preamble)
+                    .is_some_and(|card| card.top() < seen_from)
+            })
+            .count()
+    }
+
+    /// Solid, so a card scrolled half out of view ends at a clean edge, and
+    /// it says what's up there.
+    fn render_earlier_cue(&self, earlier: usize, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors();
+        h_flex()
+            .id("inbox-earlier")
+            .debug_selector(|| "INBOX_EARLIER".to_string())
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(EARLIER_CUE_HEIGHT)
+            .px_10()
+            .gap_1p5()
+            .bg(colors.editor_background)
+            .border_b_1()
+            .border_color(colors.border_variant)
+            .cursor_pointer()
+            .child(
+                Icon::new(IconName::ArrowUp)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new(earlier_label(earlier))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.reader_scroll.set_offset(point(px(0.), px(0.)));
+                cx.notify();
+            }))
             .into_any_element()
     }
 
@@ -2832,12 +3107,15 @@ impl InboxView {
         let name = destination.key();
         let live = self.list_keys_live(window, cx);
         let keycap = |action: &dyn Action| {
-            self.keycap(action, list_key_context(), window, cx)
-                .disabled(!live)
+            framed_keycap(
+                self.keycap(action, list_key_context(), window, cx),
+                !live,
+                cx,
+            )
         };
-        // The name and the odds on one line, the keys and the meter on the
-        // next: the keys grow with the suggestion, so they never share a line
-        // with the name, and the meter sits beside them rather than over them.
+        // The name and the odds, the keys, then the meter on a line of its
+        // own: the keys grow with the suggestion, so they share a line with
+        // neither, and every button's meter keeps its full length.
         let content = v_flex()
             .w_full()
             .h_full()
@@ -2890,40 +3168,33 @@ impl InboxView {
             )
             .child(
                 h_flex()
-                    .w_full()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        h_flex()
-                            .debug_selector(move || format!("INBOX_KEYS-{name}"))
-                            .flex_none()
-                            .gap_1p5()
-                            .when(suggested, |this| {
-                                this.child(keycap(&AcceptInboxSuggestion))
-                                    .child(keycap_or())
-                            })
-                            .child(keycap(destination_action(destination).as_ref())),
-                    )
-                    .when_some(probability, |this, probability| {
-                        this.child(
+                    .debug_selector(move || format!("INBOX_KEYS-{name}"))
+                    .flex_none()
+                    .gap_1()
+                    .when(suggested, |this| {
+                        this.child(keycap(&AcceptInboxSuggestion))
+                            .child(keycap_or(!live))
+                    })
+                    .child(keycap(destination_action(destination).as_ref())),
+            )
+            .when_some(probability, |this, probability| {
+                this.child(
+                    div()
+                        .debug_selector(move || format!("INBOX_PROBABILITY-{name}"))
+                        .flex_none()
+                        .w(PROBABILITY_METER_WIDTH)
+                        .h(px(3.))
+                        .rounded_full()
+                        .bg(track)
+                        .child(
                             div()
-                                .debug_selector(move || format!("INBOX_PROBABILITY-{name}"))
-                                .flex_1()
-                                .min_w_0()
-                                .max_w(PROBABILITY_METER_WIDTH)
-                                .h(px(3.))
+                                .h_full()
                                 .rounded_full()
-                                .bg(track)
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .rounded_full()
-                                        .w(relative(probability.clamp(0.0, 1.0) as f32))
-                                        .bg(fill),
-                                ),
-                        )
-                    }),
-            );
+                                .w(relative(probability.clamp(0.0, 1.0) as f32))
+                                .bg(fill),
+                        ),
+                )
+            });
         self.bar_button(
             destination.key(),
             look,
@@ -2962,55 +3233,81 @@ impl InboxView {
     }
 
     fn render_keys_sheet(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let rows: Vec<(&dyn Action, &str)> = vec![
-            (&AcceptInboxSuggestion, "Take the suggestion"),
+        let key = |action: &dyn Action| vec![self.keycap(action, list_key_context(), window, cx)];
+        let groups = [
             (
-                &SendInboxItemToToday,
-                "Task under today's Day planner heading",
+                "Decide",
+                vec![
+                    (key(&AcceptInboxSuggestion), "Take the suggestion"),
+                    (key(&SendInboxItemToToday), "Today"),
+                    (key(&SendInboxItemToSoon), "Soon"),
+                    (key(&SendInboxItemToSomeday), "Someday"),
+                    (key(&ArchiveInboxItem), "Archive"),
+                    (key(&UndoInboxMove), "Undo the last decision"),
+                    (key(&MarkInboxItem), "Mark the row for a batch decision"),
+                    (key(&SuggestInboxDestinations), "Ask for a suggestion again"),
+                    (
+                        key(&TriageInbox),
+                        "Hand what is left to the Triage Inbox ritual",
+                    ),
+                ],
             ),
-            (&SendInboxItemToSoon, "Task under Soon"),
-            (&SendInboxItemToSomeday, "Task under Someday"),
-            (&ArchiveInboxItem, "Out of the inbox, nothing else"),
-            (&OpenInboxItem, "The note in the editor"),
-            (&UndoInboxMove, "Reverse the last decision"),
-            (&MarkInboxItem, "Mark the row for a batch decision"),
-            (&SuggestInboxDestinations, "Ask for a suggestion again"),
-            (&FilterInbox, "Filter by title, sender, source"),
-            (&FocusInboxReader, "Move between the list and the note"),
-            (&NextInboxMessage, "Next message of the email"),
-            (&PreviousInboxMessage, "Previous message of the email"),
-            (&ToggleInboxFolds, "Show or hide what the email folded away"),
-            (&ShowInboxItemMenu, "The row menu"),
-            (&TriageInbox, "Hand what is left to the Triage Inbox ritual"),
-            (&ShowInboxKeys, "This sheet"),
+            (
+                "Move",
+                vec![
+                    (self.row_keycaps(window, cx), "Up and down the list"),
+                    (key(&FocusInboxReader), "Between the list and the note"),
+                    (key(&FilterInbox), "Filter by title, sender, source"),
+                    (key(&ShowInboxItemMenu), "The row menu"),
+                    (key(&ShowInboxKeys), "This sheet"),
+                ],
+            ),
+            (
+                "Read",
+                vec![
+                    (key(&OpenInboxItem), "The note in the editor"),
+                    (key(&NextInboxMessage), "Next message of the email"),
+                    (key(&PreviousInboxMessage), "Previous message of the email"),
+                    (
+                        key(&ToggleInboxFolds),
+                        "Show or hide what the email folded away",
+                    ),
+                ],
+            ),
         ];
         v_flex()
             .size_full()
             .px_10()
-            .pt_7()
-            .gap_1()
-            .child(
-                div()
-                    .pb_2()
-                    .child(Label::new("Keys").weight(FontWeight::SEMIBOLD)),
-            )
-            .children(rows.into_iter().map(|(action, what)| {
-                h_flex()
-                    .gap_2()
-                    .child(div().w(px(120.)).child(self.keycap(
-                        action,
-                        list_key_context(),
-                        window,
-                        cx,
-                    )))
-                    .child(Label::new(what).size(LabelSize::Small).color(Color::Muted))
+            .pt_5()
+            .gap_3()
+            .children(groups.into_iter().map(|(heading, rows)| {
+                v_flex()
+                    .debug_selector(move || format!("INBOX_KEYS_GROUP-{heading}"))
+                    .gap_1()
+                    .child(
+                        div().pb_0p5().child(
+                            Label::new(heading)
+                                .size(LabelSize::Small)
+                                .weight(FontWeight::SEMIBOLD),
+                        ),
+                    )
+                    .children(rows.into_iter().map(|(keycaps, what)| {
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                h_flex().flex_none().w(px(120.)).gap_1().children(
+                                    keycaps
+                                        .into_iter()
+                                        .map(|keycap| framed_keycap(keycap, false, cx)),
+                                ),
+                            )
+                            .child(Label::new(what).size(LabelSize::Small).color(Color::Muted))
+                    }))
             }))
             .child(
-                div().pt_2().child(
-                    Label::new("Any key closes this.")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                ),
+                Label::new("Any key closes this.")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
             )
             .into_any_element()
     }
@@ -3041,7 +3338,6 @@ struct BarState {
 /// The right side of the list footer.
 #[derive(Debug, Clone, PartialEq)]
 enum FooterStats {
-    Marked(usize),
     /// *Suggestions come with Thock Plus*, until dismissed.
     PlusOffer,
     Stats(String),
@@ -3051,11 +3347,44 @@ enum FooterStats {
 struct FooterHint {
     label: &'static str,
     keycaps: Vec<KeyBinding>,
+    dimmed: bool,
 }
 
 impl FooterHint {
     fn new(label: &'static str, keycaps: Vec<KeyBinding>) -> Self {
-        Self { label, keycaps }
+        Self {
+            label,
+            keycaps,
+            dimmed: false,
+        }
+    }
+
+    fn dimmed(mut self, dimmed: bool) -> Self {
+        self.dimmed = dimmed;
+        self
+    }
+}
+
+/// What a closed message's neighbouring folds hold.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FoldPiece {
+    Text(FoldKind, usize),
+    Fields(usize),
+}
+
+/// Folds that meet, on their way to one row; `key` is the first's.
+#[derive(Default)]
+struct FoldRun {
+    key: Option<(usize, usize)>,
+    pieces: Vec<FoldPiece>,
+    /// A row of this message has drawn the `z` keycap.
+    key_shown: bool,
+}
+
+impl FoldRun {
+    fn add(&mut self, key: (usize, usize), piece: FoldPiece) {
+        self.key.get_or_insert(key);
+        self.pieces.push(piece);
     }
 }
 
@@ -3165,24 +3494,12 @@ impl gpui::Render for InboxView {
         }
         self.sync_reader_note();
         if std::mem::take(&mut self.reader_note.reveal_current) {
-            // A scroll request reads the last frame's bounds, so it waits for
-            // this frame to lay the card out.
-            cx.defer_in(window, |this, _, cx| {
-                let Some(thread) = this
-                    .reader_note
-                    .thread
-                    .as_ref()
-                    .filter(|thread| thread.messages.len() > 1)
-                else {
-                    return;
-                };
-                let preamble = usize::from(!thread.preamble.is_empty());
-                this.reader_scroll
-                    .scroll_to_item(this.reader_note.current_message + preamble);
-                cx.notify();
-            });
+            // A scroll reads the frame's bounds, so it waits for this frame to
+            // lay the card out.
+            cx.defer_in(window, |this, _, cx| this.reveal_current_message(cx));
         }
-        let list_header = self.render_list_header(window, cx);
+        let list_header = self.render_list_header(cx);
+        let filter_bar = self.render_filter_bar(window, cx);
         let reader_header = self.render_reader_header(window, cx);
         let notices = self.render_notices(cx);
         let list = self.render_list(cx);
@@ -3264,6 +3581,7 @@ impl gpui::Render for InboxView {
                         self.list_fraction,
                         v_flex()
                             .size_full()
+                            .children(filter_bar)
                             .child(div().flex_1().min_h_0().w_full().child(list))
                             .child(footer),
                         reader,
@@ -3297,10 +3615,51 @@ where
     }
 }
 
+/// One keycap look for every Inbox hint. Dimmed, the frame fades with the key.
+fn framed_keycap(keycap: KeyBinding, dimmed: bool, cx: &App) -> gpui::Div {
+    let colors = cx.theme().colors();
+    h_flex()
+        .flex_none()
+        .h(KEYCAP_HEIGHT)
+        .min_w(KEYCAP_HEIGHT)
+        .justify_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(if dimmed {
+            colors.border_variant
+        } else {
+            colors.text_placeholder
+        })
+        .bg(colors.element_background)
+        .child(keycap.size(KEYCAP_TEXT_SIZE).disabled(dimmed))
+}
+
+/// A hint's words: they dim along with their keycaps.
+fn hint_color(dimmed: bool) -> Color {
+    if dimmed {
+        Color::Disabled
+    } else {
+        Color::Muted
+    }
+}
+
 /// Sits between two keycaps that do the same thing, so `space` `s` does not
 /// read as one chord.
-fn keycap_or() -> Label {
-    Label::new("or").size(LabelSize::Small).color(Color::Muted)
+fn keycap_or(dimmed: bool) -> Label {
+    Label::new("or")
+        .size(LabelSize::Small)
+        .color(hint_color(dimmed))
+}
+
+/// A sender's colour in a theme: their hue, at a lightness that holds up as
+/// text on the badge.
+fn sender_color(participant: u32, light: bool) -> Hsla {
+    let hue = SENDER_HUES[participant as usize % SENDER_HUES.len()] / 360.;
+    if light {
+        hsla(hue, 0.6, 0.36, 1.)
+    } else {
+        hsla(hue, 0.5, 0.72, 1.)
+    }
 }
 
 /// The body without a first heading that repeats the title, since the
@@ -3335,6 +3694,66 @@ fn fold_label(kind: FoldKind, lines: usize) -> String {
 fn fold_label_for_fields(count: usize) -> String {
     let unit = if count == 1 { "field" } else { "fields" };
     format!("Details · {count} {unit}")
+}
+
+/// One label for folds that meet: each kind once, in the order they first
+/// appear, with its lines or fields added up.
+fn fold_summary(pieces: &[FoldPiece]) -> String {
+    let mut totals: Vec<FoldPiece> = Vec::new();
+    for piece in pieces {
+        let same_kind = totals.iter_mut().find_map(|total| match (total, piece) {
+            (FoldPiece::Text(kind, lines), FoldPiece::Text(added, more)) if kind == added => {
+                *lines += more;
+                Some(())
+            }
+            (FoldPiece::Fields(count), FoldPiece::Fields(more)) => {
+                *count += more;
+                Some(())
+            }
+            _ => None,
+        });
+        if same_kind.is_none() {
+            totals.push(*piece);
+        }
+    }
+    totals
+        .into_iter()
+        .map(|piece| match piece {
+            FoldPiece::Text(kind, lines) => fold_label(kind, lines),
+            FoldPiece::Fields(count) => fold_label_for_fields(count),
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// A comma list's first items and how many more there are, so it holds one
+/// line; anything else comes back whole. Prose has spaces inside its items.
+fn capped_list(value: &str) -> (String, usize) {
+    let items: Vec<&str> = value.split(',').map(str::trim).collect();
+    let is_list = items.len() > MAX_FIELD_LIST_ITEMS
+        && items
+            .iter()
+            .all(|item| !item.is_empty() && !item.contains(char::is_whitespace));
+    if !is_list {
+        return (value.to_string(), 0);
+    }
+    let (shown, rest) = items.split_at(MAX_FIELD_LIST_ITEMS);
+    (shown.join(", "), rest.len())
+}
+
+/// Whether `was …` tells more than it costs: a whole old list doesn't.
+fn previous_helps(previous: &str) -> bool {
+    previous.chars().count() <= MAX_PREVIOUS_VALUE_LENGTH && capped_list(previous).1 == 0
+}
+
+fn match_count_label(count: usize) -> String {
+    let unit = if count == 1 { "match" } else { "matches" };
+    format!("{count} {unit}")
+}
+
+fn earlier_label(count: usize) -> String {
+    let unit = if count == 1 { "message" } else { "messages" };
+    format!("{count} earlier {unit}")
 }
 
 /// Said above the bar, where a decision is made: the note on screen isn't the
@@ -4282,10 +4701,9 @@ mod tests {
         assert_eq!(setup.cx.debug_bounds("INBOX_CHECK-0"), None);
         assert_eq!(setup.cx.debug_bounds("INBOX_MARKS_NOTE"), None);
         setup.cx.simulate_keystrokes("end x home x");
-        setup.view.read_with(&setup.cx, |view, cx| {
-            assert_eq!(view.marked.len(), 2);
-            assert_eq!(view.footer_stats(cx), FooterStats::Marked(2));
-        });
+        setup
+            .view
+            .read_with(&setup.cx, |view, _| assert_eq!(view.marked.len(), 2));
         // The check rides the meta line, so marking costs a title nothing,
         // and the reader says the bar now reaches beyond the note on screen.
         let title = drawn(&mut setup, "INBOX_TITLE-0");
@@ -5135,9 +5553,21 @@ mod tests {
                 "{width}: {space:?} below {label:?}"
             );
             assert!(
-                keys.right() <= meter.left(),
-                "{width}: {meter:?} clear of {keys:?}"
+                keys.bottom() <= meter.top(),
+                "{width}: {meter:?} under {keys:?}"
             );
+            for selector in [
+                "INBOX_PROBABILITY-today",
+                "INBOX_PROBABILITY-soon",
+                "INBOX_PROBABILITY-someday",
+                "INBOX_PROBABILITY-archive",
+            ] {
+                let bounds = drawn(&mut setup, selector);
+                assert_eq!(
+                    bounds.size.width, PROBABILITY_METER_WIDTH,
+                    "{width}: {selector}"
+                );
+            }
             assert!(
                 space.bottom() <= button.bottom() && meter.bottom() <= button.bottom(),
                 "{width}: {space:?} and {meter:?} inside {button:?}"
@@ -5223,6 +5653,191 @@ mod tests {
         setup
     }
 
+    async fn setup_with_note(cx: &mut TestAppContext, note: String) -> Setup {
+        let mut setup = setup(cx, Options::default()).await;
+        setup
+            .fs
+            .insert_tree(
+                setup._vault_dir.path().join("inbox"),
+                json!({ "2026-10-09-1930-ticket-42.md": note }),
+            )
+            .await;
+        setup.cx.run_until_parked();
+        select(&mut setup, "Ticket 42");
+        setup
+    }
+
+    #[gpui::test]
+    async fn folds_that_meet_read_as_one_row_with_one_key(cx: &mut TestAppContext) {
+        // Nothing changed, so the fields fold straight after the repeat.
+        let mut setup = setup_with_note(cx, TICKET.replace("IN PROGRESS", "OPEN")).await;
+        let row = drawn(&mut setup, "INBOX_FOLD-1-2");
+        assert_eq!(setup.cx.debug_bounds("INBOX_FOLD-1-3"), None);
+        let key = drawn(&mut setup, "KEY_BINDING-z");
+        assert!(row.contains(&key.center()), "{key:?} in {row:?}");
+        setup.view.read_with(&setup.cx, |view, _| {
+            let thread = view.reader_note.thread.as_ref().unwrap();
+            assert!(matches!(
+                thread.messages[1].blocks[2..],
+                [EmailBlock::Fold { .. }, EmailBlock::Fields { .. }]
+            ));
+        });
+
+        setup.cx.simulate_keystrokes("z");
+        drawn(&mut setup, "INBOX_FOLD-1-3");
+    }
+
+    #[gpui::test]
+    async fn a_long_list_holds_one_line_until_the_folds_open(cx: &mut TestAppContext) {
+        let note = TICKET.replace(
+            "Status:  IN PROGRESS\n\nTeam:  render-ops",
+            "Status:  IN PROGRESS\n\nTeam:  a,b,c,d,e,f",
+        );
+        let mut setup = setup_with_note(cx, note).await;
+        let status_changed = "INBOX_CHANGED-1-3-0";
+        drawn(&mut setup, status_changed);
+        drawn(&mut setup, "INBOX_MORE-1-3-1");
+
+        setup.cx.simulate_keystrokes("z");
+        draw(&mut setup);
+        assert_eq!(setup.cx.debug_bounds("INBOX_MORE-1-3-1"), None);
+    }
+
+    #[gpui::test]
+    async fn the_cue_says_what_sits_above_a_revealed_card(cx: &mut TestAppContext) {
+        let mut setup = setup_with_ticket(cx).await;
+        draw(&mut setup);
+        assert_eq!(setup.cx.debug_bounds("INBOX_EARLIER"), None);
+
+        setup.cx.simulate_resize(gpui::size(px(1200.), px(420.)));
+        setup.cx.run_until_parked();
+        setup.cx.simulate_keystrokes("shift-n n");
+        draw(&mut setup);
+        draw(&mut setup);
+        let cue = drawn(&mut setup, "INBOX_EARLIER");
+        let card = drawn(&mut setup, "INBOX_MESSAGE-1");
+        assert!(card.top() >= cue.bottom(), "{card:?} under {cue:?}");
+        setup.view.read_with(&setup.cx, |view, _| {
+            assert_eq!(view.messages_above(), 1);
+        });
+    }
+
+    #[gpui::test]
+    async fn the_header_leaves_the_sender_room(cx: &mut TestAppContext) {
+        let mut setup = setup_with_ticket(cx).await;
+        setup.cx.simulate_resize(gpui::size(px(1000.), px(900.)));
+        setup.cx.run_until_parked();
+        let sender = drawn(&mut setup, "INBOX_HEADER_SENDER");
+        assert!(sender.size.width > px(100.), "{sender:?}");
+    }
+
+    #[gpui::test]
+    async fn the_bar_stays_put_whatever_the_title_and_the_marks(cx: &mut TestAppContext) {
+        let long = "A subject long enough to need the title's second line ".repeat(3);
+        let note = TICKET.replace("# Ticket 42\n", &format!("# {long}\n"));
+        let note = note.replace("title:    Ticket 42", &format!("title:    {long}"));
+        let mut setup = setup(cx, Options::default()).await;
+        setup
+            .fs
+            .insert_tree(
+                setup._vault_dir.path().join("inbox"),
+                json!({ "2026-10-09-1930-long.md": note }),
+            )
+            .await;
+        setup.cx.run_until_parked();
+        setup.cx.simulate_resize(gpui::size(px(1000.), px(900.)));
+        setup.cx.run_until_parked();
+
+        select(&mut setup, "Call Ana");
+        let bar = drawn(&mut setup, "INBOX_BAR-today");
+        select(&mut setup, long.trim());
+        assert_eq!(drawn(&mut setup, "INBOX_BAR-today"), bar);
+        setup.cx.simulate_keystrokes("x");
+        drawn(&mut setup, "INBOX_MARKS_NOTE");
+        assert_eq!(drawn(&mut setup, "INBOX_BAR-today"), bar);
+    }
+
+    #[gpui::test]
+    async fn a_ticket_row_shows_its_number_where_the_sender_goes(cx: &mut TestAppContext) {
+        const NUMBERED: &str = "---\nsource:   gmail\ncapture:  d4d4d4d4d4d4\ncaptured: 2026-10-09T19:40:00Z\ntitle:    HD 7: Backups not restarted\nfrom:     helpdesk@example.com\n---\n\n# HD 7: Backups not restarted\n\nThe disk is full.\n";
+        let mut setup = setup(
+            cx,
+            Options {
+                grant: true,
+                cached: vec![(NUMBERED, "soon", 0.91)],
+                ..Options::default()
+            },
+        )
+        .await;
+        setup
+            .fs
+            .insert_tree(
+                setup._vault_dir.path().join("inbox"),
+                json!({ "2026-10-09-1940-hd-7.md": NUMBERED }),
+            )
+            .await;
+        setup.cx.run_until_parked();
+        select(&mut setup, "HD 7: Backups not restarted");
+        let position = setup
+            .view
+            .read_with(&setup.cx, |view, _| view.selected_index().unwrap());
+        setup.cx.simulate_resize(gpui::size(px(1000.), px(900.)));
+        setup
+            .view
+            .update(&mut setup.cx, |view, _| view.list_fraction = 0.2);
+        setup.cx.run_until_parked();
+        draw(&mut setup);
+        let selector = |name: &str| -> &'static str {
+            Box::leak(format!("{name}-{position}").into_boxed_str())
+        };
+        let chip = drawn(&mut setup, selector("INBOX_CHIP"));
+        let age = drawn(&mut setup, selector("INBOX_AGE"));
+        let row = drawn(&mut setup, selector("INBOX_ROW"));
+        assert!(chip.right() <= age.left(), "{chip:?} before {age:?}");
+        assert!(age.right() <= row.right(), "{age:?} in {row:?}");
+    }
+
+    #[gpui::test]
+    async fn the_filter_box_sits_inside_the_list_with_its_count(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        setup.cx.simulate_resize(gpui::size(px(1000.), px(900.)));
+        setup
+            .view
+            .update(&mut setup.cx, |view, _| view.list_fraction = 0.2);
+        setup.cx.run_until_parked();
+        let list_right = drawn(&mut setup, "INBOX_ROW-0").right();
+        setup.cx.simulate_keystrokes("/");
+        draw(&mut setup);
+        assert_eq!(setup.cx.debug_bounds("INBOX_FILTER_COUNT"), None);
+        setup.cx.simulate_input("ship");
+        setup.cx.run_until_parked();
+        let filter = drawn(&mut setup, "INBOX_FILTER");
+        assert!(filter.right() <= list_right + px(8.), "{filter:?}");
+        drawn(&mut setup, "INBOX_FILTER_COUNT");
+        drawn(&mut setup, "KEY_BINDING-escape");
+    }
+
+    #[gpui::test]
+    async fn a_list_with_nothing_to_move_through_offers_only_the_keys(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        setup.cx.simulate_keystrokes("/");
+        setup.cx.simulate_input("nothing is called this");
+        setup.cx.run_until_parked();
+        drawn(&mut setup, "INBOX_HINT-keys");
+        assert_eq!(setup.cx.debug_bounds("INBOX_HINT-move"), None);
+        assert_eq!(setup.cx.debug_bounds("INBOX_ACTION-open"), None);
+    }
+
+    #[gpui::test]
+    async fn the_keys_sheet_groups_keys_by_what_they_do(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        setup.cx.simulate_keystrokes("?");
+        let decide = drawn(&mut setup, "INBOX_KEYS_GROUP-Decide");
+        let moving = drawn(&mut setup, "INBOX_KEYS_GROUP-Move");
+        let read = drawn(&mut setup, "INBOX_KEYS_GROUP-Read");
+        assert!(decide.bottom() <= moving.top() && moving.bottom() <= read.top());
+    }
+
     #[gpui::test]
     async fn a_thread_reads_as_a_card_per_message(cx: &mut TestAppContext) {
         let mut setup = setup_with_ticket(cx).await;
@@ -5296,14 +5911,14 @@ mod tests {
             older.size.height < newest.size.height,
             "{older:?} folds to its header above {newest:?}"
         );
-        assert_eq!(setup.cx.debug_bounds("INBOX_FOLD-0-1"), None);
+        assert_eq!(setup.cx.debug_bounds("INBOX_FOLD-0-2"), None);
 
         // `z` opens every card, and closing it leaves the newest open.
         setup.cx.simulate_keystrokes("z");
-        drawn(&mut setup, "INBOX_FOLD-0-1");
+        drawn(&mut setup, "INBOX_FOLD-0-2");
         setup.cx.simulate_keystrokes("z");
         draw(&mut setup);
-        assert_eq!(setup.cx.debug_bounds("INBOX_FOLD-0-1"), None);
+        assert_eq!(setup.cx.debug_bounds("INBOX_FOLD-0-2"), None);
         assert_eq!(current_message(&setup), 1);
     }
 
@@ -5315,7 +5930,7 @@ mod tests {
         setup.cx.simulate_keystrokes("shift-n");
         draw(&mut setup);
         assert_eq!(current_message(&setup), 0);
-        drawn(&mut setup, "INBOX_FOLD-0-1");
+        drawn(&mut setup, "INBOX_FOLD-0-2");
         assert_eq!(selected(&setup).as_deref(), Some("Ticket 42"));
         setup.cx.simulate_keystrokes("shift-n");
         assert_eq!(current_message(&setup), 0, "the first stays the first");
@@ -5384,14 +5999,15 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         let mut setup = setup_with_ticket(cx).await;
-        // The repeated comment of the second message, then its fields.
-        let folded_comment = (1, 1);
+        // The second message's author line, its words, then the repeated
+        // comment and its fields.
+        let folded_comment = (1, 2);
         let has_comment = |setup: &Setup| {
             setup.view.read_with(&setup.cx, |view, _| {
                 view.reader_note.markdown.contains_key(&folded_comment)
             })
         };
-        drawn(&mut setup, "INBOX_FOLD-1-1");
+        drawn(&mut setup, "INBOX_FOLD-1-2");
         assert!(!has_comment(&setup));
 
         setup.cx.simulate_keystrokes("z");
@@ -5524,6 +6140,51 @@ mod tests {
             assert_eq!(state.leaning, Some(Destination::Soon));
         });
         assert_eq!(space_button(&mut setup), None);
+    }
+
+    #[test]
+    fn a_sender_keeps_their_hue_across_themes_and_none_reads_as_an_error() {
+        for participant in 0..SENDER_HUES.len() as u32 {
+            let (light, dark) = (
+                sender_color(participant, true),
+                sender_color(participant, false),
+            );
+            assert_eq!(light.h, dark.h, "{participant}");
+            assert!(light.l < dark.l, "{participant}");
+            let degrees = light.h * 360.;
+            assert!((30.0..=340.0).contains(&degrees), "{degrees} reads as red");
+        }
+        assert_eq!(
+            sender_color(0, true),
+            sender_color(SENDER_HUES.len() as u32, true)
+        );
+    }
+
+    #[test]
+    fn folds_that_meet_add_up_by_kind() {
+        assert_eq!(
+            fold_summary(&[
+                FoldPiece::Text(FoldKind::Repeated, 9),
+                FoldPiece::Fields(2),
+                FoldPiece::Text(FoldKind::Repeated, 3),
+            ]),
+            "Earlier in the thread · 12 lines · Details · 2 fields"
+        );
+        assert_eq!(
+            fold_summary(&[FoldPiece::Text(FoldKind::Signature, 4)]),
+            "Signature"
+        );
+    }
+
+    #[test]
+    fn only_a_long_comma_list_is_capped() {
+        assert_eq!(capped_list("a,b, c,d,e"), ("a, b, c".to_string(), 2));
+        assert_eq!(capped_list("a,b,c"), ("a,b,c".to_string(), 0));
+        let prose = "Well, this one, as you see, is a sentence";
+        assert_eq!(capped_list(prose), (prose.to_string(), 0));
+        assert!(previous_helps("EDIT"));
+        assert!(!previous_helps("a,b,c,d,e"));
+        assert!(!previous_helps(&"long".repeat(20)));
     }
 
     #[test]
