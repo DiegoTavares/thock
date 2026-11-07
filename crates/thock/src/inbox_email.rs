@@ -171,7 +171,8 @@ pub fn drop_restated_subject(thread: &mut EmailThread, title: &str) {
 /// line restating `title` and a note of where the ticket was imported from
 /// fold, the `(by …)` line goes since the card's header gives it, and a note of
 /// the ticket's own edit stays quiet, or goes when a changed field already says
-/// it. This is the reading alone; the note keeps every line.
+/// it. An import note repeated from an earlier message is told from the comments
+/// around it too. This is the reading alone; the note keeps every line.
 pub fn quiet_system_lines(thread: &mut EmailThread, title: &str) {
     for message in &mut thread.messages {
         if message.author.is_none() {
@@ -190,6 +191,13 @@ pub fn quiet_system_lines(thread: &mut EmailThread, title: &str) {
                     &mut before_author,
                     &mut message.blocks,
                 ),
+                EmailBlock::Fold {
+                    kind: FoldKind::Repeated,
+                    text,
+                    ..
+                } if !text.lines().any(is_fence) => {
+                    split_repeated_notes(&text, &mut message.blocks)
+                }
                 other => message.blocks.push(other),
             }
         }
@@ -288,6 +296,34 @@ fn split_system_text(
             None => push_block(blocks, EmailBlock::Text(lines.join("\n"))),
         }
     }
+}
+
+/// Parts the import notes in a repeated fold from the comments around them.
+fn split_repeated_notes(text: &str, blocks: &mut Vec<EmailBlock>) {
+    fn push_comments(blocks: &mut Vec<EmailBlock>, paragraphs: &mut Vec<&str>) {
+        if paragraphs.is_empty() {
+            return;
+        }
+        let text = paragraphs.join("\n\n");
+        let lines = text.lines().filter(|line| !is_blank(line)).count();
+        paragraphs.clear();
+        blocks.push(EmailBlock::Fold {
+            kind: FoldKind::Repeated,
+            text,
+            lines,
+        });
+    }
+    let mut comments = Vec::new();
+    for paragraph in text.split("\n\n") {
+        let lines: Vec<&str> = paragraph.lines().collect();
+        if is_import_note(&lines) {
+            push_comments(blocks, &mut comments);
+            push_system_fold(blocks, &lines);
+        } else {
+            comments.push(paragraph);
+        }
+    }
+    push_comments(blocks, &mut comments);
 }
 
 /// Where the `(by …)` line starts: a system may set its label on the line
@@ -1391,6 +1427,51 @@ Team:        render-ops
             "Anything long enough",
         );
         assert_eq!(blocks, [EmailBlock::Text("The farm is down.".to_string())]);
+    }
+
+    #[test]
+    fn a_repeated_import_note_parts_from_the_comments_around_it() {
+        let mut thread = EmailThread {
+            preamble: String::new(),
+            messages: vec![EmailMessage {
+                from: "helpdesk@example.com".to_string(),
+                author: Some("ana".to_string()),
+                sent: None,
+                participant: 0,
+                blocks: vec![EmailBlock::Fold {
+                    kind: FoldKind::Repeated,
+                    text: "The farm is down.\nStill.\n\n\
+                           This ticket was imported from Freshservice:\n\
+                           https://example.com/tickets/1\n\n\
+                           Thanks"
+                        .to_string(),
+                    lines: 5,
+                }],
+            }],
+        };
+        quiet_system_lines(&mut thread, "Anything long enough");
+        assert_eq!(
+            thread.messages[0].blocks,
+            [
+                EmailBlock::Fold {
+                    kind: FoldKind::Repeated,
+                    text: "The farm is down.\nStill.".to_string(),
+                    lines: 2,
+                },
+                EmailBlock::Fold {
+                    kind: FoldKind::System,
+                    text: "This ticket was imported from Freshservice:\n\
+                           https://example.com/tickets/1"
+                        .to_string(),
+                    lines: 2,
+                },
+                EmailBlock::Fold {
+                    kind: FoldKind::Repeated,
+                    text: "Thanks".to_string(),
+                    lines: 1,
+                },
+            ]
+        );
     }
 
     #[test]
