@@ -163,6 +163,7 @@ pub fn drop_restated_subject(thread: &mut EmailThread, title: &str) {
 /// `(by …)` line, that line, and any line restating `title` or noting the
 /// ticket's own edit. This is the reading alone; the note keeps every line.
 pub fn quiet_system_lines(thread: &mut EmailThread, title: &str) {
+    let carded = thread.messages.len() > 1;
     for message in &mut thread.messages {
         if message.author.is_none() {
             continue;
@@ -172,9 +173,13 @@ pub fn quiet_system_lines(thread: &mut EmailThread, title: &str) {
         );
         for block in std::mem::take(&mut message.blocks) {
             match block {
-                EmailBlock::Text(text) if !text.lines().any(is_fence) => {
-                    split_system_text(&text, title, &mut before_author, &mut message.blocks)
-                }
+                EmailBlock::Text(text) if !text.lines().any(is_fence) => split_system_text(
+                    &text,
+                    title,
+                    carded,
+                    &mut before_author,
+                    &mut message.blocks,
+                ),
                 other => message.blocks.push(other),
             }
         }
@@ -184,6 +189,7 @@ pub fn quiet_system_lines(thread: &mut EmailThread, title: &str) {
 fn split_system_text(
     text: &str,
     title: &str,
+    carded: bool,
     before_author: &mut bool,
     blocks: &mut Vec<EmailBlock>,
 ) {
@@ -199,6 +205,13 @@ fn split_system_text(
             }
             None => ([].as_slice(), lines.as_slice()),
         };
+        // A card's header already gives the author and the date; a lone
+        // message has no card, so its line stays.
+        let quiet: Vec<&str> = quiet
+            .iter()
+            .filter(|line| !(carded && is_author_line(line)))
+            .copied()
+            .collect();
         if !quiet.is_empty() {
             push_block(blocks, EmailBlock::Meta(quiet.join("\n")));
         }
@@ -548,6 +561,12 @@ fn parse_author(line: &str) -> Option<&str> {
     let shaped = !author.is_empty() && author.len() <= MAX_AUTHOR_LENGTH && !author.contains(')');
     // The date is what tells a ticket's line from prose: `(by the team on Friday)`.
     (shaped && date.contains(|character: char| character.is_ascii_digit())).then_some(author)
+}
+
+/// The line is only the `(by …)` attribution, with no words of the person's
+/// after it.
+fn is_author_line(line: &str) -> bool {
+    parse_author(line).is_some() && line.trim_end().ends_with([')', ':'])
 }
 
 /// A sender with a display name is a person; a bare address may be a system
@@ -1088,6 +1107,26 @@ Team:        render-ops
                 EmailBlock::Text("Glad the publishes succeeded!".to_string()),
                 EmailBlock::Meta("Changing Status to CLOSED".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn a_card_drops_the_author_line_its_header_already_gives() {
+        let mut thread = thread(
+            "## helpdesk@example.com — 2026-11-05 09:38\n\n\
+             Comment #3 (by bo on 11/05/26 08:38am):\n\n\
+             Looking into it.\n\n\
+             ## helpdesk@example.com — 2026-11-06 09:38\n\n\
+             Comment #4 (by ana on 11/06/26 08:38am):\n\n\
+             Glad the publishes succeeded!\n",
+        );
+        quiet_system_lines(&mut thread, "HD 42: The farm stopped taking jobs");
+        assert_eq!(thread.messages[1].author.as_deref(), Some("ana"));
+        assert_eq!(
+            thread.messages[1].blocks,
+            [EmailBlock::Text(
+                "Glad the publishes succeeded!".to_string()
+            )]
         );
     }
 
