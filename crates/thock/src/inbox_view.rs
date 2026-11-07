@@ -21,7 +21,7 @@ use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use menu::{Cancel, Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use project::Project;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -45,6 +45,9 @@ use workspace::{OpenOptions, OpenVisible, Toast, Workspace};
 
 use crate::backlog::{self, DEFAULT_BACKLOG, SectionKind};
 use crate::inbox::{TRIAGE_LOG_PATH, sanitize_title};
+use crate::inbox_email::{
+    EmailBlock, EmailField, EmailMessage, EmailThread, FoldKind, full_title, initials, parse_thread,
+};
 use crate::inbox_service::{
     self, InboxEntry, InboxEvent, InboxService, MoveOutcome, SuggestionAvailability, TriageInbox,
     move_note,
@@ -65,7 +68,18 @@ const PANE_HEADER_HEIGHT: Pixels = px(52.);
 const ROW_HEIGHT: Pixels = px(60.);
 const FOOTER_HEIGHT: Pixels = px(36.);
 const BAR_BUTTON_HEIGHT: Pixels = px(56.);
-const READER_MAX_WIDTH: Pixels = px(680.);
+const READER_MAX_WIDTH: Pixels = px(960.);
+/// Holds `space or shift-s`, the widest keycaps a button carries.
+const DESTINATION_MIN_WIDTH: Pixels = px(136.);
+/// One length on every button, so the meters compare at a glance.
+const PROBABILITY_METER_WIDTH: Pixels = px(64.);
+const BAR_GAP: Pixels = px(8.);
+const FIELD_MIN_WIDTH: Pixels = px(300.);
+const FIELD_KEY_WIDTH: Pixels = px(104.);
+const SENDER_BADGE_SIZE: Pixels = px(28.);
+/// How far below the reader's top edge a jump leaves a message's card: the
+/// reader's own top padding, so the first card lands where it started.
+const MESSAGE_JUMP_MARGIN: Pixels = px(24.);
 
 actions!(
     thock,
@@ -112,6 +126,13 @@ actions!(
         ScrollInboxReaderPageDown,
         /// Scrolls the inbox note up half a page.
         ScrollInboxReaderPageUp,
+        /// Jumps to the next message of the inbox email.
+        NextInboxMessage,
+        /// Jumps to the previous message of the inbox email.
+        PreviousInboxMessage,
+        /// Shows or hides what the inbox email folded away: repeated text,
+        /// quotes, signatures and unchanged fields.
+        ToggleInboxFolds,
     ]
 );
 
@@ -170,6 +191,26 @@ enum FilingNote {
 /// The rows a keystroke asked to file, each with its destination.
 type FilingPlan = Vec<(InboxEntry, Destination)>;
 
+/// The selected note as the reader shows it, rebuilt when its bytes change.
+#[derive(Default)]
+struct ReaderNote {
+    hash: Option<String>,
+    /// How an email reads; other notes render whole.
+    thread: Option<Rc<EmailThread>>,
+    /// The whole subject, when the sender's system cut it short.
+    title: Option<String>,
+    /// By message and block, built as they come into view.
+    markdown: HashMap<(usize, usize), Entity<Markdown>>,
+    folds_open: bool,
+}
+
+/// What every block of the reader is drawn with.
+struct ReaderStyle {
+    body: MarkdownStyle,
+    folded: MarkdownStyle,
+    images: Rc<dyn Fn(&str) -> Option<ImageSource>>,
+}
+
 /// The one toast a decision shows; undo dismisses it by this id.
 struct InboxDecisionToast;
 
@@ -194,8 +235,7 @@ pub struct InboxView {
     marked: HashSet<String>,
     scroll: UniformListScrollHandle,
     reader_scroll: ScrollHandle,
-    /// The rendered note, rebuilt when the selected bytes change.
-    markdown: Option<(String, Entity<Markdown>)>,
+    reader_note: ReaderNote,
     list_fraction: f32,
     layout_save: Option<Task<()>>,
     last_decision: Option<Decision>,
@@ -251,6 +291,10 @@ impl Item for InboxView {
 
     fn show_toolbar(&self) -> bool {
         false
+    }
+
+    fn fills_center(&self) -> bool {
+        true
     }
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(ItemEvent)) {
@@ -337,7 +381,7 @@ impl InboxView {
             marked: HashSet::new(),
             scroll: UniformListScrollHandle::new(),
             reader_scroll: ScrollHandle::new(),
-            markdown: None,
+            reader_note: ReaderNote::default(),
             list_fraction: DEFAULT_LIST_FRACTION,
             layout_save: None,
             last_decision: None,
@@ -809,6 +853,48 @@ impl InboxView {
     ) {
         let half = self.reader_scroll.bounds().size.height / 2.;
         self.scroll_reader(-half, cx);
+    }
+
+    /// Puts the card after (or before) the reader's top edge at that edge.
+    /// The offsets come from the last frame, so they follow manual scrolling.
+    fn jump_to_message(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let scroll = &self.reader_scroll;
+        let origin = scroll.bounds().top();
+        let offset = scroll.offset();
+        let current = MESSAGE_JUMP_MARGIN - offset.y;
+        let mut tops = (0..scroll.children_count())
+            .filter_map(|index| scroll.bounds_for_item(index))
+            .map(|bounds| bounds.top() - origin);
+        let target = if forward {
+            tops.find(|top| *top > current + px(1.))
+        } else {
+            tops.rfind(|top| *top < current - px(1.))
+        };
+        if let Some(target) = target {
+            let y = (MESSAGE_JUMP_MARGIN - target)
+                .max(-scroll.max_offset().y)
+                .min(px(0.));
+            scroll.set_offset(point(offset.x, y));
+            cx.notify();
+        }
+    }
+
+    fn next_message(&mut self, _: &NextInboxMessage, _: &mut Window, cx: &mut Context<Self>) {
+        self.jump_to_message(true, cx);
+    }
+
+    fn previous_message(
+        &mut self,
+        _: &PreviousInboxMessage,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_to_message(false, cx);
+    }
+
+    fn toggle_folds(&mut self, _: &ToggleInboxFolds, _: &mut Window, cx: &mut Context<Self>) {
+        self.reader_note.folds_open = !self.reader_note.folds_open;
+        cx.notify();
     }
 
     fn triage(&mut self, _: &TriageInbox, window: &mut Window, cx: &mut Context<Self>) {
@@ -1477,6 +1563,11 @@ impl InboxView {
             if let Some(due) = &item.due {
                 when.push(format!("due {due}"));
             }
+            if let Some(thread) = &self.reader_note.thread
+                && thread.messages.len() > 1
+            {
+                when.push(format!("{} messages", thread.messages.len()));
+            }
             if !when.is_empty() {
                 let separator = if named { "· " } else { "" };
                 meta = meta.child(
@@ -1936,18 +2027,379 @@ impl InboxView {
         style
     }
 
-    fn markdown_for(&mut self, entry: &InboxEntry, cx: &mut Context<Self>) -> Entity<Markdown> {
-        if let Some((hash, markdown)) = &self.markdown
-            && *hash == entry.hash
-        {
-            return markdown.clone();
+    /// The body of an email, smaller than a note's: it is scanned, not
+    /// studied.
+    fn reader_style(&self, window: &Window, cx: &App) -> ReaderStyle {
+        let mut body = self.markdown_style(window, cx);
+        if self.reader_note.thread.is_some() {
+            body.base_text_style.font_size = px(14.).into();
+            body.base_text_style.line_height = relative(1.5);
         }
-        let body = without_leading_title(&entry.item.body, &entry.item.title);
-        let source: SharedString = body.to_string().into();
-        let markdown = cx.new(|cx| Markdown::new(source, None, None, cx));
-        self.markdown = Some((entry.hash.clone(), markdown.clone()));
+        let mut folded = body.clone();
+        folded.base_text_style.color = cx.theme().colors().text_muted;
+        ReaderStyle {
+            body,
+            folded,
+            images: self.image_resolver(cx),
+        }
+    }
+
+    /// Brings the reader in step with the selected note.
+    fn sync_reader_note(&mut self) {
+        let Some(entry) = self.selected_entry() else {
+            self.reader_note = ReaderNote::default();
+            return;
+        };
+        if self.reader_note.hash.as_ref() == Some(&entry.hash) {
+            return;
+        }
+        let item = &entry.item;
+        let is_email = item.source.as_deref() == Some("gmail");
+        let body = without_leading_title(&item.body, &item.title);
+        let thread = is_email.then(|| Rc::new(parse_thread(body, item.from.as_deref())));
+        let title = is_email.then(|| full_title(&item.title, body)).flatten();
+        self.reader_note = ReaderNote {
+            hash: Some(entry.hash.clone()),
+            thread,
+            title,
+            ..ReaderNote::default()
+        };
         self.reader_scroll.set_offset(point(px(0.), px(0.)));
-        markdown
+    }
+
+    fn render_markdown(
+        &mut self,
+        key: (usize, usize),
+        text: &str,
+        style: MarkdownStyle,
+        images: &Rc<dyn Fn(&str) -> Option<ImageSource>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let markdown = self
+            .reader_note
+            .markdown
+            .entry(key)
+            .or_insert_with(|| {
+                let source: SharedString = text.to_string().into();
+                cx.new(|cx| Markdown::new(source, None, None, cx))
+            })
+            .clone();
+        let images = images.clone();
+        MarkdownElement::new(markdown, style)
+            .image_resolver(move |src| images(src))
+            .into_any_element()
+    }
+
+    /// A folded stretch's one line: what it holds, and the way to it.
+    fn render_fold_row(
+        &self,
+        key: (usize, usize),
+        label: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (message, block) = key;
+        let open = self.reader_note.folds_open;
+        h_flex()
+            .id(SharedString::from(format!("inbox-fold-{message}-{block}")))
+            .debug_selector(move || format!("INBOX_FOLD-{message}-{block}"))
+            .gap_1()
+            .cursor_pointer()
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+            )
+            .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
+            .tooltip(Tooltip::for_action_title(
+                if open { "Fold" } else { "Show" },
+                &ToggleInboxFolds,
+            ))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.toggle_folds(&ToggleInboxFolds, window, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// A record as a grid: as many columns as the reader has room for.
+    fn render_fields(&self, id: &str, fields: &[EmailField], cx: &App) -> AnyElement {
+        let background = cx.theme().colors().element_background;
+        h_flex()
+            .w_full()
+            .flex_wrap()
+            .items_start()
+            .gap_x_6()
+            .gap_y_1()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .bg(background)
+            .children(fields.iter().enumerate().map(|(index, field)| {
+                let changed = field.previous.is_some();
+                let value = Label::new(if field.value.is_empty() {
+                    "—".to_string()
+                } else {
+                    field.value.clone()
+                })
+                .size(LabelSize::Small)
+                .color(if changed || field.link.is_some() {
+                    Color::Accent
+                } else {
+                    Color::Default
+                });
+                let mut value_cell = v_flex()
+                    .id(SharedString::from(format!("inbox-field-{id}-{index}")))
+                    .flex_1()
+                    .min_w_0()
+                    .child(value)
+                    .when_some(field.previous.as_ref(), |this, previous| {
+                        this.child(
+                            Label::new(format!("was {previous}"))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                    });
+                if let Some(link) = field.link.clone() {
+                    value_cell = value_cell
+                        .cursor_pointer()
+                        .tooltip(Tooltip::text(link.clone()))
+                        .on_click(move |_, _, cx| cx.open_url(&link));
+                }
+                h_flex()
+                    .flex_grow_1()
+                    .flex_basis(FIELD_MIN_WIDTH)
+                    .min_w_0()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        div().flex_none().w(FIELD_KEY_WIDTH).child(
+                            Label::new(field.key.clone())
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate(),
+                        ),
+                    )
+                    .child(value_cell)
+            }))
+            .into_any_element()
+    }
+
+    fn render_email_block(
+        &mut self,
+        key: (usize, usize),
+        block: &EmailBlock,
+        style: &ReaderStyle,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.reader_note.folds_open;
+        let (message, block_index) = key;
+        match block {
+            EmailBlock::Text(text) => {
+                self.render_markdown(key, text, style.body.clone(), &style.images, cx)
+            }
+            EmailBlock::Fields { shown, unchanged } => {
+                let id = format!("{message}-{block_index}");
+                let shown = (!shown.is_empty()).then(|| self.render_fields(&id, shown, cx));
+                let fold = (!unchanged.is_empty())
+                    .then(|| self.render_fold_row(key, fold_label_for_fields(unchanged.len()), cx));
+                let revealed = (open && !unchanged.is_empty())
+                    .then(|| self.render_fields(&format!("{id}-same"), unchanged, cx));
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .children(shown)
+                    .children(fold)
+                    .children(revealed)
+                    .into_any_element()
+            }
+            EmailBlock::Fold { kind, text, lines } => {
+                let row = self.render_fold_row(key, fold_label(*kind, *lines), cx);
+                let revealed = open.then(|| {
+                    let text =
+                        self.render_markdown(key, text, style.folded.clone(), &style.images, cx);
+                    div()
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(cx.theme().colors().border_variant)
+                        .child(text)
+                });
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(row)
+                    .children(revealed)
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// One message: a card headed by who wrote it, in that person's colour,
+    /// so a reply's start can't be missed and the author reads at a glance.
+    /// A lone message has only its blocks, since the header says the rest.
+    fn render_message(
+        &mut self,
+        index: usize,
+        message: &EmailMessage,
+        total: usize,
+        style: &ReaderStyle,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let blocks: Vec<AnyElement> = message
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(block, content)| self.render_email_block((index, block), content, style, cx))
+            .collect();
+        if total < 2 {
+            return v_flex()
+                .w_full()
+                .max_w(READER_MAX_WIDTH)
+                .gap_3()
+                .children(blocks)
+                .into_any_element();
+        }
+        let colors = cx.theme().colors();
+        let accent = cx
+            .theme()
+            .players()
+            .color_for_participant(message.participant)
+            .cursor;
+        let sender = sender_name(&message.from);
+        let (name, detail) = match &message.author {
+            Some(author) => (author.clone(), Some(format!("via {sender}"))),
+            None => (sender, sender_address(&message.from)),
+        };
+        let when = message
+            .sent
+            .map(|sent| sent.format("%b %-d, %H:%M").to_string());
+        let header = h_flex()
+            .w_full()
+            .gap_2()
+            .pl_4()
+            .pr_3()
+            .py_2()
+            .bg(accent.opacity(0.08))
+            .border_b_1()
+            .border_color(colors.border_variant)
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(SENDER_BADGE_SIZE)
+                    .rounded_full()
+                    .bg(accent.opacity(0.22))
+                    .child(
+                        Label::new(initials(&name))
+                            .size(LabelSize::XSmall)
+                            .weight(FontWeight::SEMIBOLD)
+                            .color(Color::Custom(accent)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .child(Label::new(name).weight(FontWeight::SEMIBOLD).single_line()),
+            )
+            .child(div().flex_1().min_w_0().children(detail.map(|detail| {
+                Label::new(detail)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .truncate()
+            })))
+            .children(when.map(|when| {
+                div().flex_none().child(
+                    Label::new(when)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .single_line(),
+                )
+            }))
+            .child(
+                div().flex_none().pl_2().child(
+                    Label::new(format!("{} of {total}", index + 1))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted)
+                        .single_line(),
+                ),
+            );
+        v_flex()
+            .debug_selector(move || format!("INBOX_MESSAGE-{index}"))
+            .relative()
+            .flex_none()
+            .w_full()
+            .max_w(READER_MAX_WIDTH)
+            .rounded_lg()
+            .border_1()
+            .border_color(colors.border_variant)
+            .bg(colors.panel_background)
+            .child(header)
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap_3()
+                    .pl_4()
+                    .pr_4()
+                    .py_3()
+                    .children(blocks),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(3.))
+                    .rounded_l_lg()
+                    .bg(accent),
+            )
+            .into_any_element()
+    }
+
+    /// The note's body as the reader's children, one per message.
+    fn render_note_body(
+        &mut self,
+        entry: &InboxEntry,
+        style: &ReaderStyle,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(thread) = self.reader_note.thread.clone() else {
+            let body = without_leading_title(&entry.item.body, &entry.item.title);
+            let body = self.render_markdown((0, 0), body, style.body.clone(), &style.images, cx);
+            return vec![
+                div()
+                    .w_full()
+                    .max_w(READER_MAX_WIDTH)
+                    .child(body)
+                    .into_any_element(),
+            ];
+        };
+        let total = thread.messages.len();
+        let preamble = (!thread.preamble.is_empty()).then(|| {
+            // Past the messages' keys, which count from zero.
+            let key = (total, 0);
+            let preamble =
+                self.render_markdown(key, &thread.preamble, style.body.clone(), &style.images, cx);
+            div()
+                .w_full()
+                .max_w(READER_MAX_WIDTH)
+                .child(preamble)
+                .into_any_element()
+        });
+        preamble
+            .into_iter()
+            .chain(
+                thread
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .map(|(index, message)| self.render_message(index, message, total, style, cx)),
+            )
+            .collect()
     }
 
     fn render_reader(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1971,9 +2423,8 @@ impl InboxView {
                 )
                 .into_any_element();
         };
-        let markdown = self.markdown_for(&entry, cx);
-        let style = self.markdown_style(window, cx);
-        let resolver = self.image_resolver(cx);
+        let style = self.reader_style(window, cx);
+        let body = self.render_note_body(&entry, &style, cx);
         let focused = self.reader_focus.is_focused(window);
         let colors = cx.theme().colors();
         let (rule, focus_edge) = (colors.border_variant, colors.border_focused);
@@ -1987,15 +2438,25 @@ impl InboxView {
                     .px_10()
                     .pt_7()
                     .pb_5()
-                    .gap(px(18.))
                     .border_b_1()
                     .border_color(rule)
                     .child(
-                        Label::new(entry.item.title.clone())
-                            .size(LabelSize::Custom(HeadlineSize::XLarge.rems()))
-                            .weight(FontWeight::SEMIBOLD),
-                    )
-                    .child(self.render_destination_bar(&entry, cx)),
+                        v_flex()
+                            .w_full()
+                            .max_w(READER_MAX_WIDTH)
+                            .gap(px(18.))
+                            .child(
+                                Label::new(
+                                    self.reader_note
+                                        .title
+                                        .clone()
+                                        .unwrap_or_else(|| entry.item.title.clone()),
+                                )
+                                .size(LabelSize::Custom(HeadlineSize::XLarge.rems()))
+                                .weight(FontWeight::SEMIBOLD),
+                            )
+                            .child(self.render_destination_bar(&entry, cx)),
+                    ),
             )
             .child(
                 v_flex()
@@ -2008,13 +2469,9 @@ impl InboxView {
                     .track_scroll(&self.reader_scroll)
                     .px_10()
                     .py_6()
+                    .gap_4()
                     .when(focused, |this| this.border_l_2().border_color(focus_edge))
-                    .child(
-                        div().w_full().max_w(READER_MAX_WIDTH).child(
-                            MarkdownElement::new(markdown, style)
-                                .image_resolver(move |src| resolver(src)),
-                        ),
-                    ),
+                    .children(body),
             )
             .into_any_element()
     }
@@ -2080,10 +2537,7 @@ impl InboxView {
         div()
             .debug_selector(move || format!("INBOX_BAR-{name}"))
             .h(BAR_BUTTON_HEIGHT)
-            // The four destinations share what is left after Open and Undo
-            // equally and shrink with the reader, so the bar is always one
-            // row.
-            .when(fills, |this| this.flex_1().min_w_0())
+            .when(fills, |this| this.flex_1().min_w(DESTINATION_MIN_WIDTH))
             .when(!fills, |this| this.flex_none())
             .rounded_lg()
             .border_1()
@@ -2105,67 +2559,36 @@ impl InboxView {
         let colors = cx.theme().colors();
         let (track, fill) = (colors.text_muted.opacity(0.18), colors.text_accent);
         let name = destination.key();
-        // Two lines, so a narrow reader keeps every button on one row: the
-        // keys and the label, then the probability bar and its percentage.
-        // The keys and the percentage keep their size; only the label gives
-        // way.
+        // The name and the odds on one line, the keys and the meter on the
+        // next: the keys grow with the suggestion, so they never share a line
+        // with the name, and the meter sits beside them rather than over them.
         let content = v_flex()
             .w_full()
             .h_full()
             .justify_center()
-            .gap_2()
+            .gap_0p5()
             .px(px(10.))
             .child(
                 h_flex()
                     .w_full()
-                    .gap_1p5()
-                    .when(suggested, |this| {
-                        this.child(div().flex_none().child(KeyBinding::for_action_in(
-                            &AcceptInboxSuggestion,
-                            &self.focus_handle,
-                            cx,
-                        )))
-                        .child(div().flex_none().child(keycap_or()))
-                    })
-                    .child(div().flex_none().child(KeyBinding::for_action_in(
-                        destination_action(destination).as_ref(),
-                        &self.focus_handle,
-                        cx,
-                    )))
+                    .justify_between()
+                    .gap_2()
                     .child(
-                        div().flex_1().min_w_0().child(
-                            Label::new(destination.label())
-                                .color(if suggested {
-                                    Color::Accent
-                                } else {
-                                    Color::Default
-                                })
-                                .truncate(),
-                        ),
-                    ),
-            )
-            .when_some(probability, |this, probability| {
-                this.child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(
-                            div()
-                                .debug_selector(move || format!("INBOX_PROBABILITY-{name}"))
-                                .flex_1()
-                                .min_w_0()
-                                .h(px(3.))
-                                .rounded_full()
-                                .bg(track)
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .rounded_full()
-                                        .w(relative(probability.clamp(0.0, 1.0) as f32))
-                                        .bg(fill),
-                                ),
-                        )
-                        .child(
+                        div()
+                            .debug_selector(move || format!("INBOX_LABEL-{name}"))
+                            .flex_none()
+                            .child(
+                                Label::new(destination.label())
+                                    .color(if suggested {
+                                        Color::Accent
+                                    } else {
+                                        Color::Default
+                                    })
+                                    .single_line(),
+                            ),
+                    )
+                    .when_some(probability, |this, probability| {
+                        this.child(
                             div()
                                 .debug_selector(move || format!("INBOX_PERCENT-{name}"))
                                 .flex_none()
@@ -2177,9 +2600,53 @@ impl InboxView {
                                     .size(LabelSize::Small)
                                     .color(Color::Muted),
                                 ),
-                        ),
-                )
-            });
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .debug_selector(move || format!("INBOX_KEYS-{name}"))
+                            .flex_none()
+                            .gap_1p5()
+                            .when(suggested, |this| {
+                                this.child(KeyBinding::for_action_in(
+                                    &AcceptInboxSuggestion,
+                                    &self.focus_handle,
+                                    cx,
+                                ))
+                                .child(keycap_or())
+                            })
+                            .child(KeyBinding::for_action_in(
+                                destination_action(destination).as_ref(),
+                                &self.focus_handle,
+                                cx,
+                            )),
+                    )
+                    .when_some(probability, |this, probability| {
+                        this.child(
+                            div()
+                                .debug_selector(move || format!("INBOX_PROBABILITY-{name}"))
+                                .flex_1()
+                                .min_w_0()
+                                .max_w(PROBABILITY_METER_WIDTH)
+                                .h(px(3.))
+                                .rounded_full()
+                                .bg(track)
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .rounded_full()
+                                        .w(relative(probability.clamp(0.0, 1.0) as f32))
+                                        .bg(fill),
+                                ),
+                        )
+                    }),
+            );
         self.bar_button(
             destination.key(),
             look,
@@ -2209,7 +2676,8 @@ impl InboxView {
     }
 
     /// The destination bar (§4.2): one button per destination in a fixed
-    /// order, then Open and Undo, always on one row.
+    /// order, then Open and Undo. A reader too narrow for one row wraps Open
+    /// and Undo, then the destinations, rather than squeeze a button.
     fn render_destination_bar(&self, entry: &InboxEntry, cx: &App) -> AnyElement {
         let state = self.bar_state(entry, cx);
         let buttons = Destination::ALL
@@ -2228,15 +2696,21 @@ impl InboxView {
             });
         let open = self.quiet_button("open", &OpenInboxItem, "Open", cx);
         let undo = self.quiet_button("undo", &UndoInboxMove, "Undo", cx);
-        let rule = cx.theme().colors().border_variant;
-        let divider = |height: Pixels| div().flex_none().w(px(1.)).h(height).mx_1().bg(rule);
+        let destinations_width = DESTINATION_MIN_WIDTH * 4. + BAR_GAP * 3.;
         h_flex()
             .w_full()
-            .gap_2()
-            .children(buttons)
-            .child(divider(BAR_BUTTON_HEIGHT - px(12.)))
-            .child(open)
-            .child(undo)
+            .flex_wrap()
+            .gap(BAR_GAP)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .flex_basis(destinations_width)
+                    .min_w_0()
+                    .flex_wrap()
+                    .gap(BAR_GAP)
+                    .children(buttons),
+            )
+            .child(h_flex().flex_none().gap(BAR_GAP).child(open).child(undo))
             .into_any_element()
     }
 
@@ -2256,6 +2730,9 @@ impl InboxView {
             (&SuggestInboxDestinations, "Ask for a suggestion again"),
             (&FilterInbox, "Filter by title, sender, source"),
             (&FocusInboxReader, "Move between the list and the note"),
+            (&NextInboxMessage, "Next message of the email"),
+            (&PreviousInboxMessage, "Previous message of the email"),
+            (&ToggleInboxFolds, "Show or hide what the email folded away"),
             (&ShowInboxItemMenu, "The row menu"),
             (&TriageInbox, "Hand what is left to the Triage Inbox ritual"),
             (&ShowInboxKeys, "This sheet"),
@@ -2392,6 +2869,7 @@ impl gpui::Render for InboxView {
         if self.reader_focus.is_focused(window) {
             key_context.add("reader");
         }
+        self.sync_reader_note();
         let list_header = self.render_list_header(window, cx);
         let reader_header = self.render_reader_header(cx);
         let notices = self.render_notices(cx);
@@ -2438,6 +2916,9 @@ impl gpui::Render for InboxView {
                     .on_action(cx.listener(Self::scroll_reader_up))
                     .on_action(cx.listener(Self::scroll_reader_page_down))
                     .on_action(cx.listener(Self::scroll_reader_page_up))
+                    .on_action(cx.listener(Self::next_message))
+                    .on_action(cx.listener(Self::previous_message))
+                    .on_action(cx.listener(Self::toggle_folds))
                     .on_action(cx.listener(Self::triage))
             })
             .when(keys_sheet, |this| {
@@ -2523,6 +3004,20 @@ fn without_leading_title<'a>(body: &'a str, title: &str) -> &'a str {
     } else {
         body
     }
+}
+
+fn fold_label(kind: FoldKind, lines: usize) -> String {
+    let unit = if lines == 1 { "line" } else { "lines" };
+    match kind {
+        FoldKind::Repeated => format!("Earlier in the thread · {lines} {unit}"),
+        FoldKind::Quoted => format!("Quoted reply · {lines} {unit}"),
+        FoldKind::Signature => "Signature".to_string(),
+    }
+}
+
+fn fold_label_for_fields(count: usize) -> String {
+    let unit = if count == 1 { "field" } else { "fields" };
+    format!("{count} {unit} unchanged")
 }
 
 /// `Marta <marta@example.com>` → `Marta`.
@@ -2905,6 +3400,7 @@ mod tests {
     const SHIP_IT: &str = "---\nsource:   google-tasks\ncapture:  3f1c3f1c3f1c\ncaptured: 2026-10-09T18:42:00Z\ntitle:    Ship it — a practical guide\nurl:      https://example.com/ship-it\n---\n\n# Ship it — a practical guide\n\nhttps://example.com/ship-it\n";
     const Q4: &str = "---\nsource:   gmail\ncapture:  a1a1a1a1a1a1\ncaptured: 2026-10-09T19:00:00Z\ntitle:    Re: Q4 planning doc\nfrom:     Marta <marta@example.com>\n---\n\n# Re: Q4 planning doc\n\nCan you look at the numbers before Friday?\n";
     const CALL_ANA: &str = "---\nsource:   thock-ios\ncapture:  4d1f9a02c7b3\ncaptured: 2026-10-10T09:31:00Z\ntitle:    Call Ana\n---\n\n# Call Ana\n";
+    const TICKET: &str = "---\nsource:   gmail\ncapture:  b2b2b2b2b2b2\ncaptured: 2026-10-09T19:30:00Z\ntitle:    Ticket 42\nfrom:     helpdesk@example.com\n---\n\n# Ticket 42\n\n## helpdesk@example.com — 2026-10-09 08:55\n\nComment #1 (by rsilva on 10/09/26 07:55am):\n\nThe farm stopped taking jobs.\nCould someone look?\nIt's urgent.\n\nStatus:  OPEN\n\nTeam:  render-ops\n\nHost:  N/A\n\n## helpdesk@example.com — 2026-10-09 09:13\n\nComment #2 (by jlopes on 10/09/26 08:13am):\n\nThe print server is down again.\n\nComment #1 (by rsilva on 10/09/26 07:55am):\n\nThe farm stopped taking jobs.\nCould someone look?\nIt's urgent.\n\nStatus:  IN PROGRESS\n\nTeam:  render-ops\n\nHost:  N/A\n";
     const IDEA: &str = "# idea: routines could carry state\n\n![sketch](/images/sketch.png)\n";
     const TODAY_NOTE: &str =
         "# Today\n\n## Journal\n\n## Day planner\n\n- [ ] 09:00 - 09:30 Standup\n\n## Personal\n";
@@ -4071,7 +4567,7 @@ mod tests {
         select(&mut setup, "Call Ana");
         draw(&mut setup);
         setup.view.read_with(&setup.cx, |view, cx| {
-            let (_, markdown) = view.markdown.as_ref().unwrap();
+            let markdown = view.reader_note.markdown.get(&(0, 0)).unwrap();
             assert_eq!(markdown.read(cx).source().as_ref(), "");
         });
     }
@@ -4271,6 +4767,236 @@ mod tests {
                 "{width}: {space:?} inside {someday:?}"
             );
         }
+    }
+
+    #[gpui::test]
+    async fn a_button_keeps_its_name_clear_of_its_keys(cx: &mut TestAppContext) {
+        let mut setup = setup(
+            cx,
+            Options {
+                grant: true,
+                cached: vec![(SHIP_IT, "someday", 0.91)],
+                ..Options::default()
+            },
+        )
+        .await;
+        select(&mut setup, "Ship it — a practical guide");
+        for width in [1600., 1000.] {
+            setup.cx.simulate_resize(gpui::size(px(width), px(900.)));
+            setup.cx.run_until_parked();
+            let label = drawn(&mut setup, "INBOX_LABEL-someday");
+            let space = drawn(&mut setup, "KEY_BINDING-space");
+            let keys = drawn(&mut setup, "INBOX_KEYS-someday");
+            let meter = drawn(&mut setup, "INBOX_PROBABILITY-someday");
+            let button = drawn(&mut setup, "INBOX_BAR-someday");
+            assert!(
+                space.top() >= label.bottom(),
+                "{width}: {space:?} below {label:?}"
+            );
+            assert!(
+                keys.right() <= meter.left(),
+                "{width}: {meter:?} clear of {keys:?}"
+            );
+            assert!(
+                space.bottom() <= button.bottom() && meter.bottom() <= button.bottom(),
+                "{width}: {space:?} and {meter:?} inside {button:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn the_destination_bar_wraps_rather_than_squeeze_a_button(cx: &mut TestAppContext) {
+        let mut setup = setup(
+            cx,
+            Options {
+                grant: true,
+                cached: vec![(SHIP_IT, "someday", 0.91)],
+                ..Options::default()
+            },
+        )
+        .await;
+        select(&mut setup, "Ship it — a practical guide");
+        for width in [1000., 700.] {
+            setup.cx.simulate_resize(gpui::size(px(width), px(900.)));
+            setup.cx.run_until_parked();
+            for selector in [
+                "INBOX_BAR-today",
+                "INBOX_BAR-soon",
+                "INBOX_BAR-someday",
+                "INBOX_BAR-archive",
+            ] {
+                let button = drawn(&mut setup, selector);
+                assert!(
+                    button.size.width >= DESTINATION_MIN_WIDTH,
+                    "{width}: {selector} {button:?}"
+                );
+                assert!(
+                    button.right() <= px(width),
+                    "{width}: {selector} {button:?}"
+                );
+            }
+            let undo = drawn(&mut setup, "INBOX_BAR-undo");
+            assert!(undo.right() <= px(width), "{width}: {undo:?}");
+        }
+    }
+
+    #[gpui::test]
+    async fn the_inbox_takes_the_room_between_the_docks(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        setup.cx.simulate_resize(gpui::size(px(1600.), px(900.)));
+        let column = px(700.);
+        setup.workspace.update(&mut setup.cx, |workspace, cx| {
+            workspace.centered_layout = true;
+            workspace.set_center_anchor(
+                Some(workspace::CenterAnchor {
+                    column,
+                    min_column: px(500.),
+                    thread: None,
+                    left: workspace::TideSide::default(),
+                    right: workspace::TideSide::default(),
+                }),
+                cx,
+            );
+        });
+        setup.cx.run_until_parked();
+        setup.cx.update(|window, _| window.refresh());
+        setup.cx.run_until_parked();
+        let layout = setup
+            .workspace
+            .read_with(&setup.cx, |workspace, _| workspace.anchor_layout())
+            .expect("the page is anchored");
+        assert!(layout.column > px(1500.), "{layout:?}");
+    }
+
+    async fn setup_with_ticket(cx: &mut TestAppContext) -> Setup {
+        let mut setup = setup(cx, Options::default()).await;
+        setup
+            .fs
+            .insert_tree(
+                setup._vault_dir.path().join("inbox"),
+                json!({ "2026-10-09-1930-ticket-42.md": TICKET }),
+            )
+            .await;
+        setup.cx.run_until_parked();
+        select(&mut setup, "Ticket 42");
+        setup
+    }
+
+    #[gpui::test]
+    async fn a_thread_reads_as_a_card_per_message(cx: &mut TestAppContext) {
+        let mut setup = setup_with_ticket(cx).await;
+        let first = drawn(&mut setup, "INBOX_MESSAGE-0");
+        let second = drawn(&mut setup, "INBOX_MESSAGE-1");
+        assert!(second.top() >= first.bottom(), "{first:?} then {second:?}");
+        setup.view.read_with(&setup.cx, |view, _| {
+            let thread = view.reader_note.thread.as_ref().unwrap();
+            assert_eq!(thread.messages[1].author.as_deref(), Some("jlopes"));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_cut_subject_reads_whole_in_the_reader_and_stays_cut_in_the_note(
+        cx: &mut TestAppContext,
+    ) {
+        const CUT: &str = "---\nsource:   gmail\ncapture:  c3c3c3c3c3c3\ncaptured: 2026-10-09T19:40:00Z\ntitle:    HD 7: Backups not restarted when t...\nfrom:     helpdesk@example.com\n---\n\n# HD 7: Backups not restarted when t...\n\nTicket 7:Backups not restarted when the disk is full | FS-1\n";
+        let mut setup = setup(cx, Options::default()).await;
+        setup
+            .fs
+            .insert_tree(
+                setup._vault_dir.path().join("inbox"),
+                json!({ "2026-10-09-1940-hd-7.md": CUT }),
+            )
+            .await;
+        setup.cx.run_until_parked();
+        select(&mut setup, "HD 7: Backups not restarted when t...");
+        draw(&mut setup);
+        setup.view.read_with(&setup.cx, |view, _| {
+            assert_eq!(
+                view.reader_note.title.as_deref(),
+                Some("HD 7: Backups not restarted when the disk is full | FS-1")
+            );
+        });
+        assert_eq!(
+            load(&setup, "inbox/2026-10-09-1940-hd-7.md")
+                .await
+                .as_deref(),
+            Some(CUT)
+        );
+    }
+
+    #[gpui::test]
+    async fn only_an_email_reads_as_a_thread(cx: &mut TestAppContext) {
+        let mut setup = setup(cx, Options::default()).await;
+        select(&mut setup, "Call Ana");
+        draw(&mut setup);
+        setup.view.read_with(&setup.cx, |view, _| {
+            assert!(view.reader_note.thread.is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn n_jumps_between_messages_from_the_list(cx: &mut TestAppContext) {
+        let mut setup = setup_with_ticket(cx).await;
+        setup.cx.simulate_resize(gpui::size(px(1200.), px(420.)));
+        setup.cx.run_until_parked();
+        let offset = |setup: &Setup| {
+            setup
+                .view
+                .read_with(&setup.cx, |view, _| view.reader_scroll.offset().y)
+        };
+        draw(&mut setup);
+        assert_eq!(offset(&setup), px(0.));
+        setup.cx.simulate_keystrokes("n");
+        draw(&mut setup);
+        assert!(offset(&setup) < px(0.), "scrolled to the second message");
+        assert_eq!(selected(&setup).as_deref(), Some("Ticket 42"));
+        setup.cx.simulate_keystrokes("shift-n");
+        draw(&mut setup);
+        assert_eq!(offset(&setup), px(0.));
+    }
+
+    #[gpui::test]
+    async fn z_shows_what_the_email_folded_and_the_next_note_starts_folded(
+        cx: &mut TestAppContext,
+    ) {
+        let mut setup = setup_with_ticket(cx).await;
+        // The repeated comment of the second message, then its fields.
+        let folded_comment = (1, 1);
+        let has_comment = |setup: &Setup| {
+            setup.view.read_with(&setup.cx, |view, _| {
+                view.reader_note.markdown.contains_key(&folded_comment)
+            })
+        };
+        drawn(&mut setup, "INBOX_FOLD-1-1");
+        assert!(!has_comment(&setup));
+
+        setup.cx.simulate_keystrokes("z");
+        draw(&mut setup);
+        assert!(has_comment(&setup));
+
+        setup.cx.simulate_keystrokes("z");
+        draw(&mut setup);
+        setup
+            .view
+            .read_with(&setup.cx, |view, _| assert!(!view.reader_note.folds_open));
+
+        setup.cx.simulate_keystrokes("z");
+        select(&mut setup, "Re: Q4 planning doc");
+        draw(&mut setup);
+        setup
+            .view
+            .read_with(&setup.cx, |view, _| assert!(!view.reader_note.folds_open));
+    }
+
+    #[gpui::test]
+    async fn the_filter_box_keeps_the_message_keys(cx: &mut TestAppContext) {
+        let mut setup = setup_with_ticket(cx).await;
+        setup.cx.simulate_keystrokes("/ z n");
+        setup.cx.run_until_parked();
+        setup.view.read_with(&setup.cx, |view, cx| {
+            assert_eq!(view.filter_editor.read(cx).text(cx), "zn");
+            assert!(!view.reader_note.folds_open);
+        });
     }
 
     #[test]

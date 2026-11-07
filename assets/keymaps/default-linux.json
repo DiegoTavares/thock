@@ -1016,6 +1016,15 @@
     },
   },
   {
+    "context": "ThockInboxView && !filtering",
+    "use_key_equivalents": true,
+    "bindings": {
+      "n": "thock::NextInboxMessage",
+      "shift-n": "thock::PreviousInboxMessage",
+      "z": "thock::ToggleInboxFolds",
+    },
+  },
+  {
     "context": "ThockInboxView && !filtering && !reader",
     "use_key_equivalents": true,
     "bindings": {

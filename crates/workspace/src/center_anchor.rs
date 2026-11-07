@@ -372,6 +372,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_page_asking_for_the_whole_row_fills_between_the_docks() {
+        let layout = anchor(AnchorInput {
+            column: px(1920.),
+            ..input(1920., open(240.), open(340.))
+        });
+        assert_eq!(layout.left_padding, ANCHOR_GAP);
+        assert_eq!(layout.right_padding, ANCHOR_GAP);
+        assert_eq!(layout.column, px(1920. - 240. - 340.) - ANCHOR_GAP * 2.);
+    }
+
     fn row(window: f32, left: AnchorSide, right: AnchorSide, thread: bool) -> AnchorLayout {
         anchor(AnchorInput {
             thread: thread.then_some(MESSAGES),

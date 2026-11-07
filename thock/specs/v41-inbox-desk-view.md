@@ -2,7 +2,9 @@
 
 **Status:** Implemented (2026-10-10); the Jev request is exercised against a fake endpoint in tests
 and awaits its first run against OpenRouter from a Plus vault. **Rev 2 (2026-10-11):** §4.2's layout
-is redesigned around a destination bar above the note; implemented (2026-10-11)
+is redesigned around a destination bar above the note; implemented (2026-10-11). **Rev 3
+(2026-11-06):** the view takes the room between the docks, the destination bar stops squeezing its
+buttons, and an email reads as a conversation (§4.4); implemented (2026-11-06)
 **Owner:** Diego · **Date:** 2026-10-10
 **Design reference:** the design notes with the Jev study, the gpui-kit evaluation, the component
 map and the decision cards this spec resolves: <https://claude.ai/artifact/FoeWmrEjqsMiTKvZKCvfBp>.
@@ -100,7 +102,9 @@ set while the filter box has focus and `reader` while the reader has it.
            suggestions on · $0.0001    │
 ```
 
-The view is two panes split by a draggable handle, and each pane has a header row of the same
+The view takes all the room between the docks rather than the page's measure (`Item::fills_center`;
+V54 decision 13 keeps the measure for every other item). It is two panes split by a draggable
+handle, and each pane has a header row of the same
 height, so the split line, the two headers and the two edges read as one grid. There is no
 view-wide header or bottom bar: everything sits in the pane it describes. What the selected note
 is, where it can go and how likely each place is all live in the reader, in the line of sight of
@@ -141,23 +145,25 @@ fixed order — **Today**, **Soon**, **Someday**, **Archive** — so a key's pla
 notes. Each button holds its keycap, its label, the suggestion's probability for it and a thin bar
 drawing that probability, so the stats and the action are one object. The suggested destination
 is drawn in the accent colour (filled or outlined by tier, §7.4) and also carries the `space`
-keycap, written `space or s`, so the two keys do not read as one chord. After a divider, **Open**
+keycap, written `space or s`, so the two keys do not read as one chord. After them, **Open**
 and **Undo** as quieter buttons sized to their content. `space` only ever takes a suggestion: with
 none, it does nothing and its keycap is on no button, since opening the note is `o`'s job. Without
 a suggestion, or with suggestions off, the four buttons show no percentages and no bars. Keycaps are
 `ui::KeyBinding::for_action_in`, so a rebinding shows up without a code change. The buttons are
-clickable and dispatch the same actions. The bar is always one row: the four destinations share
-what Open and Undo leave equally and shrink with the reader, a side panel opening included. Each
-destination button has two lines — its keycaps and label, then its probability bar with the
-percentage at its end — so it stays narrow. Keycaps and the percentage keep their size; when a
-button is narrow only the label truncates.
+clickable and dispatch the same actions. The four destinations share what Open and Undo leave
+equally, down to a minimum that holds `space or shift-s`. Below that nothing shrinks: Open and Undo
+wrap under the destinations, then the destinations wrap two by two. Each destination button has two
+lines — its label and percentage, then its keycaps with the probability meter at the line's end,
+under the percentage. The keycaps grow with the suggestion, so they never share a line with the
+label, and no part of a button truncates. The meter is 64px on every button, so the four compare at
+a glance, and gives way only where the keycaps need the room.
 
 **Reader.** The note's title, the destination bar, a rule, then the body rendered with
 `markdown::MarkdownElement` and `MarkdownStyle::themed`, as the chat panel renders the agent's
-replies. Frontmatter is not shown; its fields are the reader header. A first heading that repeats the title is not
+replies; an email reads as §4.4 describes. Frontmatter is not shown; its fields are the reader header. A first heading that repeats the title is not
 shown either, since the title already sits above the bar. Image lines resolve by V39
-§4's rule before rendering so `![alt](/images/x.png)` draws the vault's picture. The body stops at
-680px per line and scrolls under the title and bar. The reader is read-only. The keys sheet
+§4's rule before rendering so `![alt](/images/x.png)` draws the vault's picture. The title, the bar
+and the body stop at 960px and the body scrolls under the title and bar. The reader is read-only. The keys sheet
 replaces the reader while it is open. The split is draggable (§9) and remembered per vault in
 `.thock/state/inbox/layout.json` (`{"list_width": 0.32}`), defaulting to 32% of the pane.
 
@@ -173,7 +179,7 @@ edge or the split.
 | Pane headers | 52px tall | 20px sides in the list, 40px in the reader |
 | List rows | 60px tall, radius 8 | 12px left, 16px right, 4px title to meta |
 | List footer | 36px tall | 20px sides |
-| Destination buttons | 56px tall, radius 8, equal shares of the row | 8px between, 10px inside |
+| Destination buttons | 56px tall, radius 8, equal shares of the row, at least 136px wide | 8px between, 10px inside |
 | Open, Undo | 56px tall, radius 8, sized to content | 12px inside |
 | Reader | | 28px top, 40px sides, 18px title to bar |
 
@@ -181,7 +187,8 @@ edge or the split.
 | --- | --- |
 | Reader title | `HeadlineSize::XLarge`, semibold |
 | View title *Inbox* | `LabelSize::Large`, semibold |
-| Reader body | 15px, line height 1.65, at most 680px wide |
+| Reader body | 15px, line height 1.65, at most 960px wide |
+| Email body | 14px, line height 1.5 |
 | Row title, button labels, section counts | `LabelSize::Default` |
 | Meta lines, hints, stats, percentages | `LabelSize::Small`, muted |
 | Keycaps | `ui::KeyBinding`, one size everywhere |
@@ -193,6 +200,56 @@ row gets a 14px check column inside its left padding, with the check on the mark
 check has room around it and all titles shift together and stay aligned. While any row is marked, the four verbs apply to every marked row in list order, and
 `space` applies each row's own suggestion (rows without one are skipped and stay marked). Marks
 clear when the list refreshes from disk. `escape` clears marks before it leaves the view.
+
+### 4.4 An email reads as a conversation
+
+A note with `source: gmail` is read by `inbox_email::parse_thread`, a pure function of the body. It
+decides what the reader shows and nothing else: the file keeps every byte, and `o` opens it whole.
+Every other note renders as one Markdown body.
+
+**Title.** Ticketing systems cut long subjects (`HD 42: Backups not restarted when t...`) and keep the
+whole one in the body. When a subject ends in `...` and a line of the body continues it, the reader
+title shows it whole, keeping the subject's own prefix. The list and the note keep the subject as
+captured.
+
+**Messages.** `thread_sections` writes each message under `## <from> — <YYYY-MM-DD HH:MM>`. The date
+is what tells a message from a heading inside an email, so `## Summary` stays in its message.
+Anything above the first message (the person's own note) renders above the cards. A note with no
+such heading is one message, and a lone message draws its blocks without a card, since the reader
+header already names the sender.
+
+**Cards.** Each message of a thread is a card headed by a badge with the sender's initials, their
+name and address, the time, and `2 of 7`. The badge, the header's tint and a stripe down the card's
+edge take the sender's colour from the theme's player colours, in order of first appearance, so one
+person keeps one colour through the thread. The reader header adds `7 messages`.
+
+**The real author.** Ticketing systems send every reply from one address and name the writer in the
+body: `Comment #2 (by ana on 03/02/26 10:25am):`. When the sender is a bare address and the
+message's new text has such a line, the card is headed by that person, with `via <address>` beside
+it. A sender with a display name is a person, and stays the author whatever they quote.
+
+**What folds.** Each fold is one muted row saying what it holds. `z` opens or closes every fold of
+the note, a click does the same, and the next note starts folded.
+
+| Fold | Row reads | What goes in it |
+| --- | --- | --- |
+| Repeated | *Earlier in the thread · 19 lines* | Paragraphs whose every line an earlier message already had, in a run of at least 3 lines. A shorter run stays, so a closing *Thanks,* isn't folded, except an opening one: a reply's repeated subject line joins the message's first fold. |
+| Quoted | *Quoted reply · 12 lines* | The trailing `>` run with its `On … wrote:` line, or everything from `-----Original Message-----` or a `From:` / `Sent:` pair. A `>` run with the sender's words after it is an inline reply and stays. |
+| Signature | *Signature* | From a `-- ` line after a blank line. |
+
+The dogfood inbox's seven threads held 1,518 lines, of which 519 stay on screen. A helpdesk reply
+that resends a ticket falls from 88 lines to its comment and the one field that changed.
+
+**Fields.** A run of at least 3 `Key: value` lines with distinct keys is a record, drawn as a grid
+with as many columns as the reader has room for. A later message shows only what it introduced or
+changed, the old value under the new one as *was OPEN*, and folds the rest as *18 fields unchanged*.
+A value with a web link opens it on click.
+
+**Links.** A bare link longer than 60 characters or wrapped by URL Defense is named by its address
+(`github.com/acme/repo/pull/36`), outside code fences. It still opens the link that was sent.
+
+Message headings and `(by …)` lines come from the email's own text, so a sender can shape them. A
+card names who the note says wrote it; the reader header's `from:` and *Open in Gmail* are the check.
 
 ## 5. Keys and focus
 
@@ -214,13 +271,16 @@ footer's hints, the row menu and the keys sheet render from the bindings.
 | `r` | `thock::SuggestInboxDestinations` | Re-asks for the selected (or marked) items; with none selected, for every row without a suggestion |
 | `/` | `thock::FilterInbox` | Focuses the filter box; narrows by title, sender, source; `escape` clears and returns |
 | `tab` | `thock::FocusInboxReader` | Moves focus to the reader, where `j`/`k`/`ctrl-d`/`ctrl-u` scroll; `tab` or `escape` returns |
+| `n` `shift-n` | `thock::NextInboxMessage`, `thock::PreviousInboxMessage` | Jumps the reader to the next or previous message, from the list or the reader |
+| `z` | `thock::ToggleInboxFolds` | Opens or closes the note's folds (§4.4), from the list or the reader |
 | `.` | `thock::ShowInboxItemMenu` | The row menu: the verbs above with their bindings; also right-click |
 | `?` | `thock::ShowInboxKeys` | The keys sheet over the reader; any key closes it |
 | `shift-r` | `thock::TriageInbox` | Hands what is left to the ritual (unchanged action) |
 | `escape` | `menu::Cancel` | Clears marks or the filter; otherwise returns to the previous item |
 
 Bindings go in the Thock blocks of `assets/keymaps/default-linux.json` and `default-macos.json`
-under `ThockInboxView`, `ThockInboxView && !filtering && !reader` and `ThockInboxView && reader`,
+under `ThockInboxView`, `ThockInboxView && !filtering`, `ThockInboxView && !filtering && !reader`
+and `ThockInboxView && reader`,
 and the vim letters in `assets/keymaps/vim.json` under `ThockInboxView && !filtering`, mirroring
 the Backlog panel's blocks. `ctrl-alt-i` joins the global Thock toggles.
 
