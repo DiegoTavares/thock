@@ -83,8 +83,9 @@ stand-in for an average character. `measure` defaults to **80**, `min_measure` t
 Soft wrap stays `editor_width` (V43 §7.1). The editor *is* the column, so it wraps at the page's
 width.
 
-For a non-note item in the centre (the Inbox view, settings JSON, an image) the column is the same
-width (decision 13).
+For a non-note item in the centre (settings JSON, an image) the column is the same width (decision
+13). The Inbox view is the exception: an item whose `fills_center` is true takes all the room between
+the docks.
 
 The page has no header row and no lines at its sides (decision 20). Breadcrumbs are off by default,
 since the title bar already names the note, so the toolbar is left with only its buttons (preview,
@@ -440,8 +441,9 @@ None.
     page.
 12. **One `measure` for every body font.** A monospace body font gets a wider column, since the
     page is measured in characters.
-13. **Same measure everywhere:** the Inbox view, settings and any other single item use the page's
-    column too.
+13. **Same measure everywhere:** settings and any other single item use the page's column too. The
+    Inbox view doesn't (V41 Rev 3): it is two panes, not a page, and the measure left its reader
+    about a third of the window.
 14. **Centred layout is on by default** for a vault: the first time its workspace opens, Thock
     saves "on" as the workspace's own `centered_layout`, so every later launch restores it before
     the first frame and a later toggle wins. The anchored page is the normal state and the
