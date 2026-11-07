@@ -1067,7 +1067,7 @@
       "n": "thock::NextInboxMessage",
       "shift-n": "thock::PreviousInboxMessage",
       "z": "thock::ToggleInboxFolds",
-      "l": "thock::OpenInboxLink",
+      "b": "thock::OpenInboxLink",
     },
   },
   {

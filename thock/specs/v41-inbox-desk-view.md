@@ -9,7 +9,9 @@ design review on that PR moved Open and Undo to the reader header, opened thread
 message and folded field tables (§4.2, §4.4), then gave the Inbox one keycap look, neutral cards,
 a fixed title block and a quiet suggestion (§4.2, §4.4, §7.4), and one fold row per card, one-line
 changed fields and a key for the header's link (§4.2, §4.4, §5), then put the reader on one right
-edge and opened a relayed card on the person's own words (§4.2, §4.4).
+edge and opened a relayed card on the person's own words (§4.2, §4.4), then moved the link to `b`,
+gave every email a card, quieted the fields and the fold rows, and made the filter say what's live
+(§4.2, §4.3, §4.4, §5).
 **Owner:** Diego · **Date:** 2026-10-10
 **Design reference:** the design notes with the Jev study, the gpui-kit evaluation, the component
 map and the decision cards this spec resolves: <https://claude.ai/artifact/FoeWmrEjqsMiTKvZKCvfBp>.
@@ -87,7 +89,7 @@ set while the filter box has focus and `reader` while the reader has it.
 ### 4.2 Two panes
 
 ```
- Inbox  [New 4] Carried over 2       ⌕ │ ✉ Jordan Reyes · Oct 11 10:48  [o] Open  [u] Undo  Open in Gmail ↗
+ Inbox  [New 4] Carried over 2       ⌕ │ Jordan Reyes · Oct 11 10:48  [o] Open  [u] Undo  [b] Open in Gmail ↗
 ───────────────────────────────────────┼────────────────────────────────────────────────────────────
  ╭───────────────────────────────────╮ │
  │ Renew the studio VPN certificate  │ │ Add a priority flag for lighting jobs
@@ -118,12 +120,16 @@ the note itself.
 **List header.** *Inbox* as the view's title, then the two sections as counts — **New 4** and
 **Carried over 2** — with the section that holds the selection highlighted, then the filter button
 (`/`). While filtering, the filter box takes a line of its own at the top of the list, inset in the
-pane so it keeps all four edges, with `6 matches` and the `esc` keycap inside it; the match count leaves when one section's count
-already says it. Clicking a section scrolls to it; the counts are not filters. A section with no
-rows hides its count, and a section alone is a plain count rather than a button.
+pane so it keeps all four edges, with typed text on the row titles' left edge. The header's counts
+give way to what the filter let through, `6 of 8`. The `esc` keycap sits in the box only once focus
+has left it, since the footer says so until then. Clicking a section scrolls to it; the counts are
+not filters. A section with no rows hides its count, and a section alone is a plain count rather
+than a button.
 
 **List.** The title on up to two lines, cut only by the row's width: a subject the sender's system
-shortened reads whole, as in the reader (§4.4). Then a muted meta line: the sender, or the source when
+shortened reads whole, as in the reader (§4.4). Short of room for that, a trailing `| FS-596203`
+leaves the row before the words lose a character, since the words tell one row from the next and the
+reader title keeps the number. Then a muted meta line: the sender, or the source when
 there is none, with a bare address cut to the part before the `@`. A title that opens with a ticket
 number (`HD 520596: …`, `INC-42: …`) shows the number there instead of the sender, and only the
 subject in the title's two lines; this is the row's display alone, and the note keeps its subject.
@@ -152,19 +158,22 @@ with Thock Plus* there instead, dismissible. A hint is drawn whole or not at all
 narrows the stats leave first, then filter, then mark, and `? keys` stays whatever the width, at the
 footer's right end, where a click also opens the sheet. An empty list shows only `? keys`. While the reader has focus
 the footer shows the reader's keys instead — scroll, next, folds — and `tab list` takes `?`'s place.
+While the filter box has focus it shows what still acts there: the arrows move through the rows,
+`enter list` takes the narrowed list to decide on, and `esc close` takes `?`'s place.
 The destination bar's and the header's keycaps stay on screen, dimmed, with the `or` between them:
 they are the list's keys, and they answer again once focus is back there. They dim the same way
-while the filter box has focus, the footer's hints whole, words included.
+while the filter box has focus.
 
 **Reader header.** The meta line for the selected note, at the list header's height, on the reader's
-column: a source glyph, the sender's name, when it was captured and its due date when it has one.
+column: the sender's name, an evenly spaced dot, when it was captured and its due date when it has
+one. There's no source glyph at any width.
 The date never truncates. The pane's width decides the rest, so the sender keeps about 16
 characters: from 44rem the sender's address or a bare address's domain joins the name, and under
-35.5rem the glyph goes and the link takes its short name. The whole `from:` is the sender's tooltip.
+35.5rem the link takes its short name. The whole `from:` is the sender's tooltip.
 On the right, ending on the column's right edge, **Open note** and **Undo** as quiet buttons with their keycaps, then the link with its
 keycap, as words — *Open in Gmail ↗*, *Open link ↗*, or *Gmail ↗*, *Link ↗* — never the raw URL. All three are
 in the header's neutral colour, so amber belongs to the decision. A hint whose key is off dims as one
-unit, keycap and words, and stays clickable: `o` and `u` while the reader or filter has focus, `l`
+unit, keycap and words, and stays clickable: `o` and `u` while the reader or filter has focus, `b`
 only in the filter, since it works in the reader. The keys sheet is `?`, from the footer.
 
 **Destination bar.** Under the note's title and above its body, one button per destination in a
@@ -191,19 +200,25 @@ suggested button's outline dims with them.
 bar, the destination bar, a rule, then the body rendered with
 `markdown::MarkdownElement` and `MarkdownStyle::themed`, as the chat panel renders the agent's
 replies; an email reads as §4.4 describes. Frontmatter is not shown; its fields are the reader header. A first heading that repeats the title is not
-shown either, since the title already sits above the bar. Image lines resolve by V39
+shown either, since the title already sits above the bar. A title too long for its block keeps a
+trailing `| FS-596203` whole at the end of its last line, and the words are cut instead. Image lines resolve by V39
 §4's rule before rendering so `![alt](/images/x.png)` draws the vault's picture. The title, the bar
 and the body stop at 960px and the body scrolls under the title and bar, so the four targets never
-move between notes. While the reader is scrolled a solid `↑ 3 earlier messages` line with
+move between notes. The reader's rules start at the pane's edge and end on the column. While the reader is scrolled a solid `↑ 3 earlier messages` line with
 the `shift-n` keycap holds the top of the scroll area; a click on it goes back to the top. It counts
 every card whose header is above its bottom edge, from the finished frame, so the count follows open
-folds, and with none above it isn't drawn.
+folds, and with none above it isn't drawn. A note's folded text is parsed with the note, so `z` opens
+on text that already has its height and the landing and the count don't lag it.
 The slot above the bar names what the bar shows: *Suggested: Soon* at 0.5 and above, *Leaning Someday* below
 that, and nothing for a tie or no answer. Marks take it over (§4.3). With no note selected, which
-only an empty list leaves, the reader says a quiet, centred *All clear*, or nothing when a filter emptied the list, and **Undo**
+only an empty list leaves, the reader says a quiet, centred *All clear* and where captures come from,
+the one message on screen, with no rule under the headers; when a filter emptied the list it says
+nothing, and the list says why. **Undo**
 stays in the header while a last decision exists. The reader is read-only. The keys sheet
-replaces the reader while it is open, its descriptions close to their keys and Decide, Move and Read
-side by side where the width allows, wrapping under each other where it doesn't. While it has focus a 3px rail runs down the reader's left
+replaces the reader while it is open: two columns, Decide beside Move with Read under it, wrapping
+under each other where the width doesn't allow. Each entry starts with a verb and holds one line at
+MacBook width, the key column as wide as the widest key, and a line under them says what `→ Soon` on
+a row means. It is where `z`'s reach across every fold is said. While the reader has focus a 3px rail runs down the reader's left
 edge, drawn over the pane so nothing moves. The split is draggable (§9) and remembered per vault in
 `.thock/state/inbox/layout.json` (`{"list_width": 0.32}`), defaulting to 32% of the pane.
 
@@ -220,7 +235,7 @@ edge or the split.
 | List rows | 76px slot, a 72px band, radius 8 | 12px left, 16px right, 2px title to meta, 4px between bands |
 | List footer | 36px tall | 20px sides |
 | Destination buttons | 60px tall, radius 8, equal shares of the row, at least 136px wide | 8px between, 10px inside |
-| Reader | | 20px top, 40px sides, 18px marks slot 4px from title and bar, 12px bar to rule |
+| Reader | | 20px top, 40px sides, a 1.25rem caption slot 5px above the bar (taken from the title block, so the bar stays put), 12px bar to rule |
 
 | Text | Style |
 | --- | --- |
@@ -230,13 +245,13 @@ edge or the split.
 | Email body | 14px, line height 1.5 |
 | Row title, button labels, section counts | `LabelSize::Default` |
 | Meta lines, hints, stats, percentages | `LabelSize::Small`, muted |
-| Keycaps | `ui::KeyBinding` in a bordered frame, in the buffer font so `l` isn't read as `I` or a pipe, one look and size in the header, bar, folds, footer and keys sheet |
+| Keycaps | `ui::KeyBinding` in a bordered frame, in the interface font, one look and size in the header, bar, folds, footer and keys sheet |
 
 ### 4.3 Marks
 
 `x` marks the selected row. A marked row carries a filled check wholly inside the row's left padding, level with
 the title's first line, so marking costs no title any width; fill stays the selection's. While any row is
-marked the reader says so above the bar, in the slot kept for it and nowhere else, `3 marked · decisions apply to all · percentages are this row's`, and the four verbs apply to every marked row in list order, and
+marked the reader says so above the bar, in the slot kept for it and nowhere else, `3 marked · decisions apply to all`, neutral with only the count in accent, and the four verbs apply to every marked row in list order, and
 `space` applies each row's own suggestion (rows without one are skipped and stay marked). Marks
 clear when the list refreshes from disk. `escape` clears marks before it leaves the view.
 
@@ -254,12 +269,13 @@ captured.
 **Messages.** `thread_sections` writes each message under `## <from> — <YYYY-MM-DD HH:MM>`. The date
 is what tells a message from a heading inside an email, so `## Summary` stays in its message.
 Anything above the first message (the person's own note) renders above the cards. A note with no
-such heading is one message, and a lone message draws its blocks without a card, since the reader
-header already names the sender.
+such heading is one message, on the same card as any other, without `1 of 1`.
 
 **Cards.** Each message of a thread is a card headed by a badge with the sender's initials, their
-name and address, the time, and `2 of 7`. Card and header are neutral, so collapsed rows stay behind
-the open message; only the badge takes the sender's colour, in order of first appearance, so one
+name and address, the time, and `2 of 7`, then on a collapsed card a quiet chevron that says it opens.
+Card and header are neutral, so collapsed rows stay behind the open message. In Thock Light cards and
+tiles stand one step deeper than the theme's element ground (the theme's hover), with the stronger
+border and meter tracks, and the filled tile's accent label is darkened to hold 4.5:1; only the badge takes the sender's colour, in order of first appearance, so one
 person keeps one colour through the thread. The colours are the Inbox's own six hues, the same in
 both themes at a lightness to suit each, and none is a red, which would read as an error.
 
@@ -280,21 +296,22 @@ message's new text has such a line, the card is headed by that person, with `via
 it unless the reader header already names that address. A sender with a display name is a person, and stays the author whatever they quote.
 
 **System lines.** A relayed message opens on what the person wrote. All that precedes the `(by …)`
-line (a survey, the ticket restated) and any line restating the subject go into the card's fold. The
-`(by …)` line itself, with a label set on the line above it (`Description`), isn't drawn on a card,
-since the card's header gives the author and date; a lone message has no card and keeps it. A
+line (a survey, the ticket restated), any line restating the subject and a note of where the ticket
+was imported from, with its link (`This ticket was imported from Freshservice:`), go into the card's
+fold. The `(by …)` line itself, with a label set on the line above it (`Description`), isn't drawn,
+since the card's header gives the author. A
 ticket's note of its own edit (`Changing Status to CLOSED`) isn't drawn when a changed field on
-screen says the same. Otherwise it and a lone message's `(by …)` line are drawn a step smaller,
-tighter and muted. In Thock Light the muted colour is eased a little further
+screen says the same. Otherwise it is drawn a step smaller, tighter and muted. In Thock Light the muted colour is eased a little further
 from the text, staying at 4.5:1. This too is the reading alone, the file doesn't change, and a
 collapsed card's snippet skips these lines.
 
-**What folds.** A card has one fold row, the last thing in it, under the changed fields. It reads as
-the action `z` takes, on every fold of the note, then adds up what this card holds (*Show all folds ·
-12 earlier lines and 14 fields here*, then *Hide all folds · …*), its `z` keycap leading the words
-like every other hint. `z` opens or closes every fold and every card of
-the note, each folded stretch opening where it was; a click on the row does the same, and the next
-note starts folded. Open, the row also heads the card, so a long card closes from either end.
+**What folds.** A card has one fold row, the last thing in it, under the changed fields: a chevron,
+the `z` keycap, then what this card holds (*12 earlier lines, 14 fields*). `z` opens or closes every
+fold and every card of the note, each folded stretch opening where it was; a click on the row does
+the same, and the next note starts folded. That reach is the keys sheet's to say, so the row doesn't.
+Open, a short quiet *Hide* with no keycap also heads the card, so a long card closes from either end
+and the control doesn't outweigh a short message. Body text, field labels and the fold row's chevron
+share the card's left edge.
 
 | Fold | The row says | What goes in it |
 | --- | --- | --- |
@@ -307,10 +324,10 @@ The dogfood inbox's seven threads held 1,518 lines, of which 519 stay on screen.
 that resends a ticket falls from 88 lines to its comment and the one field that changed.
 
 **Fields.** A run of at least 3 `Key: value` lines with distinct keys is a record, drawn as a grid
-with as many columns as the reader has room for. A record the thread hasn't seen is reference
-rather than news, so it folds whole as *18 fields* and opens dimmed. A later copy shows
-only what it introduced or changed and folds the rest the same way. A field is one line. Values are
-plain text: accent is for a real link. The old value follows the new one, `Status  CLOSED, was OPEN`,
+with as many columns as the reader has room for, on the card's ground with tight lines. A record the
+thread hasn't seen is reference rather than news, so it folds whole as *18 fields* and opens dimmed. A later copy shows
+only what it introduced or changed and folds the rest the same way. A field is one line. Values keep
+the labels' tone so a one-line reply leads, a changed value a step above it: accent is for a real link. The old value follows the new one, `Status  CLOSED, was OPEN`,
 when that's short enough to help. A comma list and its old value read one way, `sosh, lmiller, neaton`. A value holds its line, a comma list its first three
 items and *+17 more*, until `z` opens it whole, old value included. Values that say nothing (empty, `N/A`, a dash) aren't drawn or counted, unless
 they replaced a real one. A value with a web link opens it on click.
@@ -336,7 +353,7 @@ footer's hints, the row menu and the keys sheet render from the bindings.
 | `shift-s` | `thock::SendInboxItemToSomeday` | Task under **Someday** |
 | `e` | `thock::ArchiveInboxItem` | Out of the inbox, nothing else |
 | `o` `enter` | `thock::OpenInboxItem` (`menu::Confirm`) | The note in the editor |
-| `l` | `thock::OpenInboxLink` | Opens the note's link in the browser, from the list or the reader; does nothing without a web link |
+| `b` | `thock::OpenInboxLink` | Opens the note's link in the browser, from the list or the reader; does nothing without a web link |
 | `u` | `thock::UndoInboxMove` | Reverses the last decision (§6.2) |
 | `x` | `thock::MarkInboxItem` | Toggles a mark (§4.3) |
 | `r` | `thock::SuggestInboxDestinations` | Re-asks for the selected (or marked) items; with none selected, for every row without a suggestion |
@@ -672,7 +689,8 @@ step four.
   list header's section counts follow the selection and a filter.
 - **Threads:** a thread opens on its newest message with the rest collapsed; `n` and `shift-n` walk
   the messages and bring them into view; a click opens a collapsed card; `z` opens every card; the
-  earlier cue counts the headers above it with the folds open; a landing leaves no sliver; a line
+  earlier cue counts the headers above it with the folds open, and after `z` a card's top stands under
+it and the count is that card's index less one; a landing leaves no sliver; a line
   restating the subject leaves the reading and not the note; a new record folds without its empty
   values, a later one keeps what changed.
 - **Service:** suggestions are requested only while a view is open, only for uncached hashes, at

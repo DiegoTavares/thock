@@ -24,6 +24,10 @@ const MAX_LINK_LENGTH: usize = 60;
 const MIN_TITLE_STEM_LENGTH: usize = 12;
 const MAX_TITLE_LENGTH: usize = 200;
 const MAX_TICKET_QUEUE_LENGTH: usize = 6;
+/// How a ticket says which other system it came from, ahead of a link there.
+const IMPORT_NOTE_PREFIX: &str = "This ticket was imported from ";
+/// The sentence and its link.
+const MAX_IMPORT_NOTE_LINES: usize = 2;
 
 const SECTION_PREFIX: &str = "## ";
 const SECTION_DATE_SEPARATOR: &str = " — ";
@@ -161,13 +165,12 @@ pub fn drop_restated_subject(thread: &mut EmailThread, title: &str) {
 }
 
 /// Tells a relayed message's system text from its person's words, so the
-/// message opens on the words: all that comes before the `(by …)` line and any
-/// line restating `title` fold, the `(by …)` line goes where a card's header
-/// gives it, and a note of the ticket's own edit stays quiet, or goes when a
-/// changed field already says it. This is the reading alone; the note keeps
-/// every line.
+/// message opens on the words: all that comes before the `(by …)` line, any
+/// line restating `title` and a note of where the ticket was imported from
+/// fold, the `(by …)` line goes since the card's header gives it, and a note of
+/// the ticket's own edit stays quiet, or goes when a changed field already says
+/// it. This is the reading alone; the note keeps every line.
 pub fn quiet_system_lines(thread: &mut EmailThread, title: &str) {
-    let carded = thread.messages.len() > 1;
     for message in &mut thread.messages {
         if message.author.is_none() {
             continue;
@@ -181,7 +184,6 @@ pub fn quiet_system_lines(thread: &mut EmailThread, title: &str) {
                 EmailBlock::Text(text) if !text.lines().any(is_fence) => split_system_text(
                     &text,
                     title,
-                    carded,
                     &shown_fields,
                     &mut before_author,
                     &mut message.blocks,
@@ -208,7 +210,6 @@ fn shown_fields(blocks: &[EmailBlock]) -> Vec<(String, String)> {
 fn split_system_text(
     text: &str,
     title: &str,
-    carded: bool,
     shown_fields: &[(String, String)],
     before_author: &mut bool,
     blocks: &mut Vec<EmailBlock>,
@@ -220,9 +221,8 @@ fn split_system_text(
                 *before_author = false;
                 let by_line = by_line_start(&lines, author_line);
                 push_system_fold(blocks, &lines[..by_line]);
-                // A card's header already gives the author and the date; a
-                // lone message has no card, so its line stays.
-                if !(carded && is_author_line(lines[author_line])) {
+                // The card's header already gives the author and the date.
+                if !is_author_line(lines[author_line]) {
                     let by_line = lines[by_line..=author_line].join("\n");
                     push_block(blocks, EmailBlock::Meta(by_line));
                 }
@@ -231,7 +231,7 @@ fn split_system_text(
                     push_block(blocks, EmailBlock::Text(own.join("\n")));
                 }
             }
-            None if *before_author => push_system_fold(blocks, &lines),
+            None if *before_author || is_import_note(&lines) => push_system_fold(blocks, &lines),
             None if lines.iter().all(|line| is_system_line(line, title)) => {
                 for line in lines {
                     if is_change_line(line) {
@@ -273,6 +273,13 @@ fn push_system_fold(blocks: &mut Vec<EmailBlock>, lines: &[&str]) {
     }
 }
 
+fn is_import_note(lines: &[&str]) -> bool {
+    lines.len() <= MAX_IMPORT_NOTE_LINES
+        && lines
+            .first()
+            .is_some_and(|line| line.trim_start().starts_with(IMPORT_NOTE_PREFIX))
+}
+
 fn is_system_line(line: &str, title: &str) -> bool {
     restates_subject(line, title) || is_change_line(line)
 }
@@ -307,20 +314,35 @@ fn change_is_shown(line: &str, shown_fields: &[(String, String)]) -> bool {
 pub fn ticket_prefix(title: &str) -> Option<(&str, &str)> {
     let (prefix, subject) = title.split_once(": ")?;
     let subject = subject.trim();
-    let is_queue = |word: &str| {
-        (2..=MAX_TICKET_QUEUE_LENGTH).contains(&word.len())
-            && word.chars().all(|character| character.is_ascii_uppercase())
-    };
-    let is_number =
-        |word: &str| !word.is_empty() && word.chars().all(|character| character.is_ascii_digit());
     let is_ticket = match prefix.split_whitespace().collect::<Vec<_>>()[..] {
         [word, number] => (word == "Ticket" || is_queue(word)) && is_number(number),
-        [key] => key
-            .split_once('-')
-            .is_some_and(|(word, number)| is_queue(word) && is_number(number)),
+        [key] => is_ticket_key(key),
         _ => false,
     };
     (is_ticket && !subject.is_empty()).then_some((prefix, subject))
+}
+
+/// Splits `The farm is down | FS-42` into the subject and the id another
+/// system gave it, which a row can do without when it's short of room.
+pub fn trailing_ticket(title: &str) -> Option<(&str, &str)> {
+    let (subject, id) = title.rsplit_once(" | ")?;
+    let subject = subject.trim_end();
+    (is_ticket_key(id.trim()) && !subject.is_empty()).then_some((subject, id.trim()))
+}
+
+fn is_queue(word: &str) -> bool {
+    (2..=MAX_TICKET_QUEUE_LENGTH).contains(&word.len())
+        && word.chars().all(|character| character.is_ascii_uppercase())
+}
+
+fn is_number(word: &str) -> bool {
+    !word.is_empty() && word.chars().all(|character| character.is_ascii_digit())
+}
+
+/// `INC-42`.
+fn is_ticket_key(key: &str) -> bool {
+    key.split_once('-')
+        .is_some_and(|(word, number)| is_queue(word) && is_number(number))
 }
 
 /// The two may name the ticket differently (`Ticket 42:The farm` under
@@ -1186,7 +1208,6 @@ Team:        render-ops
                         .to_string(),
                     lines: 2,
                 },
-                EmailBlock::Meta("Comment #4 (by ana on 11/06/26 08:38am):".to_string()),
                 EmailBlock::Text("Glad the publishes succeeded!".to_string()),
                 EmailBlock::Meta("Changing Status to CLOSED".to_string()),
             ]
@@ -1290,13 +1311,7 @@ Team:        render-ops
              Description\n(by ana on 11/06/26 12:55pm):\nThe farm is down.\n",
             "Anything long enough",
         );
-        assert_eq!(
-            blocks,
-            [
-                EmailBlock::Meta("Description\n(by ana on 11/06/26 12:55pm):".to_string()),
-                EmailBlock::Text("The farm is down.".to_string()),
-            ]
-        );
+        assert_eq!(blocks, [EmailBlock::Text("The farm is down.".to_string())]);
     }
 
     #[test]
@@ -1320,6 +1335,31 @@ Team:        render-ops
             snippet(&thread.messages[0]).as_deref(),
             Some("Glad it worked.")
         );
+    }
+
+    #[test]
+    fn a_trailing_id_leaves_the_subject() {
+        assert_eq!(
+            trailing_ticket("mxfs not working | FS-596203"),
+            Some(("mxfs not working", "FS-596203"))
+        );
+        assert_eq!(trailing_ticket("Pipes | and more"), None);
+        assert_eq!(trailing_ticket("mxfs not working"), None);
+        assert_eq!(trailing_ticket(" | FS-1"), None);
+    }
+
+    #[test]
+    fn an_import_note_folds_and_words_about_imports_stay() {
+        let body = "## helpdesk@example.com — 2026-11-06 09:38\n\nDescription\n(by ana on 03/02/26 10:25am):\n\nThe farm is down.\n\nThis ticket was imported from Freshservice:\nhttps://example.com/tickets/1\n\nThis ticket was imported from a mess, and\nnobody knows how\nor why.";
+        let blocks = quieted(body, "HD 42: The farm stopped taking jobs");
+        assert!(matches!(
+            &blocks[..],
+            [
+                EmailBlock::Text(words),
+                EmailBlock::Fold { kind: FoldKind::System, lines: 2, .. },
+                EmailBlock::Text(rest),
+            ] if words == "The farm is down." && rest.ends_with("or why.")
+        ));
     }
 
     #[test]
