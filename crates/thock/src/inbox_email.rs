@@ -29,6 +29,8 @@ const IMPORT_NOTE_PREFIX: &str = "This ticket was imported from ";
 /// The sentence and its link.
 const MAX_IMPORT_NOTE_LINES: usize = 2;
 
+/// The level the folds' attribution lines take: nothing else in a fold is one.
+const ATTRIBUTION_HEADING: &str = "###### ";
 const SECTION_PREFIX: &str = "## ";
 const SECTION_DATE_SEPARATOR: &str = " — ";
 const SECTION_DATE_FORMAT: &str = "%Y-%m-%d %H:%M";
@@ -192,6 +194,46 @@ pub fn quiet_system_lines(thread: &mut EmailThread, title: &str) {
             }
         }
     }
+}
+
+/// Sets each `Comment #3 (by …)` line in a message's folded text as a heading,
+/// the one thing in a fold that is, so the reader can draw it apart from the
+/// words it introduces. A label on the line above joins it. This is the reading
+/// alone; the note keeps every line.
+pub fn mark_attributions(thread: &mut EmailThread) {
+    for message in &mut thread.messages {
+        for block in &mut message.blocks {
+            if let EmailBlock::Fold { kind, text, .. } = block
+                && *kind != FoldKind::Quoted
+                && !text.lines().any(is_fence)
+            {
+                *text = text
+                    .split("\n\n")
+                    .map(attribution_as_heading)
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+            }
+        }
+    }
+}
+
+fn attribution_as_heading(paragraph: &str) -> String {
+    let lines: Vec<&str> = paragraph.lines().collect();
+    let Some(author_line) = lines.iter().position(|line| is_author_line(line)) else {
+        return paragraph.to_string();
+    };
+    let start = by_line_start(&lines, author_line);
+    let heading = format!(
+        "{ATTRIBUTION_HEADING}{}",
+        lines[start..=author_line].join(" ")
+    );
+    lines[..start]
+        .iter()
+        .copied()
+        .chain([heading.as_str()])
+        .chain(lines[author_line + 1..].iter().copied())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The fields a message keeps on screen, as `(key, value)`.
@@ -967,6 +1009,43 @@ fn compact_links(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folds_attribution_lines_become_its_headings() {
+        let fold = |kind, text: &str| EmailThread {
+            preamble: String::new(),
+            messages: vec![EmailMessage {
+                from: "helpdesk@example.com".to_string(),
+                author: None,
+                sent: None,
+                participant: 0,
+                blocks: vec![EmailBlock::Fold {
+                    kind,
+                    text: text.to_string(),
+                    lines: 1,
+                }],
+            }],
+        };
+        let marked = |kind, text: &str| {
+            let mut thread = fold(kind, text);
+            mark_attributions(&mut thread);
+            match thread.messages.remove(0).blocks.remove(0) {
+                EmailBlock::Fold { text, .. } => text,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            marked(
+                FoldKind::Repeated,
+                "Comment #3 (by bo on 10/15/26 09:38am):\n\nOh I see.\n\nDescription\n(by ana on 10/13/26 05:25pm):\n\nThe farm is down."
+            ),
+            "###### Comment #3 (by bo on 10/15/26 09:38am):\n\nOh I see.\n\n###### Description (by ana on 10/13/26 05:25pm):\n\nThe farm is down."
+        );
+        let quoted = "> Comment #3 (by bo on 10/15/26 09:38am):";
+        assert_eq!(marked(FoldKind::Quoted, quoted), quoted);
+        let prose = "This was fixed (by the team on Friday).";
+        assert_eq!(marked(FoldKind::Repeated, prose), prose);
+    }
 
     fn thread(body: &str) -> EmailThread {
         parse_thread(body, Some("Marta Reis <marta@example.com>"))
