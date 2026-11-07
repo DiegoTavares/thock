@@ -133,6 +133,89 @@ pub fn full_title(title: &str, body: &str) -> Option<String> {
     })
 }
 
+/// Takes a message's opening line off when it only restates `title`: the
+/// reader shows the subject above the bar. This is the reading alone; the note
+/// keeps the line.
+pub fn drop_restated_subject(thread: &mut EmailThread, title: &str) {
+    for message in &mut thread.messages {
+        let Some(EmailBlock::Text(text)) = message.blocks.first_mut() else {
+            continue;
+        };
+        let (first, rest) = text.split_once('\n').unwrap_or((text.as_str(), ""));
+        if !restates_subject(first, title) {
+            continue;
+        }
+        let rest = rest.trim_start().to_string();
+        if rest.is_empty() {
+            message.blocks.remove(0);
+        } else {
+            *text = rest;
+        }
+    }
+}
+
+/// The two may name the ticket differently (`Ticket 42:The farm` under
+/// `HD 42: The farm`), so what comes after the prefix is what's compared.
+fn restates_subject(line: &str, title: &str) -> bool {
+    let subject = |text: &str| {
+        let text = text.split_once(':').map_or(text, |(_, rest)| rest);
+        normalized(text).to_lowercase()
+    };
+    let title = subject(title);
+    title.chars().count() >= MIN_TITLE_STEM_LENGTH && subject(line) == title
+}
+
+/// The line a collapsed message shows: the first of its own words, past the
+/// ticket's `(by …)` line.
+pub fn snippet(message: &EmailMessage) -> Option<String> {
+    message
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            EmailBlock::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .flat_map(|text| text.split("\n\n"))
+        .find(|paragraph| !paragraph.lines().any(|line| parse_author(line).is_some()))
+        .and_then(|paragraph| {
+            paragraph
+                .lines()
+                .map(normalized)
+                .find(|line| !line.is_empty())
+        })
+}
+
+/// A value that says nothing: `N/A`, a dash, or no value at all.
+fn is_empty_value(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty()
+        || ["—", "-", "n/a"]
+            .iter()
+            .any(|empty| value.eq_ignore_ascii_case(empty))
+}
+
+/// How a record reads: what stays on screen and what folds. A record the
+/// thread hasn't seen is reference, not news, so all of it folds; a later copy
+/// keeps what it introduced or changed. Values that say nothing are dropped
+/// from both, unless they replaced a real one.
+pub fn split_fields<'a>(
+    shown: &'a [EmailField],
+    unchanged: &'a [EmailField],
+) -> (Vec<&'a EmailField>, Vec<&'a EmailField>) {
+    let says_something = |field: &&EmailField| !is_empty_value(&field.value);
+    let first_sight = unchanged.is_empty() && shown.iter().all(|field| field.previous.is_none());
+    if first_sight {
+        return (Vec::new(), shown.iter().filter(says_something).collect());
+    }
+    (
+        shown
+            .iter()
+            .filter(|field| field.previous.is_some() || says_something(field))
+            .collect(),
+        unchanged.iter().filter(says_something).collect(),
+    )
+}
+
 /// The two letters of a sender's badge: `Marta Reis` → `MR`.
 pub fn initials(name: &str) -> String {
     let name = name.split('@').next().unwrap_or(name);
@@ -1060,6 +1143,89 @@ Team:        render-ops
         ] {
             assert_eq!(full_title(title, body), None, "{title}");
         }
+    }
+
+    #[test]
+    fn a_line_restating_the_subject_leaves_the_reading() {
+        let mut restated = ticket_thread();
+        drop_restated_subject(&mut restated, "HD 42: The render farm is down");
+        assert!(text(&restated.messages[0]).starts_with("Comment #1"));
+
+        let mut unrelated = ticket_thread();
+        drop_restated_subject(&mut unrelated, "HD 42: Something else entirely");
+        assert_eq!(unrelated, ticket_thread());
+    }
+
+    #[test]
+    fn a_short_subject_is_not_taken_for_a_restatement() {
+        let mut short = thread("Done: yes\n\nThe rest of it.");
+        let before = short.clone();
+        drop_restated_subject(&mut short, "Note: yes");
+        assert_eq!(short, before);
+    }
+
+    #[test]
+    fn a_message_that_was_only_the_subject_has_no_text_left() {
+        let mut only = thread("The render farm is down\n");
+        drop_restated_subject(&mut only, "HD 42: The render farm is down");
+        assert!(only.messages[0].blocks.is_empty());
+    }
+
+    #[test]
+    fn a_snippet_skips_the_ticket_line() {
+        let thread = ticket_thread();
+        assert_eq!(
+            snippet(&thread.messages[1]).as_deref(),
+            Some("The print server is down again.")
+        );
+        let empty = EmailMessage {
+            blocks: Vec::new(),
+            ..thread.messages[0].clone()
+        };
+        assert_eq!(snippet(&empty), None);
+    }
+
+    fn field(key: &str, value: &str, previous: Option<&str>) -> EmailField {
+        EmailField {
+            key: key.to_string(),
+            value: value.to_string(),
+            previous: previous.map(str::to_string),
+            link: None,
+        }
+    }
+
+    fn keys(fields: &[&EmailField]) -> Vec<String> {
+        fields.iter().map(|field| field.key.clone()).collect()
+    }
+
+    #[test]
+    fn a_new_record_folds_whole_without_its_empty_values() {
+        let shown = [
+            field("Status", "OPEN", None),
+            field("Host", "N/A", None),
+            field("Logs", "", None),
+            field("Phone", "—", None),
+        ];
+        let (visible, folded) = split_fields(&shown, &[]);
+        assert!(visible.is_empty());
+        assert_eq!(keys(&folded), ["Status"]);
+    }
+
+    #[test]
+    fn a_later_record_keeps_what_changed_on_screen() {
+        let shown = [
+            field("Status", "IN PROGRESS", Some("OPEN")),
+            field("Owner", "N/A", Some("ana")),
+            field("Resolution", "Fixed", None),
+            field("Host", "N/A", None),
+        ];
+        let unchanged = [
+            field("Team", "render-ops", None),
+            field("Phone", "n/a", None),
+        ];
+        let (visible, folded) = split_fields(&shown, &unchanged);
+        assert_eq!(keys(&visible), ["Status", "Owner", "Resolution"]);
+        assert_eq!(keys(&folded), ["Team"]);
     }
 
     #[test]

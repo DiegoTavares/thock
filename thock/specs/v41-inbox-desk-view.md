@@ -4,7 +4,9 @@
 and awaits its first run against OpenRouter from a Plus vault. **Rev 2 (2026-10-11):** §4.2's layout
 is redesigned around a destination bar above the note; implemented (2026-10-11). **Rev 3
 (2026-11-06):** the view takes the room between the docks, the destination bar stops squeezing its
-buttons, and an email reads as a conversation (§4.4); Implemented (2026-11-06): PR #195
+buttons, and an email reads as a conversation (§4.4); Implemented (2026-11-06): PR #195. The
+design review on that PR moved Open and Undo to the reader header, opened threads on their newest
+message and folded field tables (§4.2, §4.4).
 **Owner:** Diego · **Date:** 2026-10-10
 **Design reference:** the design notes with the Jev study, the gpui-kit evaluation, the component
 map and the decision cards this spec resolves: <https://claude.ai/artifact/FoeWmrEjqsMiTKvZKCvfBp>.
@@ -82,24 +84,24 @@ set while the filter box has focus and `reader` while the reader has it.
 ### 4.2 Two panes
 
 ```
- Inbox  [New 4] Carried over 2       ⌕ │ ✉ Jordan Reyes  jordan@…  · Oct 11 10:48  Open in Gmail ↗  ⌨
+ Inbox  [New 4] Carried over 2       ⌕ │ ✉ Jordan Reyes · Oct 11 10:48  o Open  u Undo  Open in Gmail ↗  ⌨
 ───────────────────────────────────────┼────────────────────────────────────────────────────────────
  ╭───────────────────────────────────╮ │
  │ Renew the studio VPN certificate  │ │ Add a priority flag for lighting jobs
- │ Gmail · IT desk · 2h       (Soon) │ │
- ╰───────────────────────────────────╯ │ ┌────────┐┏━━━━━━━━━━┓┌──────────┐┌─────────┐ ┌──────┐┌──────┐
-   Ticket 4821: render nodes ignore…   │ │t Today ││␣ s Soon  ┃│⇧s Someday││e Archive│ │o Open││u Undo│
-   Gmail · Helpdesk · 3h               │ │     1% ││      54% ┃│      22% ││      2% │ └──────┘└──────┘
- ▐ Add a priority flag for lighting… ▌ │ │▏       ││██████▌   ┃│███▍      ││▏        │
- ▐ Gmail · Jordan Reyes · 5h  (Soon) ▌ │ └────────┘┗━━━━━━━━━━┛└──────────┘└─────────┘
-   Investigate inkdrop.app             │ ─────────────────────────────────────────────────────
-   Google Tasks · yesterday   (Today)  │ The retry cap was added to keep render times
-   Carried over ─────────────────────  │ predictable, since these tools already multithread
-   Ideas for thock                     │ well.
-   Phone · 3 days           (Someday)  │
-───────────────────────────────────────┤ My understanding is that the new scheduler …
- ↑↓ move  x mark  / filter  ? keys     │
-           suggestions on · $0.0001    │
+ │ IT desk              (Soon)    2h │ │
+ ╰───────────────────────────────────╯ │ ┌────────┐┏━━━━━━━━━━┓┌──────────┐┌─────────┐
+   Ticket 4821: render nodes ignore    │ │t Today ││␣ s Soon  ┃│⇧s Someday││e Archive│
+   the new scheduler since the upd…    │ │     1% ││      54% ┃│      22% ││      2% │
+   Helpdesk                        3h  │ │▏       ││██████▌   ┃│███▍      ││▏        │
+                                       │ └────────┘┗━━━━━━━━━━┛└──────────┘└─────────┘
+ ▐ Add a priority flag for lighting… ▌ │ ─────────────────────────────────────────────────────
+ ▐ Jordan Reyes       (Soon)      5h ▌ │ The retry cap was added to keep render times
+                                       │ predictable, since these tools already multithread
+   Investigate inkdrop.app             │ well.
+   Google Tasks      (Today) yesterday │
+   Carried over ─────────────────────  │ My understanding is that the new scheduler …
+───────────────────────────────────────┤
+ ↑↓ move  x mark  / filter      ? keys │
 ```
 
 The view takes all the room between the docks rather than the page's measure (`Item::fills_center`;
@@ -115,13 +117,15 @@ the note itself.
 (`/`), which becomes the filter box while filtering. Clicking a section scrolls to it; the counts
 are not filters. A section with no rows hides its count.
 
-**List.** Two lines per item: the title, then a muted meta line — source, sender when there is
-one, age, a picture glyph when the note has an image line — and the suggestion chip on the right,
-centred on the row. The source is plain text in the meta line, not a chip. The chip names the
-destination only (§7.4); a row without a confident suggestion shows nothing there, not a dash.
+**List.** The title on up to two lines, then a muted meta line: the sender, or the source when
+there is none, with a bare address cut to the part before the `@`; a picture glyph when the note has
+an image line; the suggestion chip; and the age, pinned right, which never truncates. The source is
+plain text in the meta line, not a chip. The chip names the destination only (§7.4); a row without a
+confident suggestion shows nothing there, not a dash. The title has the row's whole width to itself.
 Rows are inset from the pane edge and the selection is a rounded band, with a faint accent ring
-while the list has focus. Every row has one fixed height, because `uniform_list` sizes every row
-like the one it measures (§9). The two sections, **New** and **Carried over**, split by the
+while the list has focus, and at half strength while focus is elsewhere. Space inside a row is
+tighter than space between rows, so a title stays with its meta line. Every row has one fixed
+height, because `uniform_list` sizes every row like the one it measures (§9). The two sections, **New** and **Carried over**, split by the
 ritual's own rule (`triage-inbox.md` §1: `captured:` or file mtime against
 `.thock/state/inbox/last-triage`), so the two surfaces agree on what is old. **New** has no header
 row of its own, since the list header names it; **Carried over** starts with a quiet divider row.
@@ -130,14 +134,20 @@ selected row is filed or disappears underneath, the selection moves to the next 
 `space` `space` walks the list. A filed row leaves the list at the keystroke, not when its writes
 land (§6.1).
 
-**List footer.** On the left, hints for the keys that act on the list — move, mark, filter, keys
-sheet — rendered from the bindings. On the right, the session's quiet stats: whether suggestions
-are on, `3 filed today` and what they cost (§7.5), or `3 marked` while marks exist (§4.3). A vault
-without a gateway grant shows *Suggestions come with Thock Plus* there instead, dismissible.
+**List footer.** Hints for the keys that act on the list — move, mark, filter, keys sheet —
+rendered from the bindings, then the session's quiet stats: whether suggestions are on,
+`3 filed today` and what they cost (§7.5). A vault without a gateway grant shows *Suggestions come
+with Thock Plus* there instead, dismissible. A hint is drawn whole or not at all: as the pane
+narrows the stats leave first, then filter, then mark, and `? keys` stays whatever the width, at the
+footer's right end with `3 marked` beside it while marks exist (§4.3). While the reader has focus
+the footer shows the reader's keys instead — scroll, next, folds — and `tab list` takes `?`'s place.
+The destination bar's and the header's keycaps stay on screen, dimmed: they are the list's keys, and
+they answer again once focus is back there. They dim the same way while the filter box has focus.
 
 **Reader header.** The meta line for the selected note, at the list header's height: a source
-glyph, the sender's name and address, when it was captured, and its due date when it has one.
-On the right, the link as words — *Open in Gmail ↗*, *Open link ↗* — never the raw URL, then the
+glyph, the sender's name and address, when it was captured, and its due date when it has one. The
+name and address give way first. On the right, **Open** and **Undo** as quiet buttons with their
+keycaps, the link as words — *Open in Gmail ↗*, *Open link ↗* — never the raw URL, then the
 keys-sheet button (`?`).
 
 **Destination bar.** Under the note's title and above its body, one button per destination in a
@@ -145,26 +155,28 @@ fixed order — **Today**, **Soon**, **Someday**, **Archive** — so a key's pla
 notes. Each button holds its keycap, its label, the suggestion's probability for it and a thin bar
 drawing that probability, so the stats and the action are one object. The suggested destination
 is drawn in the accent colour (filled or outlined by tier, §7.4) and also carries the `space`
-keycap, written `space or s`, so the two keys do not read as one chord. After them, **Open**
-and **Undo** as quieter buttons sized to their content. `space` only ever takes a suggestion: with
-none, it does nothing and its keycap is on no button, since opening the note is `o`'s job. Without
-a suggestion, or with suggestions off, the four buttons show no percentages and no bars. Keycaps are
-`ui::KeyBinding::for_action_in`, so a rebinding shows up without a code change. The buttons are
-clickable and dispatch the same actions. The four destinations share what Open and Undo leave
-equally, down to a minimum that holds `space or shift-s`. Below that nothing shrinks: Open and Undo
-wrap under the destinations, then the destinations wrap two by two. Each destination button has two
-lines — its label and percentage, then its keycaps with the probability meter at the line's end,
+keycap, written `space or s`, so the two keys do not read as one chord. `space` only ever takes a
+suggestion: with none, it does nothing and its keycap is on no button, since opening the note is
+`o`'s job. Below the outlined tier the likeliest destination, when one is ahead of the others, gets
+a quiet cue and no key: a stronger border, its percentage at full strength and the only accent
+meter in the bar. Without a suggestion, or with suggestions off, the four buttons show no
+percentages and no bars. Keycaps are read from the keymap for the list's own context, whichever
+pane has focus, so a rebinding shows up without a code change. The buttons are clickable and
+dispatch the same actions. The four destinations share the row equally, down to a minimum that
+holds `space or shift-s`. Below that nothing shrinks: the destinations wrap two by two. Each
+destination button has two lines — its label and percentage, then its keycaps with the probability meter at the line's end,
 under the percentage. The keycaps grow with the suggestion, so they never share a line with the
 label, and no part of a button truncates. The meter is 64px on every button, so the four compare at
 a glance, and gives way only where the keycaps need the room.
 
-**Reader.** The note's title, the destination bar, a rule, then the body rendered with
+**Reader.** The note's title, on at most two lines, the destination bar, a rule, then the body rendered with
 `markdown::MarkdownElement` and `MarkdownStyle::themed`, as the chat panel renders the agent's
 replies; an email reads as §4.4 describes. Frontmatter is not shown; its fields are the reader header. A first heading that repeats the title is not
 shown either, since the title already sits above the bar. Image lines resolve by V39
 §4's rule before rendering so `![alt](/images/x.png)` draws the vault's picture. The title, the bar
 and the body stop at 960px and the body scrolls under the title and bar. The reader is read-only. The keys sheet
-replaces the reader while it is open. The split is draggable (§9) and remembered per vault in
+replaces the reader while it is open. While it has focus a 3px rail runs down the reader's left
+edge, drawn over the pane so nothing moves. The split is draggable (§9) and remembered per vault in
 `.thock/state/inbox/layout.json` (`{"list_width": 0.32}`), defaulting to 32% of the pane.
 
 **Notices.** The paused-suggestions line, a failed write and *Already archived* render as one strip
@@ -177,11 +189,10 @@ edge or the split.
 | Element | Size | Spacing |
 | --- | --- | --- |
 | Pane headers | 52px tall | 20px sides in the list, 40px in the reader |
-| List rows | 60px tall, radius 8 | 12px left, 16px right, 4px title to meta |
+| List rows | 76px slot, a 72px band, radius 8 | 12px left, 16px right, 2px title to meta, 4px between bands |
 | List footer | 36px tall | 20px sides |
 | Destination buttons | 56px tall, radius 8, equal shares of the row, at least 136px wide | 8px between, 10px inside |
-| Open, Undo | 56px tall, radius 8, sized to content | 12px inside |
-| Reader | | 28px top, 40px sides, 18px title to bar |
+| Reader | | 20px top, 40px sides, 12px title to bar, 12px bar to rule |
 
 | Text | Style |
 | --- | --- |
@@ -195,9 +206,9 @@ edge or the split.
 
 ### 4.3 Marks
 
-`x` marks the selected row and the list footer reads `3 marked`. While any row is marked, every
-row gets a 14px check column inside its left padding, with the check on the marked ones, so the
-check has room around it and all titles shift together and stay aligned. While any row is marked, the four verbs apply to every marked row in list order, and
+`x` marks the selected row and the list footer reads `3 marked`. A marked row is tinted and carries
+its check at the start of the meta line, so marking costs no title any width. While any row is
+marked the reader says so above the bar, `3 marked · decisions apply to all`, and the four verbs apply to every marked row in list order, and
 `space` applies each row's own suggestion (rows without one are skipped and stay marked). Marks
 clear when the list refreshes from disk. `escape` clears marks before it leaves the view.
 
@@ -223,13 +234,22 @@ name and address, the time, and `2 of 7`. The badge, the header's tint and a str
 edge take the sender's colour from the theme's player colours, in order of first appearance, so one
 person keeps one colour through the thread. The reader header adds `7 messages`.
 
+A thread opens on its newest message. Only the current message is open: the others are one line,
+their header with a snippet of their own words in place of the address. `n` and `shift-n` move the
+current message and bring it into view, a click on a collapsed card opens it, and `z` opens them all,
+with a ring on the current one and `2 of 7` at full strength.
+
+**Restated subject.** A message that opens by restating the subject doesn't show that line, since
+the title sits above the bar. Prefixes may differ (`Ticket 42:The farm` under `HD 42: The farm`).
+
 **The real author.** Ticketing systems send every reply from one address and name the writer in the
 body: `Comment #2 (by ana on 03/02/26 10:25am):`. When the sender is a bare address and the
 message's new text has such a line, the card is headed by that person, with `via <address>` beside
 it. A sender with a display name is a person, and stays the author whatever they quote.
 
-**What folds.** Each fold is one muted row saying what it holds. `z` opens or closes every fold of
-the note, a click does the same, and the next note starts folded.
+**What folds.** Each fold is one row on a quiet band saying what it holds, with the `z` keycap at
+its end. `z` opens or closes every fold and every card of the note, a click on a fold row does the
+same, and the next note starts folded.
 
 | Fold | Row reads | What goes in it |
 | --- | --- | --- |
@@ -241,9 +261,11 @@ The dogfood inbox's seven threads held 1,518 lines, of which 519 stay on screen.
 that resends a ticket falls from 88 lines to its comment and the one field that changed.
 
 **Fields.** A run of at least 3 `Key: value` lines with distinct keys is a record, drawn as a grid
-with as many columns as the reader has room for. A later message shows only what it introduced or
-changed, the old value under the new one as *was OPEN*, and folds the rest as *18 fields unchanged*.
-A value with a web link opens it on click.
+with as many columns as the reader has room for. A record the thread hasn't seen is reference
+rather than news, so it folds whole as *Details · 18 fields* and opens dimmed. A later copy shows
+only what it introduced or changed, the old value under the new one as *was OPEN*, and folds the
+rest the same way. Values that say nothing (empty, `N/A`, a dash) aren't drawn or counted, unless
+they replaced a real one. A value with a web link opens it on click.
 
 **Links.** A bare link longer than 60 characters or wrapped by URL Defense is named by its address
 (`github.com/acme/repo/pull/36`), outside code fences. It still opens the link that was sent.
@@ -271,8 +293,8 @@ footer's hints, the row menu and the keys sheet render from the bindings.
 | `r` | `thock::SuggestInboxDestinations` | Re-asks for the selected (or marked) items; with none selected, for every row without a suggestion |
 | `/` | `thock::FilterInbox` | Focuses the filter box; narrows by title, sender, source; `escape` clears and returns |
 | `tab` | `thock::FocusInboxReader` | Moves focus to the reader, where `j`/`k`/`ctrl-d`/`ctrl-u` scroll; `tab` or `escape` returns |
-| `n` `shift-n` | `thock::NextInboxMessage`, `thock::PreviousInboxMessage` | Jumps the reader to the next or previous message, from the list or the reader |
-| `z` | `thock::ToggleInboxFolds` | Opens or closes the note's folds (§4.4), from the list or the reader |
+| `n` `shift-n` | `thock::NextInboxMessage`, `thock::PreviousInboxMessage` | Opens the next or previous message and brings it into view, from the list or the reader |
+| `z` | `thock::ToggleInboxFolds` | Opens or closes the note's folds and cards (§4.4), from the list or the reader |
 | `.` | `thock::ShowInboxItemMenu` | The row menu: the verbs above with their bindings; also right-click |
 | `?` | `thock::ShowInboxKeys` | The keys sheet over the reader; any key closes it |
 | `shift-r` | `thock::TriageInbox` | Hands what is left to the ritual (unchanged action) |
@@ -591,10 +613,17 @@ step four.
   move and with it off they do not.
 - **Layout (rev 2):** the destination bar's buttons are in the fixed order whatever the
   suggestion; the suggested button carries the `space` keycap, and with no suggestion no button
-  does; a percentage is never clipped by its button; the bar stays one row as the reader narrows,
-  every button inside the reader; clicking a destination button files like its key; every list row lays out at the same
-  height as the measured one, headers and the divider no taller; the list header's section counts
-  follow the selection and a filter.
+  does; below the line the likeliest destination leans with no key, and a tie leans nowhere; a
+  percentage is never clipped by its button; the bar stays one row as the reader narrows, every
+  button inside the reader; clicking a destination button files like its key; every list row lays
+  out at the same height as the measured one, headers and the divider no taller; the age stays whole
+  in a narrow list; the footer's hints are whole or gone at any width and `?` stays; the list's
+  keycaps stay on screen while the reader has focus; moving focus to the reader moves nothing; the
+  list header's section counts follow the selection and a filter.
+- **Threads:** a thread opens on its newest message with the rest collapsed; `n` and `shift-n` walk
+  the messages and bring them into view; a click opens a collapsed card; `z` opens every card; a line
+  restating the subject leaves the reading and not the note; a new record folds without its empty
+  values, a later one keeps what changed.
 - **Service:** suggestions are requested only while a view is open, only for uncached hashes, at
   most four at a time; a 402 pauses without retry; the cache file is appended after each answer and
   loaded on start; the decision record is written after the writes, with `via`.
