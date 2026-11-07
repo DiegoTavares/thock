@@ -11,7 +11,8 @@ a fixed title block and a quiet suggestion (§4.2, §4.4, §7.4), and one fold r
 changed fields and a key for the header's link (§4.2, §4.4, §5), then put the reader on one right
 edge and opened a relayed card on the person's own words (§4.2, §4.4), then moved the link to `b`,
 gave every email a card, quieted the fields and the fold rows, and made the filter say what's live
-(§4.2, §4.3, §4.4, §5).
+(§4.2, §4.3, §4.4, §5), then led an open card with the new words above what was folded, lightened
+Thock Light's cards and tiles, and gave marks their own footer (§4.2, §4.3, §4.4, §7.4).
 **Owner:** Diego · **Date:** 2026-10-10
 **Design reference:** the design notes with the Jev study, the gpui-kit evaluation, the component
 map and the decision cards this spec resolves: <https://claude.ai/artifact/FoeWmrEjqsMiTKvZKCvfBp>.
@@ -127,9 +128,8 @@ not filters. A section with no rows hides its count, and a section alone is a pl
 than a button.
 
 **List.** The title on up to two lines, cut only by the row's width: a subject the sender's system
-shortened reads whole, as in the reader (§4.4). Short of room for that, a trailing `| FS-596203`
-leaves the row before the words lose a character, since the words tell one row from the next and the
-reader title keeps the number. Then a muted meta line: the sender, or the source when
+shortened reads whole, as in the reader (§4.4). A trailing `| FS-596203` always leaves the row, since
+the words tell one row from the next and the reader title keeps the number. Then a muted meta line: the sender, or the source when
 there is none, with a bare address cut to the part before the `@`. A title that opens with a ticket
 number (`HD 520596: …`, `INC-42: …`) shows the number there instead of the sender, and only the
 subject in the title's two lines; this is the row's display alone, and the note keeps its subject.
@@ -137,8 +137,8 @@ Then a picture glyph when the note has
 an image line; the suggestion; and the age (`5m`, `2h`, `3d`), right-aligned in a column of its own so the suggestion
 holds its place from row to row. The suggestion and the age keep their width; a name gives way. A ticket number never
 truncates: what sits beside it goes, whole, before it loses a character. The source is
-plain text in the meta line, not a chip. The suggestion names the destination only (§7.4); a row without a
-confident suggestion shows nothing there, not a dash. The title has the row's whole width to itself.
+plain text in the meta line, not a chip. The suggestion names the destination only (§7.4), set off from a ticket number by a dot so the
+number doesn't read as what moves; a row without a confident suggestion shows nothing there, not a dash. The title has the row's whole width to itself.
 Rows are inset from the pane edge and the selection is a rounded band, with a faint accent ring
 while the list has focus, and at half strength while focus is elsewhere. Space inside a row is
 tighter than space between rows, so a title stays with its meta line. Every row has one fixed
@@ -160,6 +160,8 @@ footer's right end, where a click also opens the sheet. An empty list shows only
 the footer shows the reader's keys instead — scroll, next, folds — and `tab list` takes `?`'s place.
 While the filter box has focus it shows what still acts there: the arrows move through the rows,
 `enter list` takes the narrowed list to decide on, and `esc close` takes `?`'s place.
+While rows are marked, with no filter up, it shows what acts on them: `x unmark` (`x mark` on a row
+that isn't marked) and `esc clear` in `?`'s place.
 The destination bar's and the header's keycaps stay on screen, dimmed, with the `or` between them:
 they are the list's keys, and they answer again once focus is back there. They dim the same way
 while the filter box has focus.
@@ -180,12 +182,13 @@ only in the filter, since it works in the reader. The keys sheet is `?`, from th
 fixed order — **Today**, **Soon**, **Someday**, **Archive** — so a key's place never moves between
 notes. Each button holds its keycap, its label, the suggestion's probability for it and a thin bar
 drawing that probability, so the stats and the action are one object. The suggested destination
-is drawn in the accent colour (filled or outlined by tier, §7.4; the dark theme's fill runs stronger
-so the step from outlined reads the same) and also carries the `space` keycap, written `space or s`, so the two keys do not read as one chord. `space` only ever takes a
+is drawn in the accent colour (filled or outlined by tier, §7.4; all four tiles share one base fill,
+an outlined tile adds a faint amber tint and a filled one a stronger fill, which the dark theme runs
+stronger so the step reads the same) and also carries the `space` keycap, written `space or s`, so the two keys do not read as one chord. `space` only ever takes a
 suggestion: with none, it does nothing and its keycap is on no button, since opening the note is
 `o`'s job. Below the outlined tier the likeliest destination, when one is ahead of the others, gets
 a quiet cue and no key: a stronger border, its percentage at full strength and the only accent
-meter in the bar. Without a suggestion, or with suggestions off, the four buttons show no
+meter in the bar. The cue goes while rows are marked, since a decision reaches past this row. Without a suggestion, or with suggestions off, the four buttons show no
 percentages and no bars. Keycaps are read from the keymap for the list's own context, whichever
 pane has focus, so a rebinding shows up without a code change. The buttons are clickable and
 dispatch the same actions. The four destinations share the row equally, down to a minimum that
@@ -200,8 +203,8 @@ suggested button's outline dims with them.
 bar, the destination bar, a rule, then the body rendered with
 `markdown::MarkdownElement` and `MarkdownStyle::themed`, as the chat panel renders the agent's
 replies; an email reads as §4.4 describes. Frontmatter is not shown; its fields are the reader header. A first heading that repeats the title is not
-shown either, since the title already sits above the bar. A title too long for its block keeps a
-trailing `| FS-596203` whole at the end of its last line, and the words are cut instead. Image lines resolve by V39
+shown either, since the title already sits above the bar. A title too long for its block fills both
+lines and keeps a trailing `| FS-596203` whole, one space after the ellipsis that cuts the words. Image lines resolve by V39
 §4's rule before rendering so `![alt](/images/x.png)` draws the vault's picture. The title, the bar
 and the body stop at 960px and the body scrolls under the title and bar, so the four targets never
 move between notes. The reader's rules start at the pane's edge and end on the column. While the reader is scrolled a solid `↑ 3 earlier messages` line with
@@ -211,8 +214,8 @@ folds, and with none above it isn't drawn. A note's folded text is parsed with t
 on text that already has its height and the landing and the count don't lag it.
 The slot above the bar names what the bar shows: *Suggested: Soon* at 0.5 and above, *Leaning Someday* below
 that, and nothing for a tie or no answer. Marks take it over (§4.3). With no note selected, which
-only an empty list leaves, the reader says a quiet, centred *All clear* and where captures come from,
-the one message on screen, with no rule under the headers; when a filter emptied the list it says
+only an empty list leaves, the reader says a quiet *All clear* and where captures come from, where
+the title would start, the one message on screen, with no rule under the headers; when a filter emptied the list it says
 nothing, and the list says why. **Undo**
 stays in the header while a last decision exists. The reader is read-only. The keys sheet
 replaces the reader while it is open: two columns, Decide beside Move with Read under it, wrapping
@@ -235,7 +238,7 @@ edge or the split.
 | List rows | 76px slot, a 72px band, radius 8 | 12px left, 16px right, 2px title to meta, 4px between bands |
 | List footer | 36px tall | 20px sides |
 | Destination buttons | 60px tall, radius 8, equal shares of the row, at least 136px wide | 8px between, 10px inside |
-| Reader | | 20px top, 40px sides, a 1.25rem caption slot 5px above the bar (taken from the title block, so the bar stays put), 12px bar to rule |
+| Reader | | 10px top, 40px sides, a 1.25rem caption slot with 5px under the title and 5px above the bar, 12px bar to rule |
 
 | Text | Style |
 | --- | --- |
@@ -249,9 +252,9 @@ edge or the split.
 
 ### 4.3 Marks
 
-`x` marks the selected row. A marked row carries a filled check wholly inside the row's left padding, level with
+`x` marks the selected row. A marked row carries a filled check centred in the row's left padding, level with
 the title's first line, so marking costs no title any width; fill stays the selection's. While any row is
-marked the reader says so above the bar, in the slot kept for it and nowhere else, `3 marked · decisions apply to all`, neutral with only the count in accent, and the four verbs apply to every marked row in list order, and
+marked the reader says so above the bar, in the slot kept for it and nowhere else, `3 marked · decisions apply to all · showing this row`, neutral with only the count in accent, and the four verbs apply to every marked row in list order, and
 `space` applies each row's own suggestion (rows without one are skipped and stay marked). Marks
 clear when the list refreshes from disk. `escape` clears marks before it leaves the view.
 
@@ -272,17 +275,20 @@ Anything above the first message (the person's own note) renders above the cards
 such heading is one message, on the same card as any other, without `1 of 1`.
 
 **Cards.** Each message of a thread is a card headed by a badge with the sender's initials, their
-name and address, the time, and `2 of 7`, then on a collapsed card a quiet chevron that says it opens.
-Card and header are neutral, so collapsed rows stay behind the open message. In Thock Light cards and
-tiles stand one step deeper than the theme's element ground (the theme's hover), with the stronger
-border and meter tracks, and the filled tile's accent label is darkened to hold 4.5:1; only the badge takes the sender's colour, in order of first appearance, so one
+name and address, the time, and `2 of 7`, then a quiet chevron, right on a collapsed card and down on an
+open one. A thread's current card also carries the keycap that leaves it, `n`, or `shift-n` on the last
+card where `n` has nowhere to go, ahead of the time so the columns hold. A lone message has no rule
+under its header. Card and header are neutral, so collapsed rows stay behind the open message. Cards
+and tiles sit on the theme's element ground. In Thock Light they lean on the stronger border and meter
+tracks, and the filled tile's accent label is darkened to hold 4.5:1; only the badge takes the sender's colour, in order of first appearance, so one
 person keeps one colour through the thread. The colours are the Inbox's own six hues, the same in
 both themes at a lightness to suit each, and none is a red, which would read as an error.
 
 A thread opens on its newest message. Only the current message is open: the others are one line,
 their header with a snippet of their own words in place of the address. `n` and `shift-n` move the
 current message and bring it into view, a click on a collapsed card opens it, and `z` opens them all,
-with a ring on the current one and `2 of 7` at full strength. A card lands one gap under the earlier
+with a ring on the current one and `2 of 7` at full strength. The ring also shows whenever the reader
+has focus, so `n` has a visible start. A card lands one gap under the earlier
 cue. Near the end of a thread, where the scroll can't take it that far, the nearest card it can reach
 lands there instead, so no sliver of a card shows under the cue, unless that would put the
 current card's header off screen.
@@ -306,11 +312,11 @@ from the text, staying at 4.5:1. This too is the reading alone, the file doesn't
 collapsed card's snippet skips these lines.
 
 **What folds.** A card has one fold row, the last thing in it, under the changed fields: a chevron,
-the `z` keycap, then what this card holds (*12 earlier lines, 14 fields*). `z` opens or closes every
-fold and every card of the note, each folded stretch opening where it was; a click on the row does
-the same, and the next note starts folded. That reach is the keys sheet's to say, so the row doesn't.
-Open, a short quiet *Hide* with no keycap also heads the card, so a long card closes from either end
-and the control doesn't outweigh a short message. Body text, field labels and the fold row's chevron
+the `z` keycap, then what opening it shows (*Show 12 earlier lines, 14 fields*). `z` opens or closes
+every fold and every card of the note; a click on the row does the same, and the next note starts
+folded. That reach is the keys sheet's to say, so the row doesn't. Open, everything folded follows the
+new words and the changed fields, in its own order and a step smaller, so the new words still lead the
+card, and the same row, last in the card with its keycap, says *Hide*. Body text, field labels and the fold row's chevron
 share the card's left edge.
 
 | Fold | The row says | What goes in it |
@@ -504,7 +510,7 @@ changes what the row shows, never what the view does on its own:
 | Confidence | Row chip | Destination bar | `space` |
 | --- | --- | --- | --- |
 | ≥ 0.85 | muted, `→ Soon` | the button filled in the accent colour | files to the suggestion |
-| 0.50 – 0.85 | muted, `→ Soon` | the button outlined in the accent colour | files to the suggestion |
+| 0.50 – 0.85 | muted, `→ Soon` | the button outlined in the accent colour, with a faint tint | files to the suggestion |
 | < 0.50, or `choice == "unsure"` | none | no button highlighted; `space` on no button | does nothing |
 
 The row's suggestion is an arrow and the destination only, so it reads as where the note could go
