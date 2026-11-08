@@ -8230,6 +8230,9 @@ impl Workspace {
                     .contains_focused(window, cx),
         };
         let row = self.row_width(window);
+        let fills_center = self
+            .active_item(cx)
+            .is_some_and(|item| item.fills_center(cx));
         // The page centres on the window, wherever the workspace sits in it.
         let centre = if self.bounds.size.width > Pixels::ZERO {
             window.viewport_size().width / 2. - self.bounds.left()
@@ -8241,7 +8244,11 @@ impl Workspace {
             centre,
             left: side(DockPosition::Left, center_anchor.left),
             right: side(DockPosition::Right, center_anchor.right),
-            column: center_anchor.column,
+            column: if fills_center {
+                row
+            } else {
+                center_anchor.column
+            },
             min_column: center_anchor.min_column,
             thread: center_anchor.thread,
         }))

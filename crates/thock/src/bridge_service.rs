@@ -2005,7 +2005,7 @@ mod tests {
     use serde_json::json;
     use settings::SettingsStore;
 
-    use std::io::{Read as _, Write as _};
+    use std::io::Write as _;
 
     use crate::vault::{DEFAULT_DAILY_TEMPLATE, InstalledRoutine, VaultConfig};
 
@@ -2673,6 +2673,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[gpui::test]
     async fn trickled_heads_do_not_starve_paired_clients(cx: &mut TestAppContext) {
+        use std::io::Read as _;
+
         let desk = serve_bound(cx, true, "0.0.0.0").await;
         let token = pair(cx, &desk, "robin").await;
         // Linux picks `127.0.0.1` as the source for any loopback target,
