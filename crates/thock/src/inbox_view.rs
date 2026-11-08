@@ -143,9 +143,10 @@ const ACTION_PADDING: Pixels = px(4.);
 /// room for an address.
 const HEADER_TIGHT_WIDTH: f32 = 35.5;
 const HEADER_ROOMY_WIDTH: f32 = 44.;
-/// Holds `shift-n`, so the sheet's words start together close to their keys.
+/// Holds `shift-n` as glyphs, so the sheet's words start together close to
+/// their keys. Spelled-out keycaps widen it.
 const KEYS_COLUMN_WIDTH: Rems = rems(3.);
-/// Below this a column of the keys sheet wraps under the one before it.
+/// The narrowest a column of the keys sheet gets; its widest line widens it.
 const KEYS_GROUP_MIN_WIDTH: Rems = rems(12.5);
 /// Every line of the keys sheet, so its columns share one grid.
 const KEYS_ROW_HEIGHT: Rems = rems(1.3);
@@ -4088,7 +4089,7 @@ impl InboxView {
             .into_any_element()
     }
 
-    fn render_keys_sheet(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_keys_sheet(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let key = |action: &dyn Action| vec![self.keycap(action, list_key_context(), window, cx)];
         let decide = vec![
             (key(&AcceptInboxSuggestion), "Take the suggestion"),
@@ -4114,6 +4115,32 @@ impl InboxView {
             (key(&PreviousInboxMessage), "Go to previous message"),
             (key(&ToggleInboxFolds), "Show or hide all folds"),
         ];
+        let keys_key = self.keycap(&ShowInboxKeys, list_key_context(), window, cx);
+        // macOS draws keycaps as glyphs, Linux spells them out (`Shift-R`), so
+        // the keys' column and each column's width come from what they measure:
+        // a column too wide for the sheet wraps under the other rather than
+        // wrap its words.
+        let rem_size = window.rem_size();
+        let keycap_width = decide
+            .iter()
+            .chain(&moving)
+            .chain(&read)
+            .map(|(keycaps, _)| natural_width(keys_cell(keycaps.clone(), px(0.), cx), window, cx))
+            .fold(KEYS_COLUMN_WIDTH.to_pixels(rem_size), Ord::max);
+        let mut column_width = |rows: &[&[(Vec<KeyBinding>, &'static str)]]| {
+            rows.iter()
+                .flat_map(|rows| rows.iter())
+                .map(|(keycaps, what)| {
+                    natural_width(
+                        keys_row(keycaps.clone(), what, keycap_width, cx),
+                        window,
+                        cx,
+                    )
+                })
+                .fold(KEYS_GROUP_MIN_WIDTH.to_pixels(rem_size), Ord::max)
+        };
+        let decide_width = column_width(&[&decide]);
+        let moving_width = column_width(&[&moving, &read]);
         let group = |heading: &'static str, rows: Vec<(Vec<KeyBinding>, &'static str)>| {
             v_flex()
                 .debug_selector(move || format!("INBOX_KEYS_GROUP-{heading}"))
@@ -4126,33 +4153,12 @@ impl InboxView {
                             .weight(FontWeight::SEMIBOLD),
                     ),
                 )
-                .children(rows.into_iter().map(|(keycaps, what)| {
-                    h_flex()
-                        .debug_selector(move || format!("INBOX_KEYS_ROW-{what}"))
-                        .min_h(KEYS_ROW_HEIGHT)
-                        .items_start()
-                        .gap_2()
-                        .child(
-                            h_flex()
-                                .flex_none()
-                                .min_w(KEYS_COLUMN_WIDTH)
-                                .gap_1()
-                                .children(
-                                    keycaps
-                                        .into_iter()
-                                        .map(|keycap| framed_keycap(keycap, false, cx)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(Label::new(what).size(LabelSize::Small).color(Color::Muted)),
-                        )
-                }))
+                .children(
+                    rows.into_iter()
+                        .map(|(keycaps, what)| keys_row(keycaps, what, keycap_width, cx)),
+                )
         };
-        let column = || v_flex().flex_1().min_w(KEYS_GROUP_MIN_WIDTH).gap_1();
-        let keys_key = self.keycap(&ShowInboxKeys, list_key_context(), window, cx);
+        let column = |width: Pixels| v_flex().flex_1().min_w(width).gap_1();
         v_flex()
             .size_full()
             .px_10()
@@ -4166,9 +4172,9 @@ impl InboxView {
                     .items_start()
                     .gap_x_8()
                     .gap_y_3()
-                    .child(column().child(group("Decide", decide)))
+                    .child(column(decide_width).child(group("Decide", decide)))
                     .child(
-                        column()
+                        column(moving_width)
                             .child(group("Move", moving))
                             // One blank line, so Read's rows sit on Decide's.
                             .child(div().h(KEYS_ROW_HEIGHT))
@@ -4582,6 +4588,36 @@ fn is_arrow(binding: &gpui::KeyBinding) -> bool {
     matches!(binding.keystrokes(), [keystroke]
         if matches!(keystroke.key(), "up" | "down" | "left" | "right")
             && !keystroke.modifiers().modified())
+}
+
+/// One line of the keys sheet: its keys in a column `keycap_width` wide, then
+/// what they do.
+fn keys_row(
+    keycaps: Vec<KeyBinding>,
+    what: &'static str,
+    keycap_width: Pixels,
+    cx: &App,
+) -> gpui::Div {
+    h_flex()
+        .debug_selector(move || format!("INBOX_KEYS_ROW-{what}"))
+        .min_h(KEYS_ROW_HEIGHT)
+        .items_start()
+        .gap_2()
+        .child(keys_cell(keycaps, keycap_width, cx))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(Label::new(what).size(LabelSize::Small).color(Color::Muted)),
+        )
+}
+
+fn keys_cell(keycaps: Vec<KeyBinding>, min_width: Pixels, cx: &App) -> gpui::Div {
+    h_flex().flex_none().min_w(min_width).gap_1().children(
+        keycaps
+            .into_iter()
+            .map(|keycap| framed_keycap(keycap, false, cx)),
+    )
 }
 
 /// How wide `element` lays out with all the room it wants. Only for sizing:
@@ -8102,23 +8138,30 @@ mod tests {
         };
         let shows = |setup: &mut Setup, hint: &'static str| setup.cx.debug_bounds(hint).is_some();
 
-        resize(&mut setup, LAPTOP_LIST_FRACTION);
+        // Wide enough for both hints whether keycaps are glyphs (macOS) or
+        // spelled out (`Escape` on Linux).
+        resize(&mut setup, 0.3);
         setup.cx.simulate_keystrokes("x");
         draw(&mut setup);
         let unmark = drawn(&mut setup, "INBOX_HINT-unmark");
         let clear = drawn(&mut setup, "INBOX_HINT-clear");
         assert!(unmark.right() < clear.left(), "{unmark:?} {clear:?}");
+        assert!(clear.right() <= px(300.), "{clear:?} inside the list");
+        resize(&mut setup, LAPTOP_LIST_FRACTION);
+        let clear = drawn(&mut setup, "INBOX_HINT-clear");
         assert!(clear.right() <= px(234.), "{clear:?} inside the list");
         resize(&mut setup, 0.14);
         assert!(!shows(&mut setup, "INBOX_HINT-unmark"));
         assert!(shows(&mut setup, "INBOX_HINT-clear"));
 
-        resize(&mut setup, LAPTOP_LIST_FRACTION);
+        resize(&mut setup, 0.3);
         setup.cx.simulate_keystrokes("escape /");
         setup.cx.simulate_input("i");
         setup.cx.run_until_parked();
         draw(&mut setup);
         assert!(shows(&mut setup, "INBOX_HINT-list"));
+        assert!(shows(&mut setup, "INBOX_HINT-close"));
+        resize(&mut setup, LAPTOP_LIST_FRACTION);
         assert!(shows(&mut setup, "INBOX_HINT-close"));
         resize(&mut setup, 0.14);
         assert!(!shows(&mut setup, "INBOX_HINT-list"));
