@@ -373,6 +373,9 @@ struct AutoArchive {
     /// `thock::RunInboxAutoArchive` asked, whatever the day.
     manual: bool,
     running: Option<Task<()>>,
+    /// Note hashes the running job asks Jev about itself, so the view's
+    /// suggestions don't ask a second time.
+    asking: HashSet<String>,
     /// The last run's filings nobody corrected, whose notes are still in
     /// the archive, in the order they were filed.
     group: Vec<AutoArchivedEntry>,
@@ -662,8 +665,8 @@ impl InboxService {
                 if !service.gmail_polling(cx) {
                     service.auto_archive.triggered = true;
                 }
-                service.pump_suggestions(cx);
                 service.try_auto_archive(cx);
+                service.pump_suggestions(cx);
             })
             .ok();
         }));
@@ -1216,6 +1219,7 @@ impl InboxService {
             .filter(|entry| {
                 self.suggestion_for(&entry.hash).is_none()
                     && !self.suggestions.in_flight.contains_key(&entry.hash)
+                    && !self.auto_archive.asking.contains(&entry.hash)
                     && !self.suggestions.failed.contains_key(&entry.hash)
             })
             .take(free)
@@ -1351,8 +1355,8 @@ impl InboxService {
                 service.refresh_group(cx);
                 cx.emit(InboxEvent::SuggestionsChanged);
                 cx.notify();
-                service.pump_suggestions(cx);
                 service.try_auto_archive(cx);
+                service.pump_suggestions(cx);
             })
             .ok();
         }));
@@ -1486,15 +1490,11 @@ impl InboxService {
                 service.policy = Some(policy);
                 cx.emit(InboxEvent::SuggestionsChanged);
                 cx.notify();
-                service.pump_suggestions(cx);
                 service.try_auto_archive(cx);
+                service.pump_suggestions(cx);
             })
             .ok();
         }));
-    }
-
-    pub fn policy(&self) -> Option<&LoadedPolicy> {
-        self.policy.as_ref()
     }
 
     // ----- The morning run (V56 §7) -----
@@ -1519,6 +1519,10 @@ impl InboxService {
     /// follows, so nothing else that finishes first (the policy, the cache)
     /// starts it on a listing from before the poll's notes.
     fn gmail_poll_finished(&mut self, cx: &mut Context<Self>) {
+        // The poll's own file events already re-read the queue.
+        if !self.auto_archive_on() {
+            return;
+        }
         self.auto_archive.triggered = true;
         self.items_loaded = false;
         self.refresh_items(cx);
@@ -1567,10 +1571,6 @@ impl InboxService {
     /// The view's Auto-archived group (§8.1).
     pub fn auto_archived(&self) -> &[AutoArchivedEntry] {
         &self.auto_archive.group
-    }
-
-    pub fn auto_archive_running(&self) -> bool {
-        self.auto_archive.running.is_some()
     }
 
     /// Records the moment `[inbox] auto_archive` is seen turned on or off,
@@ -1716,6 +1716,11 @@ impl InboxService {
                 ))
             })
             .collect();
+        self.auto_archive.asking = entries
+            .iter()
+            .filter(|entry| !cached.contains_key(&entry.hash))
+            .map(|entry| entry.hash.clone())
+            .collect();
         let job = RunJob {
             run,
             vault,
@@ -1740,8 +1745,8 @@ impl InboxService {
     }
 
     /// One run over its candidates, newest first: the guardrail, then Jev at
-    /// most [`MAX_IN_FLIGHT`] at a time, then each filing in order. A 402
-    /// stops it where it is.
+    /// most [`MAX_IN_FLIGHT`] at a time, then each filing in order. A 402,
+    /// or auto-archive being turned off, stops it where it is.
     async fn auto_archive_run(
         this: &WeakEntity<Self>,
         project: &Entity<Project>,
@@ -1777,29 +1782,43 @@ impl InboxService {
             });
             let answers = futures::future::join_all(asks).await;
             for (entry, answer) in chunk.iter().zip(answers) {
+                // An answer is paid for even when the run stops before it,
+                // so it is cached either way.
+                if let Some((AskOutcome::Answered(suggestion), false)) = &answer {
+                    this.update(cx, |service, cx| {
+                        service.cache_answer(
+                            &entry.hash,
+                            &entry.item.stem,
+                            &job.policy.hash,
+                            suggestion.clone(),
+                            cx,
+                        )
+                    })
+                    .ok();
+                }
+                if stopped.is_some() {
+                    continue;
+                }
+                // Turning auto-archive off stops a run between filings.
+                match this.read_with(cx, |service, _| service.auto_archive_on()) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        stopped = Some(TURNED_OFF.to_string());
+                        continue;
+                    }
+                    Err(_) => return RunOutcome::Released,
+                }
                 let event = match answer {
                     None => skipped(job, entry, SkipReason::Replied),
                     Some((AskOutcome::Paused(reason), _)) => {
                         stopped = Some(reason.to_string());
-                        break;
+                        continue;
                     }
                     Some((AskOutcome::Failed(reason), _)) => {
                         log::warn!("Thock: auto-archive couldn't ask about an item: {reason}");
                         skipped(job, entry, SkipReason::Error)
                     }
-                    Some((AskOutcome::Answered(suggestion), was_cached)) => {
-                        if !was_cached {
-                            this.update(cx, |service, cx| {
-                                service.cache_answer(
-                                    &entry.hash,
-                                    &entry.item.stem,
-                                    &job.policy.hash,
-                                    suggestion.clone(),
-                                    cx,
-                                )
-                            })
-                            .ok();
-                        }
+                    Some((AskOutcome::Answered(suggestion), _)) => {
                         if clears_bar(&suggestion, job.threshold) {
                             Self::file_automatically(
                                 this,
@@ -1879,6 +1898,7 @@ impl InboxService {
 
     fn finish_auto_archive(&mut self, run: &str, outcome: RunOutcome, cx: &mut Context<Self>) {
         self.auto_archive.running = None;
+        self.auto_archive.asking.clear();
         let RunOutcome::Done { stopped } = outcome else {
             return;
         };
@@ -2037,6 +2057,9 @@ impl InboxService {
 
 /// The toast turning auto-archive off shows.
 struct AutoArchiveToast;
+
+/// Why a run that was going when auto-archive was turned off stopped.
+const TURNED_OFF: &str = "auto-archive was turned off";
 
 /// What a run needs, captured when it starts.
 struct RunJob {
@@ -3149,15 +3172,17 @@ mod tests {
     ) -> (Arc<FakeFs>, Entity<InboxService>, Arc<AtomicUsize>) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
-        auto_archive_service_on(cx, fs, notes, policy, answer).await
+        auto_archive_service_on(cx, fs, notes, policy, answer, false).await
     }
 
+    /// The same on `fs`, with an Inbox view open when `view_open`.
     async fn auto_archive_service_on(
         cx: &mut TestAppContext,
         fs: Arc<FakeFs>,
         notes: &[(&str, String)],
         policy: &str,
         answer: fn(&str) -> (u16, &'static str, f64),
+        view_open: bool,
     ) -> (Arc<FakeFs>, Entity<InboxService>, Arc<AtomicUsize>) {
         fs.create_dir(Path::new("/vault/inbox")).await.unwrap();
         fs.create_dir(Path::new("/vault/routines/inbox"))
@@ -3212,10 +3237,49 @@ mod tests {
         vault.config.inbox.auto_archive = true;
         service.update(cx, |service, cx| {
             service.set_account_for_test("diego@example.com");
+            if view_open {
+                service.open_views += 1;
+            }
             service.set_vault_for_test(vault, cx);
         });
         cx.run_until_parked();
         (fs, service, requests)
+    }
+
+    #[gpui::test]
+    async fn an_open_view_does_not_ask_about_what_the_run_asks(cx: &mut TestAppContext) {
+        init_test(cx);
+        let notes = [
+            (
+                "2026-11-07-0900-a",
+                note("A", "2026-11-07T09:00:00Z", "a2a2a2a2a2a2"),
+            ),
+            (
+                "2026-11-07-0800-b",
+                note("B", "2026-11-07T08:00:00Z", "b2b2b2b2b2b2"),
+            ),
+            (
+                "2026-11-07-0700-c",
+                note("C", "2026-11-07T07:00:00Z", "c2c2c2c2c2c2"),
+            ),
+        ];
+        let fs = FakeFs::new(cx.executor());
+        let (_, service, requests) = auto_archive_service_on(
+            cx,
+            fs,
+            &notes,
+            STAMPED_POLICY,
+            |_| (200, "unsure", 0.9),
+            true,
+        )
+        .await;
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        service.read_with(cx, |service, _| {
+            assert!(service.auto_archive.asking.is_empty());
+            for (_, content) in &notes {
+                assert!(service.suggestion_for(&note_hash(content)).is_some());
+            }
+        });
     }
 
     fn run_log(text: &str) -> RunLog {
@@ -3506,9 +3570,15 @@ mod tests {
         fs.create_dir(Path::new(&format!("/vault/{TRIAGE_LOG_PATH}")))
             .await
             .unwrap();
-        let (fs, _service, _) =
-            auto_archive_service_on(cx, fs, &notes, STAMPED_POLICY, |_| (200, "archive", 0.99))
-                .await;
+        let (fs, _service, _) = auto_archive_service_on(
+            cx,
+            fs,
+            &notes,
+            STAMPED_POLICY,
+            |_| (200, "archive", 0.99),
+            false,
+        )
+        .await;
         assert!(
             fs.is_file(Path::new("/vault/inbox/2026-11-07-0800-a.md"))
                 .await
