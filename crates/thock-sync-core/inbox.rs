@@ -9,6 +9,10 @@ pub const INBOX_ARCHIVE_DIR: &str = "archives/inbox";
 /// The append-only record of every decision (V13 §9.5).
 pub const TRIAGE_LOG_PATH: &str = "archives/inbox/triage-log.md";
 
+/// The destination word the desk's morning run writes (V56 §7.1): an
+/// Archive decision nobody keyed.
+pub const ARCHIVED_AUTOMATICALLY: &str = "Archived · auto";
+
 /// The archive path for an inbox note: the same file name under
 /// [`INBOX_ARCHIVE_DIR`].
 pub fn archive_path(inbox_path: &str) -> String {
@@ -121,10 +125,16 @@ pub fn decision_class(
         }
     }
     match destination {
-        "Archived" => DecisionClass::Archive,
+        "Archived" | ARCHIVED_AUTOMATICALLY => DecisionClass::Archive,
         "Discarded" => DecisionClass::Discard,
         _ => DecisionClass::Other,
     }
+}
+
+/// Whether a log line's destination was written by the morning run rather
+/// than a person (V56 §7.1). Gmail archive keeps these undoable for longer.
+pub fn is_automatic(destination: &str) -> bool {
+    destination.trim() == ARCHIVED_AUTOMATICALLY
 }
 
 /// One triage-log line that carries a capture marker.
@@ -223,6 +233,15 @@ mod tests {
             triage_log_line("2026-10-10", "Call Ana", "Archived", None),
             "- 2026-10-10 · Call Ana → Archived"
         );
+        assert_eq!(
+            triage_log_line(
+                "2026-11-08",
+                "HD 52112: Maya licence expired",
+                ARCHIVED_AUTOMATICALLY,
+                Some("d4d4d4d4d4d4")
+            ),
+            "- 2026-11-08 · HD 52112: Maya licence expired → Archived · auto <!--inbox:d4d4d4d4d4d4-->"
+        );
     }
 
     #[test]
@@ -270,6 +289,10 @@ mod tests {
         assert_eq!(class("Backlog · Soon"), DecisionClass::Soon);
         assert_eq!(class("Backlog · Someday"), DecisionClass::Someday);
         assert_eq!(class("Archived"), DecisionClass::Archive);
+        assert_eq!(class("Archived · auto"), DecisionClass::Archive);
+        assert!(is_automatic("Archived · auto"));
+        assert!(!is_automatic("Archived"));
+        assert!(!is_automatic("Backlog · Soon"));
         assert_eq!(class("Discarded"), DecisionClass::Discard);
         assert_eq!(class("notes/ideas/ (kept as note)"), DecisionClass::Other);
         assert_eq!(class("Backlog · Later"), DecisionClass::Other);

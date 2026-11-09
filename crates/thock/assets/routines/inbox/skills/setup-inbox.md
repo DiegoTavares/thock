@@ -34,9 +34,12 @@ already exists, and what the daily note's sections are called.
 ## 3. Write the policy
 
 Rewrite `routines/inbox/triage-policy.md` from the answers, keeping its shipped shape: a
-`## Proposals` table of *if it looks like → propose*, a `## Destinations` paragraph naming the
-real paths, and a `## When unsure` paragraph recording question 6's answer. Plain Markdown,
-no front matter — the user will edit this file by hand.
+`## Proposals` table of *if it looks like → propose*, a `## Criteria` list keeping the shipped
+file's five lines (`today`, `soon`, `someday`, `archive`, `unsure`, one sentence each; widen
+`archive` with question 5's answer if it names something), a `## Destinations` paragraph naming
+the real paths, and a `## When unsure` paragraph recording question 6's answer. Plain Markdown,
+no front matter: the `refreshed:` stamp is **Refresh Inbox Policy**'s, which keeps the file
+from then on.
 
 ## 4. Mark setup done
 

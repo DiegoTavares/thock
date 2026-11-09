@@ -237,6 +237,12 @@ pub struct GmailService {
 }
 
 impl EventEmitter<ManualSyncFinished> for GmailService {}
+impl EventEmitter<GmailPollFinished> for GmailService {}
+
+/// A poll that reached Gmail and landed what it found, manual or not. The
+/// Inbox's morning run starts on the first one of the day (V56 §7.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GmailPollFinished;
 
 impl GmailService {
     fn new(project: Entity<Project>, cx: &mut Context<Self>) -> Self {
@@ -282,6 +288,16 @@ impl GmailService {
                 None => ArchiveStatus::Healthy,
             },
         }
+    }
+
+    /// The Google account the mail is captured from.
+    pub fn account(&self) -> Option<&str> {
+        self.config.as_ref()?.account.as_deref()
+    }
+
+    /// Whether polls are running: a config, an account, and a transport.
+    pub fn is_polling(&self) -> bool {
+        self.transport.is_some()
     }
 
     /// Whether `.thock/gmail.toml` turns Gmail archive on.
@@ -526,6 +542,7 @@ impl GmailService {
                 }
             })
             .flatten();
+        let synced = matches!(outcome, SyncOutcome::Synced { .. });
         let keep_going = match outcome {
             SyncOutcome::Aborted => false,
             SyncOutcome::Synced { .. } => {
@@ -560,6 +577,9 @@ impl GmailService {
                 message,
                 icon: IconName::Envelope,
             });
+        }
+        if synced {
+            cx.emit(GmailPollFinished);
         }
         cx.notify();
         keep_going
@@ -800,6 +820,7 @@ impl GmailService {
                                 digest: action.digest,
                                 thread: action.thread,
                                 at: now(),
+                                automatic: action.automatic,
                             },
                             ThreadMove::Unarchive => ArchiveEvent::Unarchived {
                                 digest: action.digest,

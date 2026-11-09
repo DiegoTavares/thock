@@ -47,7 +47,7 @@ version = 13
 [[routines.installed]]
 id      = "inbox"
 enabled = true
-version = 2
+version = 3
 "#;
 
 pub const DEFAULT_DAILY_TEMPLATE: &str = r#"# {{date:dddd, MMMM D, YYYY}}
@@ -430,31 +430,55 @@ impl ImagesConfigContent {
 struct InboxViewConfigContent {
     #[serde(skip_serializing_if = "Option::is_none")]
     suggestions: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_archive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_archive_threshold: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    names: Option<Vec<String>>,
 }
 
 impl InboxViewConfigContent {
     fn resolve(self) -> InboxViewConfig {
         InboxViewConfig {
             suggestions: self.suggestions.unwrap_or(true),
+            auto_archive: self.auto_archive.unwrap_or(false),
+            auto_archive_threshold: self.auto_archive_threshold,
+            names: self.names.unwrap_or_default(),
         }
     }
 
     fn is_unset(&self) -> bool {
         self.suggestions.is_none()
+            && self.auto_archive.is_none()
+            && self.auto_archive_threshold.is_none()
+            && self.names.is_none()
     }
 }
 
-/// The `[inbox]` table of `config.toml` (V41 §10): whether a Plus vault asks
-/// for suggested destinations in the Inbox view. The landing zone and its
-/// transports live in `.thock/inbox.toml`, not here.
+/// The `[inbox]` table of `config.toml` (V41 §10, V56 §5.2): whether a Plus
+/// vault asks for suggested destinations in the Inbox view, and whether the
+/// morning run archives what it is sure needs nothing. The landing zone and
+/// its transports live in `.thock/inbox.toml`, not here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InboxViewConfig {
     pub suggestions: bool,
+    pub auto_archive: bool,
+    /// As written; `inbox_auto_archive::effective_threshold` clamps it.
+    pub auto_archive_threshold: Option<f64>,
+    /// How ticket systems spell the person, beside the account's own name,
+    /// so the replied-thread guardrail knows them.
+    pub names: Vec<String>,
 }
 
 impl Default for InboxViewConfig {
     fn default() -> Self {
-        Self { suggestions: true }
+        Self {
+            suggestions: true,
+            auto_archive: false,
+            auto_archive_threshold: None,
+            names: Vec::new(),
+        }
     }
 }
 
@@ -912,6 +936,12 @@ pub enum VaultStatus {
     Valid(Vault),
 }
 
+/// Reads `.thock/config.toml`'s text the way [`Vault::detect`] does.
+pub fn parse_vault_config(text: &str) -> Result<VaultConfig> {
+    let content: VaultConfigContent = toml::from_str(text).context("parsing .thock/config.toml")?;
+    Ok(content.resolve())
+}
+
 impl Vault {
     /// Determines whether `root` is a Thock vault and loads its config.
     pub fn detect(root: &Path) -> VaultStatus {
@@ -1145,7 +1175,7 @@ mod tests {
             vault.config.routines.installed,
             vec![
                 InstalledRoutine::new("timeline".to_string(), true, 13),
-                InstalledRoutine::new("inbox".to_string(), true, 2),
+                InstalledRoutine::new("inbox".to_string(), true, 3),
             ]
         );
         // The Inbox Routine's landing zone and files ship with the scaffold.

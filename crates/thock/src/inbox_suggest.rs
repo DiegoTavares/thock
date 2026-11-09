@@ -7,8 +7,9 @@
 use anyhow::{Context as _, Result};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use serde_json::{Map, Value, json};
+use sha2::{Digest as _, Sha256};
+use std::collections::{BTreeMap, HashSet};
 
 use crate::inbox::InboxItem;
 
@@ -34,6 +35,140 @@ pub const DEFAULT_POLICY: [&str; 5] = [
     "Something that reads like today's business (an errand, a call, a follow-up) → today",
     "Obvious noise (a test capture, an empty item, a duplicate) → archive",
 ];
+
+/// Jev's five options in the order the request sends them, whatever order
+/// the policy file uses: Jev leans to the first option (V41 decision 4).
+pub const CRITERIA_KEYS: [&str; 5] = ["today", "soon", "someday", "archive", "unsure"];
+
+/// The shipped sentence for each of [`CRITERIA_KEYS`], used when the
+/// policy's `## Criteria` lacks a key (V56 §4.4).
+pub const DEFAULT_CRITERIA: [&str; 5] = [
+    "Something to do, call, or read today, or a line for today's page.",
+    "A task for the coming days: `item.due_in` is within a week, or the wording is urgent.",
+    "A link, article, idea or task with no date pressure.",
+    "Nothing for this person to act on: a notification, receipt, newsletter, test capture or duplicate, or a ticket that belongs to another team under the policy.",
+    "None of the above fits, or the item is a note that belongs in a folder of its own.",
+];
+
+/// A criterion longer than this falls back to the shipped sentence.
+pub const CRITERION_LIMIT: usize = 400;
+
+/// The five criteria sentences, in [`CRITERIA_KEYS`] order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Criteria {
+    pub sentences: [String; 5],
+    /// The keys that fell back to the shipped sentence.
+    pub fallbacks: Vec<&'static str>,
+}
+
+impl Criteria {
+    pub fn shipped() -> Self {
+        Self {
+            sentences: DEFAULT_CRITERIA.map(str::to_string),
+            fallbacks: CRITERIA_KEYS.to_vec(),
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&str> {
+        let index = CRITERIA_KEYS
+            .iter()
+            .position(|candidate| *candidate == key)?;
+        self.sentences.get(index).map(String::as_str)
+    }
+
+    fn to_json(&self) -> Value {
+        let mut map = Map::new();
+        for (key, sentence) in CRITERIA_KEYS.iter().zip(&self.sentences) {
+            map.insert(key.to_string(), Value::String(sentence.clone()));
+        }
+        Value::Object(map)
+    }
+}
+
+/// The `## Criteria` section of `triage-policy.md` (V56 §4.4): one list item
+/// per option, `- **archive**: <sentence>`, a sentence free to wrap onto
+/// indented lines. A missing key, a missing section or a sentence over
+/// [`CRITERION_LIMIT`] falls back per key; unknown keys are ignored.
+pub fn parse_criteria(markdown: &str) -> Criteria {
+    let mut found: BTreeMap<&'static str, String> = BTreeMap::new();
+    let mut in_criteria = false;
+    let mut current: Option<(&'static str, String)> = None;
+    let mut finish = |current: &mut Option<(&'static str, String)>| {
+        if let Some((key, sentence)) = current.take() {
+            found.entry(key).or_insert(sentence);
+        }
+    };
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if let Some(heading) = trimmed.strip_prefix('#') {
+            finish(&mut current);
+            in_criteria = heading.trim_start_matches('#').trim() == "Criteria";
+            continue;
+        }
+        if !in_criteria {
+            continue;
+        }
+        if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            finish(&mut current);
+            current = criterion_item(item);
+            continue;
+        }
+        let continues = line.starts_with(' ') || line.starts_with('\t');
+        match &mut current {
+            Some((_, sentence)) if continues && !trimmed.is_empty() => {
+                sentence.push(' ');
+                sentence.push_str(trimmed);
+            }
+            _ => finish(&mut current),
+        }
+    }
+    finish(&mut current);
+
+    let mut criteria = Criteria::shipped();
+    criteria.fallbacks.clear();
+    for (index, key) in CRITERIA_KEYS.iter().enumerate() {
+        match found.get(key) {
+            Some(sentence)
+                if !sentence.is_empty() && sentence.chars().count() <= CRITERION_LIMIT =>
+            {
+                criteria.sentences[index] = sentence.clone();
+            }
+            _ => criteria.fallbacks.push(key),
+        }
+    }
+    criteria
+}
+
+/// `**key**: sentence` (bold optional), for one of the five keys.
+fn criterion_item(item: &str) -> Option<(&'static str, String)> {
+    let (key, sentence) = item.split_once(':')?;
+    let key = key.trim().trim_matches('*').trim().to_lowercase();
+    let key = CRITERIA_KEYS
+        .into_iter()
+        .find(|candidate| *candidate == key)?;
+    Some((key, sentence.trim().to_string()))
+}
+
+/// What the cache keys a suggestion on beside the note (V56 §7.5): the
+/// sha256 of the policy rows and the resolved criteria, in request order.
+pub fn policy_hash(policy: &[String], criteria: &Criteria) -> String {
+    let mut hasher = Sha256::new();
+    for row in policy {
+        hasher.update(row.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher.update(b"\0");
+    for (key, sentence) in CRITERIA_KEYS.iter().zip(&criteria.sentences) {
+        hasher.update(key.as_bytes());
+        hasher.update(b": ");
+        hasher.update(sentence.as_bytes());
+        hasher.update(b"\n");
+    }
+    hex::encode(hasher.finalize())
+}
 
 /// The four filing options a key can take. `unsure` is the fifth answer Jev
 /// may give and is not a destination.
@@ -201,8 +336,14 @@ fn alt_text_only(line: &str) -> String {
 }
 
 /// The decision request (§7.2): the item and the policy as `state`, one
-/// `choice` question with full-sentence criteria in a fixed order.
-pub fn build_request(item: &InboxItem, policy: &[String], today: NaiveDate) -> Value {
+/// `choice` question with the policy's full-sentence criteria in a fixed
+/// order.
+pub fn build_request(
+    item: &InboxItem,
+    policy: &[String],
+    criteria: &Criteria,
+    today: NaiveDate,
+) -> Value {
     json!({
         "model": JEV_MODEL,
         "state": {
@@ -221,13 +362,7 @@ pub fn build_request(item: &InboxItem, policy: &[String], today: NaiveDate) -> V
             "destination": {
                 "type": "choice",
                 "instructions": "Where should `item` go, following `policy`?",
-                "criteria": {
-                    "today": "Something to do, call, or read today, or a line for today's page.",
-                    "soon": "A task for the coming days: `item.due_in` is within a week, or the wording is urgent.",
-                    "someday": "A link, article, idea or task with no date pressure.",
-                    "archive": "Noise with nothing to act on: a notification, receipt, newsletter, test capture or duplicate.",
-                    "unsure": "None of the above fits, or the item is a note that belongs in a folder of its own.",
-                },
+                "criteria": criteria.to_json(),
             },
         },
     })
@@ -327,7 +462,7 @@ pub fn tier(suggestion: &Suggestion) -> Tier {
 }
 
 /// One line of `.thock/state/inbox/suggestions.jsonl` (§7.5), keyed by the
-/// note's byte hash.
+/// note's byte hash and the policy it was asked under (V56 §7.5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuggestionRecord {
     pub hash: String,
@@ -338,10 +473,20 @@ pub struct SuggestionRecord {
     pub probabilities: BTreeMap<String, f64>,
     pub cost: f64,
     pub asked_at: String,
+    /// [`policy_hash`] at asking time; `None` on records written before V56,
+    /// which count as stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
 }
 
 impl SuggestionRecord {
-    pub fn new(hash: &str, stem: &str, suggestion: &Suggestion, asked_at: &str) -> Self {
+    pub fn new(
+        hash: &str,
+        stem: &str,
+        suggestion: &Suggestion,
+        asked_at: &str,
+        policy: &str,
+    ) -> Self {
         Self {
             hash: hash.to_string(),
             stem: stem.to_string(),
@@ -351,7 +496,14 @@ impl SuggestionRecord {
             probabilities: suggestion.probabilities.clone(),
             cost: suggestion.cost,
             asked_at: asked_at.to_string(),
+            policy: Some(policy.to_string()),
         }
+    }
+
+    /// Whether this record answers for a note with these bytes under this
+    /// policy.
+    pub fn answers(&self, hash: &str, policy: &str) -> bool {
+        self.hash == hash && self.policy.as_deref() == Some(policy)
     }
 
     pub fn suggestion(&self) -> Suggestion {
@@ -373,28 +525,57 @@ pub struct DecisionRecord {
     pub suggested: Option<String>,
     pub confidence: Option<f64>,
     pub chosen: String,
-    /// The key: `space`, `t`, `s`, `S`, `e`, or `menu`.
+    /// The key: `space`, `t`, `s`, `S`, `e`, or `menu`; `auto` for the
+    /// morning run (V56 §7.1).
     pub via: String,
     pub at: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub undone: bool,
+    /// The morning run that filed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// The run whose filing this re-files from the Auto-archived group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrects: Option<String>,
 }
 
+/// The `via` of a morning-run record.
+pub const VIA_AUTO: &str = "auto";
+
 /// What the decision log says so far (§7.6): how often the suggestion was
-/// taken, over how many decisions that had one.
+/// taken, over how many decisions that had one, and how many of the morning
+/// run's filings were sent back or re-filed (V56 §9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DecisionReport {
     pub decisions: usize,
     pub taken: usize,
+    pub automatic: usize,
+    pub automatic_undone: usize,
 }
 
 impl DecisionReport {
     pub fn from_log(text: &str) -> Self {
         let mut report = Self::default();
-        for line in text.lines() {
-            let Ok(record) = serde_json::from_str::<DecisionRecord>(line) else {
+        let records: Vec<DecisionRecord> = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<DecisionRecord>(line).ok())
+            .collect();
+        let corrected: HashSet<(&str, &str)> = records
+            .iter()
+            .filter(|record| !record.undone)
+            .filter_map(|record| Some((record.stem.as_str(), record.corrects.as_deref()?)))
+            .collect();
+        for record in &records {
+            if record.via == VIA_AUTO {
+                // Nobody chose these, so they say nothing about how often a
+                // suggestion is taken.
+                report.automatic += 1;
+                let run = record.run.as_deref().unwrap_or_default();
+                if record.undone || corrected.contains(&(record.stem.as_str(), run)) {
+                    report.automatic_undone += 1;
+                }
                 continue;
-            };
+            }
             if record.undone {
                 continue;
             }
@@ -409,18 +590,28 @@ impl DecisionReport {
         report
     }
 
-    /// `suggestion taken 83% of the time, 212 decisions`, or `None` with
-    /// nothing to report.
+    /// `suggestion taken 83% of the time, 212 decisions`, then
+    /// `auto-archive undone 2 of 61` when the morning run has filed, or
+    /// `None` with nothing to report.
     pub fn summary(&self) -> Option<String> {
-        if self.decisions == 0 {
-            return None;
+        let taken = (self.decisions > 0).then(|| {
+            let percent = self.taken * 100 / self.decisions;
+            format!(
+                "suggestion taken {percent}% of the time, {} decision{}",
+                self.decisions,
+                if self.decisions == 1 { "" } else { "s" }
+            )
+        });
+        let automatic = (self.automatic > 0).then(|| {
+            format!(
+                "auto-archive undone {} of {}",
+                self.automatic_undone, self.automatic
+            )
+        });
+        match (taken, automatic) {
+            (Some(taken), Some(automatic)) => Some(format!("{taken}; {automatic}")),
+            (taken, automatic) => taken.or(automatic),
         }
-        let percent = self.taken * 100 / self.decisions;
-        Some(format!(
-            "suggestion taken {percent}% of the time, {} decision{}",
-            self.decisions,
-            if self.decisions == 1 { "" } else { "s" }
-        ))
     }
 }
 
@@ -468,7 +659,7 @@ mod tests {
              title:    Ship it — a practical guide to shipping\nurl:      https://example.com/ship-it\n---\n\n\
              # Ship it — a practical guide to shipping\n\nhttps://example.com/ship-it\n",
         );
-        let request = build_request(&item, &policy(), today());
+        let request = build_request(&item, &policy(), &Criteria::shipped(), today());
         let expected: Value = serde_json::from_str(
             r##"{
               "model": "typesafe/jev-1.13",
@@ -498,7 +689,7 @@ mod tests {
                     "today":   "Something to do, call, or read today, or a line for today's page.",
                     "soon":    "A task for the coming days: `item.due_in` is within a week, or the wording is urgent.",
                     "someday": "A link, article, idea or task with no date pressure.",
-                    "archive": "Noise with nothing to act on: a notification, receipt, newsletter, test capture or duplicate.",
+                    "archive": "Nothing for this person to act on: a notification, receipt, newsletter, test capture or duplicate, or a ticket that belongs to another team under the policy.",
                     "unsure":  "None of the above fits, or the item is a note that belongs in a folder of its own."
                   }
                 }
@@ -528,7 +719,7 @@ mod tests {
                  due:      2026-10-11\n---\n\n{body}"
             ),
         );
-        let request = build_request(&item, &policy(), today());
+        let request = build_request(&item, &policy(), &Criteria::shipped(), today());
         let excerpt = request["state"]["item"]["excerpt"].as_str().unwrap();
         assert!(excerpt.chars().count() <= EXCERPT_LIMIT);
         // Cut at a line boundary: two whole paragraphs fit, the third does
@@ -553,7 +744,7 @@ mod tests {
             "inbox/whiteboard.md",
             "# Whiteboard\n\n![sketch of the routines rail](/images/2026-10-10-0931-whiteboard.jpg)\n\nRoutines could carry state.\n",
         );
-        let request = build_request(&item, &policy(), today());
+        let request = build_request(&item, &policy(), &Criteria::shipped(), today());
         let state = &request["state"]["item"];
         assert_eq!(state["source"], "");
         assert_eq!(state["has_image"], true);
@@ -674,6 +865,7 @@ mod tests {
             "2026-10-09-1842-ship-it",
             &suggestion,
             "2026-10-10T09:14:02Z",
+            "p-1",
         );
         let line = serde_json::to_string(&record).unwrap();
         let back: SuggestionRecord = serde_json::from_str(&line).unwrap();
@@ -704,6 +896,8 @@ mod tests {
             via: "space".to_string(),
             at: "2026-10-10T09:14:40Z".to_string(),
             undone: false,
+            run: None,
+            corrects: None,
         };
         let line = serde_json::to_string(&decision).unwrap();
         assert!(!line.contains("undone"), "{line}");
@@ -738,7 +932,9 @@ mod tests {
             report,
             DecisionReport {
                 decisions: 2,
-                taken: 1
+                taken: 1,
+                automatic: 0,
+                automatic_undone: 0,
             }
         );
         assert_eq!(
@@ -746,5 +942,148 @@ mod tests {
             Some("suggestion taken 50% of the time, 2 decisions")
         );
         assert_eq!(DecisionReport::default().summary(), None);
+    }
+
+    const CRITERIA: &str = "## Criteria\n\n\
+        - **today**: Something to do, call, or read today, or a line for today's page.\n\
+        - **soon**: A task for the coming days: `item.due_in` is within a week, or the wording is urgent.\n\
+        - **someday**: A link, article, idea or task with no date pressure.\n\
+        - **archive**: Nothing for this person to act on: a notification, receipt, newsletter, test\n  \
+          capture or duplicate, or a ticket that belongs to another team under the policy.\n\
+        - **unsure**: None of the above fits, or the item is a note that belongs in a folder of its own.\n";
+
+    #[test]
+    fn criteria_parse_from_the_policy_in_a_fixed_order() {
+        let criteria = parse_criteria(CRITERIA);
+        assert!(criteria.fallbacks.is_empty(), "{criteria:?}");
+        assert_eq!(criteria.sentences, Criteria::shipped().sentences);
+
+        // No section at all: every key falls back.
+        let none = parse_criteria("# Triage policy\n\n## Proposals\n");
+        assert_eq!(none.sentences, Criteria::shipped().sentences);
+        assert_eq!(none.fallbacks, CRITERIA_KEYS.to_vec());
+
+        // Out of order, one key missing, one too long, one unknown.
+        let long = "x".repeat(CRITERION_LIMIT + 1);
+        let shuffled = parse_criteria(&format!(
+            "## Criteria\n\n- **unsure**: Ask.\n- **archive**: {long}\n- **later**: Never.\n\
+             - **today**: Now.\n- **someday**: Whenever.\n\n## When unsure\n\n- **soon**: Not here.\n"
+        ));
+        assert_eq!(
+            shuffled.sentences,
+            [
+                "Now.".to_string(),
+                DEFAULT_CRITERIA[1].to_string(),
+                "Whenever.".to_string(),
+                DEFAULT_CRITERIA[3].to_string(),
+                "Ask.".to_string(),
+            ]
+        );
+        assert_eq!(shuffled.fallbacks, ["soon", "archive"]);
+
+        let item = parse_inbox_note("inbox/x.md", "# Call Ana\n");
+        let request = build_request(&item, &policy(), &shuffled, today());
+        let keys: Vec<&String> = request["questions"]["destination"]["criteria"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert_eq!(keys, CRITERIA_KEYS);
+        assert_eq!(
+            request["questions"]["destination"]["criteria"]["unsure"],
+            "Ask."
+        );
+    }
+
+    #[test]
+    fn the_policy_hash_follows_rows_and_criteria_only() {
+        let policy_text = format!(
+            "---\nrefreshed: 2026-11-08\n---\n# Triage policy\n\n## Proposals\n\n\
+             | If it looks like… | Propose |\n| --- | --- |\n| A link | Backlog · Someday |\n\n{CRITERIA}"
+        );
+        let hash = |text: &str| policy_hash(&flatten_policy(text), &parse_criteria(text));
+        let base = hash(&policy_text);
+        // Prose and spacing outside the table don't count.
+        let spaced = policy_text.replace("# Triage policy\n", "# Triage policy\n\nSome prose.\n\n");
+        assert_eq!(hash(&spaced), base);
+        let padded = policy_text.replace(
+            "| A link | Backlog · Someday |",
+            "|  A link  |  Backlog · Someday  |",
+        );
+        assert_eq!(hash(&padded), base);
+        // A row or a criterion does.
+        let row = policy_text.replace("| A link |", "| A long read |");
+        assert_ne!(hash(&row), base);
+        let criterion = policy_text.replace("**today**: Something", "**today**: Anything");
+        assert_ne!(hash(&criterion), base);
+    }
+
+    #[test]
+    fn a_cached_answer_needs_the_note_and_the_policy() {
+        let suggestion = parse_response(JEV_CHOICE).unwrap();
+        let record =
+            SuggestionRecord::new("h-1", "stem", &suggestion, "2026-11-08T07:00:00Z", "p-1");
+        assert!(record.answers("h-1", "p-1"));
+        assert!(!record.answers("h-1", "p-2"));
+        assert!(!record.answers("h-2", "p-1"));
+        // A record from before V56 has no policy and never answers.
+        let old: SuggestionRecord = serde_json::from_str(
+            r#"{"hash":"h-1","stem":"stem","model":"typesafe/jev-1.13","choice":"someday",
+                "confidence":0.91,"probabilities":{},"cost":0.0,"asked_at":"2026-10-10T09:14:02Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.policy, None);
+        assert!(!old.answers("h-1", "p-1"));
+    }
+
+    #[test]
+    fn the_report_counts_auto_archives_apart() {
+        let record =
+            |stem: &str, via: &str, run: Option<&str>, corrects: Option<&str>| DecisionRecord {
+                stem: stem.to_string(),
+                suggested: Some("archive".to_string()),
+                confidence: Some(0.97),
+                chosen: if corrects.is_some() {
+                    "soon"
+                } else {
+                    "archive"
+                }
+                .to_string(),
+                via: via.to_string(),
+                at: "2026-11-08T07:00:00Z".to_string(),
+                undone: false,
+                run: run.map(str::to_string),
+                corrects: corrects.map(str::to_string),
+            };
+        let undone = DecisionRecord {
+            undone: true,
+            ..record("b", VIA_AUTO, Some("r-1"), None)
+        };
+        let log = [
+            record("a", VIA_AUTO, Some("r-1"), None),
+            undone,
+            record("c", VIA_AUTO, Some("r-1"), None),
+            record("c", "s", None, Some("r-1")),
+            record("d", "e", None, None),
+        ]
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let report = DecisionReport::from_log(&log);
+        assert_eq!(report.automatic, 3);
+        assert_eq!(report.automatic_undone, 2);
+        // The correction is a person's choice against the suggestion.
+        assert_eq!((report.decisions, report.taken), (2, 1));
+        assert_eq!(
+            report.summary().as_deref(),
+            Some("suggestion taken 50% of the time, 2 decisions; auto-archive undone 2 of 3")
+        );
+        let line = serde_json::to_string(&record("a", VIA_AUTO, Some("r-1"), None)).unwrap();
+        assert!(
+            line.contains(r#""via":"auto""#) && line.contains(r#""run":"r-1""#),
+            "{line}"
+        );
+        assert!(!line.contains("corrects"), "{line}");
     }
 }

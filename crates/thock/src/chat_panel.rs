@@ -2478,6 +2478,7 @@ impl ChatPanel {
         self.snooze_nudge(offer.id, cx);
         let action = RunSkill {
             skill: Some(offer.skill.to_string()),
+            mode: None,
         };
         window.defer(cx, move |window, cx| {
             window.dispatch_action(action.boxed_clone(), cx);

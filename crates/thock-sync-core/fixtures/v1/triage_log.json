@@ -25,7 +25,16 @@
     "soon": "Soon",
     "someday": "Someday",
     "parsed": {"day": "2026-11-02", "title": "Re: Q4 planning doc", "destination": "Archived", "digest": "a1a1a1a1a1a1"},
-    "class": "archive"
+    "class": "archive",
+    "automatic": false
+  },
+  {
+    "line": "- 2026-11-08 · HD 52112: Maya licence expired → Archived · auto <!--inbox:d4d4d4d4d4d4-->",
+    "soon": "Soon",
+    "someday": "Someday",
+    "parsed": {"day": "2026-11-08", "title": "HD 52112: Maya licence expired", "destination": "Archived · auto", "digest": "d4d4d4d4d4d4"},
+    "class": "archive",
+    "automatic": true
   },
   {
     "line": "- 2026-11-02 · Newsletter → Discarded <!--inbox:b2b2b2b2b2b2-->",

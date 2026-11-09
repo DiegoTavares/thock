@@ -237,6 +237,12 @@ pub fn run_skill_kickoff(vault_relative_path: &str) -> String {
     format!("{RUN_SKILL_KICKOFF_PREFIX}{vault_relative_path}")
 }
 
+/// The same, run in one of the modes the skill describes (`enable` for
+/// Refresh Inbox Policy, V56 §5.1).
+pub fn run_skill_kickoff_in_mode(vault_relative_path: &str, mode: &str) -> String {
+    format!("{} in {mode} mode", run_skill_kickoff(vault_relative_path))
+}
+
 const RUN_SKILL_KICKOFF_PREFIX: &str = "Read and execute ";
 
 /// Whether `text` is a kickoff `run_skill_kickoff` composed: a prompt the

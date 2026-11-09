@@ -177,4 +177,6 @@ Decisions the implementation had to take; the contract will be amended to match.
 `{"line", "soon", "someday", "parsed", "class"}` (V53 §4.2): `parsed` is
 `parse_triage_log_line(line)` as `{"day", "title", "destination", "digest"}`, or null for a line
 without a marker or out of the log's shape; `class` is
-`decision_class(parsed.destination, soon, someday)` by name, null when `parsed` is.
+`decision_class(parsed.destination, soon, someday)` by name, null when `parsed` is. An optional
+`automatic` (false when absent) is `is_automatic(parsed.destination)`: the morning run's
+`Archived · auto` (V56 §7.1).
