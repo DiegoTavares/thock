@@ -1899,7 +1899,18 @@ impl ToolHost for DeskHost<'_> {
             .strip_prefix(&vault.root)
             .map(|path| path.to_string_lossy().into_owned())
             .map_err(|_| HostError::Refused("today's note is outside the vault".into()))?;
-        let seed = if self.context.fs.is_file(&absolute).await {
+        let existing = if self.context.fs.is_file(&absolute).await {
+            Some(
+                self.context
+                    .fs
+                    .load(&absolute)
+                    .await
+                    .map_err(HostError::from)?,
+            )
+        } else {
+            None
+        };
+        let seed = if existing.is_some() {
             None
         } else {
             let template = self
@@ -1919,13 +1930,17 @@ impl ToolHost for DeskHost<'_> {
                 &title,
             ))
         };
-        let write = thock_bridge::today_write(
+        let (write, adds_section) = thock_bridge::today_write(
             WRITE_CLIENT_ID,
             &relative,
             &self.context.config.today_heading,
             &rendered,
+            existing.as_deref().or(seed.as_deref()),
         );
-        let outcome = self.apply_write(&write, seed).await?;
+        let outcome = match self.apply_write(&write, seed).await? {
+            WriteOutcome::Applied if adds_section => WriteOutcome::SectionAdded,
+            outcome => outcome,
+        };
         self.record_seen(meta, outcome).await;
         Ok(outcome)
     }
