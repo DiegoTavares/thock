@@ -160,11 +160,15 @@ impl VaultSnapshot {
                 week_days.insert(day);
             }
         }
-        let inbox_policy_refreshed = fs
-            .load(&vault.root.join(crate::inbox_service::POLICY_PATH))
-            .await
-            .ok()
-            .and_then(|text| crate::inbox_auto_archive::policy_refreshed(&text));
+        // Only the refresh nudge reads the stamp, and only with auto-archive on.
+        let inbox_policy_refreshed = if vault.config.inbox.auto_archive {
+            fs.load(&vault.root.join(crate::inbox_service::POLICY_PATH))
+                .await
+                .ok()
+                .and_then(|text| crate::inbox_auto_archive::policy_refreshed(&text))
+        } else {
+            None
+        };
         Self {
             skills,
             daily,
