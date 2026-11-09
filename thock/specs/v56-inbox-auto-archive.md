@@ -345,9 +345,10 @@ the chips without deleting the cache.
 
 - The last row of the list, below **Carried over**, just above the footer. One line, collapsed
   by default, muted. Run on a previous day, it reads *Auto-archived Friday · 7*.
-- The group holds the last run's `archived` stems whose files are still in `archives/inbox/` and
-  that haven't been corrected (§8.2). It is read from `auto-archive.jsonl` and the files, with no
-  Jev call (G4).
+- The group holds the `archived` stems of the latest run that archived anything, whose files
+  are still in `archives/inbox/` and that haven't been corrected (§8.2). A run that cleared
+  nothing (a manual one, say) never replaces it, and the header's day is that run's day. It is
+  read from `auto-archive.jsonl` and the files, with no Jev call (G4).
 - Expanded, the group shows its rows under the header in the list's normal row style, with the
   confidence where a fresh row shows its chip (`archive 0.97`). Selecting a row opens it in the
   reader like any other: the destination bar shows Jev's spread, with **Archive** filled.
@@ -386,7 +387,8 @@ group, or to the header when the group empties.
 | On, waiting for a policy | *Auto-archive waiting for a policy · Refresh* | same |
 | Ran | *Auto-archived this morning · 7* | *Auto-archived 7 today* |
 | Ran, nothing cleared the bar | hidden | *Auto-archive ran · nothing to clear* |
-| Stopped | *Auto-archive stopped after 4 of 11 · Retry* | same, with the reason in the tooltip |
+| Stopped, with a grant and allowance | *Auto-archive stopped after 4 of 11 · Retry* | same, with the reason in the tooltip |
+| Stopped, no grant or allowance spent | *Auto-archive stopped after 4 of 11 · allowance spent*, no Retry | same, no Retry |
 
 The existing *suggestion taken 83%* tooltip gains *auto-archive undone 2 of 61* when there are
 `via: auto` records.
@@ -554,14 +556,17 @@ Where the code made a choice the text above didn't, or differs from it:
    still recorded as `skipped` with `"reason": "replied"`.
 8. **Keys.** `right`/`left` already reach the view as `menu::SelectChild`/`SelectParent` through the
    `menu` context, and `enter` as `menu::Confirm`, so the default keymaps don't change; `vim.json`
-   gains `h`/`l` for the two. `thock::ToggleInboxAutoArchived` is palette-only. On a header with
-   no rows (a waiting or stopped status), `enter`/`l` runs the status's action.
+   gains `h`/`l` for the two. `thock::ToggleInboxAutoArchived` is palette-only, so the keys
+   sheet's *Show or hide the group* row shows the keys that work: `→`/`←`, or `l`/`h` with vim.
+   On a header with no rows (a waiting or stopped status), `enter`/`l` runs the status's action.
 9. **A re-file from the group isn't undoable with `u`**: the row leaves the group and was never the
    view's last decision. Its task line and log line are ordinary text to edit.
 10. **Header and popover words.** A run from earlier in the week reads its weekday
     (*Auto-archived Friday · 7*), older ones the date (*on Oct 30*). The popover's *Auto-archived 7
     today* shows only for a run that finished today; the waiting and stopped lines show whenever
-    they apply, with *Refresh* or *Retry* as the row's first action.
+    they apply, with *Refresh* or *Retry* as the row's first action. Retry is offered only when it
+    can work: with no grant or the allowance spent, the stopped line ends *· allowance spent*
+    instead, in the header and the popover, and there is no button.
 11. **The decision report** leaves `via: auto` records out of *suggestion taken*, and counts an auto
     record as undone when it is marked `undone` or a later record `corrects` its run.
 12. **Turning off** removes the two keys and leaves the `[inbox]` header even if it is now empty.
@@ -571,3 +576,6 @@ Where the code made a choice the text above didn't, or differs from it:
 14. **A poll-triggered run waits for the scan after the poll.** A Gmail poll marks the queue
     unread and re-lists it, so a policy or cache load finishing first can't start the run on a
     listing from before the poll's notes landed.
+15. **The group comes from the latest run that archived something** (§8.1), not simply the
+    latest run, so a manual run that clears nothing leaves yesterday's or this morning's group in
+    place.

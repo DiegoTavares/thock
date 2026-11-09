@@ -1558,9 +1558,10 @@ impl InboxService {
         )
     }
 
-    /// The day the last run finished, locally, for the group's header.
+    /// The day the group's run finished, locally, for its header: the latest
+    /// run that archived anything (§8.1).
     pub fn auto_archive_day(&self) -> Option<chrono::NaiveDate> {
-        let run = self.auto_archive.log.latest()?;
+        let run = crate::inbox_auto_archive::group_run(&self.auto_archive.log)?;
         let moment = run
             .finished
             .as_ref()
@@ -1937,10 +1938,7 @@ impl InboxService {
         let Some(vault) = self.vault.clone() else {
             return;
         };
-        let items: Vec<GroupItem> = self
-            .auto_archive
-            .log
-            .latest()
+        let items: Vec<GroupItem> = crate::inbox_auto_archive::group_run(&self.auto_archive.log)
             .map(|run| group_items(run, &self.suggestions.decisions_text))
             .unwrap_or_default();
         let fs = self.project.read(cx).fs().clone();
@@ -2038,6 +2036,13 @@ impl InboxService {
         self.imported = None;
         self.state = SyncState::Idle;
         self.start_poll(cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_run_log_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.auto_archive.log = RunLog::parse(text);
+        self.auto_archive.log_text = text.to_string();
+        self.refresh_group(cx);
     }
 
     #[cfg(test)]
@@ -3452,7 +3457,23 @@ mod tests {
                     processed: 1,
                     candidates: 3,
                     reason: "Thock Plus allowance spent for this cycle".to_string(),
+                    retryable: true,
                 }
+            );
+        });
+        // With the allowance spent Retry couldn't work, so it isn't offered.
+        cx.update(|cx| plus::set_current_entitlement(Some(entitlement(true)), cx));
+        service.read_with(cx, |service, cx| {
+            let status = service.auto_archive_status(cx);
+            assert!(
+                matches!(
+                    status,
+                    RunStatus::Stopped {
+                        retryable: false,
+                        ..
+                    }
+                ),
+                "{status:?}"
             );
         });
     }

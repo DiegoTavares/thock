@@ -644,16 +644,16 @@ fn with_auto_archive(
             ActionKind::RefreshInboxPolicy,
             "Refresh",
         )),
-        RunStatus::Stopped { reason, .. } => {
+        RunStatus::Stopped {
+            reason, retryable, ..
+        } => {
             let detail = match status.detail.take() {
                 Some(detail) => format!("Auto-archive stopped: {reason}\n{detail}"),
                 None => format!("Auto-archive stopped: {reason}"),
             };
             status.detail = Some(detail.into());
-            Some(ConnectorAction::new(
-                ActionKind::RunInboxAutoArchive,
-                "Retry",
-            ))
+            // Without a grant or allowance Retry can't work, so none is shown.
+            retryable.then(|| ConnectorAction::new(ActionKind::RunInboxAutoArchive, "Retry"))
         }
         _ => None,
     };
@@ -1694,6 +1694,7 @@ mod tests {
                 processed: 4,
                 candidates: 11,
                 reason: "Thock Plus allowance spent for this cycle".to_string(),
+                retryable: true,
             },
             today,
         );
@@ -1705,6 +1706,25 @@ mod tests {
         assert_eq!(
             stopped.detail.as_deref(),
             Some("Auto-archive stopped: Thock Plus allowance spent for this cycle")
+        );
+        let spent = with_auto_archive(
+            inbox.clone(),
+            &RunStatus::Stopped {
+                processed: 4,
+                candidates: 11,
+                reason: "Thock Plus allowance spent for this cycle".to_string(),
+                retryable: false,
+            },
+            today,
+        );
+        assert_eq!(
+            spent.summary.as_ref(),
+            "3 waiting · Auto-archive stopped after 4 of 11 · allowance spent"
+        );
+        assert_eq!(
+            labels(&spent),
+            ["Open", "Sync now"],
+            "no Retry that can't work"
         );
         let waiting = with_auto_archive(inbox.clone(), &RunStatus::WaitingForPolicy, today);
         assert_eq!(

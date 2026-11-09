@@ -397,6 +397,13 @@ pub fn account_names<'a>(froms: impl IntoIterator<Item = &'a str>, account: &str
     names
 }
 
+/// The run the Auto-archived group shows (§8.1): the latest that archived
+/// anything, so a run that cleared nothing (a manual one, say) never empties
+/// the group.
+pub fn group_run(log: &RunLog) -> Option<&Run> {
+    log.runs.iter().rev().find(|run| !run.archived.is_empty())
+}
+
 /// An item of the view's Auto-archived group.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupItem {
@@ -450,6 +457,8 @@ pub enum RunStatus {
         processed: usize,
         candidates: usize,
         reason: String,
+        /// There is a grant with allowance left, so Retry can work.
+        retryable: bool,
     },
 }
 
@@ -476,6 +485,7 @@ pub fn status(
             processed: run.archived.len() + run.skipped.len(),
             candidates: run.candidates,
             reason: reason.to_string(),
+            retryable: available,
         };
     }
     if !available {
@@ -525,13 +535,18 @@ pub fn status_line(status: &RunStatus) -> Option<String> {
         RunStatus::Unavailable => {
             Some("Auto-archive needs suggestions to be available".to_string())
         }
+        // Retry is offered beside the line only when it can work; without a
+        // grant or allowance the line says why instead.
         RunStatus::Stopped {
             processed,
             candidates,
+            retryable,
             ..
-        } => Some(format!(
-            "Auto-archive stopped after {processed} of {candidates}"
-        )),
+        } => Some(if *retryable {
+            format!("Auto-archive stopped after {processed} of {candidates}")
+        } else {
+            format!("Auto-archive stopped after {processed} of {candidates} · allowance spent")
+        }),
         RunStatus::Off | RunStatus::Pending | RunStatus::Ran { .. } => None,
     }
 }
@@ -817,12 +832,26 @@ mod tests {
             RunStatus::Stopped {
                 processed: 1,
                 candidates: 3,
-                reason: "allowance spent".to_string()
+                reason: "allowance spent".to_string(),
+                retryable: true,
             }
         );
         assert_eq!(
             status_line(&stopped).as_deref(),
             Some("Auto-archive stopped after 1 of 3")
+        );
+        // No grant or allowance: the line says so, and offers nothing.
+        let spent = status(true, true, false, &log, day);
+        assert!(matches!(
+            spent,
+            RunStatus::Stopped {
+                retryable: false,
+                ..
+            }
+        ));
+        assert_eq!(
+            status_line(&spent).as_deref(),
+            Some("Auto-archive stopped after 1 of 3 · allowance spent")
         );
     }
 

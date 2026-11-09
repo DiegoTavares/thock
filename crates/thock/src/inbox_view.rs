@@ -759,14 +759,7 @@ impl InboxView {
                     && self.matches_filter(&row.entry.item)
             })
             .collect();
-        self.group_status = status_line(&status).map(|text| GroupStatus {
-            text,
-            action: match status {
-                RunStatus::WaitingForPolicy => Some(StatusAction::Refresh),
-                RunStatus::Stopped { .. } => Some(StatusAction::Retry),
-                _ => None,
-            },
-        });
+        self.group_status = group_status(&status);
         if self.group.is_empty() {
             self.group_expanded = false;
         }
@@ -4832,32 +4825,39 @@ impl InboxView {
     }
 
     fn render_keys_sheet(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let key = |action: &dyn Action| vec![self.keycap(action, list_key_context(), window, cx)];
         let (decide_heading, decide) = if self.in_group() {
-            let open = self.move_keycap(
-                &["menu::Confirm"],
-                ["enter", "enter"],
-                &Confirm,
-                list_key_context(),
-                window,
-                cx,
-            );
-            (
-                "Auto-archived",
-                vec![
-                    (key(&UndoInboxMove), "Send back to the Inbox"),
-                    (key(&SendInboxItemToToday), "File to Today instead"),
-                    (key(&SendInboxItemToSoon), "File to Soon instead"),
-                    (key(&SendInboxItemToSomeday), "File to Someday instead"),
-                    (key(&MarkInboxItem), "Mark rows to correct together"),
-                    (vec![open], "Open the group, or the note"),
-                    (key(&ToggleInboxAutoArchived), "Show or hide the group"),
-                ],
-            )
+            ("Auto-archived", self.group_keys(window, cx))
         } else {
             ("Decide", self.decide_keys(window, cx))
         };
         self.render_keys_sheet_with(decide_heading, decide, window, cx)
+    }
+
+    /// The group's rows of the keys sheet (V56 §8.2). Showing and hiding the
+    /// group is the keys that open and close it, `→`/`←` or `l`/`h`.
+    fn group_keys(&self, window: &Window, cx: &App) -> Vec<(Vec<KeyBinding>, &'static str)> {
+        let key = |action: &dyn Action| vec![self.keycap(action, list_key_context(), window, cx)];
+        let row_key = |name: &str, keys: [&str; 2], fallback: &dyn Action| {
+            self.move_keycap(&[name], keys, fallback, list_key_context(), window, cx)
+        };
+        vec![
+            (key(&UndoInboxMove), "Send back to the Inbox"),
+            (key(&SendInboxItemToToday), "File to Today instead"),
+            (key(&SendInboxItemToSoon), "File to Soon instead"),
+            (key(&SendInboxItemToSomeday), "File to Someday instead"),
+            (key(&MarkInboxItem), "Mark rows to correct together"),
+            (
+                vec![row_key("menu::Confirm", ["enter", "enter"], &Confirm)],
+                "Open the group, or the note",
+            ),
+            (
+                vec![
+                    row_key("menu::SelectChild", ["l", "right"], &menu::SelectChild),
+                    row_key("menu::SelectParent", ["h", "left"], &menu::SelectParent),
+                ],
+                "Show or hide the group",
+            ),
+        ]
     }
 
     fn decide_keys(&self, window: &Window, cx: &App) -> Vec<(Vec<KeyBinding>, &'static str)> {
@@ -5173,6 +5173,21 @@ fn vim_mode(cx: &App) -> bool {
         .merged_settings()
         .vim_mode
         .unwrap_or(false)
+}
+
+/// The header's status line and the action it offers, if one can work:
+/// Retry only with a grant and allowance to retry with.
+fn group_status(status: &RunStatus) -> Option<GroupStatus> {
+    status_line(status).map(|text| GroupStatus {
+        text,
+        action: match status {
+            RunStatus::WaitingForPolicy => Some(StatusAction::Refresh),
+            RunStatus::Stopped {
+                retryable: true, ..
+            } => Some(StatusAction::Retry),
+            _ => None,
+        },
+    })
 }
 
 fn dispatch_status_action(action: StatusAction, window: &mut Window, cx: &mut App) {
@@ -10263,5 +10278,133 @@ mod tests {
             Some(GroupCursor::Row(HOUDINI_STEM.to_string()))
         );
         assert_eq!(selected(&setup).as_deref(), Some("HD 2: Houdini seat"));
+    }
+
+    #[test]
+    fn a_stopped_run_offers_retry_only_when_it_can_work() {
+        let stopped = |retryable| RunStatus::Stopped {
+            processed: 4,
+            candidates: 11,
+            reason: "Thock Plus allowance spent for this cycle".to_string(),
+            retryable,
+        };
+        assert_eq!(
+            group_status(&stopped(true)),
+            Some(GroupStatus {
+                text: "Auto-archive stopped after 4 of 11".to_string(),
+                action: Some(StatusAction::Retry),
+            })
+        );
+        assert_eq!(
+            group_status(&stopped(false)),
+            Some(GroupStatus {
+                text: "Auto-archive stopped after 4 of 11 · allowance spent".to_string(),
+                action: None,
+            })
+        );
+    }
+
+    async fn show_hide_keys(setup: &mut Setup) -> Vec<String> {
+        setup.cx.simulate_keystrokes("end");
+        assert_eq!(cursor(setup), Some(GroupCursor::Header));
+        setup.view.update_in(&mut setup.cx, |view, window, cx| {
+            let rows = view.group_keys(window, cx);
+            let (keycaps, _) = rows
+                .into_iter()
+                .find(|(_, what)| *what == "Show or hide the group")
+                .expect("the row");
+            keycaps
+                .iter()
+                .map(|keycap| {
+                    keycap
+                        .keyboard_shortcut_text(window, cx)
+                        .map(|text| text.to_string())
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn the_keys_sheet_shows_the_keys_that_open_and_close_the_group(cx: &mut TestAppContext) {
+        let mut setup = setup(
+            cx,
+            Options {
+                auto_archived: true,
+                ..Options::default()
+            },
+        )
+        .await;
+        let keys = show_hide_keys(&mut setup).await;
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().all(|key| !key.is_empty()), "{keys:?}");
+        assert!(keys[0].to_lowercase().contains("right"), "{keys:?}");
+        assert!(keys[1].to_lowercase().contains("left"), "{keys:?}");
+    }
+
+    #[gpui::test]
+    async fn the_keys_sheet_shows_l_and_h_with_vim(cx: &mut TestAppContext) {
+        let mut setup = setup_group(cx).await;
+        let keys = show_hide_keys(&mut setup).await;
+        let keys: Vec<String> = keys.iter().map(|key| key.to_lowercase()).collect();
+        assert_eq!(keys, ["l", "h"]);
+    }
+
+    #[gpui::test]
+    async fn a_run_that_archives_nothing_keeps_the_group(cx: &mut TestAppContext) {
+        use crate::inbox_auto_archive::RunEvent;
+        let mut setup = setup_group(cx).await;
+        assert_eq!(group_titles(&setup).len(), 2);
+        // A manual run later the same morning clears nothing.
+        let at = |text: &str| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let path = setup
+            ._vault_dir
+            .path()
+            .join(".thock/state/inbox/auto-archive.jsonl");
+        let mut log = setup.fs.load(&path).await.unwrap();
+        for event in [
+            RunEvent::Started {
+                run: "r-2".to_string(),
+                at: at("2026-11-09T09:00:00Z"),
+                watermark: at("2026-11-08T07:00:00Z"),
+                policy: "p".to_string(),
+                threshold: 0.95,
+                candidates: 0,
+            },
+            RunEvent::Finished {
+                run: "r-2".to_string(),
+                at: at("2026-11-09T09:00:01Z"),
+                archived: 0,
+                skipped: 0,
+                stopped: None,
+            },
+        ] {
+            log.push_str(&(event.to_json_line().unwrap() + "\n"));
+        }
+        let service = setup
+            .view
+            .read_with(&setup.cx, |view, _| view.service.clone().unwrap());
+        service.update(&mut setup.cx, |service, cx| {
+            service.replace_run_log_for_test(&log, cx)
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(
+            group_titles(&setup),
+            ["HD 1: Maya licence expired", "HD 2: Houdini seat"]
+        );
+        // The header's day is that run's, not the empty one's.
+        let day = service.read_with(&setup.cx, |service, _| service.auto_archive_day());
+        assert_eq!(
+            day,
+            Some(
+                at("2026-11-08T07:01:00Z")
+                    .with_timezone(&Local)
+                    .date_naive()
+            )
+        );
     }
 }
