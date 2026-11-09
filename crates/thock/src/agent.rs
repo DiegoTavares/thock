@@ -245,6 +245,22 @@ pub fn run_skill_kickoff_in_mode(vault_relative_path: &str, mode: &str) -> Strin
 
 const RUN_SKILL_KICKOFF_PREFIX: &str = "Read and execute ";
 
+/// `kickoff` with a run-skill kickoff's vault-relative path made absolute
+/// under `vault_root`; any other text unchanged. A bare `routines/…/skills/…`
+/// path reads to a small model like one of its own global skills, so the
+/// agent is handed the one file it must open.
+pub fn kickoff_in_vault(kickoff: &str, vault_root: &Path) -> String {
+    match kickoff.strip_prefix(RUN_SKILL_KICKOFF_PREFIX) {
+        Some(rest) if !Path::new(rest).is_absolute() => {
+            format!(
+                "{RUN_SKILL_KICKOFF_PREFIX}{}",
+                vault_root.join(rest).display()
+            )
+        }
+        _ => kickoff.to_string(),
+    }
+}
+
 /// Whether `text` is a kickoff `run_skill_kickoff` composed: a prompt the
 /// app sent on the user's behalf, which the chat shows as a marker rather
 /// than as something they typed (V44 decision 7).
@@ -550,6 +566,28 @@ mod tests {
         assert_eq!(
             run_skill_kickoff("skills/timeline/wrap-today.md"),
             "Read and execute skills/timeline/wrap-today.md"
+        );
+    }
+
+    #[test]
+    fn a_skill_kickoff_names_the_file_in_the_vault() {
+        let root = Path::new("/Users/me/Thock");
+        assert_eq!(
+            kickoff_in_vault(
+                &run_skill_kickoff_in_mode(
+                    "routines/inbox/skills/refresh-inbox-policy.md",
+                    "enable"
+                ),
+                root
+            ),
+            "Read and execute /Users/me/Thock/routines/inbox/skills/refresh-inbox-policy.md in \
+             enable mode"
+        );
+        let absolute = "Read and execute /Users/me/Thock/skills/thock/reflect.md";
+        assert_eq!(kickoff_in_vault(absolute, root), absolute);
+        assert_eq!(
+            kickoff_in_vault("What's on today?", root),
+            "What's on today?"
         );
     }
 }

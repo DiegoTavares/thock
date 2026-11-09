@@ -2790,7 +2790,12 @@ impl ChatPanel {
             answers_dir,
             _subscriptions: vec![subscription],
         });
+        let is_ritual = request.is_ritual();
         if let Some(kickoff) = request.kickoff {
+            let kickoff = match self.vault() {
+                Some(vault) if is_ritual => agent::kickoff_in_vault(&kickoff, &vault.root),
+                _ => kickoff,
+            };
             self.send_text(kickoff, cx);
         }
         if self.thread_open {

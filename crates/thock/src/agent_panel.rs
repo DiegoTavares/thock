@@ -481,16 +481,18 @@ impl AgentPanel {
             return;
         };
         self.connected = Some(connected.clone());
-        let launch = match agent::build_launch(
-            &connected.command_for(request.tier),
-            request.kickoff.as_deref(),
-        ) {
-            Ok(launch) => launch,
-            Err(error) => {
-                self.show_error(format!("Couldn't launch the agent: {error}"), cx);
-                return;
-            }
-        };
+        let kickoff = request
+            .kickoff
+            .as_deref()
+            .map(|kickoff| agent::kickoff_in_vault(kickoff, &vault_root));
+        let launch =
+            match agent::build_launch(&connected.command_for(request.tier), kickoff.as_deref()) {
+                Ok(launch) => launch,
+                Err(error) => {
+                    self.show_error(format!("Couldn't launch the agent: {error}"), cx);
+                    return;
+                }
+            };
 
         // Pre-session checkpoint (spec §6.5): a soft dependency — the history
         // service no-ops when unavailable, and the launch never waits on it.
