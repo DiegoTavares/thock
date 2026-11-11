@@ -1186,7 +1186,7 @@
     },
   },
   {
-    "context": "ThockInboxView && !filtering && !reader",
+    "context": "ThockInboxView && !filtering && !reader && !composing",
     "bindings": {
       "j": "vim::MenuSelectNext",
       "k": "vim::MenuSelectPrevious",

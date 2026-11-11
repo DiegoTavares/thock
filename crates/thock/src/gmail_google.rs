@@ -13,12 +13,14 @@ use futures::AsyncReadExt as _;
 use gpui::{AsyncApp, Task};
 use http_client::{AsyncBody, HttpClient, Request, http};
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::gmail::{
-    GmailFetched, MailTransport, MappingFetched, MissingPermission, SyncMapping, ThreadMove,
-    gmail_thread_url, sanitize_subject, thread_marker_id,
+    GmailFetched, KnownThread, MailTransport, MappingFetched, MessageHeaders, MissingPermission,
+    OutgoingReply, SyncMapping, ThreadHeaders, ThreadMessage, ThreadMove, ThreadUpdate,
+    gmail_thread_url, mailbox_address, message_section, reply_mime, sanitize_subject,
+    split_mailboxes, thread_marker_id,
 };
 use crate::google_auth::{
     AuthRevoked, GMAIL_MODIFY_SCOPE, GoogleClient, InsufficientScope, NotFound, TokenKeeper,
@@ -96,6 +98,50 @@ pub async fn list_label_messages(
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ThreadRef {
+    id: String,
+    /// Moves on any change to the thread: a new message, a label.
+    history_id: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ThreadsPage {
+    threads: Vec<ThreadRef>,
+    next_page_token: Option<String>,
+}
+
+/// Every thread with a message carrying `label_id`, with the `historyId`
+/// that says whether it changed, following `nextPageToken`.
+async fn list_label_threads(
+    http: &Arc<dyn HttpClient>,
+    access_token: &str,
+    label_id: &str,
+) -> Result<Vec<ThreadRef>> {
+    let mut threads = Vec::new();
+    let mut page_token: Option<String> = None;
+    loop {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query
+            .append_pair("labelIds", label_id)
+            .append_pair("maxResults", "100");
+        if let Some(token) = &page_token {
+            query.append_pair("pageToken", token);
+        }
+        let url = format!("{API_BASE}/users/me/threads?{}", query.finish());
+        let body = get_json(http, &url, access_token).await?;
+        let page: ThreadsPage =
+            serde_json::from_str(&body).context("failed to parse Gmail threads response")?;
+        threads.extend(page.threads);
+        match page.next_page_token {
+            Some(token) => page_token = Some(token),
+            None => return Ok(threads),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct MessageHeader {
     name: String,
@@ -129,6 +175,7 @@ struct GmailMessage {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct GmailThread {
+    history_id: Option<String>,
     messages: Vec<GmailMessage>,
 }
 
@@ -167,6 +214,87 @@ async fn modify_thread(
         Err(error) if error.is::<InsufficientScope>() => Err(anyhow!(MissingPermission)),
         Err(error) => Err(error),
     }
+}
+
+/// `messages.send` into the reply's thread (V56 §7.4). A grant without
+/// `gmail.modify` is [`MissingPermission`].
+async fn send_message(
+    http: &Arc<dyn HttpClient>,
+    access_token: &str,
+    reply: &OutgoingReply,
+) -> Result<()> {
+    let url = format!("{API_BASE}/users/me/messages/send");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(reply_mime(reply));
+    let body = serde_json::json!({"raw": raw, "threadId": reply.thread});
+    match api_post_json(http, &url, access_token, &body, "Gmail messages.send").await {
+        Ok(_) => Ok(()),
+        Err(error) if error.is::<InsufficientScope>() => Err(anyhow!(MissingPermission)),
+        Err(error) => Err(error),
+    }
+}
+
+/// A fetched thread as a reply addresses it.
+fn thread_headers(thread: &GmailThread, thread_id: &str) -> ThreadHeaders {
+    let mut messages: Vec<&GmailMessage> = thread
+        .messages
+        .iter()
+        .filter(|message| !is_draft(message))
+        .collect();
+    messages.sort_by_key(|message| message_date(message));
+    let messages = messages
+        .into_iter()
+        .map(|message| {
+            let header = |name: &str| {
+                header_value(&message.payload, name)
+                    .map(decode_rfc2047)
+                    .filter(|value| !value.trim().is_empty())
+            };
+            let mailboxes = |name: &str| {
+                header_value(&message.payload, name)
+                    .map(header_mailboxes)
+                    .unwrap_or_default()
+            };
+            MessageHeaders {
+                from: mailboxes("From").into_iter().next().unwrap_or_default(),
+                reply_to: mailboxes("Reply-To"),
+                to: mailboxes("To"),
+                cc: mailboxes("Cc"),
+                subject: header("Subject").unwrap_or_default(),
+                message_id: header("Message-ID"),
+                references: header("References"),
+                sent: message_date(message),
+                text: extract_text_body(&message.payload),
+                own: message.label_ids.iter().any(|label| label == "SENT"),
+            }
+        })
+        .collect();
+    ThreadHeaders {
+        thread: thread_id.to_string(),
+        messages,
+    }
+}
+
+/// The mailboxes of an address header as `Name <address>`. The address is
+/// read from the header as sent and only the name is decoded after, so an
+/// encoded name can't put an address of its own on the thread. What isn't
+/// plainly one address is left out.
+fn header_mailboxes(raw: &str) -> Vec<String> {
+    split_mailboxes(raw)
+        .into_iter()
+        .filter_map(|mailbox| {
+            let address = mailbox_address(&mailbox)?;
+            let name = mailbox
+                .rsplit_once('<')
+                .map(|(name, _)| decode_rfc2047(name).replace(['<', '>'], ""))
+                .unwrap_or_default();
+            let name = name.trim();
+            Some(if name.is_empty() {
+                address
+            } else {
+                format!("{name} <{address}>")
+            })
+        })
+        .collect()
 }
 
 fn url_path_escape(segment: &str) -> String {
@@ -234,12 +362,18 @@ fn extract_text_body(payload: &MessagePart) -> Option<String> {
     Some(html_to_text(&html))
 }
 
-/// Gmail bodies are base64url, usually unpadded.
+/// Gmail bodies are base64url, usually unpadded. Mail's CRLF line endings
+/// become plain newlines: a note is written with those, whichever message
+/// of a thread the text came from.
 fn decode_body_data(data: &str) -> Option<String> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(data.trim_end_matches('='))
         .ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    Some(
+        String::from_utf8_lossy(&bytes)
+            .replace("\r\n", "\n")
+            .replace('\r', "\n"),
+    )
 }
 
 /// Decodes RFC 2047 encoded words (`=?charset?B|Q?…?=`) in a header value.
@@ -511,6 +645,74 @@ impl MailTransport for GmailTransport {
         self.inner.keeper.has_scope(GMAIL_MODIFY_SCOPE)
     }
 
+    fn thread_headers(&self, thread_id: &str, cx: &AsyncApp) -> Task<Result<ThreadHeaders>> {
+        let inner = self.inner.clone();
+        let thread_id = thread_id.to_string();
+        cx.spawn(async move |cx| {
+            let token = inner.keeper.valid_access_token(&inner.http, cx).await?;
+            let thread = match get_thread(&inner.http, &token, &thread_id).await {
+                Err(error) if error.is::<Unauthorized>() => {
+                    inner.keeper.invalidate_access_token();
+                    let token = inner.keeper.valid_access_token(&inner.http, cx).await?;
+                    match get_thread(&inner.http, &token, &thread_id).await {
+                        Err(error) if error.is::<Unauthorized>() => Err(anyhow!(AuthRevoked)),
+                        other => other,
+                    }
+                }
+                other => other,
+            }?;
+            Ok(thread_headers(&thread, &thread_id))
+        })
+    }
+
+    fn send_reply(&self, reply: &OutgoingReply, cx: &AsyncApp) -> Task<Result<()>> {
+        let inner = self.inner.clone();
+        let reply = reply.clone();
+        cx.spawn(async move |cx| {
+            let token = inner.keeper.valid_access_token(&inner.http, cx).await?;
+            // The refresh that minted the token said what the grant carries:
+            // don't send a write it is known to refuse.
+            if inner.keeper.has_scope(GMAIL_MODIFY_SCOPE) == Some(false) {
+                return Err(anyhow!(MissingPermission));
+            }
+            match send_message(&inner.http, &token, &reply).await {
+                Err(error) if error.is::<Unauthorized>() => {
+                    inner.keeper.invalidate_access_token();
+                    let token = inner.keeper.valid_access_token(&inner.http, cx).await?;
+                    match send_message(&inner.http, &token, &reply).await {
+                        Err(error) if error.is::<Unauthorized>() => Err(anyhow!(AuthRevoked)),
+                        other => other,
+                    }
+                }
+                other => other,
+            }
+        })
+    }
+
+    fn refresh(
+        &self,
+        known: &HashMap<String, KnownThread>,
+        budget: usize,
+        cx: &AsyncApp,
+    ) -> Task<Result<Vec<ThreadUpdate>>> {
+        let inner = self.inner.clone();
+        let known = known.clone();
+        cx.spawn(async move |cx| {
+            let token = inner.keeper.valid_access_token(&inner.http, cx).await?;
+            match inner.refresh_with_token(&known, budget, &token).await {
+                Err(error) if error.is::<Unauthorized>() => {
+                    inner.keeper.invalidate_access_token();
+                    let token = inner.keeper.valid_access_token(&inner.http, cx).await?;
+                    match inner.refresh_with_token(&known, budget, &token).await {
+                        Err(error) if error.is::<Unauthorized>() => Err(anyhow!(AuthRevoked)),
+                        other => other,
+                    }
+                }
+                other => other,
+            }
+        })
+    }
+
     fn modify_thread(
         &self,
         thread_id: &str,
@@ -549,6 +751,7 @@ impl TransportInner {
     ) -> Result<GmailFetched> {
         let label_ids = self.resolve_label_ids(access_token).await?;
         let mut seen_threads = HashSet::new();
+        let mut threads = HashMap::new();
         let mut mappings = Vec::with_capacity(self.mappings.len());
         for label_id in &label_ids {
             let Some(label_id) = label_id else {
@@ -586,11 +789,69 @@ impl TransportInner {
                     continue;
                 }
                 let thread = get_thread(&self.http, access_token, &reference.thread_id).await?;
+                let through = thread
+                    .messages
+                    .iter()
+                    .filter(|message| !is_draft(message))
+                    .filter_map(message_date)
+                    .map(|date| date.timestamp_millis())
+                    .max();
+                if let (Some(history), Some(through)) = (&thread.history_id, through) {
+                    threads.insert(
+                        reference.thread_id.clone(),
+                        KnownThread {
+                            history: Some(history.clone()),
+                            through,
+                        },
+                    );
+                }
                 items.push(captured_item(&thread, &self.account, &reference.thread_id));
             }
             mappings.push(MappingFetched::Items(items));
         }
-        Ok(GmailFetched { mappings })
+        Ok(GmailFetched { mappings, threads })
+    }
+
+    /// The captured threads Gmail changed since they were last fetched
+    /// (V56 §6.2). The listing is one request per hundred threads; only a
+    /// thread whose `historyId` moved costs a fetch, and at most `budget` do.
+    async fn refresh_with_token(
+        &self,
+        known: &HashMap<String, KnownThread>,
+        budget: usize,
+        access_token: &str,
+    ) -> Result<Vec<ThreadUpdate>> {
+        let mut updates = Vec::new();
+        if known.is_empty() {
+            return Ok(updates);
+        }
+        let label_ids = self.resolve_label_ids(access_token).await?;
+        let mut seen = HashSet::new();
+        for label_id in label_ids.iter().flatten() {
+            for listed in list_label_threads(&self.http, access_token, label_id).await? {
+                let Some(known) = known.get(&listed.id) else {
+                    continue;
+                };
+                if !seen.insert(listed.id.clone())
+                    || known.history.as_deref() == Some(listed.history_id.as_str())
+                {
+                    continue;
+                }
+                if updates.len() >= budget {
+                    return Ok(updates);
+                }
+                match get_thread(&self.http, access_token, &listed.id).await {
+                    Ok(thread) => updates.push(thread_update(&thread, &listed, known)),
+                    // What was already read is still worth applying.
+                    Err(error) if !updates.is_empty() && !error.is::<AuthRevoked>() => {
+                        log::warn!("Thock: reading a changed Gmail thread failed: {error:#}");
+                        return Ok(updates);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Ok(updates)
     }
 
     /// Resolves every mapped label by its full path name, case-insensitively
@@ -632,7 +893,7 @@ fn captured_item(thread: &GmailThread, account: &str, thread_id: &str) -> Captur
     let mut messages: Vec<&GmailMessage> = thread
         .messages
         .iter()
-        .filter(|message| !message.label_ids.iter().any(|label| label == "DRAFT"))
+        .filter(|message| !is_draft(message))
         .collect();
     messages.sort_by_key(|message| message_date(message));
 
@@ -668,6 +929,49 @@ fn captured_item(thread: &GmailThread, account: &str, thread_id: &str) -> Captur
     }
 }
 
+/// What a fetched thread adds to what the note holds.
+fn thread_update(thread: &GmailThread, listed: &ThreadRef, known: &KnownThread) -> ThreadUpdate {
+    let mut messages: Vec<&GmailMessage> = thread
+        .messages
+        .iter()
+        .filter(|message| !is_draft(message))
+        .collect();
+    messages.sort_by_key(|message| message_date(message));
+    let millis =
+        |message: &GmailMessage| message_date(message).map_or(0, |date| date.timestamp_millis());
+    let as_message = |message: &GmailMessage| ThreadMessage {
+        from: header_value(&message.payload, "From")
+            .map(decode_rfc2047)
+            .unwrap_or_default(),
+        sent: message_date(message),
+        text: extract_text_body(&message.payload),
+        own: message.label_ids.iter().any(|label| label == "SENT"),
+    };
+    ThreadUpdate {
+        thread: listed.id.clone(),
+        history: thread
+            .history_id
+            .clone()
+            .unwrap_or_else(|| listed.history_id.clone()),
+        through: messages
+            .iter()
+            .map(|message| millis(message))
+            .max()
+            .unwrap_or(0)
+            .max(known.through),
+        first: messages.first().map(|message| as_message(message)),
+        new_messages: messages
+            .iter()
+            .filter(|message| millis(message) > known.through)
+            .map(|message| as_message(message))
+            .collect(),
+    }
+}
+
+fn is_draft(message: &GmailMessage) -> bool {
+    message.label_ids.iter().any(|label| label == "DRAFT")
+}
+
 fn message_date(message: &GmailMessage) -> Option<DateTime<chrono::Utc>> {
     message
         .internal_date
@@ -684,29 +988,10 @@ fn thread_sections(messages: &[&GmailMessage]) -> String {
         }
         let from = header_value(&message.payload, "From")
             .map(decode_rfc2047)
-            .map(|from| crate::gmail::collapse_whitespace(&from))
-            .filter(|from| !from.is_empty())
-            .unwrap_or_else(|| "(unknown sender)".to_string());
-        out.push_str("## ");
-        out.push_str(&from);
-        if let Some(date) = message_date(message) {
-            let local = date.with_timezone(&Local);
-            out.push_str(&format!(" — {}", local.format("%Y-%m-%d %H:%M")));
-        }
-        out.push('\n');
+            .unwrap_or_default();
+        let sent = message_date(message).map(|date| date.with_timezone(&Local));
         let text = extract_text_body(&message.payload);
-        match text
-            .as_deref()
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-        {
-            Some(text) => {
-                out.push('\n');
-                out.push_str(text);
-                out.push('\n');
-            }
-            None => out.push_str("\n_(no content)_\n"),
-        }
+        out.push_str(&message_section(&from, sent, text.as_deref()));
     }
     out
 }
@@ -749,6 +1034,21 @@ mod tests {
             html_to_text(html),
             "Hi & welcome,\nYour invoice\nis attached.\none\ntwo — both\n\n&copy; Acme"
         );
+    }
+
+    #[test]
+    fn a_lone_message_is_captured_without_mail_line_endings() {
+        let thread = GmailThread {
+            history_id: None,
+            messages: vec![plain_message(
+                "Ana <ana@example.com>",
+                Some("Coffee tomorrow?\r\n\r\nAna\r\n"),
+                "1000",
+                &["INBOX"],
+            )],
+        };
+        let item = captured_item(&thread, "diego@example.com", "t-1");
+        assert_eq!(item.body.as_deref(), Some("Coffee tomorrow?\n\nAna\n"));
     }
 
     #[test]
@@ -827,6 +1127,7 @@ mod tests {
     fn threads_render_every_message_in_order() {
         // Unsorted input, a draft, and a reply with no text.
         let thread = GmailThread {
+            history_id: None,
             messages: vec![
                 plain_message("Bea <bea@example.com>", Some("Second"), "2000", &[]),
                 plain_message("Draft <me@example.com>", Some("wip"), "3000", &["DRAFT"]),
@@ -848,6 +1149,7 @@ mod tests {
         // A single-message thread keeps the bare V13 body — no section
         // heading.
         let single = GmailThread {
+            history_id: None,
             messages: vec![plain_message(
                 "Ana <ana@example.com>",
                 Some("Solo"),
@@ -888,7 +1190,7 @@ mod tests {
             } else if uri.contains("/threads/t-both") {
                 assert!(uri.contains("format=full"), "{uri}");
                 format!(
-                    r#"{{"id": "t-both", "messages": [
+                    r#"{{"id": "t-both", "historyId": "812", "messages": [
                         {{"id": "m3", "internalDate": "1755500000000",
                           "payload": {{"headers": [
                             {{"name": "Subject", "value": "Re: =?UTF-8?Q?Caf=C3=A9?= plans"}},
@@ -944,6 +1246,18 @@ mod tests {
         // the first message, replies rendered oldest first…
         assert_eq!(backlog.len(), 1);
         assert_eq!(backlog[0].external_id, "t-both");
+        // The thread as fetched is what its refresh starts from; one Gmail
+        // gave no history for is dated by its capture instead.
+        assert_eq!(
+            fetched.threads,
+            HashMap::from([(
+                "t-both".to_string(),
+                KnownThread {
+                    history: Some("812".to_string()),
+                    through: 1755500000000,
+                }
+            )])
+        );
         assert_eq!(backlog[0].title, "Café plans");
         assert_eq!(backlog[0].from.as_deref(), Some("Ana <ana@example.com>"));
         assert_eq!(
@@ -1132,5 +1446,265 @@ mod tests {
                 .to_string()
                 .contains("503")
         );
+    }
+
+    fn known(history: Option<&str>, through: i64) -> KnownThread {
+        KnownThread {
+            history: history.map(str::to_string),
+            through,
+        }
+    }
+
+    /// A listing of three captured threads and one never captured; every
+    /// thread's fetch holds an old message, a draft and a sent reply.
+    fn refresh_http(fetched: Arc<Mutex<Vec<String>>>) -> Arc<dyn HttpClient> {
+        FakeHttpClient::create(move |request| {
+            let fetched = fetched.clone();
+            async move {
+                let uri = request.uri().to_string();
+                let body = if uri.contains("/labels") {
+                    r#"{"labels": [{"id": "Label_2", "name": "thock/inbox"}]}"#.to_string()
+                } else if uri.contains("/threads?") && uri.contains("pageToken=p2") {
+                    r#"{"threads": [{"id": "t-new", "historyId": "9"},
+                                    {"id": "t-uncaptured", "historyId": "9"}]}"#
+                        .to_string()
+                } else if uri.contains("/threads?") {
+                    assert!(uri.contains("labelIds=Label_2"), "{uri}");
+                    r#"{"threads": [{"id": "t-same", "historyId": "5"},
+                                    {"id": "t-moved", "historyId": "8"}],
+                        "nextPageToken": "p2"}"#
+                        .to_string()
+                } else if let Some((_, id)) = uri.split_once("/threads/") {
+                    let id = id.split('?').next().unwrap_or_default().to_string();
+                    fetched.lock().unwrap().push(id.clone());
+                    format!(
+                        r#"{{"id": "{id}", "historyId": "10", "messages": [
+                            {{"id": "m3", "internalDate": "3000", "labelIds": ["SENT"],
+                              "payload": {{"headers": [{{"name": "From", "value": "Diego <diego@example.com>"}}],
+                              "mimeType": "text/plain", "body": {{"data": "{}"}}}}}},
+                            {{"id": "m4", "internalDate": "4000", "labelIds": ["DRAFT"],
+                              "payload": {{"headers": [{{"name": "From", "value": "Diego <diego@example.com>"}}]}}}},
+                            {{"id": "m1", "internalDate": "1000", "labelIds": ["INBOX"],
+                              "payload": {{"headers": [{{"name": "From", "value": "Ana <ana@example.com>"}}],
+                              "mimeType": "text/plain", "body": {{"data": "{}"}}}}}}
+                        ]}}"#,
+                        base64url("On it."),
+                        base64url("Is the farm up?")
+                    )
+                } else {
+                    panic!("unexpected request to {uri}");
+                };
+                Ok(Response::builder()
+                    .status(200)
+                    .body(AsyncBody::from(body.into_bytes()))
+                    .unwrap())
+            }
+        })
+    }
+
+    #[test]
+    fn refresh_fetches_only_the_captured_threads_that_moved() {
+        let fetched = Arc::new(Mutex::new(Vec::new()));
+        let inner = test_inner(refresh_http(fetched.clone()), &[("thock/inbox", "inbox")]);
+        let threads: HashMap<String, KnownThread> = [
+            ("t-same".to_string(), known(Some("5"), 1000)),
+            ("t-moved".to_string(), known(Some("7"), 1000)),
+            ("t-new".to_string(), known(None, 3000)),
+        ]
+        .into();
+        let updates = block_on(inner.refresh_with_token(&threads, 10, "token")).unwrap();
+        assert_eq!(*fetched.lock().unwrap(), ["t-moved", "t-new"]);
+
+        let moved = &updates[0];
+        assert_eq!(
+            (moved.thread.as_str(), moved.history.as_str()),
+            ("t-moved", "10")
+        );
+        assert_eq!(moved.through, 3000, "the draft doesn't count");
+        assert_eq!(moved.first.as_ref().unwrap().from, "Ana <ana@example.com>");
+        assert_eq!(moved.new_messages.len(), 1);
+        let reply = &moved.new_messages[0];
+        assert_eq!(reply.text.as_deref(), Some("On it."));
+        assert!(reply.own, "it carries SENT");
+        // Fetched with nothing newer: still an update, so its history is kept.
+        assert_eq!(updates[1].thread, "t-new");
+        assert!(updates[1].new_messages.is_empty());
+
+        // The budget stops the fetches, not the listing.
+        fetched.lock().unwrap().clear();
+        let updates = block_on(inner.refresh_with_token(&threads, 1, "token")).unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(*fetched.lock().unwrap(), ["t-moved"]);
+        // And with nothing captured there is nothing to ask.
+        let updates = block_on(inner.refresh_with_token(&HashMap::new(), 10, "token")).unwrap();
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn a_thread_gives_a_reply_its_headers() {
+        let message = GmailMessage {
+            label_ids: vec!["INBOX".to_string()],
+            internal_date: Some("1000".to_string()),
+            payload: MessagePart {
+                mime_type: "text/plain".to_string(),
+                headers: [
+                    ("From", "Ana <ana@example.com>"),
+                    (
+                        "To",
+                        "\"Tavares, Diego\" <diego@example.com>, bea@example.com",
+                    ),
+                    ("Cc", "Rui <rui@example.com>"),
+                    ("Subject", "=?UTF-8?Q?Caf=C3=A9?= plans"),
+                    ("Message-ID", "<m1@mail.example.com>"),
+                    ("References", "<m0@mail.example.com>"),
+                ]
+                .into_iter()
+                .map(|(name, value)| MessageHeader {
+                    name: name.to_string(),
+                    value: value.to_string(),
+                })
+                .collect(),
+                body: PartBody {
+                    data: Some(base64url("Coffee?")),
+                },
+                ..Default::default()
+            },
+        };
+        let thread = GmailThread {
+            history_id: None,
+            messages: vec![
+                plain_message("Draft <diego@example.com>", Some("wip"), "2000", &["DRAFT"]),
+                message,
+            ],
+        };
+        let headers = thread_headers(&thread, "t-1");
+        assert_eq!(headers.thread, "t-1");
+        assert_eq!(headers.messages.len(), 1);
+        let message = &headers.messages[0];
+        assert_eq!(
+            message.to,
+            ["\"Tavares, Diego\" <diego@example.com>", "bea@example.com"]
+        );
+        assert_eq!(message.cc, ["Rui <rui@example.com>"]);
+        assert_eq!(message.subject, "Café plans");
+        assert_eq!(message.message_id.as_deref(), Some("<m1@mail.example.com>"));
+        assert_eq!(message.references.as_deref(), Some("<m0@mail.example.com>"));
+        assert!(message.reply_to.is_empty());
+        assert_eq!(message.text.as_deref(), Some("Coffee?"));
+        assert!(!message.own);
+    }
+
+    #[test]
+    fn an_encoded_name_cannot_put_an_address_on_the_thread() {
+        // Decoded, the name reads `Mallory <eve@evil.example>,`.
+        let thread = GmailThread {
+            history_id: None,
+            messages: vec![GmailMessage {
+                label_ids: vec!["INBOX".to_string()],
+                internal_date: Some("1000".to_string()),
+                payload: MessagePart {
+                    mime_type: "text/plain".to_string(),
+                    headers: [
+                        (
+                            "From",
+                            "<ana@example.com> =?UTF-8?Q?=3Ceve=40evil.example=3E?=",
+                        ),
+                        (
+                            "To",
+                            "=?UTF-8?Q?Mallory_=3Ceve=40evil.example=3E=2C?= <bob@example.com>",
+                        ),
+                        ("Cc", "=?UTF-8?Q?eve=40evil.example?="),
+                        ("Reply-To", "ana@example.com, list@example.com"),
+                    ]
+                    .into_iter()
+                    .map(|(name, value)| MessageHeader {
+                        name: name.to_string(),
+                        value: value.to_string(),
+                    })
+                    .collect(),
+                    ..Default::default()
+                },
+            }],
+        };
+        let headers = thread_headers(&thread, "t-1");
+        let message = &headers.messages[0];
+        assert_eq!(message.from, "");
+        assert_eq!(message.to, ["Mallory eve@evil.example, <bob@example.com>"]);
+        assert!(message.cc.is_empty());
+        assert_eq!(message.reply_to, ["ana@example.com", "list@example.com"]);
+        assert_eq!(
+            crate::gmail::thread_addresses(&headers, "me@example.com"),
+            ["ana@example.com", "list@example.com", "bob@example.com"]
+        );
+    }
+
+    fn outgoing() -> OutgoingReply {
+        OutgoingReply {
+            thread: "t-1".to_string(),
+            from: "diego@example.com".to_string(),
+            to: vec!["ana@example.com".to_string()],
+            cc: Vec::new(),
+            subject: "Re: Plans".to_string(),
+            in_reply_to: Some("<m1@mail.example.com>".to_string()),
+            references: Some("<m1@mail.example.com>".to_string()),
+            body: "Yes.\n".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_reply_is_sent_into_its_thread() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let http = FakeHttpClient::create({
+            let requests = requests.clone();
+            move |mut request| {
+                let requests = requests.clone();
+                async move {
+                    let mut body = String::new();
+                    request.body_mut().read_to_string(&mut body).await?;
+                    requests.lock().unwrap().push((
+                        request.method().to_string(),
+                        request.uri().to_string(),
+                        body,
+                    ));
+                    Ok(Response::builder()
+                        .status(200)
+                        .body(AsyncBody::from(b"{}".to_vec()))
+                        .unwrap())
+                }
+            }
+        });
+        let http: Arc<dyn HttpClient> = http;
+        block_on(send_message(&http, "token", &outgoing())).unwrap();
+        let requests = requests.lock().unwrap();
+        let [(method, uri, body)] = requests.as_slice() else {
+            panic!("one request, got {requests:?}");
+        };
+        assert_eq!(method, "POST");
+        assert_eq!(
+            uri,
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+        );
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["threadId"], "t-1");
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(body["raw"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(String::from_utf8(raw).unwrap(), reply_mime(&outgoing()));
+    }
+
+    #[test]
+    fn a_send_the_grant_refuses_names_the_missing_permission() {
+        let http = FakeHttpClient::create(|_| async move {
+            Ok(Response::builder()
+                .status(403)
+                .body(AsyncBody::from(
+                    br#"{"error": {"message": "Request had insufficient authentication scopes."}}"#
+                        .to_vec(),
+                ))
+                .unwrap())
+        });
+        let http: Arc<dyn HttpClient> = http;
+        let error = block_on(send_message(&http, "token", &outgoing())).unwrap_err();
+        assert!(error.is::<MissingPermission>(), "{error:#}");
     }
 }
