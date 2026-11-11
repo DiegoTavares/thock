@@ -362,12 +362,18 @@ fn extract_text_body(payload: &MessagePart) -> Option<String> {
     Some(html_to_text(&html))
 }
 
-/// Gmail bodies are base64url, usually unpadded.
+/// Gmail bodies are base64url, usually unpadded. Mail's CRLF line endings
+/// become plain newlines: a note is written with those, whichever message
+/// of a thread the text came from.
 fn decode_body_data(data: &str) -> Option<String> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(data.trim_end_matches('='))
         .ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    Some(
+        String::from_utf8_lossy(&bytes)
+            .replace("\r\n", "\n")
+            .replace('\r', "\n"),
+    )
 }
 
 /// Decodes RFC 2047 encoded words (`=?charset?B|Q?…?=`) in a header value.
@@ -1028,6 +1034,21 @@ mod tests {
             html_to_text(html),
             "Hi & welcome,\nYour invoice\nis attached.\none\ntwo — both\n\n&copy; Acme"
         );
+    }
+
+    #[test]
+    fn a_lone_message_is_captured_without_mail_line_endings() {
+        let thread = GmailThread {
+            history_id: None,
+            messages: vec![plain_message(
+                "Ana <ana@example.com>",
+                Some("Coffee tomorrow?\r\n\r\nAna\r\n"),
+                "1000",
+                &["INBOX"],
+            )],
+        };
+        let item = captured_item(&thread, "diego@example.com", "t-1");
+        assert_eq!(item.body.as_deref(), Some("Coffee tomorrow?\n\nAna\n"));
     }
 
     #[test]
