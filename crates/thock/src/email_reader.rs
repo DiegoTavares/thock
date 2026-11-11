@@ -561,6 +561,11 @@ impl EmailReader {
         gmail_thread_id(link).map(str::to_string)
     }
 
+    /// Whether the note is an email with a thread to reply into.
+    pub(crate) fn can_reply(&self) -> bool {
+        self.thread_id().is_some()
+    }
+
     /// Whether the keys are the composer's: its editor or its menu has focus.
     pub(crate) fn is_composing(&self, window: &Window, cx: &App) -> bool {
         self.composer.as_ref().is_some_and(|composer| {

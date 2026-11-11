@@ -1806,6 +1806,31 @@ impl InboxView {
                                     cx,
                                 ))
                             })
+                            // An email with its thread to answer into. Reply
+                            // all gives way first when the header is tight.
+                            .when(self.reader.can_reply(), |this| {
+                                this.child(self.render_quiet_action(
+                                    "reply",
+                                    &ReplyToEmail,
+                                    list_key(&ReplyToEmail),
+                                    "Reply",
+                                    list_keys_off,
+                                    cx,
+                                ))
+                                .when(
+                                    fit != HeaderFit::Tight,
+                                    |this| {
+                                        this.child(self.render_quiet_action(
+                                            "reply-all",
+                                            &ReplyAllToEmail,
+                                            list_key(&ReplyAllToEmail),
+                                            "Reply all",
+                                            list_keys_off,
+                                            cx,
+                                        ))
+                                    },
+                                )
+                            })
                             // Only with something to undo, which can outlive
                             // the list it emptied.
                             .when(self.last_decision.is_some(), |this| {
@@ -7680,6 +7705,31 @@ mod tests {
             );
             assert_eq!(composer.state, crate::email_reader::ComposerState::Writing);
         });
+    }
+
+    #[gpui::test]
+    async fn the_header_offers_reply_on_an_email_with_its_thread(cx: &mut TestAppContext) {
+        let (mut setup, _transport) = setup_replying(cx).await;
+        let reply = drawn(&mut setup, "INBOX_ACTION-reply");
+        let key = drawn(&mut setup, "KEY_BINDING-r");
+        assert!(reply.contains(&key.center()), "{key:?} in {reply:?}");
+        let open = drawn(&mut setup, "INBOX_ACTION-open");
+        assert!(open.right() <= reply.left(), "{open:?} before {reply:?}");
+
+        // The button does what the key does.
+        setup
+            .cx
+            .simulate_click(reply.center(), gpui::Modifiers::none());
+        setup.cx.run_until_parked();
+        assert_eq!(reply_text(&setup).as_deref(), Some(""));
+
+        // A note that isn't an email has nothing to reply to.
+        select(&mut setup, "Call Ana");
+        setup.cx.run_until_parked();
+        setup.view.update(&mut setup.cx, |_, cx| cx.notify());
+        setup.cx.run_until_parked();
+        assert_eq!(setup.cx.debug_bounds("INBOX_ACTION-reply"), None);
+        assert_eq!(setup.cx.debug_bounds("INBOX_ACTION-reply-all"), None);
     }
 
     #[gpui::test]

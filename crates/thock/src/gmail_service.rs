@@ -1473,10 +1473,15 @@ impl GmailService {
         // there, so the next pass over fresh text is what tells.
         let was_saved = buffer.read_with(cx, |buffer, _| !buffer.is_dirty());
         let mut edited = false;
+        // What the last pass meant the buffer to hold. A buffer that holds
+        // it is done, whatever the plan makes of the text: appending again
+        // would write the messages twice.
+        let mut intended: Option<String> = None;
         for _ in 0..4 {
             let text = buffer.read_with(cx, |buffer, _| buffer.text());
-            let Some(refresh) = plan_note_refresh(&text, first_heading.as_deref(), &sections)
-            else {
+            let plan = plan_note_refresh(&text, first_heading.as_deref(), &sections)
+                .filter(|_| intended.as_deref() != Some(text.as_str()));
+            let Some(refresh) = plan else {
                 if edited && was_saved {
                     project
                         .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
@@ -1484,8 +1489,11 @@ impl GmailService {
                 }
                 return Ok(buffer.read_with(cx, |buffer, _| !buffer.is_dirty()));
             };
+            let mut new_text = refresh.apply(&text);
+            text::LineEnding::normalize(&mut new_text);
+            intended = Some(new_text.clone());
             let diff = buffer
-                .read_with(cx, |buffer, cx| buffer.diff(refresh.apply(&text), cx))
+                .read_with(cx, |buffer, cx| buffer.diff(new_text, cx))
                 .await;
             buffer.update(cx, |buffer, cx| {
                 buffer.start_transaction();
@@ -3034,5 +3042,54 @@ mod tests {
         open.send(()).unwrap();
         cx.run_until_parked();
         assert_eq!(transport.sent.lock().unwrap().as_slice(), [reply]);
+    }
+
+    #[gpui::test]
+    async fn a_reply_with_mail_line_endings_lands_once_in_an_open_note(cx: &mut TestAppContext) {
+        let (fs, project, transport) = refresh_harness(cx).await;
+        let path = project
+            .read_with(cx, |project, cx| {
+                project.find_project_path(Path::new(IDEA_NOTE), cx)
+            })
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(path, cx))
+            .await
+            .unwrap();
+        // Mail is CRLF; a buffer never is.
+        *transport.thread_updates.lock().unwrap() = vec![update(
+            "h2",
+            vec![reply(
+                "Bea <bea@example.com>",
+                "Count me in.\r\n\r\nSee you there.\r\n",
+                5,
+                false,
+            )],
+        )];
+        for _ in 0..2 {
+            poll(cx);
+            cx.executor().advance_clock(TYPING_GUARD_QUIET * 2);
+            cx.run_until_parked();
+        }
+        buffer.read_with(cx, |buffer, _| {
+            assert_eq!(
+                buffer.text().matches("Count me in.").count(),
+                1,
+                "{}",
+                buffer.text()
+            );
+            assert!(!buffer.is_dirty());
+        });
+        let note = fs.load(Path::new(IDEA_NOTE)).await.unwrap();
+        assert!(
+            note.ends_with("Count me in.\n\nSee you there.\n"),
+            "{note:?}"
+        );
+        assert!(
+            fs.load(Path::new(THREADS_STATE))
+                .await
+                .unwrap()
+                .contains("\"h2\"")
+        );
     }
 }

@@ -319,7 +319,14 @@ pub fn section_heading(from: &str, sent: Option<DateTime<Local>>) -> String {
 pub fn message_section(from: &str, sent: Option<DateTime<Local>>, text: Option<&str>) -> String {
     let mut section = section_heading(from, sent);
     section.push('\n');
-    match text.map(str::trim).filter(|text| !text.is_empty()) {
+    // Mail is CRLF. A note isn't, and an open buffer never is: a section
+    // that kept its line endings would never be found there again.
+    let text = text.map(|text| text.replace("\r\n", "\n").replace('\r', "\n"));
+    match text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
         Some(text) => {
             section.push('\n');
             section.push_str(text);
@@ -841,9 +848,11 @@ pub fn plan_note_refresh(
     first_heading: Option<&str>,
     sections: &[String],
 ) -> Option<NoteRefresh> {
+    // A note written before sections were normalized may hold CRLF.
+    let held = content.replace("\r\n", "\n");
     let missing: Vec<&String> = sections
         .iter()
-        .filter(|section| !content.contains(section.trim_end()))
+        .filter(|section| !held.contains(section.trim_end()))
         .collect();
     if missing.is_empty() {
         return None;

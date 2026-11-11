@@ -212,7 +212,9 @@ Messages newer than `through`, drafts left out, oldest first, each in the sectio
   title, so the reader sees two messages rather than a note and a reply. This is the one insert;
   nothing is rewritten.
 - **Never twice.** A section the note already contains, byte for byte, isn't appended. That is
-  what makes a crash between the note and the state file harmless.
+  what makes a crash between the note and the state file harmless. Mail's CRLF line endings are
+  made plain newlines first: an open buffer never holds CRLF, so a section that kept them would
+  never be found there and would be appended again.
 - **One note's trouble is its own.** A note that can't be read or written is logged and tried
   again next poll; the other threads are still applied. A refresh that failed is the poll's
   outcome in the sync status, after the Gmail archive pass has run: nothing here holds V53 up.
@@ -330,6 +332,8 @@ refuses with `MissingPermission` when the grant is known to lack `gmail.modify`,
 - The right pane is an `EmailReader`.
 - `r` is `thock::ReplyToEmail` and `a` is `thock::ReplyAllToEmail`. On a note that isn't an email
   they do nothing. `thock::SuggestInboxDestinations` moves from `r` to `shift-j` (decision 5).
+- The reader's header offers **Reply** and **Reply all** with their keys, beside *Open note* and
+  *Open in Gmail*, on an email that has its thread; a tight header keeps only **Reply**.
 - `o` and `enter` open the note as before; for an email that is now the reader tab (§4.4).
 - The keys sheet and the row menu gain the reply keys.
 
