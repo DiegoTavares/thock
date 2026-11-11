@@ -14,6 +14,7 @@ pub mod day_plan;
 pub mod day_planner_panel;
 pub mod desk_layout;
 pub mod desk_panel;
+pub mod email_reader;
 pub mod getting_started;
 pub mod gmail;
 pub mod gmail_google;
