@@ -7,10 +7,11 @@
 
 use chrono::Local;
 use gpui::{
-    Action, AnyElement, App, AppContext as _, Context, Entity, FocusHandle, FontWeight, Hsla,
-    ImageSource, KeyContext, Length, Pixels, Rems, Resource, ScrollHandle, ScrollWheelEvent,
-    SharedString, TextRun, TextStyleRefinement, UnderlineStyle, Window, WrappedLine, div, hsla,
-    linear_color_stop, linear_gradient, point, prelude::*, px, relative, rems, transparent_black,
+    Action, AnyElement, App, AppContext as _, Context, Entity, FocusHandle, FontWeight,
+    HighlightStyle, Hsla, ImageSource, KeyContext, Length, Pixels, Rems, Resource, ScrollHandle,
+    ScrollWheelEvent, SharedString, StyledText, TextRun, TextStyleRefinement, UnderlineStyle,
+    Window, WrappedLine, div, hsla, linear_color_stop, linear_gradient, point, prelude::*, px,
+    relative, rems, transparent_black,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
 use settings::{Settings as _, SettingsStore};
@@ -20,8 +21,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use theme_settings::ThemeSettings;
 use ui::{
-    ActiveTheme as _, Color, HeadlineSize, Icon, IconName, IconSize, KeyBinding, Label,
-    LabelCommon as _, LabelSize, TextSize, Tooltip, h_flex, v_flex,
+    ActiveTheme as _, ButtonLike, Clickable as _, Color, HeadlineSize, Icon, IconName, IconSize,
+    KeyBinding, Label, LabelCommon as _, LabelSize, TextSize, Tooltip, h_flex, v_flex,
 };
 use util::paths::PathStyle;
 use util::rel_path::RelPath;
@@ -39,6 +40,11 @@ use crate::vault::Vault;
 /// The frontmatter `source:` of a note captured from Gmail.
 pub(crate) const EMAIL_SOURCE: &str = "gmail";
 
+/// One step of the reader's scroll keys.
+pub(crate) const READER_LINE: Pixels = px(40.);
+/// The row above a pane: the Inbox's two headers and an email tab's.
+pub(crate) const PANE_HEADER_HEIGHT: Pixels = px(52.);
+pub(crate) const TITLE_LINE_HEIGHT: f32 = 1.3;
 pub(crate) const READER_MAX_WIDTH: Pixels = px(960.);
 pub(crate) const FIELD_MIN_WIDTH: Pixels = px(300.);
 pub(crate) const FIELD_KEY_WIDTH: Pixels = px(104.);
@@ -460,10 +466,6 @@ impl EmailReader {
         }
     }
 
-    pub(crate) fn is_email(&self) -> bool {
-        self.reader_note.thread.is_some()
-    }
-
     /// Brings the reader in step with the note its host shows. `key` names
     /// the note's bytes: the same key is the same reading. A note that only
     /// grew keeps its folds, and stays on its message unless a newer one came.
@@ -546,7 +548,7 @@ impl EmailReader {
 
     /// An action's keycap as the host binds it. Asking the focus handle would
     /// answer for whichever pane holds focus.
-    fn keycap(&self, action: &dyn Action, window: &Window, cx: &App) -> KeyBinding {
+    pub(crate) fn keycap(&self, action: &dyn Action, window: &Window, cx: &App) -> KeyBinding {
         window
             .highest_precedence_binding_for_action_in_context(action, self.hint_context.clone())
             .map(|binding| binding_keycap(&binding, cx))
@@ -574,6 +576,39 @@ impl EmailReader {
             let path = vault.root.join(relative.as_std_path());
             Some(ImageSource::Resource(Resource::Path(Arc::from(path))))
         })
+    }
+
+    /// The note's title in its fixed block: whatever its length, what sits
+    /// under it stays where the hand expects it. A trailing ticket id is
+    /// muted.
+    pub(crate) fn render_title(&self, window: &Window, cx: &App) -> gpui::Div {
+        let title = self.title().unwrap_or_default();
+        let shown_title = self.reader_title(&title, window, cx);
+        let id_tone = HighlightStyle {
+            color: Some(cx.theme().colors().text_muted),
+            ..Default::default()
+        };
+        let id_start = shown_title
+            .rfind(TITLE_ID_SEPARATOR)
+            .or_else(|| shown_title.rfind('\n'));
+        let id_length = shown_title.len();
+        let title_text = div()
+            .text_size(TITLE_SIZE.rems())
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(cx.theme().colors().text)
+            .line_clamp(TITLE_LINES)
+            .text_ellipsis()
+            .child(
+                StyledText::new(shown_title)
+                    .with_highlights(id_start.map(|start| (start..id_length, id_tone))),
+            );
+        let title_height = rems(TITLE_SIZE.rems().0 * TITLE_LINE_HEIGHT * TITLE_LINES as f32);
+        div()
+            .debug_selector(|| "INBOX_READER_TITLE".to_string())
+            .flex_none()
+            .h(title_height)
+            .line_height(relative(TITLE_LINE_HEIGHT))
+            .child(title_text)
     }
 
     /// The scrolling body: the note's cards, under the earlier cue once the
@@ -1662,4 +1697,43 @@ pub(crate) fn vim_mode(cx: &App) -> bool {
         .merged_settings()
         .vim_mode
         .unwrap_or(false)
+}
+
+/// An action on the note rather than a place for it, so it sits in a header.
+/// While its key is off the keycap and the words dim as one hint; a click
+/// still works.
+pub(crate) fn quiet_action(
+    name: &'static str,
+    action: &dyn Action,
+    keycap: KeyBinding,
+    label: &'static str,
+    dimmed: bool,
+    focus: &FocusHandle,
+    cx: &App,
+) -> gpui::Stateful<gpui::Div> {
+    let focus = focus.clone();
+    let boxed_action = action.boxed_clone();
+    div()
+        .id(SharedString::from(format!("inbox-action-wrap-{name}")))
+        .debug_selector(move || format!("INBOX_ACTION-{name}"))
+        .flex_none()
+        .child(
+            ButtonLike::new(SharedString::from(format!("inbox-action-{name}")))
+                .child(
+                    h_flex()
+                        .when(dimmed, |this| {
+                            this.debug_selector(move || format!("INBOX_DIMMED-{name}"))
+                        })
+                        .gap_1()
+                        .child(framed_keycap(keycap, dimmed, cx))
+                        .child(
+                            Label::new(label)
+                                .size(LabelSize::Small)
+                                .color(hint_color(dimmed)),
+                        ),
+                )
+                .on_click(move |_, window, cx| {
+                    focus.dispatch_action(boxed_action.as_ref(), window, cx)
+                }),
+        )
 }

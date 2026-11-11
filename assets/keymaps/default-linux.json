@@ -1059,6 +1059,23 @@
     },
   },
   {
+    "context": "ThockEmailView && !composing",
+    "use_key_equivalents": true,
+    "bindings": {
+      "j": "thock::ScrollInboxReaderDown",
+      "k": "thock::ScrollInboxReaderUp",
+      "down": "thock::ScrollInboxReaderDown",
+      "up": "thock::ScrollInboxReaderUp",
+      "ctrl-d": "thock::ScrollInboxReaderPageDown",
+      "ctrl-u": "thock::ScrollInboxReaderPageUp",
+      "n": "thock::NextInboxMessage",
+      "shift-n": "thock::PreviousInboxMessage",
+      "z": "thock::ToggleInboxFolds",
+      "b": "thock::OpenInboxLink",
+      "o": "thock::EditEmailNote",
+    },
+  },
+  {
     "context": "ThockRemindersPanel",
     "use_key_equivalents": true,
     "bindings": {
@@ -1215,6 +1232,7 @@
     "use_key_equivalents": true,
     "bindings": {
       "ctrl-alt-m": "thock::ToggleMarkdownSource",
+      "ctrl-alt-shift-m": "thock::ReadEmailNote",
       "ctrl-enter": "thock::ToggleTask",
     },
   },

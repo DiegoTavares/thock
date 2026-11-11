@@ -12,11 +12,10 @@ use editor::{Editor, EditorEvent};
 use fs::Fs;
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext as _, AvailableSpace, ClickEvent, Context,
-    DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla,
-    KeyContext, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Rems, ScrollHandle,
-    SharedString, StyledText, Subscription, Task, TaskExt as _, UniformListScrollHandle,
-    WeakEntity, Window, actions, anchored, deferred, div, point, prelude::*, px, relative, rems,
-    transparent_black,
+    DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, KeyContext,
+    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Rems, ScrollHandle, SharedString,
+    Subscription, Task, TaskExt as _, UniformListScrollHandle, WeakEntity, Window, actions,
+    anchored, deferred, div, point, prelude::*, px, relative, rems, transparent_black,
 };
 use menu::{Cancel, Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use project::Project;
@@ -58,9 +57,7 @@ use crate::vault::{VAULT_MARKER_DIR, Vault};
 pub const INBOX_VIEW_KEY: &str = "ThockInboxView";
 const LAYOUT_PATH: &str = "state/inbox/layout.json";
 const DEFAULT_LIST_FRACTION: f32 = 0.32;
-const READER_LINE: Pixels = px(40.);
 // The spacing and type scale of §4.2.
-const PANE_HEADER_HEIGHT: Pixels = px(52.);
 /// A row's slot: a two-line title and the meta line, with `ROW_GAP` above and
 /// below the band, so a row holds together and the next one starts apart.
 const ROW_HEIGHT: Pixels = px(84.);
@@ -94,7 +91,6 @@ const FOCUS_RAIL_WIDTH: Pixels = px(3.);
 /// Thock Light's selection, at full strength the heaviest shape on screen.
 /// This leaves the suggested tile stronger, as it is in Dark.
 const SELECTED_ROW_OPACITY_LIGHT: f32 = 0.45;
-const TITLE_LINE_HEIGHT: f32 = 1.3;
 /// Kept whatever it says, so the caption and the marks don't move the bar.
 const CAPTION_SLOT_HEIGHT: Rems = rems(1.25);
 /// Either side of the caption: under the title and over the bar.
@@ -1666,31 +1662,7 @@ impl InboxView {
         dimmed: bool,
         cx: &App,
     ) -> gpui::Stateful<gpui::Div> {
-        let focus = self.focus_handle.clone();
-        let boxed_action = action.boxed_clone();
-        div()
-            .id(SharedString::from(format!("inbox-action-wrap-{name}")))
-            .debug_selector(move || format!("INBOX_ACTION-{name}"))
-            .flex_none()
-            .child(
-                ButtonLike::new(SharedString::from(format!("inbox-action-{name}")))
-                    .child(
-                        h_flex()
-                            .when(dimmed, |this| {
-                                this.debug_selector(move || format!("INBOX_DIMMED-{name}"))
-                            })
-                            .gap_1()
-                            .child(framed_keycap(keycap, dimmed, cx))
-                            .child(
-                                Label::new(label)
-                                    .size(LabelSize::Small)
-                                    .color(hint_color(dimmed)),
-                            ),
-                    )
-                    .on_click(move |_, window, cx| {
-                        focus.dispatch_action(boxed_action.as_ref(), window, cx)
-                    }),
-            )
+        quiet_action(name, action, keycap, label, dimmed, &self.focus_handle, cx)
     }
 
     fn render_reader_header(&self, window: &Window, cx: &App) -> AnyElement {
@@ -2624,30 +2596,6 @@ impl InboxView {
                     )
             })
         };
-        let title = self
-            .reader
-            .title()
-            .unwrap_or_else(|| entry.item.title.clone());
-        let shown_title = self.reader.reader_title(&title, window, cx);
-        let id_tone = HighlightStyle {
-            color: Some(cx.theme().colors().text_muted),
-            ..Default::default()
-        };
-        let id_start = shown_title
-            .rfind(TITLE_ID_SEPARATOR)
-            .or_else(|| shown_title.rfind('\n'));
-        let id_length = shown_title.len();
-        let title_text = div()
-            .text_size(TITLE_SIZE.rems())
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(cx.theme().colors().text)
-            .line_clamp(TITLE_LINES)
-            .text_ellipsis()
-            .child(
-                StyledText::new(shown_title)
-                    .with_highlights(id_start.map(|start| (start..id_length, id_tone))),
-            );
-        let title_height = rems(TITLE_SIZE.rems().0 * TITLE_LINE_HEIGHT * TITLE_LINES as f32);
         let rule_width = self.reader.rule_width(window);
         v_flex()
             .relative()
@@ -2664,15 +2612,7 @@ impl InboxView {
                         // A fixed block and a fixed slot: whatever the
                         // title's length and the caption, the four targets
                         // stay where the hand expects them.
-                        .child(
-                            div()
-                                .debug_selector(|| "INBOX_READER_TITLE".to_string())
-                                .flex_none()
-                                .h(title_height)
-                                .mb(CAPTION_GAP)
-                                .line_height(relative(TITLE_LINE_HEIGHT))
-                                .child(title_text),
-                        )
+                        .child(self.reader.render_title(window, cx).mb(CAPTION_GAP))
                         .child(
                             div()
                                 .debug_selector(|| "INBOX_CAPTION_SLOT".to_string())

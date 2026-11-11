@@ -14,6 +14,7 @@ pub mod day_plan;
 pub mod day_planner_panel;
 pub mod desk_layout;
 pub mod desk_panel;
+pub mod email_note_view;
 pub mod email_reader;
 pub mod getting_started;
 pub mod gmail;
@@ -198,6 +199,7 @@ pub fn init(cx: &mut App) {
     gmail_service::init(cx);
     inbox_service::init(cx);
     inbox_view::init(cx);
+    email_note_view::init(cx);
     readwise_service::init(cx);
     reminders::init(cx);
     reminder_service::init(cx);
