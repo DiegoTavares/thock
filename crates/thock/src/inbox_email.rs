@@ -517,6 +517,11 @@ fn parse_section_heading(line: &str) -> Option<(&str, NaiveDateTime)> {
     Some((from.trim(), sent))
 }
 
+/// Whether `line` starts a message, as capture writes one.
+pub fn is_message_heading(line: &str) -> bool {
+    parse_section_heading(line).is_some()
+}
+
 fn split_sections(body: &str) -> (String, Vec<Section<'_>>) {
     let mut preamble = Vec::new();
     let mut sections: Vec<Section> = Vec::new();

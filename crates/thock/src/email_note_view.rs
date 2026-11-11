@@ -572,7 +572,7 @@ mod tests {
         let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-        let mut cx = cx.clone();
+        let cx = cx.clone();
         let workspace = multi_workspace.read_with(&cx, |multi, _| multi.workspace().clone());
         cx.run_until_parked();
         Setup {

@@ -4,18 +4,20 @@
 //! no I/O); the GPUI service lives in `gmail_service.rs`, the note planner in
 //! `inbox.rs`, and the backlog landing integration in `backlog.rs`.
 
-use anyhow::Result;
-use chrono::{DateTime, Utc};
+use anyhow::{Result, anyhow, bail};
+use base64::Engine as _;
+use chrono::{DateTime, Local, Utc};
 use gpui::{AsyncApp, Task};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::time::Duration;
-use thock_sync_core::{DecisionClass, decision_class, parse_triage_log_line};
+use thock_sync_core::{DecisionClass, INBOX_ARCHIVE_DIR, decision_class, parse_triage_log_line};
 
 use crate::calendar::GoogleClientOverride;
-use crate::inbox::CapturedItem;
+use crate::inbox::{CapturedItem, parse_inbox_note};
+use crate::inbox_email::is_message_heading;
 
 /// Lives next to `config.toml` in `.thock/`. A separate file for the same
 /// forward-compat reason as `calendar.toml` (V8 §7.1): `config.toml` is
@@ -220,6 +222,633 @@ pub trait MailTransport: Send + Sync {
     fn archive_permission(&self) -> Option<bool> {
         None
     }
+
+    /// The captured threads that changed since they were last looked at
+    /// (V56 §6.2), fetching at most `budget` of them. A thread comes back
+    /// even with nothing new, so its `historyId` is recorded and it isn't
+    /// fetched again. The default is a transport that can't tell: nothing
+    /// changed.
+    fn refresh(
+        &self,
+        _known: &HashMap<String, KnownThread>,
+        _budget: usize,
+        _cx: &AsyncApp,
+    ) -> Task<Result<Vec<ThreadUpdate>>> {
+        Task::ready(Ok(Vec::new()))
+    }
+
+    /// A thread's messages with the headers a reply is addressed from
+    /// (V56 §7.2), oldest first, drafts left out.
+    fn thread_headers(&self, _thread_id: &str, _cx: &AsyncApp) -> Task<Result<ThreadHeaders>> {
+        Task::ready(Err(anyhow!("this mail connection can't read a thread")))
+    }
+
+    /// Sends a reply into its thread (V56 §7.4). Fails with
+    /// [`MissingPermission`] when the grant lacks `gmail.modify`, without
+    /// sending anything when the grant is known.
+    fn send_reply(&self, _reply: &OutgoingReply, _cx: &AsyncApp) -> Task<Result<()>> {
+        Task::ready(Err(anyhow!("this mail connection can't send")))
+    }
+}
+
+/// How many changed threads one poll fetches (V56 §6.2), so the first poll
+/// after an upgrade doesn't fetch a whole mailbox.
+pub const REFRESH_BUDGET: usize = 10;
+
+/// What Thock knows of a captured thread before asking Gmail (V56 §6.3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnownThread {
+    /// Gmail's `historyId` when the thread was last fetched, if it ever was.
+    pub history: Option<String>,
+    /// The newest message the note holds, in milliseconds since the epoch.
+    pub through: i64,
+}
+
+/// One message of a thread, as a refresh hands it over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThreadMessage {
+    pub from: String,
+    pub sent: Option<DateTime<Utc>>,
+    pub text: Option<String>,
+    /// Sent from the connected account.
+    pub own: bool,
+}
+
+impl ThreadMessage {
+    /// The message as a section of its note.
+    pub fn section(&self) -> String {
+        let sent = self.sent.map(|sent| sent.with_timezone(&Local));
+        message_section(&self.from, sent, self.text.as_deref())
+    }
+
+    pub fn heading(&self) -> String {
+        let sent = self.sent.map(|sent| sent.with_timezone(&Local));
+        section_heading(&self.from, sent)
+    }
+}
+
+/// A captured thread as Gmail has it now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThreadUpdate {
+    pub thread: String,
+    pub history: String,
+    /// The newest message of the thread, in milliseconds since the epoch.
+    pub through: i64,
+    /// The thread's first message, for the heading a lone message never got.
+    pub first: Option<ThreadMessage>,
+    /// Messages newer than the note holds, oldest first, drafts left out.
+    pub new_messages: Vec<ThreadMessage>,
+}
+
+/// `## <from> — <YYYY-MM-DD HH:MM>`: what heads a message in a note, and what
+/// tells the reader where one starts.
+pub fn section_heading(from: &str, sent: Option<DateTime<Local>>) -> String {
+    let from = collapse_whitespace(from);
+    let from = if from.is_empty() {
+        "(unknown sender)"
+    } else {
+        from.as_str()
+    };
+    match sent {
+        Some(sent) => format!("## {from} — {}", sent.format("%Y-%m-%d %H:%M")),
+        None => format!("## {from}"),
+    }
+}
+
+/// One message as capture writes it: the heading, then its text.
+pub fn message_section(from: &str, sent: Option<DateTime<Local>>, text: Option<&str>) -> String {
+    let mut section = section_heading(from, sent);
+    section.push('\n');
+    match text.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => {
+            section.push('\n');
+            section.push_str(text);
+            section.push('\n');
+        }
+        None => section.push_str("\n_(no content)_\n"),
+    }
+    section
+}
+
+/// The last record of `.thock/state/gmail/threads.jsonl` for each thread.
+pub fn parse_thread_marks(text: &str) -> HashMap<String, KnownThread> {
+    let mut marks = HashMap::new();
+    for line in text.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let thread = record.get("thread").and_then(|value| value.as_str());
+        let history = record.get("history").and_then(|value| value.as_str());
+        let through = record.get("through").and_then(|value| value.as_i64());
+        if let (Some(thread), Some(history), Some(through)) = (thread, history, through) {
+            marks.insert(
+                thread.to_string(),
+                KnownThread {
+                    history: Some(history.to_string()),
+                    through,
+                },
+            );
+        }
+    }
+    marks
+}
+
+/// One line of `threads.jsonl`.
+pub fn thread_mark_line(update: &ThreadUpdate, at: &str) -> String {
+    serde_json::json!({
+        "thread": update.thread,
+        "history": update.history,
+        "through": update.through,
+        "at": at,
+    })
+    .to_string()
+}
+
+/// Every captured thread a refresh may ask about: one with a mark, or one
+/// whose capture is dated, which stands in for a mark until the first fetch.
+pub fn known_threads(
+    imported: &ImportedIndex,
+    marks: &HashMap<String, KnownThread>,
+) -> HashMap<String, KnownThread> {
+    imported
+        .values()
+        .filter_map(|imported| {
+            let known = marks.get(&imported.thread).cloned().or_else(|| {
+                Some(KnownThread {
+                    history: None,
+                    through: imported.captured_at?.timestamp_millis(),
+                })
+            })?;
+            Some((imported.thread.clone(), known))
+        })
+        .collect()
+}
+
+/// One message of a thread, with what a reply to it needs (V56 §7.2).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MessageHeaders {
+    pub from: String,
+    pub reply_to: Option<String>,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub message_id: Option<String>,
+    pub references: Option<String>,
+    pub sent: Option<DateTime<Utc>>,
+    pub text: Option<String>,
+    /// Sent from the connected account.
+    pub own: bool,
+}
+
+/// A thread as a reply sees it: oldest first, drafts left out.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThreadHeaders {
+    pub thread: String,
+    pub messages: Vec<MessageHeaders>,
+}
+
+/// Who a reply goes to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplyMode {
+    /// Whoever wrote the message.
+    Author,
+    /// Whoever wrote it, and everyone it was sent to.
+    All,
+    /// One address of the thread, and nobody else.
+    One(String),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recipients {
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+}
+
+/// A reply ready to send. [`plan_reply`] is what builds one, so its
+/// recipients are always addresses the thread already named.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutgoingReply {
+    pub thread: String,
+    pub from: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub in_reply_to: Option<String>,
+    pub references: Option<String>,
+    pub body: String,
+}
+
+/// The thread id a captured note's `link:` points at (see
+/// [`gmail_thread_url`]).
+pub fn gmail_thread_id(link: &str) -> Option<&str> {
+    let (_, id) = link
+        .strip_prefix("https://mail.google.com/mail/")?
+        .rsplit_once("/#all/")?;
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())).then_some(id)
+}
+
+/// The bare address of a mailbox (`Ana <ana@example.com>` or
+/// `ana@example.com`), lowercased. Anything that isn't plainly one address is
+/// refused, so a header can't smuggle a second recipient or a line break.
+pub fn mailbox_address(mailbox: &str) -> Option<String> {
+    let mailbox = mailbox.trim();
+    let address = match mailbox.rsplit_once('<') {
+        Some((_, rest)) => rest.strip_suffix('>')?,
+        None => mailbox,
+    }
+    .trim();
+    let (local, domain) = address.split_once('@')?;
+    let plain = |part: &str| {
+        !part.is_empty()
+            && part.chars().all(|c| {
+                c.is_ascii_graphic()
+                    && !matches!(
+                        c,
+                        '<' | '>' | ',' | ';' | ':' | '"' | '(' | ')' | '[' | ']' | '\\' | '@'
+                    )
+            })
+    };
+    (plain(local) && plain(domain) && domain.contains('.')).then(|| address.to_ascii_lowercase())
+}
+
+/// The mailboxes of a `To` or `Cc` header: split on the commas between
+/// them, not the ones inside a quoted name.
+pub fn split_mailboxes(header: &str) -> Vec<String> {
+    let mut mailboxes = Vec::new();
+    let mut current = String::new();
+    let (mut quoted, mut angled) = (false, false);
+    for c in header.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            '<' if !quoted => angled = true,
+            '>' if !quoted => angled = false,
+            ',' if !quoted && !angled => {
+                mailboxes.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(c);
+    }
+    mailboxes.push(current);
+    mailboxes
+        .into_iter()
+        .map(|mailbox| mailbox.trim().to_string())
+        .filter(|mailbox| !mailbox.is_empty())
+        .collect()
+}
+
+fn addresses<'a>(mailboxes: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+    let mut seen = Vec::new();
+    for address in mailboxes
+        .into_iter()
+        .filter_map(|mailbox| mailbox_address(mailbox))
+    {
+        if !seen.contains(&address) {
+            seen.push(address);
+        }
+    }
+    seen
+}
+
+/// Every address the thread's headers name, in order of appearance, the
+/// account's own left out: who a reply may go to, and nobody else.
+pub fn thread_addresses(thread: &ThreadHeaders, account: &str) -> Vec<String> {
+    let account = account.to_ascii_lowercase();
+    let mailboxes = thread.messages.iter().flat_map(|message| {
+        std::iter::once(&message.from)
+            .chain(message.reply_to.iter())
+            .chain(&message.to)
+            .chain(&message.cc)
+    });
+    addresses(mailboxes)
+        .into_iter()
+        .filter(|address| *address != account)
+        .collect()
+}
+
+/// Who a reply to `message` goes to (V56 §7.2). A reply to your own message
+/// goes to whoever that one went to.
+pub fn reply_recipients(message: &MessageHeaders, mode: &ReplyMode, account: &str) -> Recipients {
+    let account = account.to_ascii_lowercase();
+    let others = |mailboxes: Vec<String>| -> Vec<String> {
+        mailboxes
+            .into_iter()
+            .filter(|address| *address != account)
+            .collect()
+    };
+    let author = others(addresses(
+        message.reply_to.iter().chain([&message.from]).take(1),
+    ));
+    let sent_to = others(addresses(&message.to));
+    let to = if author.is_empty() {
+        sent_to.clone()
+    } else {
+        author
+    };
+    match mode {
+        ReplyMode::One(address) => Recipients {
+            to: vec![address.to_ascii_lowercase()],
+            cc: Vec::new(),
+        },
+        ReplyMode::Author => Recipients { to, cc: Vec::new() },
+        ReplyMode::All => {
+            let cc = others(addresses(message.to.iter().chain(&message.cc)))
+                .into_iter()
+                .filter(|address| !to.contains(address))
+                .collect();
+            Recipients { to, cc }
+        }
+    }
+}
+
+/// Which of the thread's messages a card of the note is: by position while
+/// the note and the thread agree on how many there are, else by sender and
+/// minute, else the newest.
+pub fn answered_message(
+    thread: &ThreadHeaders,
+    card: usize,
+    cards: usize,
+    card_from: &str,
+    card_sent: Option<chrono::NaiveDateTime>,
+) -> Option<usize> {
+    let last = thread.messages.len().checked_sub(1)?;
+    if cards == thread.messages.len() {
+        return Some(card.min(last));
+    }
+    let minute = |sent: DateTime<Utc>| {
+        sent.with_timezone(&Local)
+            .naive_local()
+            .format("%Y-%m-%d %H:%M")
+            .to_string()
+    };
+    let card_minute = card_sent.map(|sent| sent.format("%Y-%m-%d %H:%M").to_string());
+    let card_address = mailbox_address(card_from);
+    thread
+        .messages
+        .iter()
+        .position(|message| {
+            card_minute.is_some()
+                && message.sent.map(minute) == card_minute
+                && mailbox_address(&message.from) == card_address
+        })
+        .or(Some(last))
+}
+
+/// The thread's subject with one `Re: `.
+pub fn reply_subject(subject: &str) -> String {
+    let subject = collapse_whitespace(subject);
+    let already = subject
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("re:"));
+    if already {
+        subject
+    } else {
+        format!("Re: {subject}")
+    }
+}
+
+/// The reply's text, then the answered message quoted under it.
+pub fn reply_body(text: &str, answered: &MessageHeaders) -> String {
+    let mut body = text.trim_end().to_string();
+    body.push('\n');
+    let Some(quoted) = answered
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|quoted| !quoted.is_empty())
+    else {
+        return body;
+    };
+    let from = collapse_whitespace(&answered.from);
+    let when = answered.sent.map(|sent| {
+        sent.with_timezone(&Local)
+            .format("%a, %b %-d, %Y at %H:%M")
+            .to_string()
+    });
+    body.push('\n');
+    match when {
+        Some(when) => body.push_str(&format!("On {when}, {from} wrote:\n")),
+        None => body.push_str(&format!("{from} wrote:\n")),
+    }
+    for line in quoted.lines() {
+        if line.is_empty() {
+            body.push_str(">\n");
+        } else {
+            body.push_str(&format!("> {line}\n"));
+        }
+    }
+    body
+}
+
+/// Builds the reply to `thread.messages[answered]`. It refuses empty text, a
+/// reply with nobody to go to, and any recipient the thread doesn't name.
+pub fn plan_reply(
+    thread: &ThreadHeaders,
+    answered: usize,
+    mode: &ReplyMode,
+    account: &str,
+    text: &str,
+) -> Result<OutgoingReply> {
+    let Some(message) = thread.messages.get(answered) else {
+        bail!("that message is no longer in the thread");
+    };
+    if text.trim().is_empty() {
+        bail!("there is nothing to send yet");
+    }
+    let Some(from) = mailbox_address(account) else {
+        bail!("Thock doesn't know which Gmail account to send from");
+    };
+    let recipients = reply_recipients(message, mode, account);
+    let allowed = thread_addresses(thread, account);
+    if let Some(stranger) = recipients
+        .to
+        .iter()
+        .chain(&recipients.cc)
+        .find(|address| !allowed.contains(address))
+    {
+        bail!("{stranger} isn't on this thread");
+    }
+    if recipients.to.is_empty() {
+        bail!("this message has nobody to reply to");
+    }
+    let references = match (&message.references, &message.message_id) {
+        (Some(references), Some(id)) => Some(format!("{references} {id}")),
+        (None, Some(id)) => Some(id.clone()),
+        (references, None) => references.clone(),
+    };
+    Ok(OutgoingReply {
+        thread: thread.thread.clone(),
+        from,
+        to: recipients.to,
+        cc: recipients.cc,
+        subject: reply_subject(&message.subject),
+        in_reply_to: message.message_id.clone(),
+        references,
+        body: reply_body(text, message),
+    })
+}
+
+/// A header value on one line, whatever the email it was read from held.
+fn header_line(value: &str) -> String {
+    collapse_whitespace(&value.replace(['\r', '\n'], " "))
+}
+
+/// An unstructured header's text, RFC 2047 encoded when it isn't ASCII.
+fn encoded_word(value: &str) -> String {
+    let value = header_line(value);
+    if value.is_ascii() {
+        return value;
+    }
+    // An encoded word holds at most 75 characters; 30 bytes of UTF-8, cut
+    // between characters, keeps each well under.
+    let mut words = Vec::new();
+    let mut chunk = String::new();
+    for c in value.chars() {
+        if chunk.len() + c.len_utf8() > 30 {
+            words.push(std::mem::take(&mut chunk));
+        }
+        chunk.push(c);
+    }
+    words.push(chunk);
+    words
+        .iter()
+        .map(|word| {
+            format!(
+                "=?UTF-8?B?{}?=",
+                base64::engine::general_purpose::STANDARD.encode(word)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n ")
+}
+
+/// The reply as an RFC 5322 message: plain UTF-8 text, base64 encoded.
+pub fn reply_mime(reply: &OutgoingReply) -> String {
+    let mut mime = String::new();
+    let mut header = |name: &str, value: &str| {
+        mime.push_str(name);
+        mime.push_str(": ");
+        mime.push_str(value);
+        mime.push_str("\r\n");
+    };
+    header("From", &header_line(&reply.from));
+    header("To", &header_line(&reply.to.join(", ")));
+    if !reply.cc.is_empty() {
+        header("Cc", &header_line(&reply.cc.join(", ")));
+    }
+    header("Subject", &encoded_word(&reply.subject));
+    if let Some(id) = &reply.in_reply_to {
+        header("In-Reply-To", &header_line(id));
+    }
+    if let Some(references) = &reply.references {
+        header("References", &header_line(references));
+    }
+    header("MIME-Version", "1.0");
+    header("Content-Type", "text/plain; charset=\"UTF-8\"");
+    header("Content-Transfer-Encoding", "base64");
+    mime.push_str("\r\n");
+    let encoded = base64::engine::general_purpose::STANDARD.encode(reply.body.as_bytes());
+    for line in encoded.as_bytes().chunks(76) {
+        mime.push_str(&String::from_utf8_lossy(line));
+        mime.push_str("\r\n");
+    }
+    mime
+}
+
+/// What a refresh adds to a note (V56 §6.4): the first message's heading
+/// where capture wrote a lone message bare, then the new sections at the end.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoteRefresh {
+    /// Where the first message's heading goes, and its text.
+    pub heading: Option<(usize, String)>,
+    pub appended: String,
+}
+
+impl NoteRefresh {
+    pub fn apply(&self, content: &str) -> String {
+        let mut out = String::with_capacity(content.len() + self.appended.len());
+        match &self.heading {
+            Some((offset, heading)) => {
+                let offset = (*offset).min(content.len());
+                out.push_str(&content[..offset]);
+                out.push_str(heading);
+                out.push_str(&content[offset..]);
+            }
+            None => out.push_str(content),
+        }
+        out.push_str(&self.appended);
+        out
+    }
+}
+
+/// Plans the append of `sections` to a note. A section the note already
+/// holds, byte for byte, is left out, so a poll repeated after a crash adds
+/// nothing; `None` when that leaves nothing to add.
+pub fn plan_note_refresh(
+    content: &str,
+    first_heading: Option<&str>,
+    sections: &[String],
+) -> Option<NoteRefresh> {
+    let missing: Vec<&String> = sections
+        .iter()
+        .filter(|section| !content.contains(section.trim_end()))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let heading = first_heading
+        .filter(|_| !content.lines().any(is_message_heading))
+        .map(|heading| (first_message_offset(content), format!("{heading}\n\n")));
+    let mut appended = String::new();
+    if !content.ends_with('\n') {
+        appended.push('\n');
+    }
+    for section in missing {
+        appended.push('\n');
+        appended.push_str(section);
+    }
+    Some(NoteRefresh { heading, appended })
+}
+
+/// Where a note's first message starts: past the frontmatter and the title.
+fn first_message_offset(content: &str) -> usize {
+    let item = parse_inbox_note("", content);
+    let body = item.body.as_str();
+    let mut offset = content.len() - body.len();
+    let mut past_title = false;
+    for line in body.split_inclusive('\n') {
+        if line.trim().is_empty() {
+            offset += line.len();
+        } else if !past_title && line.starts_with("# ") {
+            past_title = true;
+            offset += line.len();
+        } else {
+            break;
+        }
+    }
+    offset
+}
+
+/// Whether a reply brings a triaged note back to the inbox (V56 §6.5): it
+/// came from someone else, the note sits where triage put it, and the last
+/// decision wasn't to archive or discard it.
+pub fn returns_to_inbox(
+    note_dir: &str,
+    last_decision: Option<DecisionClass>,
+    from_someone_else: bool,
+) -> bool {
+    from_someone_else
+        && note_dir.trim_matches('/') == INBOX_ARCHIVE_DIR
+        && matches!(
+            last_decision,
+            Some(
+                DecisionClass::Today
+                    | DecisionClass::Soon
+                    | DecisionClass::Someday
+                    | DecisionClass::Other
+            )
+        )
 }
 
 /// What a Gmail write does to a thread's `INBOX` label.
@@ -262,6 +891,8 @@ pub struct ImportedThread {
     pub thread: String,
     /// The mapping folder that captured it.
     pub path: String,
+    /// When it was captured; absent in records written before V15.
+    pub captured_at: Option<DateTime<Utc>>,
 }
 
 /// Digest → thread, from the capture state file.
@@ -284,6 +915,9 @@ pub fn parse_imported_index(text: &str) -> ImportedIndex {
                 ImportedThread {
                     thread: thread.to_string(),
                     path: path.trim_matches('/').to_string(),
+                    captured_at: field("at")
+                        .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+                        .map(|at| at.with_timezone(&Utc)),
                 },
             );
         }
@@ -1219,5 +1853,313 @@ mod tests {
         // …then on again: the pending line is now from before the opt-in.
         assert_eq!(run(&mut state, &log, &on, at(5000)), vec![]);
         assert_eq!(state.marks.get("d-1"), Some(&ArchiveMark::Baseline));
+    }
+
+    #[test]
+    fn a_lone_message_gets_its_heading_before_the_first_reply() {
+        let note = "---\nsource:   gmail\ncapture:  abc\n---\n\n# Subject\n\nHello there.\n";
+        let reply = message_section("Bea <bea@example.com>", None, Some("Hi back."));
+        let refresh =
+            plan_note_refresh(note, Some("## Ana — 2026-08-18 09:30"), &[reply.clone()]).unwrap();
+        assert_eq!(
+            refresh.apply(note),
+            "---\nsource:   gmail\ncapture:  abc\n---\n\n# Subject\n\n\
+             ## Ana — 2026-08-18 09:30\n\nHello there.\n\n\
+             ## Bea <bea@example.com>\n\nHi back.\n"
+        );
+        // Applied, the same plan has nothing left to add.
+        let applied = refresh.apply(note);
+        assert_eq!(
+            plan_note_refresh(&applied, Some("## Ana — 2026-08-18 09:30"), &[reply]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_thread_only_grows_at_its_end() {
+        let note =
+            "# Subject\n\n## Ana — 2026-08-18 09:30\n\nHello.\n\n## Bea — 2026-08-18 09:40\n\nHi.";
+        let held = "## Bea — 2026-08-18 09:40\n\nHi.\n".to_string();
+        let new = "## Ana — 2026-08-18 09:50\n\nBye.\n".to_string();
+        let refresh =
+            plan_note_refresh(note, Some("## Ana — 2026-08-18 09:30"), &[held, new]).unwrap();
+        assert_eq!(refresh.heading, None, "it has its headings");
+        assert_eq!(
+            refresh.apply(note),
+            format!("{note}\n\n## Ana — 2026-08-18 09:50\n\nBye.\n")
+        );
+    }
+
+    #[test]
+    fn a_note_without_a_title_gets_the_heading_at_its_top() {
+        let note = "Just the words.\n";
+        let new = "## Bea\n\nHi.\n".to_string();
+        let refresh = plan_note_refresh(note, Some("## Ana"), &[new]).unwrap();
+        assert_eq!(
+            refresh.apply(note),
+            "## Ana\n\nJust the words.\n\n## Bea\n\nHi.\n"
+        );
+    }
+
+    #[test]
+    fn only_a_decided_unarchived_note_returns_on_someone_elses_reply() {
+        use DecisionClass::*;
+        for (dir, decision, foreign, back) in [
+            ("archives/inbox", Some(Today), true, true),
+            ("archives/inbox", Some(Soon), true, true),
+            ("archives/inbox", Some(Someday), true, true),
+            ("archives/inbox", Some(Other), true, true),
+            ("archives/inbox", Some(Archive), true, false),
+            ("archives/inbox", Some(Discard), true, false),
+            ("archives/inbox", None, true, false),
+            ("archives/inbox", Some(Today), false, false),
+            ("inbox", Some(Today), true, false),
+            ("projects/road", Some(Today), true, false),
+        ] {
+            assert_eq!(
+                returns_to_inbox(dir, decision, foreign),
+                back,
+                "{dir} {decision:?} {foreign}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_thread_is_known_by_its_mark_or_by_when_it_was_captured() {
+        let imported = parse_imported_index(concat!(
+            r#"{"digest":"d1","thread":"t1","path":"inbox","at":"2026-11-10T09:00:00-03:00"}"#,
+            "\n",
+            r#"{"digest":"d2","thread":"t2","path":"inbox","at":"2026-11-10T09:00:00-03:00"}"#,
+            "\n",
+            r#"{"digest":"d3","thread":"t3","path":"inbox"}"#,
+            "\n",
+        ));
+        let update = ThreadUpdate {
+            thread: "t2".to_string(),
+            history: "77".to_string(),
+            through: 5,
+            first: None,
+            new_messages: Vec::new(),
+        };
+        let marks = parse_thread_marks(&format!(
+            "not json\n{}\n",
+            thread_mark_line(&update, "2026-11-10T10:00:00Z")
+        ));
+        let known = known_threads(&imported, &marks);
+        let captured = DateTime::parse_from_rfc3339("2026-11-10T09:00:00-03:00")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(
+            known.get("t1"),
+            Some(&KnownThread {
+                history: None,
+                through: captured
+            })
+        );
+        assert_eq!(
+            known.get("t2"),
+            Some(&KnownThread {
+                history: Some("77".to_string()),
+                through: 5
+            })
+        );
+        assert_eq!(known.get("t3"), None, "undated and never fetched");
+    }
+
+    fn message(from: &str, to: &[&str], cc: &[&str]) -> MessageHeaders {
+        MessageHeaders {
+            from: from.to_string(),
+            to: to.iter().map(|to| to.to_string()).collect(),
+            cc: cc.iter().map(|cc| cc.to_string()).collect(),
+            subject: "Farm is down".to_string(),
+            message_id: Some("<m2@mail.example.com>".to_string()),
+            references: Some("<m1@mail.example.com>".to_string()),
+            sent: Some(DateTime::from_timestamp(1_760_000_000, 0).unwrap()),
+            text: Some("Is it up?\n\nThanks.".to_string()),
+            ..MessageHeaders::default()
+        }
+    }
+
+    fn thread() -> ThreadHeaders {
+        ThreadHeaders {
+            thread: "t1".to_string(),
+            messages: vec![
+                message("Diego <diego@example.com>", &["helpdesk@example.com"], &[]),
+                message(
+                    "Ana Reyes <Ana@Example.com>",
+                    &["\"Tavares, Diego\" <diego@example.com>", "bea@example.com"],
+                    &["Rui <rui@example.com>", "ana@example.com"],
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn a_mailbox_is_one_plain_address_or_nothing() {
+        assert_eq!(
+            mailbox_address("Ana Reyes <Ana@Example.com>").as_deref(),
+            Some("ana@example.com")
+        );
+        assert_eq!(
+            mailbox_address(" bea@example.com ").as_deref(),
+            Some("bea@example.com")
+        );
+        for bad in [
+            "",
+            "Ana",
+            "ana@localhost",
+            "ana@example.com, eve@evil.example",
+            "ana@example.com\r\nBcc: eve@evil.example",
+            "<ana@example.com> <eve@evil.example",
+            "a b@example.com",
+        ] {
+            assert_eq!(mailbox_address(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            split_mailboxes("\"Tavares, Diego\" <diego@example.com>, bea@example.com,"),
+            ["\"Tavares, Diego\" <diego@example.com>", "bea@example.com"]
+        );
+    }
+
+    #[test]
+    fn a_reply_goes_to_the_author_everyone_or_one_address() {
+        let thread = thread();
+        let me = "Diego@example.com";
+        let theirs = &thread.messages[1];
+        assert_eq!(
+            reply_recipients(theirs, &ReplyMode::Author, me),
+            Recipients {
+                to: vec!["ana@example.com".to_string()],
+                cc: Vec::new()
+            }
+        );
+        // Everyone once: not me, and not the author a second time.
+        assert_eq!(
+            reply_recipients(theirs, &ReplyMode::All, me),
+            Recipients {
+                to: vec!["ana@example.com".to_string()],
+                cc: vec!["bea@example.com".to_string(), "rui@example.com".to_string()]
+            }
+        );
+        assert_eq!(
+            reply_recipients(theirs, &ReplyMode::One("Rui@example.com".to_string()), me).to,
+            ["rui@example.com"]
+        );
+        // My own message is answered to whoever it went to.
+        assert_eq!(
+            reply_recipients(&thread.messages[0], &ReplyMode::Author, me).to,
+            ["helpdesk@example.com"]
+        );
+        // Reply-To wins over From.
+        let mut listed = theirs.clone();
+        listed.reply_to = Some("list@example.com".to_string());
+        assert_eq!(
+            reply_recipients(&listed, &ReplyMode::Author, me).to,
+            ["list@example.com"]
+        );
+        assert_eq!(
+            thread_addresses(&thread, me),
+            [
+                "helpdesk@example.com",
+                "ana@example.com",
+                "bea@example.com",
+                "rui@example.com"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reply_only_ever_addresses_the_thread() {
+        let thread = thread();
+        let me = "diego@example.com";
+        let reply = plan_reply(&thread, 1, &ReplyMode::All, me, "On it.\n\n").unwrap();
+        assert_eq!(reply.thread, "t1");
+        assert_eq!(reply.from, me);
+        assert_eq!(reply.to, ["ana@example.com"]);
+        assert_eq!(reply.cc, ["bea@example.com", "rui@example.com"]);
+        assert_eq!(reply.subject, "Re: Farm is down");
+        assert_eq!(reply.in_reply_to.as_deref(), Some("<m2@mail.example.com>"));
+        assert_eq!(
+            reply.references.as_deref(),
+            Some("<m1@mail.example.com> <m2@mail.example.com>")
+        );
+        assert!(reply.body.starts_with("On it.\n\nOn "), "{}", reply.body);
+        assert!(
+            reply
+                .body
+                .ends_with(", Ana Reyes <Ana@Example.com> wrote:\n> Is it up?\n>\n> Thanks.\n"),
+            "{}",
+            reply.body
+        );
+
+        let stranger = ReplyMode::One("eve@evil.example".to_string());
+        let error = plan_reply(&thread, 1, &stranger, me, "Hi").unwrap_err();
+        assert_eq!(error.to_string(), "eve@evil.example isn't on this thread");
+        assert!(plan_reply(&thread, 1, &ReplyMode::Author, me, "  \n").is_err());
+        assert!(plan_reply(&thread, 7, &ReplyMode::Author, me, "Hi").is_err());
+        assert!(plan_reply(&thread, 1, &ReplyMode::Author, "", "Hi").is_err());
+    }
+
+    #[test]
+    fn the_subject_takes_one_re_and_a_card_finds_its_message() {
+        assert_eq!(reply_subject("Farm is down"), "Re: Farm is down");
+        assert_eq!(reply_subject("RE: Farm\r\n is down"), "RE: Farm is down");
+
+        let thread = thread();
+        // The note and the thread agree: by position.
+        assert_eq!(answered_message(&thread, 0, 2, "", None), Some(0));
+        // The thread grew past the note: by sender and minute, else the newest.
+        let sent = thread.messages[1]
+            .sent
+            .unwrap()
+            .with_timezone(&Local)
+            .naive_local();
+        assert_eq!(
+            answered_message(&thread, 0, 1, "Diego <diego@example.com>", Some(sent)),
+            Some(0)
+        );
+        assert_eq!(
+            answered_message(&thread, 0, 1, "Someone <else@example.com>", Some(sent)),
+            Some(1)
+        );
+        assert_eq!(
+            answered_message(&ThreadHeaders::default(), 0, 1, "", None),
+            None
+        );
+        assert_eq!(
+            gmail_thread_id(&gmail_thread_url("diego@example.com", "18c2f0a")),
+            Some("18c2f0a")
+        );
+        assert_eq!(gmail_thread_id("https://example.com/#all/18c2f0a"), None);
+        assert_eq!(
+            gmail_thread_id("https://mail.google.com/mail/u/0/#all/a/b?c"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_message_keeps_every_header_on_its_line() {
+        let mut reply =
+            plan_reply(&thread(), 1, &ReplyMode::All, "diego@example.com", "Olá.").unwrap();
+        reply.subject = "Re: Café\r\nBcc: eve@evil.example".to_string();
+        reply.in_reply_to = Some("<m2@mail.example.com>\r\nBcc: eve@evil.example".to_string());
+        let mime = reply_mime(&reply);
+        let (headers, body) = mime.split_once("\r\n\r\n").unwrap();
+        let lines: Vec<&str> = headers.split("\r\n").collect();
+        assert_eq!(lines[0], "From: diego@example.com");
+        assert_eq!(lines[1], "To: ana@example.com");
+        assert_eq!(lines[2], "Cc: bea@example.com, rui@example.com");
+        assert!(lines[3].starts_with("Subject: =?UTF-8?B?"), "{}", lines[3]);
+        assert!(
+            !lines.iter().any(|line| line.starts_with("Bcc")),
+            "no header was smuggled in: {headers}"
+        );
+        assert!(headers.contains("In-Reply-To: <m2@mail.example.com> Bcc: eve@evil.example"));
+        assert!(headers.ends_with("Content-Transfer-Encoding: base64"));
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(body.replace("\r\n", ""))
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), reply.body);
+        assert!(body.split("\r\n").all(|line| line.len() <= 76));
     }
 }
