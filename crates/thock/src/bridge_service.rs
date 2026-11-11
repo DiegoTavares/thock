@@ -6,7 +6,7 @@
 //! tokens, and implements the tools over the project `Fs`.
 
 use anyhow::{Context as _, Result, anyhow};
-use chrono::{Local, NaiveDate, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use fs::Fs;
 use futures::channel::{mpsc, oneshot};
 use futures::future::{Shared as SharedFuture, select};
@@ -429,6 +429,8 @@ pub struct BridgeService {
     /// that every write that changes a file took one first.
     checkpoints: Rc<std::cell::Cell<usize>>,
     serving_since: String,
+    /// The desk's clock for the day a call writes into and reads around.
+    now: Arc<dyn Fn() -> DateTime<Local>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -458,8 +460,14 @@ impl BridgeService {
             seen: Rc::new(RefCell::new(SeenCalls::default())),
             checkpoints: Rc::new(std::cell::Cell::new(0)),
             serving_since: String::new(),
+            now: Arc::new(Local::now),
             _subscriptions: subscriptions,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_now_for_test(&mut self, now: Arc<dyn Fn() -> DateTime<Local>>) {
+        self.now = now;
     }
 
     /// A service over a known vault, for tests that run on a fake file
@@ -1274,6 +1282,7 @@ struct RequestContext {
     checkpoints: Rc<std::cell::Cell<usize>>,
     project: Entity<Project>,
     serving_since: String,
+    now: Arc<dyn Fn() -> DateTime<Local>>,
 }
 
 /// The restore point every bridge write that changes a file takes first,
@@ -1300,6 +1309,7 @@ async fn handle_incoming(
             checkpoints: service.checkpoints.clone(),
             project: service.project.clone(),
             serving_since: service.serving_since.clone(),
+            now: service.now.clone(),
         })
     });
     let Some(context) = context else {
@@ -1745,7 +1755,7 @@ impl DeskHost<'_> {
 
 impl ToolHost for DeskHost<'_> {
     async fn context(&mut self) -> Result<String, HostError> {
-        let today = Local::now().date_naive();
+        let today = (self.context.now)().date_naive();
         let vault = self.context.vault.clone();
         let fs = self.context.fs.clone();
         let base = self
@@ -1777,7 +1787,7 @@ impl ToolHost for DeskHost<'_> {
 
     async fn search(&mut self, query: &SearchQuery) -> Result<Vec<SearchHit>, HostError> {
         self.ensure_index().await?;
-        let today = Local::now().date_naive();
+        let today = (self.context.now)().date_naive();
         let query = query.clone();
         Ok(self
             .with_index(move |index| index.search(&query, today))
@@ -1830,7 +1840,7 @@ impl ToolHost for DeskHost<'_> {
         folder: Option<&str>,
     ) -> Result<Vec<RecentNote>, HostError> {
         self.ensure_index().await?;
-        let today = Local::now().date_naive();
+        let today = (self.context.now)().date_naive();
         let folder = folder.map(str::to_string);
         Ok(self
             .with_index(move |index| index.recent(days, folder.as_deref(), today))
@@ -1846,7 +1856,7 @@ impl ToolHost for DeskHost<'_> {
         let fact = thock_bridge::check_fact(fact, &forbidden)?;
         // A queued line keeps its day within the window; an older or future
         // date is not one the agent may label, so today's stands in (M1).
-        let today = Local::now().date_naive();
+        let today = (self.context.now)().date_naive();
         let date = thock_bridge::accepted_call_date(meta.date, today).unwrap_or(today);
         let line = thock_bridge::inbox_line(date, &fact, &self.identity);
         let inbox = self.root().join(thock_bridge::INBOX_PATH);
@@ -1880,7 +1890,8 @@ impl ToolHost for DeskHost<'_> {
             let line = thock_bridge::check_fact(line, &forbidden)?;
             rendered.push(thock_bridge::today_line(&self.identity, &line));
         }
-        let today = Local::now().date_naive();
+        let now = (self.context.now)();
+        let today = now.date_naive();
         let date = match meta.date {
             None => today,
             Some(asked) => {
@@ -1912,12 +1923,7 @@ impl ToolHost for DeskHost<'_> {
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            Some(expand_template(
-                &template,
-                date,
-                Local::now().time(),
-                &title,
-            ))
+            Some(expand_template(&template, date, now.time(), &title))
         };
         let write = thock_bridge::today_write(
             WRITE_CLIENT_ID,
@@ -2000,6 +2006,7 @@ async fn build_index(fs: &Arc<dyn Fs>, root: &Path) -> Result<SearchIndex, HostE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone as _;
     use fs::FakeFs;
     use gpui::TestAppContext;
     use serde_json::json;
@@ -2051,6 +2058,15 @@ mod tests {
         })
     }
 
+    /// The desk's pinned clock: the morning of Wednesday 2026-11-04, the
+    /// day after the fixture's `daily/2026-11-03.md`.
+    fn test_now() -> DateTime<Local> {
+        Local
+            .with_ymd_and_hms(2026, 11, 4, 9, 0, 0)
+            .single()
+            .expect("09:00 is unambiguous")
+    }
+
     struct Desk {
         service: Entity<BridgeService>,
         fs: Arc<FakeFs>,
@@ -2067,7 +2083,7 @@ mod tests {
         init_test(cx);
         cx.executor().allow_parking();
         let fs = FakeFs::new(cx.executor());
-        fs.set_next_mtime(std::time::SystemTime::now());
+        fs.set_next_mtime(test_now().into());
         let mut tree = vault_tree();
         tree[".thock"]["routines"]["agents"]["bridge.toml"] =
             json!(format!("port = 0\nbind = \"{bind}\"\n"));
@@ -2075,6 +2091,9 @@ mod tests {
         let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
         cx.run_until_parked();
         let service = cx.update(|cx| BridgeService::attach_for_test(vault(enabled), &project, cx));
+        service.update(cx, |service, _| {
+            service.set_now_for_test(Arc::new(test_now))
+        });
         cx.run_until_parked();
         let port = match service.read_with(cx, |service, _| service.state().clone()) {
             BridgeState::Serving { port, .. } => port,
@@ -2792,7 +2811,7 @@ mod tests {
     async fn dates_outside_the_window_are_not_written(cx: &mut TestAppContext) {
         let desk = serve(cx, true).await;
         let token = pair(cx, &desk, "robin").await;
-        let today = Local::now().date_naive();
+        let today = test_now().date_naive();
         let old = (today - chrono::Duration::days(30)).to_string();
         let refused = call_tool(
             cx,
