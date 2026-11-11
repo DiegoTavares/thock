@@ -541,11 +541,7 @@ pub fn reply_recipients(message: &MessageHeaders, mode: &ReplyMode, account: &st
         message.reply_to.iter().chain([&message.from]).take(1),
     ));
     let sent_to = others(addresses(&message.to));
-    let to = if author.is_empty() {
-        sent_to.clone()
-    } else {
-        author
-    };
+    let to = if author.is_empty() { sent_to } else { author };
     match mode {
         ReplyMode::One(address) => Recipients {
             to: vec![address.to_ascii_lowercase()],
@@ -1859,8 +1855,12 @@ mod tests {
     fn a_lone_message_gets_its_heading_before_the_first_reply() {
         let note = "---\nsource:   gmail\ncapture:  abc\n---\n\n# Subject\n\nHello there.\n";
         let reply = message_section("Bea <bea@example.com>", None, Some("Hi back."));
-        let refresh =
-            plan_note_refresh(note, Some("## Ana — 2026-08-18 09:30"), &[reply.clone()]).unwrap();
+        let refresh = plan_note_refresh(
+            note,
+            Some("## Ana — 2026-08-18 09:30"),
+            std::slice::from_ref(&reply),
+        )
+        .unwrap();
         assert_eq!(
             refresh.apply(note),
             "---\nsource:   gmail\ncapture:  abc\n---\n\n# Subject\n\n\

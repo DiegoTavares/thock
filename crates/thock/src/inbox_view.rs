@@ -42,6 +42,7 @@ use workspace::{OpenOptions, OpenVisible, Toast, Workspace};
 
 use crate::backlog::{self, DEFAULT_BACKLOG, SectionKind};
 use crate::email_reader::*;
+use crate::gmail::ReplyMode;
 use crate::inbox::{TRIAGE_LOG_PATH, sanitize_title};
 use crate::inbox_email::{ticket_prefix, trailing_ticket};
 use crate::inbox_service::{
@@ -401,7 +402,8 @@ impl InboxView {
             }));
         }
         let focus_handle = cx.focus_handle();
-        let reader = EmailReader::new(list_key_context(), None, cx);
+        let mut reader = EmailReader::new(list_key_context(), None, cx);
+        reader.project = Some(project.clone());
         let reader_focus = reader.reader_focus.clone();
         // The selection highlight and the reader's edge follow focus.
         for handle in [&focus_handle, &reader_focus] {
@@ -929,6 +931,23 @@ impl InboxView {
         self.reader.toggle_folds(cx);
     }
 
+    fn reply(&mut self, _: &ReplyToEmail, window: &mut Window, cx: &mut Context<Self>) {
+        self.reader.reply(ReplyMode::Author, window, cx);
+    }
+
+    fn reply_all(&mut self, _: &ReplyAllToEmail, window: &mut Window, cx: &mut Context<Self>) {
+        self.reader.reply(ReplyMode::All, window, cx);
+    }
+
+    fn reply_to_recipient(
+        &mut self,
+        _: &ReplyToEmailRecipient,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reader.reply_to_recipient(window, cx);
+    }
+
     fn triage(&mut self, _: &TriageInbox, window: &mut Window, cx: &mut Context<Self>) {
         // The ritual takes what is left; the workspace handler runs it.
         let workspace = self.workspace.clone();
@@ -981,6 +1000,7 @@ impl InboxView {
         let suggested = self
             .selected_entry()
             .and_then(|entry| self.suggested_destination(entry, cx));
+        let is_email = self.reader.reader_note.thread.is_some();
         let menu = ContextMenu::build(window, cx, move |menu, _, _| {
             let file = |destination: Destination| {
                 let view = view.clone();
@@ -1024,6 +1044,10 @@ impl InboxView {
             )
             .separator()
             .action("Open note", OpenInboxItem.boxed_clone())
+            .when(is_email, |menu| {
+                menu.action("Reply", ReplyToEmail.boxed_clone())
+                    .action("Reply all", ReplyAllToEmail.boxed_clone())
+            })
             .action("Mark", MarkInboxItem.boxed_clone())
             .action("Suggest again", SuggestInboxDestinations.boxed_clone())
             .action("Undo last decision", UndoInboxMove.boxed_clone())
@@ -2220,6 +2244,7 @@ impl InboxView {
     fn list_keys_live(&self, window: &Window, cx: &App) -> bool {
         !self.reader.reader_focus.is_focused(window)
             && !self.filter_editor.focus_handle(cx).is_focused(window)
+            && !self.reader.is_composing(window, cx)
     }
 
     /// An action's keycap as `context` binds it. Asking the focus handle would
@@ -2884,6 +2909,9 @@ impl InboxView {
             (key(&NextInboxMessage), "Go to next message"),
             (key(&PreviousInboxMessage), "Go to previous message"),
             (key(&ToggleInboxFolds), "Show or hide all folds"),
+            (key(&ReplyToEmail), "Reply to an email"),
+            (key(&ReplyAllToEmail), "Reply to everyone"),
+            (key(&ReplyToEmailRecipient), "Reply to one address"),
         ];
         let keys_key = self.keycap(&ShowInboxKeys, list_key_context(), window, cx);
         // macOS draws keycaps as glyphs, Linux spells them out (`Shift-R`), so
@@ -3210,6 +3238,9 @@ impl gpui::Render for InboxView {
         if self.reader.reader_focus.is_focused(window) {
             key_context.add("reader");
         }
+        if self.reader.is_composing(window, cx) {
+            key_context.add("composing");
+        }
         self.sync_reader_note(window, cx);
         self.reader.after_layout(window, cx);
         cx.defer_in(window, |this, window, cx| this.sync_pane_widths(window, cx));
@@ -3263,6 +3294,9 @@ impl gpui::Render for InboxView {
                     .on_action(cx.listener(Self::next_message))
                     .on_action(cx.listener(Self::previous_message))
                     .on_action(cx.listener(Self::toggle_folds))
+                    .on_action(cx.listener(Self::reply))
+                    .on_action(cx.listener(Self::reply_all))
+                    .on_action(cx.listener(Self::reply_to_recipient))
                     .on_action(cx.listener(Self::triage))
             })
             .when(keys_sheet, |this| {
@@ -7490,5 +7524,40 @@ mod tests {
         assert_eq!(age_label(Some("not a date"), now), None);
         assert_eq!(source_label("google-tasks"), "Google Tasks");
         assert_eq!(source_label("readwise"), "readwise");
+    }
+
+    #[gpui::test]
+    async fn r_is_reply_and_the_suggestion_key_moved(cx: &mut TestAppContext) {
+        let note = TICKET.replace(
+            "from:     helpdesk@example.com\n",
+            "from:     helpdesk@example.com\nlink:     https://mail.google.com/mail/u/me@example.com/#all/t42\n",
+        );
+        let mut setup = setup_with_note(cx, note).await;
+        // A note that isn't an email has nothing to reply to.
+        select(&mut setup, "Call Ana");
+        setup.cx.simulate_keystrokes("r a");
+        setup.view.read_with(&setup.cx, |view, _| {
+            assert_eq!(view.reader.reply_notice, None);
+            assert!(view.reader.composer.is_none());
+        });
+        // An email does, and without Gmail connected the reader says so.
+        select(&mut setup, "Ticket 42");
+        setup.cx.simulate_keystrokes("r");
+        setup.view.read_with(&setup.cx, |view, _| {
+            assert_eq!(view.reader.reply_notice, Some(ReplyNotice::NotConnected));
+        });
+        // Nothing was filed or marked along the way.
+        assert_eq!(titles(&setup).len(), 5);
+
+        let (suggest, reply) = setup.cx.update(|window, _| {
+            let key = |action: &dyn Action| {
+                window
+                    .highest_precedence_binding_for_action_in_context(action, list_key_context())
+                    .map(|binding| binding.keystrokes()[0].unparse())
+            };
+            (key(&SuggestInboxDestinations), key(&ReplyToEmail))
+        });
+        assert_eq!(suggest.as_deref(), Some("shift-j"));
+        assert_eq!(reply.as_deref(), Some("r"));
     }
 }

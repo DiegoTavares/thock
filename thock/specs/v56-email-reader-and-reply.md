@@ -1,6 +1,6 @@
 # Thock V56 - An email reads as a conversation anywhere, keeps up with its thread, and can be answered
 
-**Status:** Draft (2026-11-10)
+**Status:** Implemented (2026-11-11)
 **Owner:** Diego · **Date:** 2026-11-10
 **Companion docs:** `v41-inbox-desk-view.md` §4.4 and §5 (the conversation reader this lifts out of
 the Inbox, and the keys it shares), `v15-unified-gmail-sync.md` §4.4 and §7 (capture, the state
@@ -118,14 +118,18 @@ position and the editor's tab is closed, unless
 
 - the source was asked for (`o` in the reader, `thock::EditEmailNote`), or
 - the buffer has unsaved changes, or
-- the file isn't in the vault.
+- the file isn't in the project.
 
-So every way of opening a note is covered without each one knowing about email, and a restored
-session comes back as readers. An editor already open on the note is left alone: opening the note
+So every way of opening a note is covered without each one knowing about email. An editor
+already open on the note is left alone: opening the note
 again activates it, which is what *I'm editing this* means.
 
-`thock::ReadEmailNote` (`o` has no room in an editor; `ctrl-alt-o`) swaps an editor on an email
-note back to the reader. It does nothing on any other note.
+`thock::ReadEmailNote` (`o` has no room in an editor; `ctrl-alt-shift-m`, beside
+`thock::ToggleMarkdownSource` on `ctrl-alt-m`) swaps an editor on an email note back to the
+reader, saving unsaved changes first since the reader can't. It does nothing on any other note.
+
+A pane holds one tab per file, so the swap removes the editor before it adds the reader, and
+opening the note again finds whichever of the two is there.
 
 Nothing outside `crates/thock/` changes for this.
 
@@ -140,18 +144,20 @@ One table for both hosts. In the Inbox these join V41 §5; `r` there moves (§8)
 | `z` | `thock::ToggleInboxFolds` | Opens or closes every fold and card |
 | `b` | `thock::OpenInboxLink` | The thread in Gmail |
 | `o` | `thock::EditEmailNote` | The tab: the Markdown source in its place. (The Inbox keeps `thock::OpenInboxItem`, which now opens the reader tab.) |
-| `ctrl-alt-o` | `thock::ReadEmailNote` | From an editor on an email note: the reader in its place |
+| `ctrl-alt-shift-m` | `thock::ReadEmailNote` | From an editor on an email note: the reader in its place |
 | `r` | `thock::ReplyToEmail` | Reply to the author of the current card |
 | `a` | `thock::ReplyAllToEmail` | Reply to everyone on the current card's message |
-| `alt-r` | `thock::ReplyToEmailRecipient` | A menu of the thread's addresses; the chosen one is the only recipient |
+| `alt-r` | `thock::ReplyToEmailRecipient` | A menu of the thread's addresses; the chosen one is the only recipient. Also from inside the composer |
 | `cmd-enter` / `ctrl-enter` | `thock::SendEmailReply` | In the composer: once to check, again to send (§7.4) |
 | `escape` | `menu::Cancel` | In the composer: back to the reader, the text kept |
 
 The existing reader actions keep their names; renaming them would break keymaps for a word.
 
-Bindings go in the Thock blocks of both default keymaps under `ThockEmailView`,
-`ThockEmailView && !composing`, `ThockInboxView && !filtering` and `ThockEmailReply`, and the vim
-letters in `vim.json` under `ThockEmailView && !composing`.
+Bindings go in the Thock blocks of both default keymaps under `ThockEmailView && !composing`,
+`ThockInboxView && !filtering && !composing` and `ThockEmailReply > Editor`. The reader's letters
+are bound for everyone, as in the Inbox's reader, so `vim.json` gains no block; its Inbox block
+takes `!composing` like the others. The Inbox's `enter` in an editor is narrowed to
+`ThockInboxView && filtering > Editor`, so the composer's `enter` is a new line.
 
 ## 6. A note keeps up with its thread
 
@@ -239,8 +245,8 @@ place of the composer, *Replying needs permission to send from your Gmail* and a
 
 ### 7.2 Who it goes to
 
-The thread is asked for when a reply starts (`threads.get`, metadata only), which gives each
-message's `From`, `To`, `Cc`, `Reply-To`, `Message-ID` and `References`. The card being read is
+The thread is asked for when a reply starts (`threads.get`), which gives each message's `From`,
+`To`, `Cc`, `Reply-To`, `Message-ID` and `References`, and the text the reply quotes. The card being read is
 matched to its message by position, and by sender and minute when the counts differ; failing that
 the newest.
 
@@ -264,6 +270,9 @@ focus the reader's context carries `composing`, so `r`, `n` and `z` are letters 
 
 `escape` returns to the reader and keeps the text; `r` or `a` again reopens it with what was
 written, switching recipients. The text is kept per note while the tab or the Inbox view lives.
+`escape` on an empty reply closes the composer.
+
+A note without a `link:` to its thread has nothing to reply into, and `r` does nothing there.
 
 ### 7.4 Sending
 
@@ -273,7 +282,8 @@ written, switching recipients. The text is kept per note while the tab or the In
  Send to ana@studio.example, cc helpdesk@studio.example, as diego@example.com?   [⌘↵] Send   [esc] Keep writing
 ```
 
-A second `cmd-enter` sends. Any edit, or a change of recipients, goes back to the first step.
+A second `cmd-enter` sends. Any edit, or a change of recipients, goes back to the first step. The
+line and the **To** and **Cc** lines wrap rather than cut, so every address is on screen.
 
 The message is `text/plain; charset=utf-8`: the reply, a blank line, `On <date>, <from> wrote:` and
 the answered message quoted with `> `. Headers: `To`, `Cc`, `Subject` (the thread's, with one
@@ -281,9 +291,10 @@ the answered message quoted with `> `. Headers: `To`, `Cc`, `Subject` (the threa
 thread. Every header value has line breaks removed before it is written, and non-ASCII is RFC 2047
 encoded.
 
-While it sends the composer is read-only and says *Sending…*. On success it closes, a toast says
-*Reply sent*, and a sync runs, so the reply joins the note by §6 like any other message. On failure
-the composer stays with its text and the error.
+While it sends the composer is read-only and says *Sending…*. On success it closes, the reader
+says *Reply sent. It joins the note at the next sync.* where the composer was, and a sync runs, so
+the reply joins the note by §6 like any other message. On failure the composer stays with its text
+and the error.
 
 ### 7.5 Transport
 
@@ -333,6 +344,7 @@ refuses with `MissingPermission` when the grant is known to lack `gmail.modify`,
 | --- | --- |
 | `crates/thock/src/email_reader.rs` | New. The reader lifted from `inbox_view.rs`, and the composer |
 | `crates/thock/src/email_note_view.rs` | New. The tab, and the routing of §4.4 |
+| `crates/thock/src/inbox_email.rs` | `is_message_heading`, for the refresh plan |
 | `crates/thock/src/inbox_view.rs` | Hosts `EmailReader`; reply keys; `r` → `shift-j` |
 | `crates/thock/src/gmail.rs` | Refresh plan, recipients, MIME, the transport's three new calls |
 | `crates/thock/src/gmail_google.rs` | `threads.list`, metadata fetch, `messages.send` |
@@ -356,7 +368,9 @@ refuses with `MissingPermission` when the grant is known to lack `gmail.modify`,
 
 ## 13. Open questions
 
-- A thread Thock archived in Gmail (V53) comes back to the Gmail inbox on a reply by Gmail's own
-  rule. When its note returns here and is decided again, V53's reconciler sees a digest it already
-  archived. Whether the second decision archives again is checked in implementation and recorded
-  here.
+- **Resolved: a second decision doesn't archive in Gmail again.** A thread Thock archived in
+  Gmail (V53) comes back to the Gmail inbox on a reply by Gmail's own rule. When its note returns
+  here and is decided again, V53's reconciler holds to G7 (*once Thock has archived a thread it
+  never archives it again*), so the thread stays in the Gmail inbox until it is archived there.
+  Marking it un-archived on the way back would archive it on the old log line, with no new
+  decision, so this is left as it is. Worth a look once it has been lived with.

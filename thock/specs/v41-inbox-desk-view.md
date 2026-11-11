@@ -17,7 +17,9 @@ the footer's hints, let the earlier cue carry a card's header and put the fold r
 (§4.2, §4.3, §4.4), then measured what fits a row and the footer, set one-line titles against their
 meta line, showed Undo only with something to undo and said less of a changed list (§4.2, §4.3, §4.4),
 then gave rows more air, kept the lead size for short messages, quieted the bar under marks and said
-`previous` for `shift-n` (§4.2, §4.3, §4.4).
+`previous` for `shift-n` (§4.2, §4.3, §4.4). **Rev 4 (2026-11-11):** V56 lifts §4.4's reader into
+a component an email note's own tab shares, adds reply on `r` and `a`, and moves re-suggest from
+`r` to `shift-j` (§5).
 **Owner:** Diego · **Date:** 2026-10-10
 **Design reference:** the design notes with the Jev study, the gpui-kit evaluation, the component
 map and the decision cards this spec resolves: <https://claude.ai/artifact/FoeWmrEjqsMiTKvZKCvfBp>.
@@ -363,11 +365,12 @@ footer's hints, the row menu and the keys sheet render from the bindings.
 | `s` | `thock::SendInboxItemToSoon` | Task under **Soon** |
 | `shift-s` | `thock::SendInboxItemToSomeday` | Task under **Someday** |
 | `e` | `thock::ArchiveInboxItem` | Out of the inbox, nothing else |
-| `o` `enter` | `thock::OpenInboxItem` (`menu::Confirm`) | The note in the editor |
+| `o` `enter` | `thock::OpenInboxItem` (`menu::Confirm`) | The note in the editor; an email in its reader tab (V56 §4.4) |
 | `b` | `thock::OpenInboxLink` | Opens the note's link in the browser, from the list or the reader; does nothing without a web link |
 | `u` | `thock::UndoInboxMove` | Reverses the last decision (§6.2) |
 | `x` | `thock::MarkInboxItem` | Toggles a mark (§4.3) |
-| `r` | `thock::SuggestInboxDestinations` | Re-asks for the selected (or marked) items; with none selected, for every row without a suggestion |
+| `shift-j` | `thock::SuggestInboxDestinations` | Re-asks for the selected (or marked) items; with none selected, for every row without a suggestion |
+| `r` `a` `alt-r` | `thock::ReplyToEmail`, `thock::ReplyAllToEmail`, `thock::ReplyToEmailRecipient` | Replies to an email's author, to everyone, or to one address of the thread (V56 §7); nothing on other notes |
 | `/` | `thock::FilterInbox` | Focuses the filter box; narrows by title, sender, source; `escape` clears and returns |
 | `tab` | `thock::FocusInboxReader` | Moves focus to the reader, where `j`/`k`/`ctrl-d`/`ctrl-u` scroll; `tab` or `escape` returns |
 | `n` `shift-n` | `thock::NextInboxMessage`, `thock::PreviousInboxMessage` | Opens the next or previous message and brings it into view, from the list or the reader |
@@ -378,9 +381,9 @@ footer's hints, the row menu and the keys sheet render from the bindings.
 | `escape` | `menu::Cancel` | Clears marks or the filter; otherwise returns to the previous item |
 
 Bindings go in the Thock blocks of `assets/keymaps/default-linux.json` and `default-macos.json`
-under `ThockInboxView`, `ThockInboxView && !filtering`, `ThockInboxView && !filtering && !reader`
-and `ThockInboxView && reader`,
-and the vim letters in `assets/keymaps/vim.json` under `ThockInboxView && !filtering`, mirroring
+under `ThockInboxView`, `ThockInboxView && !filtering && !composing`,
+`ThockInboxView && !filtering && !reader && !composing` and `ThockInboxView && reader`,
+and the vim letters in `assets/keymaps/vim.json` under the third of those, mirroring
 the Backlog panel's blocks. `ctrl-alt-i` joins the global Thock toggles.
 
 Rows are also clickable (select), double-clickable (open) and right-clickable (menu), the

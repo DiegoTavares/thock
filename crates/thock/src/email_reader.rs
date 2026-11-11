@@ -5,15 +5,19 @@
 //!
 //! This is a reading of the note. The file keeps every byte.
 
+use anyhow::Result;
 use chrono::Local;
+use editor::{Editor, EditorEvent};
 use gpui::{
-    Action, AnyElement, App, AppContext as _, Context, Entity, FocusHandle, FontWeight,
-    HighlightStyle, Hsla, ImageSource, KeyContext, Length, Pixels, Rems, Resource, ScrollHandle,
-    ScrollWheelEvent, SharedString, StyledText, TextRun, TextStyleRefinement, UnderlineStyle,
-    Window, WrappedLine, div, hsla, linear_color_stop, linear_gradient, point, prelude::*, px,
-    relative, rems, transparent_black,
+    Action, AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
+    FontWeight, HighlightStyle, Hsla, ImageSource, KeyContext, Length, Pixels, Rems, Resource,
+    ScrollHandle, ScrollWheelEvent, SharedString, StyledText, Subscription, Task, TextRun,
+    TextStyleRefinement, UnderlineStyle, Window, WrappedLine, actions, div, hsla,
+    linear_color_stop, linear_gradient, point, prelude::*, px, relative, rems, transparent_black,
 };
+use language::language_settings::SoftWrap;
 use markdown::{Markdown, MarkdownElement, MarkdownFont, MarkdownStyle};
+use project::Project;
 use settings::{Settings as _, SettingsStore};
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,9 +28,15 @@ use ui::{
     ActiveTheme as _, ButtonLike, Clickable as _, Color, HeadlineSize, Icon, IconName, IconSize,
     KeyBinding, Label, LabelCommon as _, LabelSize, TextSize, Tooltip, h_flex, v_flex,
 };
+use ui::{Button, ButtonCommon as _, ButtonStyle, ContextMenu};
 use util::paths::PathStyle;
 use util::rel_path::RelPath;
 
+use crate::gmail::{
+    OutgoingReply, Recipients, ReplyMode, ThreadHeaders, answered_message, gmail_thread_id,
+    plan_reply, reply_recipients, thread_addresses,
+};
+use crate::gmail_service::{self, AllowGmailReplies, GmailService, ReplyAvailability};
 use crate::inbox::InboxItem;
 use crate::inbox_email::{
     EmailBlock, EmailField, EmailMessage, EmailThread, FoldKind, drop_restated_subject, full_title,
@@ -36,6 +46,23 @@ use crate::inbox_email::{
 use crate::inbox_view::{NextInboxMessage, PreviousInboxMessage, ToggleInboxFolds};
 use crate::markdown_conceal::vault_image_path;
 use crate::vault::Vault;
+
+actions!(
+    thock,
+    [
+        /// Starts a reply to whoever wrote the email you're reading.
+        ReplyToEmail,
+        /// Starts a reply to everyone on the email you're reading.
+        ReplyAllToEmail,
+        /// Starts a reply to one address of the thread, which you pick.
+        ReplyToEmailRecipient,
+        /// Shows who your reply goes to; a second time sends it.
+        SendEmailReply,
+    ]
+);
+
+/// The reply's key context, on the composer.
+pub(crate) const EMAIL_REPLY_KEY: &str = "ThockEmailReply";
 
 /// The frontmatter `source:` of a note captured from Gmail.
 pub(crate) const EMAIL_SOURCE: &str = "gmail";
@@ -450,6 +477,49 @@ pub(crate) struct EmailReader {
     /// Draws the hints' keycaps dimmed, while the host's keys go elsewhere.
     pub(crate) keys_off: bool,
     pub(crate) vault: Option<Vault>,
+    /// Where the Gmail connection is found; without one a reply says so.
+    pub(crate) project: Option<Entity<Project>>,
+    pub(crate) composer: Option<Composer>,
+    /// Replies begun and left, by note path, while the host lives.
+    drafts: HashMap<String, String>,
+    pub(crate) reply_notice: Option<ReplyNotice>,
+    /// The composer just opened, so the reader shows it once it's laid out.
+    reveal_composer: bool,
+}
+
+/// A reply being written under the thread (V56 §7.3).
+pub(crate) struct Composer {
+    pub(crate) editor: Entity<Editor>,
+    pub(crate) mode: ReplyMode,
+    /// The card being answered.
+    card: usize,
+    /// The thread's headers, once Gmail has answered.
+    thread: Option<ThreadHeaders>,
+    pub(crate) state: ComposerState,
+    pub(crate) error: Option<SharedString>,
+    /// `alt-r` was pressed before the thread was read.
+    pick_when_loaded: bool,
+    picker: Option<(Entity<ContextMenu>, Subscription)>,
+    task: Option<Task<()>>,
+    _subscription: Subscription,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ComposerState {
+    /// Asking Gmail who is on the thread.
+    Loading,
+    Writing,
+    /// One keystroke from sending exactly this.
+    Confirming(OutgoingReply),
+    Sending,
+}
+
+/// What the reader says where the composer would be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplyNotice {
+    Sent,
+    NeedsPermission,
+    NotConnected,
 }
 
 impl EmailReader {
@@ -463,6 +533,414 @@ impl EmailReader {
             hint_context,
             keys_off: false,
             vault,
+            project: None,
+            composer: None,
+            drafts: HashMap::default(),
+            reply_notice: None,
+            reveal_composer: false,
+        }
+    }
+
+    fn gmail(&self, cx: &App) -> Option<Entity<GmailService>> {
+        gmail_service::service_for_project(self.project.as_ref()?, cx)
+    }
+
+    /// The Gmail thread the note was captured from.
+    fn thread_id(&self) -> Option<String> {
+        self.reader_note.thread.as_ref()?;
+        let link = self.item.as_ref()?.link.as_deref()?;
+        gmail_thread_id(link).map(str::to_string)
+    }
+
+    /// Whether the keys are the composer's: its editor or its menu has focus.
+    pub(crate) fn is_composing(&self, window: &Window, cx: &App) -> bool {
+        self.composer.as_ref().is_some_and(|composer| {
+            composer
+                .editor
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+                || composer
+                    .picker
+                    .as_ref()
+                    .is_some_and(|(menu, _)| menu.focus_handle(cx).contains_focused(window, cx))
+        })
+    }
+
+    /// `r` and `a`: opens the composer on the current card, or switches who
+    /// an open one goes to. What was written stays.
+    pub(crate) fn reply<H: EmailReaderHost>(
+        &mut self,
+        mode: ReplyMode,
+        window: &mut Window,
+        cx: &mut Context<H>,
+    ) {
+        if self.open_composer(Some(mode), window, cx)
+            && let Some(composer) = &self.composer
+        {
+            window.focus(&composer.editor.focus_handle(cx), cx);
+        }
+    }
+
+    /// `alt-r`: the thread's addresses as a menu; the one picked is the only
+    /// recipient.
+    pub(crate) fn reply_to_recipient<H: EmailReaderHost>(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<H>,
+    ) {
+        if !self.open_composer(None, window, cx) {
+            return;
+        }
+        let Some(composer) = &mut self.composer else {
+            return;
+        };
+        if composer.thread.is_some() {
+            self.open_picker(window, cx);
+        } else {
+            composer.pick_when_loaded = true;
+            window.focus(&composer.editor.focus_handle(cx), cx);
+        }
+    }
+
+    /// Makes sure a composer is open on this note, reading the thread from
+    /// Gmail if it hasn't been. False when a reply can't start, which the
+    /// notice then explains.
+    fn open_composer<H: EmailReaderHost>(
+        &mut self,
+        mode: Option<ReplyMode>,
+        window: &mut Window,
+        cx: &mut Context<H>,
+    ) -> bool {
+        let Some(thread_id) = self.thread_id() else {
+            return false;
+        };
+        let availability = self
+            .gmail(cx)
+            .map(|service| service.read(cx).reply_availability());
+        let blocked = match availability {
+            Some(ReplyAvailability::Ready) => None,
+            Some(ReplyAvailability::NeedsPermission) => Some(ReplyNotice::NeedsPermission),
+            Some(ReplyAvailability::NotConnected) | None => Some(ReplyNotice::NotConnected),
+        };
+        if let Some(notice) = blocked {
+            self.reply_notice = Some(notice);
+            self.reveal_composer = true;
+            cx.notify();
+            return false;
+        }
+        self.reply_notice = None;
+        let card = self.reader_note.current_message;
+        if let Some(composer) = &mut self.composer {
+            if let Some(mode) = mode {
+                composer.mode = mode;
+            }
+            composer.card = card;
+            composer.error = None;
+            if composer.state != ComposerState::Sending && composer.thread.is_some() {
+                composer.state = ComposerState::Writing;
+            }
+        } else {
+            let draft = self
+                .item
+                .as_ref()
+                .and_then(|item| self.drafts.get(&item.path))
+                .cloned()
+                .unwrap_or_default();
+            let editor = cx.new(|cx| {
+                let mut editor = Editor::auto_height(3, 16, window, cx);
+                editor.set_placeholder_text("Write a reply", window, cx);
+                editor.set_soft_wrap_mode(SoftWrap::EditorWidth, cx);
+                editor.set_text(draft, window, cx);
+                editor
+            });
+            let subscription = cx.subscribe(&editor, |host: &mut H, _, event: &EditorEvent, cx| {
+                if let EditorEvent::BufferEdited = event {
+                    host.email_reader().reply_edited(cx);
+                }
+            });
+            let load = self.gmail(cx).map(|service| {
+                service.update(cx, |service, cx| service.thread_headers(&thread_id, cx))
+            });
+            let task = load.map(|load| {
+                cx.spawn_in(window, async move |host, cx| {
+                    let result = load.await;
+                    host.update_in(cx, |host, window, cx| {
+                        host.email_reader().thread_loaded(result, window, cx);
+                    })
+                    .ok();
+                })
+            });
+            self.composer = Some(Composer {
+                editor,
+                mode: mode.unwrap_or(ReplyMode::Author),
+                card,
+                thread: None,
+                state: ComposerState::Loading,
+                error: None,
+                pick_when_loaded: false,
+                picker: None,
+                task,
+                _subscription: subscription,
+            });
+        }
+        self.reveal_composer = true;
+        cx.notify();
+        true
+    }
+
+    fn thread_loaded<H: EmailReaderHost>(
+        &mut self,
+        result: Result<ThreadHeaders>,
+        window: &mut Window,
+        cx: &mut Context<H>,
+    ) {
+        let Some(composer) = &mut self.composer else {
+            return;
+        };
+        match result {
+            Ok(thread) => {
+                composer.thread = Some(thread);
+                composer.state = ComposerState::Writing;
+                if std::mem::take(&mut composer.pick_when_loaded) {
+                    self.open_picker(window, cx);
+                }
+            }
+            Err(error) => {
+                log::warn!("Thock: reading the thread for a reply failed: {error:#}");
+                composer.error =
+                    Some(format!("Couldn't read the thread from Gmail: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_picker<H: EmailReaderHost>(&mut self, window: &mut Window, cx: &mut Context<H>) {
+        let account = self.account(cx);
+        let Some(composer) = &mut self.composer else {
+            return;
+        };
+        let Some(thread) = &composer.thread else {
+            return;
+        };
+        let addresses = thread_addresses(thread, &account);
+        let host = cx.entity().downgrade();
+        let menu = ContextMenu::build(window, cx, move |mut menu, _, _| {
+            for address in addresses {
+                let host = host.clone();
+                let chosen = address.clone();
+                menu = menu.entry(address, None, move |window, cx| {
+                    host.update(cx, |host, cx| {
+                        host.email_reader()
+                            .choose_recipient(chosen.clone(), window, cx);
+                    })
+                    .ok();
+                });
+            }
+            menu
+        });
+        let subscription = cx.subscribe_in(
+            &menu,
+            window,
+            |host: &mut H, _, _: &gpui::DismissEvent, window, cx| {
+                host.email_reader().close_picker(window, cx);
+            },
+        );
+        window.focus(&menu.focus_handle(cx), cx);
+        composer.picker = Some((menu, subscription));
+        cx.notify();
+    }
+
+    fn choose_recipient<H: EmailReaderHost>(
+        &mut self,
+        address: String,
+        window: &mut Window,
+        cx: &mut Context<H>,
+    ) {
+        if let Some(composer) = &mut self.composer {
+            composer.mode = ReplyMode::One(address);
+        }
+        self.reply_edited(cx);
+        self.close_picker(window, cx);
+    }
+
+    fn close_picker<H: EmailReaderHost>(&mut self, window: &mut Window, cx: &mut Context<H>) {
+        let Some(composer) = &mut self.composer else {
+            return;
+        };
+        if composer.picker.take().is_some() {
+            window.focus(&composer.editor.focus_handle(cx), cx);
+            cx.notify();
+        }
+    }
+
+    /// Anything that changes what would be sent takes the send back to its
+    /// first step.
+    fn reply_edited<H: EmailReaderHost>(&mut self, cx: &mut Context<H>) {
+        let Some(composer) = &mut self.composer else {
+            return;
+        };
+        if matches!(composer.state, ComposerState::Confirming(_)) {
+            composer.state = ComposerState::Writing;
+        }
+        composer.error = None;
+        cx.notify();
+    }
+
+    fn account(&self, cx: &App) -> String {
+        self.gmail(cx)
+            .and_then(|service| service.read(cx).account())
+            .unwrap_or_default()
+    }
+
+    /// Which of the thread's messages the composer answers.
+    fn answered(&self, composer: &Composer) -> Option<usize> {
+        let thread = composer.thread.as_ref()?;
+        let cards = &self.reader_note.thread.as_ref()?.messages;
+        let card = cards.get(composer.card)?;
+        answered_message(thread, composer.card, cards.len(), &card.from, card.sent)
+    }
+
+    /// Who the reply goes to as it stands, for the composer's lines.
+    fn recipients(&self, composer: &Composer, cx: &App) -> Option<Recipients> {
+        let message = composer
+            .thread
+            .as_ref()?
+            .messages
+            .get(self.answered(composer)?)?;
+        Some(reply_recipients(message, &composer.mode, &self.account(cx)))
+    }
+
+    /// `thock::SendEmailReply` (V56 §7.4): the first time it shows what is
+    /// about to be sent, to whom; the second time it sends that.
+    pub(crate) fn send_reply<H: EmailReaderHost>(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<H>,
+    ) {
+        let account = self.account(cx);
+        let Some(composer) = &self.composer else {
+            return;
+        };
+        match composer.state.clone() {
+            ComposerState::Loading | ComposerState::Sending => {}
+            ComposerState::Writing => {
+                let text = composer.editor.read(cx).text(cx);
+                let planned = match (&composer.thread, self.answered(composer)) {
+                    (Some(thread), Some(answered)) => {
+                        plan_reply(thread, answered, &composer.mode, &account, &text)
+                    }
+                    _ => Err(anyhow::anyhow!("the thread hasn't been read yet")),
+                };
+                let Some(composer) = &mut self.composer else {
+                    return;
+                };
+                match planned {
+                    Ok(reply) => {
+                        composer.error = None;
+                        composer.state = ComposerState::Confirming(reply);
+                    }
+                    Err(error) => composer.error = Some(format!("Can't send: {error}").into()),
+                }
+                cx.notify();
+            }
+            ComposerState::Confirming(reply) => {
+                let Some(service) = self.gmail(cx) else {
+                    return;
+                };
+                let send = service.update(cx, |service, cx| service.send_reply(reply, cx));
+                let task = cx.spawn_in(window, async move |host, cx| {
+                    let result = send.await;
+                    host.update_in(cx, |host, window, cx| {
+                        host.email_reader().reply_sent(result, window, cx);
+                    })
+                    .ok();
+                });
+                let Some(composer) = &mut self.composer else {
+                    return;
+                };
+                composer.state = ComposerState::Sending;
+                composer.task = Some(task);
+                composer
+                    .editor
+                    .update(cx, |editor, _| editor.set_read_only(true));
+                cx.notify();
+            }
+        }
+    }
+
+    fn reply_sent<H: EmailReaderHost>(
+        &mut self,
+        result: Result<()>,
+        window: &mut Window,
+        cx: &mut Context<H>,
+    ) {
+        match result {
+            Ok(()) => {
+                if let Some(item) = &self.item {
+                    self.drafts.remove(&item.path);
+                }
+                let had_focus = self.is_composing(window, cx);
+                self.composer = None;
+                self.reply_notice = Some(ReplyNotice::Sent);
+                if had_focus {
+                    window.focus(&self.reader_focus, cx);
+                }
+            }
+            Err(error) => {
+                log::warn!("Thock: sending a reply failed: {error:#}");
+                let needs_permission = error.is::<crate::gmail::MissingPermission>();
+                if let Some(composer) = &mut self.composer {
+                    composer.state = ComposerState::Writing;
+                    composer.error = Some(format!("Not sent: {error:#}").into());
+                    composer
+                        .editor
+                        .update(cx, |editor, _| editor.set_read_only(false));
+                }
+                if needs_permission {
+                    self.reply_notice = Some(ReplyNotice::NeedsPermission);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// `escape` in the composer: out of the confirming step first, then back
+    /// to the thread. What was written is kept; an empty reply just closes.
+    pub(crate) fn leave_reply<H: EmailReaderHost>(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<H>,
+    ) {
+        let Some(composer) = &mut self.composer else {
+            return;
+        };
+        if matches!(composer.state, ComposerState::Confirming(_)) {
+            composer.state = ComposerState::Writing;
+            cx.notify();
+            return;
+        }
+        if composer.state != ComposerState::Sending {
+            self.stash_draft(cx);
+        }
+        window.focus(&self.reader_focus, cx);
+        cx.notify();
+    }
+
+    /// Keeps what the composer holds for its note, and closes a composer
+    /// with nothing in it.
+    fn stash_draft(&mut self, cx: &App) {
+        let Some(composer) = &self.composer else {
+            return;
+        };
+        let text = composer.editor.read(cx).text(cx);
+        let Some(item) = &self.item else {
+            return;
+        };
+        if text.trim().is_empty() {
+            self.drafts.remove(&item.path);
+            self.composer = None;
+        } else {
+            self.drafts.insert(item.path.clone(), text);
         }
     }
 
@@ -488,6 +966,18 @@ impl EmailReader {
             .item
             .as_ref()
             .is_some_and(|shown| shown.path == item.path);
+        if !same_note {
+            // A reply belongs to its note: it waits there for `r`.
+            let sending = self
+                .composer
+                .as_ref()
+                .is_some_and(|composer| composer.state == ComposerState::Sending);
+            if !sending {
+                self.stash_draft(cx);
+            }
+            self.composer = None;
+            self.reply_notice = None;
+        }
         let is_email = item.source.as_deref() == Some(EMAIL_SOURCE);
         let body = without_leading_title(&item.body, &item.title);
         let title = whole_title(item);
@@ -611,6 +1101,173 @@ impl EmailReader {
             .child(title_text)
     }
 
+    /// What follows the last card: the reply being written, or why one
+    /// can't be.
+    fn render_reply<H: EmailReaderHost>(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<H>,
+    ) -> Option<AnyElement> {
+        if self.composer.is_some() {
+            return Some(self.render_composer(window, cx));
+        }
+        let notice = self.reply_notice?;
+        let text = match notice {
+            ReplyNotice::Sent => "Reply sent. It joins the note at the next sync.",
+            ReplyNotice::NeedsPermission => "Replying needs permission to send from your Gmail.",
+            ReplyNotice::NotConnected => "Connect Google Workspace to reply from Thock.",
+        };
+        Some(
+            h_flex()
+                .debug_selector(|| "EMAIL_REPLY_NOTICE".to_string())
+                .flex_none()
+                .w_full()
+                .max_w(READER_MAX_WIDTH)
+                .gap_2()
+                .px(CARD_PADDING)
+                .py_2()
+                .child(Label::new(text).size(LabelSize::Small).color(Color::Muted))
+                .when(notice == ReplyNotice::NeedsPermission, |this| {
+                    this.child(
+                        Button::new("email-allow-replies", "Allow replies")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::Small)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(AllowGmailReplies.boxed_clone(), cx);
+                            }),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// The composer (V56 §7.3): who it goes to, the words, and one line that
+    /// says what the send key will do next.
+    fn render_composer<H: EmailReaderHost>(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<H>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors();
+        let (border, ground, focused_border) =
+            (colors.border, colors.panel_background, neutral_ring(cx));
+        let Some(composer) = &self.composer else {
+            return div().into_any_element();
+        };
+        let recipients = self.recipients(composer, cx);
+        let editor = composer.editor.clone();
+        let focused = editor.focus_handle(cx).contains_focused(window, cx);
+        let heading = match &composer.mode {
+            ReplyMode::Author => "Reply",
+            ReplyMode::All => "Reply all",
+            ReplyMode::One(_) => "Reply to one address",
+        };
+        let line = |key: &'static str, addresses: &[String]| {
+            h_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(28.))
+                        .child(Label::new(key).size(LabelSize::Small).color(Color::Muted)),
+                )
+                // Wrapped, never cut: every address is read before a send.
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Label::new(addresses.join(", ")).size(LabelSize::Small)),
+                )
+        };
+        let send_key = || {
+            framed_keycap(
+                KeyBinding::for_action_in(&SendEmailReply, &editor.focus_handle(cx), cx),
+                !focused,
+                cx,
+            )
+        };
+        let hint = |text: String| Label::new(text).size(LabelSize::Small).color(Color::Muted);
+        let footer = match &composer.state {
+            ComposerState::Loading if composer.error.is_none() => h_flex()
+                .gap_1p5()
+                .child(hint("Reading the thread from Gmail…".to_string())),
+            ComposerState::Loading => h_flex(),
+            ComposerState::Writing => h_flex()
+                .gap_1p5()
+                .child(send_key())
+                .child(hint("Check and send".to_string()))
+                .child(hint("· esc back to the thread".to_string())),
+            // The question takes its own lines, wrapped and whole, with the
+            // key that answers it under it.
+            ComposerState::Confirming(reply) => h_flex()
+                .debug_selector(|| "EMAIL_REPLY_CONFIRM".to_string())
+                .flex_wrap()
+                .gap_x_1p5()
+                .gap_y_1()
+                .child(
+                    div()
+                        .w_full()
+                        .child(Label::new(confirm_line(reply)).size(LabelSize::Small)),
+                )
+                .child(send_key())
+                .child(hint("Send".to_string()))
+                .child(hint("· esc keep writing".to_string())),
+            ComposerState::Sending => h_flex().child(hint("Sending…".to_string())),
+        };
+        v_flex()
+            .id("email-reply")
+            .debug_selector(|| "EMAIL_REPLY".to_string())
+            .key_context(EMAIL_REPLY_KEY)
+            .on_action(cx.listener(|host: &mut H, _: &SendEmailReply, window, cx| {
+                host.email_reader().send_reply(window, cx);
+            }))
+            .on_action(cx.listener(|host: &mut H, _: &menu::Cancel, window, cx| {
+                host.email_reader().leave_reply(window, cx);
+            }))
+            // Vim's `escape` in normal mode arrives as the editor's own cancel.
+            .on_action(
+                cx.listener(|host: &mut H, _: &editor::actions::Cancel, window, cx| {
+                    host.email_reader().leave_reply(window, cx);
+                }),
+            )
+            .flex_none()
+            .w_full()
+            .max_w(READER_MAX_WIDTH)
+            .gap_2()
+            .px(CARD_PADDING)
+            .py_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(if focused { focused_border } else { border })
+            .bg(ground)
+            .child(
+                Label::new(heading)
+                    .size(LabelSize::Small)
+                    .weight(FontWeight::SEMIBOLD),
+            )
+            .when_some(recipients, |this, recipients| {
+                this.child(
+                    v_flex()
+                        .debug_selector(|| "EMAIL_REPLY_RECIPIENTS".to_string())
+                        .w_full()
+                        .child(line("To", &recipients.to))
+                        .when(!recipients.cc.is_empty(), |this| {
+                            this.child(line("Cc", &recipients.cc))
+                        }),
+                )
+            })
+            .children(composer.picker.as_ref().map(|(menu, _)| menu.clone()))
+            .child(div().w_full().child(editor.clone()))
+            .children(composer.error.clone().map(|error| {
+                div()
+                    .debug_selector(|| "EMAIL_REPLY_ERROR".to_string())
+                    .child(Label::new(error).size(LabelSize::Small).color(Color::Error))
+            }))
+            .child(footer)
+            .into_any_element()
+    }
+
     /// The scrolling body: the note's cards, under the earlier cue once the
     /// reader has scrolled.
     pub(crate) fn render_body<H: EmailReaderHost>(
@@ -619,7 +1276,8 @@ impl EmailReader {
         cx: &mut Context<H>,
     ) -> AnyElement {
         let style = self.reader_style(window, cx);
-        let body = self.render_note_body(&style, window, cx);
+        let mut body = self.render_note_body(&style, window, cx);
+        body.extend(self.render_reply(window, cx));
         let earlier = self.reader_note.messages_above;
         let carried = self.carried_card();
         let earlier_cue = (earlier > 0 || carried.is_some())
@@ -661,6 +1319,13 @@ impl EmailReader {
             // lay the card out.
             cx.defer_in(window, |host, _, cx| {
                 host.email_reader().reveal_current_message(cx)
+            });
+        }
+        if std::mem::take(&mut self.reveal_composer) {
+            // The composer is the last thing in the reader.
+            cx.defer_in(window, |host, _, cx| {
+                host.email_reader().reader_scroll.scroll_to_bottom();
+                cx.notify();
             });
         }
         cx.defer_in(window, |host, _, cx| {
@@ -1736,4 +2401,15 @@ pub(crate) fn quiet_action(
                     focus.dispatch_action(boxed_action.as_ref(), window, cx)
                 }),
         )
+}
+
+/// The line a send waits on: every address the reply goes to, and the one
+/// it is sent as.
+pub(crate) fn confirm_line(reply: &OutgoingReply) -> String {
+    let mut line = format!("Send to {}", reply.to.join(", "));
+    if !reply.cc.is_empty() {
+        line.push_str(&format!(", cc {}", reply.cc.join(", ")));
+    }
+    line.push_str(&format!(", as {}?", reply.from));
+    line
 }

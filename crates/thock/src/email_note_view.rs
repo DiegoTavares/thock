@@ -22,9 +22,10 @@ use workspace::item::{Item, ItemBufferKind, ItemEvent, ItemHandle};
 use workspace::{Pane, Workspace};
 
 use crate::email_reader::{
-    EMAIL_SOURCE, EmailReader, EmailReaderHost, PANE_HEADER_HEIGHT, READER_LINE, quiet_action,
-    sender_address, sender_name,
+    EMAIL_SOURCE, EmailReader, EmailReaderHost, PANE_HEADER_HEIGHT, READER_LINE, ReplyAllToEmail,
+    ReplyToEmail, ReplyToEmailRecipient, quiet_action, sender_address, sender_name,
 };
+use crate::gmail::ReplyMode;
 use crate::inbox::{InboxItem, note_hash, parse_inbox_note};
 use crate::inbox_service;
 use crate::inbox_view::{
@@ -224,7 +225,8 @@ impl EmailNoteView {
     ) -> Self {
         let vault = inbox_service::service_for_project(&project, cx)
             .and_then(|service| service.read(cx).vault().cloned());
-        let reader = EmailReader::new(key_context(), vault, cx);
+        let mut reader = EmailReader::new(key_context(), vault, cx);
+        reader.project = Some(project.clone());
         let focus = reader.reader_focus.clone();
         let subscriptions = vec![
             cx.subscribe(&buffer, |this, _, event: &BufferEvent, cx| {
@@ -360,6 +362,23 @@ impl EmailNoteView {
         self.reader.toggle_folds(cx);
     }
 
+    fn reply(&mut self, _: &ReplyToEmail, window: &mut Window, cx: &mut Context<Self>) {
+        self.reader.reply(ReplyMode::Author, window, cx);
+    }
+
+    fn reply_all(&mut self, _: &ReplyAllToEmail, window: &mut Window, cx: &mut Context<Self>) {
+        self.reader.reply(ReplyMode::All, window, cx);
+    }
+
+    fn reply_to_recipient(
+        &mut self,
+        _: &ReplyToEmailRecipient,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reader.reply_to_recipient(window, cx);
+    }
+
     /// Who the thread is from, then what can be done with the note, each
     /// with its key.
     fn render_header(&self, window: &Window, cx: &App) -> AnyElement {
@@ -393,7 +412,7 @@ impl EmailNoteView {
         });
         let action = |name, action: &dyn gpui::Action, label| {
             let keycap = self.reader.keycap(action, window, cx);
-            quiet_action(name, action, keycap, label, false, focus, cx)
+            quiet_action(name, action, keycap, label, self.reader.keys_off, focus, cx)
         };
         h_flex()
             .flex_none()
@@ -421,6 +440,8 @@ impl EmailNoteView {
                             .flex_none()
                             .gap_2()
                             .child(action("edit", &EditEmailNote, "Edit"))
+                            .child(action("reply", &ReplyToEmail, "Reply"))
+                            .child(action("reply-all", &ReplyAllToEmail, "Reply all"))
                             .when_some(self.link(), |this, link| {
                                 this.child(
                                     action("link", &OpenInboxLink, "Open in Gmail ↗")
@@ -490,8 +511,13 @@ impl Render for EmailNoteView {
         let header = self.render_header(window, cx);
         let title = self.reader.render_title(window, cx);
         let body = self.reader.render_body(window, cx);
+        let mut key_context = key_context();
+        if self.reader.is_composing(window, cx) {
+            key_context.add("composing");
+        }
+        self.reader.keys_off = self.reader.is_composing(window, cx);
         v_flex()
-            .key_context(key_context())
+            .key_context(key_context)
             .size_full()
             .bg(cx.theme().colors().editor_background)
             .on_action(cx.listener(Self::edit))
@@ -503,6 +529,9 @@ impl Render for EmailNoteView {
             .on_action(cx.listener(Self::next_message))
             .on_action(cx.listener(Self::previous_message))
             .on_action(cx.listener(Self::toggle_folds))
+            .on_action(cx.listener(Self::reply))
+            .on_action(cx.listener(Self::reply_all))
+            .on_action(cx.listener(Self::reply_to_recipient))
             .child(header)
             .child(
                 div().flex_none().w_full().pr_10().pt_2p5().child(
@@ -774,6 +803,280 @@ mod tests {
             };
             assert!(bound(&EditEmailNote));
             assert!(bound(&ReadEmailNote));
+            assert!(bound(&ReplyToEmail));
+            assert!(bound(&ReplyAllToEmail));
+            assert!(bound(&ReplyToEmailRecipient));
+            assert!(bound(&crate::email_reader::SendEmailReply));
+        }
+    }
+
+    mod reply {
+        use super::*;
+        use crate::email_reader::{ComposerState, ReplyNotice};
+        use crate::gmail::{GmailConfig, MessageHeaders, ThreadHeaders};
+        use crate::gmail_service::{self, StubTransport};
+        use crate::vault::{Vault, VaultConfig};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        fn headers(from: &str, to: &[&str], cc: &[&str], id: &str) -> MessageHeaders {
+            MessageHeaders {
+                from: from.to_string(),
+                to: to.iter().map(|to| to.to_string()).collect(),
+                cc: cc.iter().map(|cc| cc.to_string()).collect(),
+                subject: "Farm is down".to_string(),
+                message_id: Some(format!("<{id}@mail.example.com>")),
+                text: Some("Looking at it now.".to_string()),
+                ..MessageHeaders::default()
+            }
+        }
+
+        /// The note open in its tab, with Gmail connected as `me@example.com`.
+        async fn connected(cx: &mut TestAppContext) -> (Setup, Arc<StubTransport>) {
+            let mut setup = setup(cx).await;
+            let transport = Arc::new(StubTransport::default());
+            transport.headers.lock().unwrap().insert(
+                "t1".to_string(),
+                ThreadHeaders {
+                    thread: "t1".to_string(),
+                    messages: vec![
+                        headers(
+                            "Ana <ana@example.com>",
+                            &["me@example.com"],
+                            &["Rui <rui@example.com>"],
+                            "m1",
+                        ),
+                        headers(
+                            "Rui <rui@example.com>",
+                            &["Ana <ana@example.com>", "me@example.com"],
+                            &[],
+                            "m2",
+                        ),
+                    ],
+                },
+            );
+            let service = setup
+                .cx
+                .update(|_, cx| gmail_service::new_for_test(&setup.project, cx));
+            service.update(&mut setup.cx, |service, cx| {
+                service.configure_for_test(
+                    Vault {
+                        root: PathBuf::from("/vault"),
+                        config: VaultConfig::default(),
+                    },
+                    GmailConfig {
+                        account: Some("me@example.com".to_string()),
+                        ..GmailConfig::default()
+                    },
+                    transport.clone(),
+                    cx,
+                )
+            });
+            setup.cx.run_until_parked();
+            open(&mut setup, "archives/inbox/farm.md").await;
+            (setup, transport)
+        }
+
+        fn state(setup: &Setup) -> Option<ComposerState> {
+            let view = reader(setup)?;
+            view.read_with(&setup.cx, |view, _| {
+                view.reader
+                    .composer
+                    .as_ref()
+                    .map(|composer| composer.state.clone())
+            })
+        }
+
+        fn draft(setup: &Setup) -> Option<String> {
+            let view = reader(setup)?;
+            view.read_with(&setup.cx, |view, cx| {
+                view.reader
+                    .composer
+                    .as_ref()
+                    .map(|composer| composer.editor.read(cx).text(cx))
+            })
+        }
+
+        fn confirming(setup: &Setup) -> crate::gmail::OutgoingReply {
+            match state(setup) {
+                Some(ComposerState::Confirming(reply)) => reply,
+                other => panic!("not confirming: {other:?}"),
+            }
+        }
+
+        #[gpui::test]
+        async fn r_answers_the_author_and_sends_on_the_second_key(cx: &mut TestAppContext) {
+            let (mut setup, transport) = connected(cx).await;
+            setup.cx.simulate_keystrokes("r");
+            setup.cx.run_until_parked();
+            assert_eq!(state(&setup), Some(ComposerState::Writing));
+
+            // The reader's letters are letters again.
+            setup.cx.simulate_keystrokes("n z");
+            assert_eq!(draft(&setup).as_deref(), Some("nz"));
+            let view = reader(&setup).unwrap();
+            view.read_with(&setup.cx, |view, _| {
+                assert_eq!(view.reader.reader_note.current_message, 1);
+                assert!(!view.reader.reader_note.folds_open);
+            });
+            setup.cx.simulate_input(" On it.");
+
+            // Once shows it, and sends nothing.
+            setup.cx.simulate_keystrokes("ctrl-enter");
+            let reply = confirming(&setup);
+            assert_eq!(reply.to, ["rui@example.com"]);
+            assert!(reply.cc.is_empty());
+            assert_eq!(reply.from, "me@example.com");
+            assert_eq!(
+                crate::email_reader::confirm_line(&reply),
+                "Send to rui@example.com, as me@example.com?"
+            );
+            assert!(transport.sent.lock().unwrap().is_empty());
+
+            // An edit takes it back to the first step.
+            setup.cx.simulate_input("!");
+            assert_eq!(state(&setup), Some(ComposerState::Writing));
+            setup.cx.simulate_keystrokes("ctrl-enter");
+            let reply = confirming(&setup);
+            assert!(transport.sent.lock().unwrap().is_empty());
+
+            // Twice sends exactly what the line showed.
+            setup.cx.simulate_keystrokes("ctrl-enter");
+            setup.cx.run_until_parked();
+            assert_eq!(
+                transport.sent.lock().unwrap().as_slice(),
+                std::slice::from_ref(&reply)
+            );
+            assert_eq!(reply.thread, "t1");
+            assert_eq!(reply.subject, "Re: Farm is down");
+            assert_eq!(reply.in_reply_to.as_deref(), Some("<m2@mail.example.com>"));
+            assert!(reply.body.starts_with("nz On it.!\n\n"), "{}", reply.body);
+            assert!(
+                reply.body.ends_with("> Looking at it now.\n"),
+                "{}",
+                reply.body
+            );
+            assert_eq!(state(&setup), None, "the composer closed");
+            view.read_with(&setup.cx, |view, _| {
+                assert_eq!(view.reader.reply_notice, Some(ReplyNotice::Sent));
+            });
+            // And focus is the reader's again.
+            setup.cx.simulate_keystrokes("shift-n");
+            view.read_with(&setup.cx, |view, _| {
+                assert_eq!(view.reader.reader_note.current_message, 0);
+            });
+        }
+
+        #[gpui::test]
+        async fn a_answers_everyone_and_escape_keeps_what_was_written(cx: &mut TestAppContext) {
+            let (mut setup, transport) = connected(cx).await;
+            setup.cx.simulate_keystrokes("a");
+            setup.cx.run_until_parked();
+            setup.cx.simulate_input("Thanks both.");
+            setup.cx.simulate_keystrokes("ctrl-enter");
+            let reply = confirming(&setup);
+            assert_eq!(reply.to, ["rui@example.com"]);
+            assert_eq!(reply.cc, ["ana@example.com"], "everyone but me");
+
+            // `escape` leaves the confirming step first, then the composer.
+            setup.cx.simulate_keystrokes("escape");
+            assert_eq!(state(&setup), Some(ComposerState::Writing));
+            setup.cx.simulate_keystrokes("escape");
+            assert_eq!(draft(&setup).as_deref(), Some("Thanks both."));
+            let view = reader(&setup).unwrap();
+            let composing = setup
+                .cx
+                .update(|window, cx| view.read(cx).reader.is_composing(window, cx));
+            assert!(!composing);
+
+            // From the first card, `r` answers its author with the same words.
+            setup.cx.simulate_keystrokes("shift-n r");
+            setup.cx.run_until_parked();
+            assert_eq!(draft(&setup).as_deref(), Some("Thanks both."));
+            setup.cx.simulate_keystrokes("ctrl-enter");
+            let reply = confirming(&setup);
+            assert_eq!(reply.to, ["ana@example.com"]);
+            assert!(reply.cc.is_empty());
+            assert_eq!(reply.in_reply_to.as_deref(), Some("<m1@mail.example.com>"));
+            assert!(transport.sent.lock().unwrap().is_empty());
+
+            // An empty reply closes on `escape`.
+            setup.cx.simulate_keystrokes("escape");
+            let editor = view.read_with(&setup.cx, |view, _| {
+                view.reader.composer.as_ref().unwrap().editor.clone()
+            });
+            editor.update_in(&mut setup.cx, |editor, window, cx| {
+                editor.set_text("", window, cx)
+            });
+            setup.cx.simulate_keystrokes("escape");
+            assert_eq!(state(&setup), None);
+        }
+
+        #[gpui::test]
+        async fn alt_r_picks_one_address_of_the_thread(cx: &mut TestAppContext) {
+            let (mut setup, transport) = connected(cx).await;
+            setup.cx.simulate_keystrokes("alt-r");
+            setup.cx.run_until_parked();
+            // The thread's addresses, mine left out, in order of appearance.
+            // The menu opens on its first address; `down` moves to the next.
+            setup.cx.simulate_keystrokes("down enter");
+            setup.cx.run_until_parked();
+            setup.cx.simulate_input("Just you.");
+            setup.cx.simulate_keystrokes("ctrl-enter");
+            assert_eq!(confirming(&setup).to, ["rui@example.com"]);
+            setup.cx.simulate_keystrokes("escape alt-r enter");
+            setup.cx.run_until_parked();
+            setup.cx.simulate_keystrokes("ctrl-enter");
+            let reply = confirming(&setup);
+            assert_eq!(reply.to, ["ana@example.com"]);
+            assert!(reply.cc.is_empty());
+            setup.cx.simulate_keystrokes("ctrl-enter");
+            setup.cx.run_until_parked();
+            assert_eq!(*transport.sent.lock().unwrap(), [reply]);
+        }
+
+        #[gpui::test]
+        async fn a_read_only_grant_says_what_replying_needs(cx: &mut TestAppContext) {
+            let (mut setup, transport) = connected(cx).await;
+            *transport.permission.lock().unwrap() = Some(false);
+            setup.cx.simulate_keystrokes("r");
+            setup.cx.run_until_parked();
+            assert_eq!(state(&setup), None);
+            let view = reader(&setup).unwrap();
+            view.read_with(&setup.cx, |view, _| {
+                assert_eq!(view.reader.reply_notice, Some(ReplyNotice::NeedsPermission));
+            });
+            assert!(transport.sent.lock().unwrap().is_empty());
+        }
+
+        #[gpui::test]
+        async fn a_failed_send_keeps_the_reply(cx: &mut TestAppContext) {
+            let (mut setup, transport) = connected(cx).await;
+            *transport.send_error.lock().unwrap() = Some("Gmail is unreachable".to_string());
+            setup.cx.simulate_keystrokes("r");
+            setup.cx.run_until_parked();
+            setup.cx.simulate_input("On it.");
+            setup.cx.simulate_keystrokes("ctrl-enter ctrl-enter");
+            setup.cx.run_until_parked();
+            assert_eq!(state(&setup), Some(ComposerState::Writing));
+            assert_eq!(draft(&setup).as_deref(), Some("On it."));
+            let view = reader(&setup).unwrap();
+            view.read_with(&setup.cx, |view, _| {
+                let error = view.reader.composer.as_ref().unwrap().error.clone();
+                assert_eq!(error.as_deref(), Some("Not sent: Gmail is unreachable"));
+            });
+        }
+
+        #[gpui::test]
+        async fn without_gmail_a_reply_says_to_connect(cx: &mut TestAppContext) {
+            let mut setup = setup(cx).await;
+            open(&mut setup, "archives/inbox/farm.md").await;
+            setup.cx.simulate_keystrokes("r");
+            assert_eq!(state(&setup), None);
+            let view = reader(&setup).unwrap();
+            view.read_with(&setup.cx, |view, _| {
+                assert_eq!(view.reader.reply_notice, Some(ReplyNotice::NotConnected));
+            });
         }
     }
 }

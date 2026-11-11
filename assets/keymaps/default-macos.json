@@ -1053,7 +1053,7 @@
     },
   },
   {
-    "context": "ThockInboxView > Editor",
+    "context": "ThockInboxView && filtering > Editor",
     "use_key_equivalents": true,
     "bindings": {
       "enter": "menu::Confirm",
@@ -1061,17 +1061,20 @@
     },
   },
   {
-    "context": "ThockInboxView && !filtering",
+    "context": "ThockInboxView && !filtering && !composing",
     "use_key_equivalents": true,
     "bindings": {
       "n": "thock::NextInboxMessage",
       "shift-n": "thock::PreviousInboxMessage",
       "z": "thock::ToggleInboxFolds",
       "b": "thock::OpenInboxLink",
+      "r": "thock::ReplyToEmail",
+      "a": "thock::ReplyAllToEmail",
+      "alt-r": "thock::ReplyToEmailRecipient",
     },
   },
   {
-    "context": "ThockInboxView && !filtering && !reader",
+    "context": "ThockInboxView && !filtering && !reader && !composing",
     "use_key_equivalents": true,
     "bindings": {
       "space": "thock::AcceptInboxSuggestion",
@@ -1082,7 +1085,7 @@
       "o": "thock::OpenInboxItem",
       "u": "thock::UndoInboxMove",
       "x": "thock::MarkInboxItem",
-      "r": "thock::SuggestInboxDestinations",
+      "shift-j": "thock::SuggestInboxDestinations",
       "/": "thock::FilterInbox",
       "tab": "thock::FocusInboxReader",
       ".": "thock::ShowInboxItemMenu",
@@ -1118,6 +1121,18 @@
       "z": "thock::ToggleInboxFolds",
       "b": "thock::OpenInboxLink",
       "o": "thock::EditEmailNote",
+      "r": "thock::ReplyToEmail",
+      "a": "thock::ReplyAllToEmail",
+      "alt-r": "thock::ReplyToEmailRecipient",
+    },
+  },
+  {
+    "context": "ThockEmailReply > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-enter": "thock::SendEmailReply",
+      "alt-r": "thock::ReplyToEmailRecipient",
+      "escape": "menu::Cancel",
     },
   },
   {

@@ -36,10 +36,10 @@ use crate::calendar_service::ConnectGoogleWorkspace;
 use crate::calendar_service::{ManualSyncFinished, SyncState, show_sync_toast};
 use crate::gmail::{
     ARCHIVE_GRACE, ArchiveConfig, ArchiveEvent, ArchiveState, GMAIL_CONFIG_FILE, GmailConfig,
-    MailTransport, MappingFetched, MissingPermission, REFRESH_BUDGET, ThreadMove, ThreadUpdate,
-    archive_frontmatter_digest, known_threads, logged_decisions, parse_gmail_config,
-    parse_imported_index, parse_thread_marks, plan_archive, plan_note_refresh, returns_to_inbox,
-    scan_backlog_markers, thread_mark_line,
+    MailTransport, MappingFetched, MissingPermission, OutgoingReply, REFRESH_BUDGET, ThreadHeaders,
+    ThreadMove, ThreadUpdate, archive_frontmatter_digest, known_threads, logged_decisions,
+    parse_gmail_config, parse_imported_index, parse_thread_marks, plan_archive, plan_note_refresh,
+    returns_to_inbox, scan_backlog_markers, thread_mark_line,
 };
 use crate::gmail_google::GmailTransport;
 use crate::google_auth::{
@@ -82,6 +82,9 @@ actions!(
         /// Stops archiving emails in Gmail when you file them. Nothing
         /// already archived moves.
         DisableGmailArchive,
+        /// Lets Thock send your replies from Gmail. Asks Google for
+        /// permission first.
+        AllowGmailReplies,
     ]
 );
 
@@ -116,6 +119,12 @@ pub fn init(cx: &mut App) {
             let handle = workspace.weak_handle();
             if let Some(service) = service_for_project(workspace.project(), cx) {
                 service.update(cx, |service, cx| service.enable_archive(handle, cx));
+            }
+        });
+        workspace.register_action(|workspace, _: &AllowGmailReplies, _window, cx| {
+            let handle = workspace.weak_handle();
+            if let Some(service) = service_for_project(workspace.project(), cx) {
+                service.update(cx, |service, cx| service.allow_replies(handle, cx));
             }
         });
         workspace.register_action(|workspace, _: &DisableGmailArchive, _window, cx| {
@@ -154,6 +163,16 @@ struct ArchivePass {
     permission_missing: bool,
     failed: usize,
     error: Option<String>,
+}
+
+/// Whether Thock can send a reply, and if not, what it needs first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyAvailability {
+    Ready,
+    /// The Google grant is read-only.
+    NeedsPermission,
+    /// No Gmail account is connected.
+    NotConnected,
 }
 
 #[derive(Default)]
@@ -289,6 +308,106 @@ impl GmailService {
                 None => ArchiveStatus::Healthy,
             },
         }
+    }
+
+    /// Whether a reply can be sent from here, and if not, what is missing
+    /// (V56 §7.1).
+    pub fn reply_availability(&self) -> ReplyAvailability {
+        let connected = self
+            .config
+            .as_ref()
+            .is_some_and(|config| config.account.is_some());
+        match &self.transport {
+            Some(transport) if connected => {
+                if self.archive_permission_missing || transport.archive_permission() == Some(false)
+                {
+                    ReplyAvailability::NeedsPermission
+                } else {
+                    ReplyAvailability::Ready
+                }
+            }
+            _ => ReplyAvailability::NotConnected,
+        }
+    }
+
+    /// The connected Gmail account, which a reply is sent as.
+    pub fn account(&self) -> Option<String> {
+        self.config.as_ref()?.account.clone()
+    }
+
+    /// The thread's messages with the headers a reply is addressed from.
+    pub fn thread_headers(
+        &self,
+        thread_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<ThreadHeaders>> {
+        let Some(transport) = self.transport.clone() else {
+            return Task::ready(Err(anyhow!("Gmail isn't connected")));
+        };
+        let thread_id = thread_id.to_string();
+        cx.spawn(async move |_, cx| transport.thread_headers(&thread_id, cx).await)
+    }
+
+    /// Sends `reply` into its thread. The poll that follows brings it into
+    /// the note like any other message (V56 §7.4).
+    pub fn send_reply(&mut self, reply: OutgoingReply, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let Some(transport) = self.transport.clone() else {
+            return Task::ready(Err(anyhow!("Gmail isn't connected")));
+        };
+        cx.spawn(async move |this, cx| {
+            let result = transport.send_reply(&reply, cx).await;
+            this.update(cx, |service, cx| match &result {
+                Ok(()) => service.start_poll(cx),
+                Err(error) if error.is::<MissingPermission>() => {
+                    service.archive_permission_missing = true;
+                    cx.notify();
+                }
+                Err(_) => {}
+            })
+            .ok();
+            result
+        })
+    }
+
+    /// `thock::AllowGmailReplies` (V56 §7.1): Google's consent for
+    /// `gmail.modify`, and nothing else. `[archive]` stays as it is.
+    fn allow_replies(&mut self, workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) {
+        let context = self
+            .config
+            .as_ref()
+            .and_then(|config| Some((config.account.clone()?, config.google.clone())));
+        let Some((account, overrides)) = context else {
+            show_archive_toast(
+                &workspace,
+                "Connect Google Workspace first, then allow replies.".into(),
+                None,
+                cx,
+            );
+            return;
+        };
+        let http = cx.http_client();
+        self.archive_toggle_task = Some(cx.spawn(async move |this, cx| {
+            let result = async {
+                let client = GoogleClient::resolve(&overrides)?;
+                google_auth::grant_gmail_modify(http, client, &account, cx).await
+            }
+            .await;
+            let message: SharedString = match result {
+                Ok(true) => {
+                    // The new grant is in the keychain; a fresh transport
+                    // reads it instead of the cached read-only token.
+                    this.update(cx, |service, cx| service.reload_config(cx))
+                        .ok();
+                    "Thock can send your replies from Gmail".into()
+                }
+                Ok(false) => "Replying stays off: Google wasn't given the permission".into(),
+                Err(error) => {
+                    log::warn!("Thock: allowing Gmail replies failed: {error:#}");
+                    format!("Couldn't allow replies: {error:#}").into()
+                }
+            };
+            cx.update(|cx| show_archive_toast(&workspace, message, None, cx));
+        }));
     }
 
     /// Whether `.thock/gmail.toml` turns Gmail archive on.
@@ -1435,6 +1554,12 @@ pub(crate) struct StubTransport {
     pub(crate) permission: std::sync::Mutex<Option<bool>>,
     /// Threads as Gmail has them now, for the refresh pass.
     pub(crate) thread_updates: std::sync::Mutex<Vec<ThreadUpdate>>,
+    /// What a reply is addressed from, by thread.
+    pub(crate) headers: std::sync::Mutex<HashMap<String, ThreadHeaders>>,
+    /// Every reply sent.
+    pub(crate) sent: std::sync::Mutex<Vec<OutgoingReply>>,
+    /// When set, every send fails with it.
+    pub(crate) send_error: std::sync::Mutex<Option<String>>,
 }
 
 #[cfg(test)]
@@ -1457,6 +1582,28 @@ impl MailTransport for StubTransport {
 
     fn archive_permission(&self) -> Option<bool> {
         *self.permission.lock().unwrap()
+    }
+
+    fn thread_headers(&self, thread_id: &str, _cx: &AsyncApp) -> Task<Result<ThreadHeaders>> {
+        Task::ready(
+            self.headers
+                .lock()
+                .unwrap()
+                .get(thread_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("no such thread")),
+        )
+    }
+
+    fn send_reply(&self, reply: &OutgoingReply, _cx: &AsyncApp) -> Task<Result<()>> {
+        if *self.permission.lock().unwrap() == Some(false) {
+            return Task::ready(Err(anyhow!(MissingPermission)));
+        }
+        if let Some(error) = self.send_error.lock().unwrap().clone() {
+            return Task::ready(Err(anyhow!(error)));
+        }
+        self.sent.lock().unwrap().push(reply.clone());
+        Task::ready(Ok(()))
     }
 
     fn refresh(
