@@ -1,6 +1,6 @@
 # Thock V56 - An email reads as a conversation anywhere, keeps up with its thread, and can be answered
 
-**Status:** Implemented (2026-11-11)
+**Status:** Shipped (2026-11-11): merged as #199, by-hand checks passed
 **Owner:** Diego · **Date:** 2026-11-10
 **Companion docs:** `v41-inbox-desk-view.md` §4.4 and §5 (the conversation reader this lifts out of
 the Inbox, and the keys it shares), `v15-unified-gmail-sync.md` §4.4 and §7 (capture, the state
