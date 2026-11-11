@@ -36,10 +36,10 @@ use crate::calendar_service::ConnectGoogleWorkspace;
 use crate::calendar_service::{ManualSyncFinished, SyncState, show_sync_toast};
 use crate::gmail::{
     ARCHIVE_GRACE, ArchiveConfig, ArchiveEvent, ArchiveState, GMAIL_CONFIG_FILE, GmailConfig,
-    MailTransport, MappingFetched, MissingPermission, OutgoingReply, REFRESH_BUDGET, ThreadHeaders,
-    ThreadMove, ThreadUpdate, archive_frontmatter_digest, known_threads, logged_decisions,
-    parse_gmail_config, parse_imported_index, parse_thread_marks, plan_archive, plan_note_refresh,
-    returns_to_inbox, scan_backlog_markers, thread_mark_line,
+    KnownThread, MailTransport, MappingFetched, MissingPermission, OutgoingReply, REFRESH_BUDGET,
+    ThreadHeaders, ThreadMove, ThreadUpdate, archive_frontmatter_digest, compact_thread_marks,
+    known_threads, logged_decisions, parse_gmail_config, parse_imported_index, parse_thread_marks,
+    plan_archive, plan_note_refresh, returns_to_inbox, scan_backlog_markers, thread_mark_line,
 };
 use crate::gmail_google::GmailTransport;
 use crate::google_auth::{
@@ -354,6 +354,10 @@ impl GmailService {
         let Some(transport) = self.transport.clone() else {
             return Task::ready(Err(anyhow!("Gmail isn't connected")));
         };
+        // Detached: a message on its way to Gmail is not taken back because
+        // the view that sent it closed. A caller that stopped listening
+        // still gets the failure in the log.
+        let (finished, wait) = futures::channel::oneshot::channel::<Result<()>>();
         cx.spawn(async move |this, cx| {
             let result = transport.send_reply(&reply, cx).await;
             this.update(cx, |service, cx| match &result {
@@ -365,7 +369,14 @@ impl GmailService {
                 Err(_) => {}
             })
             .ok();
-            result
+            if let Err(Err(error)) = finished.send(result) {
+                log::warn!("Thock: a reply nobody was waiting on wasn't sent: {error:#}");
+            }
+        })
+        .detach();
+        cx.background_spawn(async move {
+            wait.await
+                .unwrap_or_else(|_| Err(anyhow!("the send was interrupted")))
         })
     }
 
@@ -795,15 +806,26 @@ impl GmailService {
             {
                 return SyncOutcome::Failed(error);
             }
+            if let Err(error) =
+                Self::mark_captured_threads(&fs, &vault, &imported, &fetched.threads).await
+            {
+                // Without its mark a thread is dated by its capture instead.
+                log::warn!("Thock: recording captured Gmail threads failed: {error:#}");
+            }
         }
 
-        match Self::refresh_threads(&fs, &vault, &config, &project, &transport, cx).await {
-            Err(error) if error.is::<AuthRevoked>() => return SyncOutcome::AuthRevoked,
-            Err(error) => return SyncOutcome::Failed(error),
-            Ok(()) => {}
+        // The archive pass runs whatever the refresh did (V53: nothing else
+        // holds it up); a refresh that failed is the poll's outcome after it.
+        let refreshed = Self::refresh_threads(&fs, &vault, &config, &project, &transport, cx).await;
+        if matches!(&refreshed, Err(error) if error.is::<AuthRevoked>()) {
+            return SyncOutcome::AuthRevoked;
         }
 
         Self::reconcile_archive(this, cx).await;
+
+        if let Err(error) = refreshed {
+            return SyncOutcome::Failed(error.context("bringing in new replies"));
+        }
 
         if let Some(reason) = hold_reason(&holding) {
             return SyncOutcome::Held(reason.into());
@@ -1263,61 +1285,160 @@ impl GmailService {
         let mut folders: Vec<&str> = vec![inbox_dir.as_str(), INBOX_ARCHIVE_DIR];
         folders.extend(config.mappings.iter().map(|mapping| mapping.path.as_str()));
 
+        // One note's trouble doesn't hold the others back; a thread whose
+        // note isn't on disk yet keeps no mark, so the next poll asks again.
+        let mut failure = None;
+        let mut settled = Vec::new();
         for update in &updates {
-            if update.new_messages.is_empty() {
-                continue;
-            }
-            let Some(digest) = digests.get(update.thread.as_str()) else {
-                continue;
+            let context = RefreshContext {
+                fs,
+                vault,
+                project,
+                folders: &folders,
+                inbox_dir: &inbox_dir,
+                decisions: &decisions,
             };
-            // A note that is gone stays gone.
-            let Some(note) = find_note(fs, vault, &folders, digest).await else {
-                continue;
-            };
-            Self::append_messages(fs, project, &note, update, cx).await?;
-
-            let last_decision = decisions
-                .iter()
-                .rev()
-                .find(|decision| decision.digest == *digest)
-                .map(|decision| decision.class);
-            let note_dir = note
-                .strip_prefix(&vault.root)
-                .ok()
-                .and_then(|path| path.parent())
-                .map(|dir| dir.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            let from_someone_else = update.new_messages.iter().any(|message| !message.own);
-            if returns_to_inbox(&note_dir, last_decision, from_someone_else)
-                && let Some(name) = note.file_name()
-            {
-                // Never over a file that is already there.
-                move_note(fs, &note, &vault.root.join(&inbox_dir).join(name)).await?;
+            let digest = digests.get(update.thread.as_str()).copied();
+            match Self::apply_update(&context, update, digest, cx).await {
+                Ok(true) => settled.push(update),
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!("Thock: appending new replies to a note failed: {error:#}");
+                    failure.get_or_insert(error);
+                }
             }
         }
 
+        if !settled.is_empty() {
+            let at = Local::now().to_rfc3339();
+            for update in settled {
+                marks_text.push_str(&thread_mark_line(
+                    &update.thread,
+                    &update.history,
+                    update.through,
+                    &at,
+                ));
+                marks_text.push('\n');
+            }
+            if let Some(parent) = marks_path.parent() {
+                fs.create_dir(parent).await?;
+            }
+            fs.atomic_write(marks_path, compact_thread_marks(&marks_text))
+                .await?;
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    /// Records each newly captured thread as Gmail had it when fetched, so
+    /// its refresh starts from the thread itself: a reply that arrived
+    /// while the capture ran is neither missed nor written twice.
+    async fn mark_captured_threads(
+        fs: &Arc<dyn Fs>,
+        vault: &Vault,
+        already_imported: &HashSet<String>,
+        fetched: &HashMap<String, KnownThread>,
+    ) -> Result<()> {
+        if fetched.is_empty() {
+            return Ok(());
+        }
+        let imported = load_if_present(fs, &state_file_path(vault)).await?;
+        let imported = parse_imported_index(&imported);
+        let path = threads_state_path(vault);
+        let mut text = load_if_present(fs, &path).await?;
+        let marks = parse_thread_marks(&text);
         let at = Local::now().to_rfc3339();
-        for update in &updates {
-            marks_text.push_str(&thread_mark_line(update, &at));
-            marks_text.push('\n');
+        let mut added = false;
+        for (digest, thread) in &imported {
+            if already_imported.contains(digest) || marks.contains_key(&thread.thread) {
+                continue;
+            }
+            let Some(known) = fetched.get(&thread.thread) else {
+                continue;
+            };
+            let Some(history) = &known.history else {
+                continue;
+            };
+            text.push_str(&thread_mark_line(
+                &thread.thread,
+                history,
+                known.through,
+                &at,
+            ));
+            text.push('\n');
+            added = true;
         }
-        if let Some(parent) = marks_path.parent() {
+        if !added {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
             fs.create_dir(parent).await?;
         }
-        fs.atomic_write(marks_path, marks_text).await
+        fs.atomic_write(path, text).await
+    }
+
+    /// One thread's refresh: its new messages into its note, and the note
+    /// back to the inbox when the reply calls for it. `Ok(true)` once the
+    /// thread needs no further look: the file holds the messages, or there
+    /// is no note to hold them.
+    async fn apply_update(
+        context: &RefreshContext<'_>,
+        update: &ThreadUpdate,
+        digest: Option<&str>,
+        cx: &mut AsyncApp,
+    ) -> Result<bool> {
+        let RefreshContext {
+            fs,
+            vault,
+            project,
+            folders,
+            inbox_dir,
+            decisions,
+        } = context;
+        if update.new_messages.is_empty() {
+            return Ok(true);
+        }
+        let Some(digest) = digest else {
+            return Ok(true);
+        };
+        // A note that is gone stays gone.
+        let Some(note) = find_note(fs, vault, folders, digest).await else {
+            return Ok(true);
+        };
+        let on_disk = Self::append_messages(fs, project, &note, update, cx).await?;
+
+        let last_decision = decisions
+            .iter()
+            .rev()
+            .find(|decision| decision.digest == digest)
+            .map(|decision| decision.class);
+        let note_dir = note
+            .strip_prefix(&vault.root)
+            .ok()
+            .and_then(|path| path.parent())
+            .map(|dir| dir.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let from_someone_else = update.new_messages.iter().any(|message| !message.own);
+        if returns_to_inbox(&note_dir, last_decision, from_someone_else)
+            && let Some(name) = note.file_name()
+        {
+            // Never over a file that is already there.
+            move_note(fs, &note, &vault.root.join(inbox_dir).join(name)).await?;
+        }
+        Ok(on_disk)
     }
 
     /// Appends a refresh's messages to the note at `path`: through the open
     /// buffer behind the typing guard when the note is open, read-modify-write
     /// through the project `Fs` otherwise. A buffer that was saved is saved
-    /// again, since the reader's tab holds one and has no way to.
+    /// again; one with unsaved words of the user's is left for them to save.
+    /// Says whether the file now holds the messages.
     async fn append_messages(
         fs: &Arc<dyn Fs>,
         project: &Entity<Project>,
         path: &std::path::Path,
         update: &ThreadUpdate,
         cx: &mut AsyncApp,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let sections: Vec<String> = update
             .new_messages
             .iter()
@@ -1336,7 +1457,7 @@ impl GmailService {
                 fs.atomic_write(path.to_path_buf(), refresh.apply(&text))
                     .await?;
             }
-            return Ok(());
+            return Ok(true);
         };
 
         for _ in 0..TYPING_GUARD_MAX_TRIES {
@@ -1361,7 +1482,7 @@ impl GmailService {
                         .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
                         .await?;
                 }
-                return Ok(());
+                return Ok(buffer.read_with(cx, |buffer, _| !buffer.is_dirty()));
             };
             let diff = buffer
                 .read_with(cx, |buffer, cx| buffer.diff(refresh.apply(&text), cx))
@@ -1557,9 +1678,29 @@ pub(crate) struct StubTransport {
     /// What a reply is addressed from, by thread.
     pub(crate) headers: std::sync::Mutex<HashMap<String, ThreadHeaders>>,
     /// Every reply sent.
-    pub(crate) sent: std::sync::Mutex<Vec<OutgoingReply>>,
+    pub(crate) sent: Arc<std::sync::Mutex<Vec<OutgoingReply>>>,
     /// When set, every send fails with it.
     pub(crate) send_error: std::sync::Mutex<Option<String>>,
+    /// When set, the next send waits for it before answering.
+    pub(crate) send_gate: std::sync::Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+    /// When set, every refresh fails with it.
+    pub(crate) refresh_error: std::sync::Mutex<Option<String>>,
+    /// Each fetched thread as Gmail had it.
+    pub(crate) fetched_threads: std::sync::Mutex<HashMap<String, KnownThread>>,
+}
+
+#[cfg(test)]
+impl StubTransport {
+    fn send_now(&self, reply: &OutgoingReply) -> Result<()> {
+        if *self.permission.lock().unwrap() == Some(false) {
+            return Err(anyhow!(MissingPermission));
+        }
+        if let Some(error) = self.send_error.lock().unwrap().clone() {
+            return Err(anyhow!(error));
+        }
+        self.sent.lock().unwrap().push(reply.clone());
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1595,15 +1736,23 @@ impl MailTransport for StubTransport {
         )
     }
 
-    fn send_reply(&self, reply: &OutgoingReply, _cx: &AsyncApp) -> Task<Result<()>> {
-        if *self.permission.lock().unwrap() == Some(false) {
-            return Task::ready(Err(anyhow!(MissingPermission)));
-        }
-        if let Some(error) = self.send_error.lock().unwrap().clone() {
-            return Task::ready(Err(anyhow!(error)));
-        }
-        self.sent.lock().unwrap().push(reply.clone());
-        Task::ready(Ok(()))
+    fn send_reply(&self, reply: &OutgoingReply, cx: &AsyncApp) -> Task<Result<()>> {
+        let Some(gate) = self.send_gate.lock().unwrap().take() else {
+            return Task::ready(self.send_now(reply));
+        };
+        let error = self.send_error.lock().unwrap().clone();
+        let sent = self.sent.clone();
+        let reply = reply.clone();
+        cx.background_spawn(async move {
+            gate.await.ok();
+            match error {
+                Some(error) => Err(anyhow!(error)),
+                None => {
+                    sent.lock().unwrap().push(reply);
+                    Ok(())
+                }
+            }
+        })
     }
 
     fn refresh(
@@ -1612,6 +1761,9 @@ impl MailTransport for StubTransport {
         budget: usize,
         _cx: &AsyncApp,
     ) -> Task<Result<Vec<ThreadUpdate>>> {
+        if let Some(error) = self.refresh_error.lock().unwrap().clone() {
+            return Task::ready(Err(anyhow!(error)));
+        }
         let updates = self
             .thread_updates
             .lock()
@@ -1649,7 +1801,10 @@ impl MailTransport for StubTransport {
             .into_iter()
             .map(MappingFetched::Items)
             .collect();
-        Task::ready(Ok(crate::gmail::GmailFetched { mappings }))
+        Task::ready(Ok(crate::gmail::GmailFetched {
+            mappings,
+            threads: self.fetched_threads.lock().unwrap().clone(),
+        }))
     }
 }
 
@@ -1824,6 +1979,16 @@ async fn inbox_dir(fs: &Arc<dyn Fs>, vault: &Vault) -> String {
         .unwrap_or_else(|| crate::inbox::InboxConfig::default().dir)
 }
 
+/// What every thread of a refresh pass is applied with.
+struct RefreshContext<'a> {
+    fs: &'a Arc<dyn Fs>,
+    vault: &'a Vault,
+    project: &'a Entity<Project>,
+    folders: &'a [&'a str],
+    inbox_dir: &'a str,
+    decisions: &'a [crate::gmail::LoggedDecision],
+}
+
 fn threads_state_path(vault: &Vault) -> PathBuf {
     vault
         .root
@@ -1864,8 +2029,12 @@ async fn find_note(
             if hidden {
                 continue;
             }
-            if fs.is_dir(&path).await {
-                if recurse {
+            let Ok(Some(metadata)) = fs.metadata(&path).await else {
+                continue;
+            };
+            if metadata.is_dir {
+                // A linked folder is not walked: it may lead back up.
+                if recurse && !metadata.is_symlink {
                     below.push((path, true));
                 }
                 continue;
@@ -2240,6 +2409,7 @@ mod tests {
 
             fn fetch(&self, _: &HashSet<String>, _cx: &AsyncApp) -> Task<Result<GmailFetched>> {
                 Task::ready(Ok(GmailFetched {
+                    threads: HashMap::new(),
                     mappings: vec![
                         MappingFetched::LabelNotFound,
                         MappingFetched::Items(Vec::new()),
@@ -2725,5 +2895,144 @@ mod tests {
         });
         let note = fs.load(Path::new(IDEA_NOTE)).await.unwrap();
         assert!(note.ends_with("Count me in.\n"), "{note}");
+    }
+
+    #[gpui::test]
+    async fn a_failed_refresh_shows_and_does_not_hold_the_archive_back(cx: &mut TestAppContext) {
+        let (fs, service, transport, clock) = archive_harness(archive_on(), cx).await;
+        *transport.refresh_error.lock().unwrap() = Some("Gmail said 503".to_string());
+        write_log(&fs, &decided_line()).await;
+        advance(&clock, 301, cx);
+        service.read_with(cx, |service, _| {
+            assert!(
+                matches!(service.state(), SyncState::Failing { .. }),
+                "the poll says the replies didn't come in"
+            );
+        });
+        // The pass that saw the decision started its grace; the next one,
+        // a backed-off poll later, archives.
+        advance(&clock, 601, cx);
+        assert_eq!(
+            *transport.modified.lock().unwrap(),
+            vec![("t-q4".to_string(), ThreadMove::Archive)]
+        );
+    }
+
+    #[gpui::test]
+    async fn a_note_with_unsaved_words_keeps_its_thread_open_until_saved(cx: &mut TestAppContext) {
+        let (fs, project, transport) = refresh_harness(cx).await;
+        let path = project
+            .read_with(cx, |project, cx| {
+                project.find_project_path(Path::new(IDEA_NOTE), cx)
+            })
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(path, cx))
+            .await
+            .unwrap();
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(buffer.len()..buffer.len(), "\nmine\n")], None, cx)
+        });
+        *transport.thread_updates.lock().unwrap() = vec![update(
+            "h2",
+            vec![reply("Bea <bea@example.com>", "Count me in.", 5, false)],
+        )];
+        poll(cx);
+        cx.executor().advance_clock(TYPING_GUARD_QUIET * 2);
+        cx.run_until_parked();
+        buffer.read_with(cx, |buffer, _| {
+            assert!(
+                buffer.text().ends_with("Count me in.\n"),
+                "{}",
+                buffer.text()
+            );
+            assert!(buffer.is_dirty(), "the user's words are theirs to save");
+        });
+        // Not on disk yet, so the thread isn't recorded as read.
+        let marked = |state: String| state.contains("\"history\":\"h2\"");
+        assert!(!marked(
+            load_if_present(&(fs.clone() as Arc<dyn Fs>), Path::new(THREADS_STATE))
+                .await
+                .unwrap()
+        ));
+
+        project
+            .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
+            .await
+            .unwrap();
+        poll(cx);
+        cx.executor().advance_clock(TYPING_GUARD_QUIET * 2);
+        cx.run_until_parked();
+        assert!(marked(fs.load(Path::new(THREADS_STATE)).await.unwrap()));
+        let note = fs.load(Path::new(IDEA_NOTE)).await.unwrap();
+        assert_eq!(note.matches("Count me in.").count(), 1, "{note}");
+    }
+
+    #[gpui::test]
+    async fn a_captured_thread_starts_from_what_gmail_had_not_from_the_clock(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(Path::new("/vault")).await.unwrap();
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+        let service = cx.new(|cx| GmailService::new(project.clone(), cx));
+        let transport = Arc::new(StubTransport {
+            items: Mutex::new(vec![
+                vec![],
+                vec![email("t-idea", "An idea from the road", "Two thoughts.")],
+            ]),
+            // The thread as fetched: one message, long before this poll.
+            fetched_threads: Mutex::new(
+                [(
+                    "t-idea".to_string(),
+                    KnownThread {
+                        history: Some("h1".to_string()),
+                        through: 1_000,
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        });
+        // A reply that reached Gmail before the capture was stamped.
+        let mut early = reply("Bea <bea@example.com>", "Count me in.", 0, false);
+        early.sent = Some(Utc::now() - chrono::Duration::minutes(5));
+        *transport.thread_updates.lock().unwrap() = vec![update("h2", vec![early])];
+        service.update(cx, |service, cx| {
+            service.configure_for_test(test_vault(), test_config(), transport.clone(), cx)
+        });
+        cx.run_until_parked();
+        let note = fs.load(Path::new(IDEA_NOTE)).await.unwrap();
+        assert!(note.ends_with("Count me in.\n"), "{note}");
+        // One line per thread, its last.
+        let state = fs.load(Path::new(THREADS_STATE)).await.unwrap();
+        assert_eq!(state.lines().count(), 1, "{state}");
+        assert!(state.contains("\"history\":\"h2\""), "{state}");
+    }
+
+    #[gpui::test]
+    async fn a_reply_on_its_way_is_sent_though_nobody_waits(cx: &mut TestAppContext) {
+        let (_fs, _project, transport) = refresh_harness(cx).await;
+        let (open, gate) = futures::channel::oneshot::channel();
+        *transport.send_gate.lock().unwrap() = Some(gate);
+        let service = cx.update(|cx| cx.global::<KeepService>().0.clone());
+        let reply = OutgoingReply {
+            thread: "t-idea".to_string(),
+            from: "diego@example.com".to_string(),
+            to: vec!["ana@example.com".to_string()],
+            cc: Vec::new(),
+            subject: "Re: An idea from the road".to_string(),
+            in_reply_to: None,
+            references: None,
+            body: "On it.\n".to_string(),
+        };
+        let waiting = service.update(cx, |service, cx| service.send_reply(reply.clone(), cx));
+        cx.run_until_parked();
+        drop(waiting);
+        open.send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(transport.sent.lock().unwrap().as_slice(), [reply]);
     }
 }

@@ -157,7 +157,9 @@ Bindings go in the Thock blocks of both default keymaps under `ThockEmailView &&
 `ThockInboxView && !filtering && !composing` and `ThockEmailReply > Editor`. The reader's letters
 are bound for everyone, as in the Inbox's reader, so `vim.json` gains no block; its Inbox block
 takes `!composing` like the others. The Inbox's `enter` in an editor is narrowed to
-`ThockInboxView && filtering > Editor`, so the composer's `enter` is a new line.
+`ThockInboxView && filtering > Editor`, and `ThockEmailReply > Editor` binds `enter` to
+`editor::Newline`: both hosts bind `enter` to `menu::Confirm` above the composer, which would
+otherwise open the selected note.
 
 ## 6. A note keeps up with its thread
 
@@ -176,18 +178,23 @@ fetch a whole mailbox; the rest wait their turn.
 
 ### 6.3 State: `.thock/state/gmail/threads.jsonl`
 
-Append-only, the last record for a thread wins:
+The last record for a thread wins, and a write keeps only that one, so the file grows with the
+threads captured and not with the polls:
 
 ```json
 {"thread":"18c2f…","history":"918273","through":1762790000000,"at":"2026-11-10T09:12:00-03:00"}
 ```
 
-`through` is the newest message the note holds, as Gmail's `internalDate` in milliseconds. A
-thread with no record takes `through` from when `imported.jsonl` says it was captured; a record
-there with no thread or no time (written before V15) is never refreshed.
+`through` is the newest message the note holds, as Gmail's `internalDate` in milliseconds.
+Capture writes a thread's first record from the thread as it was fetched (its `historyId` and its
+newest message), so a reply that arrives while a capture runs is neither missed nor written
+twice. A thread with no record (captured before this, or one Gmail gave no history for) takes
+`through` from when `imported.jsonl` says it was captured; a record there with no thread or no
+time (written before V15) is never refreshed.
 
 A fetch with nothing newer than `through` still writes a record, so a label change isn't fetched
-again.
+again. A record is written only once the note's file holds the messages: a note open with unsaved
+words takes the append in its buffer and is asked about again each poll until it is saved.
 
 ### 6.4 The write
 
@@ -206,6 +213,10 @@ Messages newer than `through`, drafts left out, oldest first, each in the sectio
   nothing is rewritten.
 - **Never twice.** A section the note already contains, byte for byte, isn't appended. That is
   what makes a crash between the note and the state file harmless.
+- **One note's trouble is its own.** A note that can't be read or written is logged and tried
+  again next poll; the other threads are still applied. A refresh that failed is the poll's
+  outcome in the sync status, after the Gmail archive pass has run: nothing here holds V53 up.
+- **Linked folders aren't walked**, since one may lead back up the vault.
 
 The sender's text is untrusted (V15): it goes through the sanitising capture uses.
 
@@ -218,7 +229,7 @@ the triage log holds for it is **Archive** or **Discard**. An archived note is a
 | The note is | Its last decision | A reply from someone else |
 | --- | --- | --- |
 | in `inbox/` | none | appended |
-| in `archives/inbox/` | Today, Soon, Someday | appended, moved back to `inbox/` |
+| in `archives/inbox/` | Today, Soon, Someday, or kept as a note | appended, moved back to `inbox/` |
 | in `archives/inbox/` | Archive, Discard | appended in place |
 | anywhere else | any | appended in place |
 
@@ -257,7 +268,12 @@ the newest.
 - `alt-r`: every address the thread's headers name, the account's left out, as a menu; the one
   picked is **To**.
 
+`Reply-To` may name several addresses; all of them are who the author asked to be answered. One
+that names nobody usable leaves the author.
+
 A recipient is always an address read from the thread. The composer has no field to type one in.
+Addresses are read from the headers as they were sent, and only the names are decoded after, so
+an encoded name can't put an address of its own on the thread.
 
 A ticketing system's card is headed by the person its text names (V41 §4.4), but a reply goes to
 the address that sent it. The composer's **To** line says the address, so the two can't be confused.
@@ -288,13 +304,21 @@ line and the **To** and **Cc** lines wrap rather than cut, so every address is o
 The message is `text/plain; charset=utf-8`: the reply, a blank line, `On <date>, <from> wrote:` and
 the answered message quoted with `> `. Headers: `To`, `Cc`, `Subject` (the thread's, with one
 `Re: `), `In-Reply-To` and `References` from the answered message, and the request names the
-thread. Every header value has line breaks removed before it is written, and non-ASCII is RFC 2047
-encoded.
+thread. Every header value has line breaks removed before it is written, non-ASCII is RFC 2047
+encoded, and `To`, `Cc` and `References` are folded to stay inside the line length.
 
 While it sends the composer is read-only and says *Sending…*. On success it closes, the reader
 says *Reply sent. It joins the note at the next sync.* where the composer was, and a sync runs, so
 the reply joins the note by §6 like any other message. On failure the composer stays with its text
-and the error.
+and the error; when the permission is what was missing, *Allow replies* is offered there.
+
+A reply being sent is not taken back by selecting another note or closing the tab. Back on its
+note before Gmail answers, `r` shows it still sending. If it failed while another note was
+showing, the note says *Your reply here wasn't sent* and `r` reopens it with its words and the
+error. When the tab was closed there is nowhere to say so: the failure is logged.
+
+If the thread can't be read from Gmail the composer says so and keeps what is typed; `r` or `a`
+asks again.
 
 ### 7.5 Transport
 
@@ -324,7 +348,7 @@ refuses with `MissingPermission` when the grant is known to lack `gmail.modify`,
 
 - `inbox_email` and the Inbox's reader tests keep passing against the extracted component.
 - `email_note_view`: an email note opened by path lands as the reader; `o` gives the editor and
-  `ctrl-alt-o` the reader back; a non-email note and a dirty buffer stay editors; `n`, `z`, `j`
+  `ctrl-alt-shift-m` the reader back; a non-email note and a dirty buffer stay editors; `n`, `z`, `j`
   move what they should (keystrokes); an append to the buffer shows as a new card.
 - `gmail` (pure): the refresh plan for a bare note, a sectioned note, a section already present;
   where a note goes by its last decision; recipients for reply, reply all and one address; the
@@ -336,7 +360,9 @@ refuses with `MissingPermission` when the grant is known to lack `gmail.modify`,
   buffer takes the append.
 - Composer (keystrokes): `r` opens it with the author, `a` with everyone, one `cmd-enter` sends
   nothing, the second sends exactly what the line showed, an edit in between disarms it.
-- Keymaps: the new bindings exist on both platforms and in `vim.json`.
+- Composer, in both hosts: `enter` is a new line; a send outlives its tab and a change of note; a
+  failed thread read is retried; a moved note keeps its reply.
+- Keymaps: the new bindings exist on both platforms.
 
 ## 11. Changes by file
 

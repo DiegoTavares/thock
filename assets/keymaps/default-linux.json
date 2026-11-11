@@ -1086,6 +1086,8 @@
     "use_key_equivalents": true,
     "bindings": {
       "ctrl-enter": "thock::SendEmailReply",
+      // The Inbox and the tab both bind `enter` above this editor.
+      "enter": "editor::Newline",
       "alt-r": "thock::ReplyToEmailRecipient",
       "escape": "menu::Cancel",
     },

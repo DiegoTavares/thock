@@ -8,8 +8,8 @@ use std::collections::HashSet;
 use editor::Editor;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, Global, KeyContext, SharedString, Subscription, TaskExt as _, WeakEntity, Window,
-    actions, div, prelude::*,
+    Focusable, Global, KeyContext, SharedString, Subscription, Task, TaskExt as _, WeakEntity,
+    Window, actions, div, prelude::*,
 };
 use language::{Buffer, BufferEvent};
 use project::{Project, ProjectItem as _};
@@ -18,7 +18,7 @@ use ui::{
     v_flex,
 };
 use util::ResultExt as _;
-use workspace::item::{Item, ItemBufferKind, ItemEvent, ItemHandle};
+use workspace::item::{Item, ItemBufferKind, ItemEvent, ItemHandle, SaveOptions};
 use workspace::{Pane, Workspace};
 
 use crate::email_reader::{
@@ -238,6 +238,9 @@ impl EmailNoteView {
                 ) {
                     this.reparse(cx);
                 }
+                if matches!(event, BufferEvent::DirtyChanged | BufferEvent::Saved) {
+                    cx.emit(ItemEvent::UpdateTab);
+                }
             }),
             // The current card's ring follows focus.
             cx.on_focus_in(&focus, window, |_, _, cx| cx.notify()),
@@ -264,10 +267,13 @@ impl EmailNoteView {
             .project_path(cx)
             .map(|path| path.path.as_unix_str().to_string())
             .unwrap_or_default();
-        let hash = note_hash(&text);
+        // The path is part of what is shown: a note moved back to the inbox
+        // keeps its bytes.
+        let hash = format!("{}:{path}", note_hash(&text));
         if self.note.as_ref().is_some_and(|(shown, _)| *shown == hash) {
             return;
         }
+        self.reader.note_moved(&path);
         self.note = Some((hash, parse_inbox_note(&path, &text)));
         cx.emit(ItemEvent::UpdateTab);
         cx.notify();
@@ -495,6 +501,46 @@ impl Item for EmailNoteView {
     // One tab per note: opening the note again finds this one.
     fn buffer_kind(&self, _cx: &App) -> ItemBufferKind {
         ItemBufferKind::Singleton
+    }
+
+    // Sync appends through the buffer and saves it; when that save didn't
+    // happen the tab says so, and closing it asks.
+    fn is_dirty(&self, cx: &App) -> bool {
+        self.buffer.read(cx).is_dirty()
+    }
+
+    fn has_conflict(&self, cx: &App) -> bool {
+        self.buffer.read(cx).has_conflict()
+    }
+
+    fn can_save(&self, _cx: &App) -> bool {
+        true
+    }
+
+    fn save(
+        &mut self,
+        _options: SaveOptions,
+        project: Entity<Project>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        project.update(cx, |project, cx| {
+            project.save_buffer(self.buffer.clone(), cx)
+        })
+    }
+
+    fn reload(
+        &mut self,
+        project: Entity<Project>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let buffers = std::iter::once(self.buffer.clone()).collect();
+        let reload = project.update(cx, |project, cx| project.reload_buffers(buffers, true, cx));
+        cx.background_spawn(async move {
+            reload.await?;
+            Ok(())
+        })
     }
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(ItemEvent)) {
@@ -1065,6 +1111,111 @@ mod tests {
                 let error = view.reader.composer.as_ref().unwrap().error.clone();
                 assert_eq!(error.as_deref(), Some("Not sent: Gmail is unreachable"));
             });
+        }
+
+        #[gpui::test]
+        async fn enter_is_a_new_line_in_the_reply(cx: &mut TestAppContext) {
+            let (mut setup, _transport) = connected(cx).await;
+            setup.cx.simulate_keystrokes("r");
+            setup.cx.run_until_parked();
+            setup.cx.simulate_input("Hi Rui,");
+            setup.cx.simulate_keystrokes("enter enter");
+            setup.cx.simulate_input("On it.");
+            assert_eq!(draft(&setup).as_deref(), Some("Hi Rui,\n\nOn it."));
+            assert_eq!(state(&setup), Some(ComposerState::Writing));
+        }
+
+        #[gpui::test]
+        async fn a_thread_that_could_not_be_read_is_asked_for_again(cx: &mut TestAppContext) {
+            let (mut setup, transport) = connected(cx).await;
+            let thread = transport.headers.lock().unwrap().remove("t1").unwrap();
+            setup.cx.simulate_keystrokes("r");
+            setup.cx.run_until_parked();
+            setup.cx.simulate_input("On it.");
+            assert_eq!(state(&setup), Some(ComposerState::Loading));
+            let view = reader(&setup).unwrap();
+            view.read_with(&setup.cx, |view, _| {
+                assert!(view.reader.composer.as_ref().unwrap().error.is_some());
+            });
+            // The send key has nothing to send to yet.
+            setup.cx.simulate_keystrokes("ctrl-enter");
+            assert_eq!(state(&setup), Some(ComposerState::Loading));
+
+            // Gmail answers the next time it is asked: `r` asks.
+            transport
+                .headers
+                .lock()
+                .unwrap()
+                .insert("t1".to_string(), thread);
+            setup.cx.simulate_keystrokes("escape r");
+            setup.cx.run_until_parked();
+            assert_eq!(state(&setup), Some(ComposerState::Writing));
+            assert_eq!(draft(&setup).as_deref(), Some("On it."));
+            view.read_with(&setup.cx, |view, _| {
+                assert_eq!(view.reader.composer.as_ref().unwrap().error, None);
+            });
+        }
+
+        #[gpui::test]
+        async fn a_reply_being_sent_is_sent_though_its_tab_closes(cx: &mut TestAppContext) {
+            let (mut setup, transport) = connected(cx).await;
+            let (open_gate, gate) = futures::channel::oneshot::channel();
+            *transport.send_gate.lock().unwrap() = Some(gate);
+            setup.cx.simulate_keystrokes("r");
+            setup.cx.run_until_parked();
+            setup.cx.simulate_input("On it.");
+            setup.cx.simulate_keystrokes("ctrl-enter ctrl-enter");
+            setup.cx.run_until_parked();
+            assert_eq!(state(&setup), Some(ComposerState::Sending));
+            assert!(transport.sent.lock().unwrap().is_empty());
+
+            setup
+                .workspace
+                .update_in(&mut setup.cx, |workspace, window, cx| {
+                    workspace.active_pane().update(cx, |pane, cx| {
+                        pane.close_active_item(&Default::default(), window, cx)
+                    })
+                })
+                .await
+                .unwrap();
+            setup.cx.run_until_parked();
+            assert_eq!(tabs(&setup), 0);
+
+            open_gate.send(()).unwrap();
+            setup.cx.run_until_parked();
+            assert_eq!(transport.sent.lock().unwrap().len(), 1);
+        }
+
+        #[gpui::test]
+        async fn a_note_that_moves_keeps_the_reply_being_written(cx: &mut TestAppContext) {
+            let (mut setup, transport) = connected(cx).await;
+            setup.cx.simulate_keystrokes("r");
+            setup.cx.run_until_parked();
+            setup.cx.simulate_input("On it.");
+            let fs = setup
+                .project
+                .read_with(&setup.cx, |project, _| project.fs().clone());
+            fs.rename(
+                Path::new("/vault/archives/inbox/farm.md"),
+                Path::new("/vault/inbox/farm.md"),
+                fs::RenameOptions {
+                    create_parents: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            setup.cx.run_until_parked();
+            let view = reader(&setup).unwrap();
+            view.read_with(&setup.cx, |view, _| {
+                let path = view.reader.item.as_ref().map(|item| item.path.clone());
+                assert_eq!(path.as_deref(), Some("inbox/farm.md"));
+            });
+            assert_eq!(draft(&setup).as_deref(), Some("On it."));
+            setup.cx.simulate_keystrokes("ctrl-enter ctrl-enter");
+            setup.cx.run_until_parked();
+            assert_eq!(transport.sent.lock().unwrap().len(), 1);
+            assert_eq!(state(&setup), None);
         }
 
         #[gpui::test]

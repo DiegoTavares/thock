@@ -7526,6 +7526,162 @@ mod tests {
         assert_eq!(source_label("readwise"), "readwise");
     }
 
+    /// A linked email selected in the Inbox, with Gmail connected.
+    async fn setup_replying(
+        cx: &mut TestAppContext,
+    ) -> (Setup, Arc<crate::gmail_service::StubTransport>) {
+        use crate::gmail::{GmailConfig, MessageHeaders, ThreadHeaders};
+        let note = TICKET.replace(
+            "from:     helpdesk@example.com\n",
+            "from:     helpdesk@example.com\nlink:     https://mail.google.com/mail/u/me@example.com/#all/t42\n",
+        );
+        let mut setup = setup_with_note(cx, note).await;
+        let transport = Arc::new(crate::gmail_service::StubTransport::default());
+        let message = MessageHeaders {
+            from: "helpdesk@example.com".to_string(),
+            to: vec!["me@example.com".to_string()],
+            subject: "Ticket 42".to_string(),
+            ..MessageHeaders::default()
+        };
+        transport.headers.lock().unwrap().insert(
+            "t42".to_string(),
+            ThreadHeaders {
+                thread: "t42".to_string(),
+                messages: vec![message.clone(), message],
+            },
+        );
+        let project = setup
+            .workspace
+            .read_with(&setup.cx, |workspace, _| workspace.project().clone());
+        let service = setup
+            .cx
+            .update(|_, cx| crate::gmail_service::new_for_test(&project, cx));
+        let vault = crate::vault::Vault {
+            root: setup._vault_dir.path().to_path_buf(),
+            config: crate::vault::VaultConfig::default(),
+        };
+        service.update(&mut setup.cx, |service, cx| {
+            let config = GmailConfig {
+                account: Some("me@example.com".to_string()),
+                ..GmailConfig::default()
+            };
+            service.configure_for_test(vault, config, transport.clone(), cx)
+        });
+        setup.cx.run_until_parked();
+        (setup, transport)
+    }
+
+    fn reply_text(setup: &Setup) -> Option<String> {
+        setup.view.read_with(&setup.cx, |view, cx| {
+            view.reader
+                .composer
+                .as_ref()
+                .map(|composer| composer.editor.read(cx).text(cx))
+        })
+    }
+
+    #[gpui::test]
+    async fn enter_in_the_reply_is_a_new_line_not_the_lists_confirm(cx: &mut TestAppContext) {
+        let (mut setup, _transport) = setup_replying(cx).await;
+        let tabs = |setup: &Setup| {
+            setup.workspace.read_with(&setup.cx, |workspace, cx| {
+                workspace.active_pane().read(cx).items_len()
+            })
+        };
+        let before = tabs(&setup);
+        setup.cx.simulate_keystrokes("r");
+        setup.cx.run_until_parked();
+        setup.cx.simulate_input("Hello,");
+        setup.cx.simulate_keystrokes("enter");
+        setup.cx.simulate_input("On it.");
+        setup.cx.run_until_parked();
+        assert_eq!(reply_text(&setup).as_deref(), Some("Hello,\nOn it."));
+        assert_eq!(tabs(&setup), before, "the note wasn't opened in a tab");
+    }
+
+    #[gpui::test]
+    async fn a_reply_being_sent_goes_on_when_another_note_is_selected(cx: &mut TestAppContext) {
+        let (mut setup, transport) = setup_replying(cx).await;
+        let (open_gate, gate) = futures::channel::oneshot::channel();
+        *transport.send_gate.lock().unwrap() = Some(gate);
+        setup.cx.simulate_keystrokes("r");
+        setup.cx.run_until_parked();
+        setup.cx.simulate_input("On it.");
+        setup.cx.simulate_keystrokes("ctrl-enter ctrl-enter");
+        setup.cx.run_until_parked();
+        assert!(transport.sent.lock().unwrap().is_empty());
+
+        select(&mut setup, "Call Ana");
+        assert_eq!(reply_text(&setup), None);
+        open_gate.send(()).unwrap();
+        setup.cx.run_until_parked();
+        assert_eq!(transport.sent.lock().unwrap().len(), 1);
+
+        // Back on the email there is nothing left over to send twice.
+        select(&mut setup, "Ticket 42");
+        setup.view.read_with(&setup.cx, |view, _| {
+            assert_eq!(view.reader.reply_notice, None);
+        });
+        setup.view.update_in(&mut setup.cx, |view, window, cx| {
+            window.focus(&view.reader.reader_focus, cx);
+        });
+        setup.cx.simulate_keystrokes("r");
+        setup.cx.run_until_parked();
+        assert_eq!(reply_text(&setup).as_deref(), Some(""));
+    }
+
+    #[gpui::test]
+    async fn a_send_that_fails_elsewhere_waits_with_its_words(cx: &mut TestAppContext) {
+        let (mut setup, transport) = setup_replying(cx).await;
+        let (open_gate, gate) = futures::channel::oneshot::channel();
+        *transport.send_gate.lock().unwrap() = Some(gate);
+        *transport.send_error.lock().unwrap() = Some("Gmail is unreachable".to_string());
+        setup.cx.simulate_keystrokes("r");
+        setup.cx.run_until_parked();
+        setup.cx.simulate_input("On it.");
+        setup.cx.simulate_keystrokes("ctrl-enter ctrl-enter");
+        setup.cx.run_until_parked();
+
+        // Back while it is still on its way: it shows as sending, and a
+        // second send can't start.
+        select(&mut setup, "Call Ana");
+        select(&mut setup, "Ticket 42");
+        setup.view.update_in(&mut setup.cx, |view, window, cx| {
+            window.focus(&view.reader.reader_focus, cx);
+        });
+        setup.cx.simulate_keystrokes("r");
+        setup.cx.run_until_parked();
+        setup.view.read_with(&setup.cx, |view, _| {
+            let composer = view.reader.composer.as_ref().unwrap();
+            assert_eq!(composer.state, crate::email_reader::ComposerState::Sending);
+        });
+        setup.cx.simulate_keystrokes("ctrl-enter ctrl-enter");
+
+        select(&mut setup, "Call Ana");
+        open_gate.send(()).unwrap();
+        setup.cx.run_until_parked();
+        assert!(transport.sent.lock().unwrap().is_empty());
+
+        select(&mut setup, "Ticket 42");
+        setup.view.read_with(&setup.cx, |view, _| {
+            assert_eq!(view.reader.reply_notice, Some(ReplyNotice::NotSent));
+        });
+        setup.view.update_in(&mut setup.cx, |view, window, cx| {
+            window.focus(&view.reader.reader_focus, cx);
+        });
+        setup.cx.simulate_keystrokes("r");
+        setup.cx.run_until_parked();
+        assert_eq!(reply_text(&setup).as_deref(), Some("On it."));
+        setup.view.read_with(&setup.cx, |view, _| {
+            let composer = view.reader.composer.as_ref().unwrap();
+            assert_eq!(
+                composer.error.as_deref(),
+                Some("Not sent: Gmail is unreachable")
+            );
+            assert_eq!(composer.state, crate::email_reader::ComposerState::Writing);
+        });
+    }
+
     #[gpui::test]
     async fn r_is_reply_and_the_suggestion_key_moved(cx: &mut TestAppContext) {
         let note = TICKET.replace(

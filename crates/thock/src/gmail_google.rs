@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 use crate::gmail::{
     GmailFetched, KnownThread, MailTransport, MappingFetched, MessageHeaders, MissingPermission,
     OutgoingReply, SyncMapping, ThreadHeaders, ThreadMessage, ThreadMove, ThreadUpdate,
-    gmail_thread_url, message_section, reply_mime, sanitize_subject, split_mailboxes,
-    thread_marker_id,
+    gmail_thread_url, mailbox_address, message_section, reply_mime, sanitize_subject,
+    split_mailboxes, thread_marker_id,
 };
 use crate::google_auth::{
     AuthRevoked, GMAIL_MODIFY_SCOPE, GoogleClient, InsufficientScope, NotFound, TokenKeeper,
@@ -238,7 +238,7 @@ fn thread_headers(thread: &GmailThread, thread_id: &str) -> ThreadHeaders {
     let mut messages: Vec<&GmailMessage> = thread
         .messages
         .iter()
-        .filter(|message| !message.label_ids.iter().any(|label| label == "DRAFT"))
+        .filter(|message| !is_draft(message))
         .collect();
     messages.sort_by_key(|message| message_date(message));
     let messages = messages
@@ -250,13 +250,13 @@ fn thread_headers(thread: &GmailThread, thread_id: &str) -> ThreadHeaders {
                     .filter(|value| !value.trim().is_empty())
             };
             let mailboxes = |name: &str| {
-                header(name)
-                    .map(|value| split_mailboxes(&value))
+                header_value(&message.payload, name)
+                    .map(header_mailboxes)
                     .unwrap_or_default()
             };
             MessageHeaders {
-                from: header("From").unwrap_or_default(),
-                reply_to: header("Reply-To"),
+                from: mailboxes("From").into_iter().next().unwrap_or_default(),
+                reply_to: mailboxes("Reply-To"),
                 to: mailboxes("To"),
                 cc: mailboxes("Cc"),
                 subject: header("Subject").unwrap_or_default(),
@@ -272,6 +272,29 @@ fn thread_headers(thread: &GmailThread, thread_id: &str) -> ThreadHeaders {
         thread: thread_id.to_string(),
         messages,
     }
+}
+
+/// The mailboxes of an address header as `Name <address>`. The address is
+/// read from the header as sent and only the name is decoded after, so an
+/// encoded name can't put an address of its own on the thread. What isn't
+/// plainly one address is left out.
+fn header_mailboxes(raw: &str) -> Vec<String> {
+    split_mailboxes(raw)
+        .into_iter()
+        .filter_map(|mailbox| {
+            let address = mailbox_address(&mailbox)?;
+            let name = mailbox
+                .rsplit_once('<')
+                .map(|(name, _)| decode_rfc2047(name).replace(['<', '>'], ""))
+                .unwrap_or_default();
+            let name = name.trim();
+            Some(if name.is_empty() {
+                address
+            } else {
+                format!("{name} <{address}>")
+            })
+        })
+        .collect()
 }
 
 fn url_path_escape(segment: &str) -> String {
@@ -722,6 +745,7 @@ impl TransportInner {
     ) -> Result<GmailFetched> {
         let label_ids = self.resolve_label_ids(access_token).await?;
         let mut seen_threads = HashSet::new();
+        let mut threads = HashMap::new();
         let mut mappings = Vec::with_capacity(self.mappings.len());
         for label_id in &label_ids {
             let Some(label_id) = label_id else {
@@ -759,11 +783,27 @@ impl TransportInner {
                     continue;
                 }
                 let thread = get_thread(&self.http, access_token, &reference.thread_id).await?;
+                let through = thread
+                    .messages
+                    .iter()
+                    .filter(|message| !is_draft(message))
+                    .filter_map(message_date)
+                    .map(|date| date.timestamp_millis())
+                    .max();
+                if let (Some(history), Some(through)) = (&thread.history_id, through) {
+                    threads.insert(
+                        reference.thread_id.clone(),
+                        KnownThread {
+                            history: Some(history.clone()),
+                            through,
+                        },
+                    );
+                }
                 items.push(captured_item(&thread, &self.account, &reference.thread_id));
             }
             mappings.push(MappingFetched::Items(items));
         }
-        Ok(GmailFetched { mappings })
+        Ok(GmailFetched { mappings, threads })
     }
 
     /// The captured threads Gmail changed since they were last fetched
@@ -794,8 +834,15 @@ impl TransportInner {
                 if updates.len() >= budget {
                     return Ok(updates);
                 }
-                let thread = get_thread(&self.http, access_token, &listed.id).await?;
-                updates.push(thread_update(&thread, &listed, known));
+                match get_thread(&self.http, access_token, &listed.id).await {
+                    Ok(thread) => updates.push(thread_update(&thread, &listed, known)),
+                    // What was already read is still worth applying.
+                    Err(error) if !updates.is_empty() && !error.is::<AuthRevoked>() => {
+                        log::warn!("Thock: reading a changed Gmail thread failed: {error:#}");
+                        return Ok(updates);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
         Ok(updates)
@@ -840,7 +887,7 @@ fn captured_item(thread: &GmailThread, account: &str, thread_id: &str) -> Captur
     let mut messages: Vec<&GmailMessage> = thread
         .messages
         .iter()
-        .filter(|message| !message.label_ids.iter().any(|label| label == "DRAFT"))
+        .filter(|message| !is_draft(message))
         .collect();
     messages.sort_by_key(|message| message_date(message));
 
@@ -881,7 +928,7 @@ fn thread_update(thread: &GmailThread, listed: &ThreadRef, known: &KnownThread) 
     let mut messages: Vec<&GmailMessage> = thread
         .messages
         .iter()
-        .filter(|message| !message.label_ids.iter().any(|label| label == "DRAFT"))
+        .filter(|message| !is_draft(message))
         .collect();
     messages.sort_by_key(|message| message_date(message));
     let millis =
@@ -913,6 +960,10 @@ fn thread_update(thread: &GmailThread, listed: &ThreadRef, known: &KnownThread) 
             .map(|message| as_message(message))
             .collect(),
     }
+}
+
+fn is_draft(message: &GmailMessage) -> bool {
+    message.label_ids.iter().any(|label| label == "DRAFT")
 }
 
 fn message_date(message: &GmailMessage) -> Option<DateTime<chrono::Utc>> {
@@ -1118,7 +1169,7 @@ mod tests {
             } else if uri.contains("/threads/t-both") {
                 assert!(uri.contains("format=full"), "{uri}");
                 format!(
-                    r#"{{"id": "t-both", "messages": [
+                    r#"{{"id": "t-both", "historyId": "812", "messages": [
                         {{"id": "m3", "internalDate": "1755500000000",
                           "payload": {{"headers": [
                             {{"name": "Subject", "value": "Re: =?UTF-8?Q?Caf=C3=A9?= plans"}},
@@ -1174,6 +1225,18 @@ mod tests {
         // the first message, replies rendered oldest first…
         assert_eq!(backlog.len(), 1);
         assert_eq!(backlog[0].external_id, "t-both");
+        // The thread as fetched is what its refresh starts from; one Gmail
+        // gave no history for is dated by its capture instead.
+        assert_eq!(
+            fetched.threads,
+            HashMap::from([(
+                "t-both".to_string(),
+                KnownThread {
+                    history: Some("812".to_string()),
+                    through: 1755500000000,
+                }
+            )])
+        );
         assert_eq!(backlog[0].title, "Café plans");
         assert_eq!(backlog[0].from.as_deref(), Some("Ana <ana@example.com>"));
         assert_eq!(
@@ -1505,9 +1568,53 @@ mod tests {
         assert_eq!(message.subject, "Café plans");
         assert_eq!(message.message_id.as_deref(), Some("<m1@mail.example.com>"));
         assert_eq!(message.references.as_deref(), Some("<m0@mail.example.com>"));
-        assert_eq!(message.reply_to, None);
+        assert!(message.reply_to.is_empty());
         assert_eq!(message.text.as_deref(), Some("Coffee?"));
         assert!(!message.own);
+    }
+
+    #[test]
+    fn an_encoded_name_cannot_put_an_address_on_the_thread() {
+        // Decoded, the name reads `Mallory <eve@evil.example>,`.
+        let thread = GmailThread {
+            history_id: None,
+            messages: vec![GmailMessage {
+                label_ids: vec!["INBOX".to_string()],
+                internal_date: Some("1000".to_string()),
+                payload: MessagePart {
+                    mime_type: "text/plain".to_string(),
+                    headers: [
+                        (
+                            "From",
+                            "<ana@example.com> =?UTF-8?Q?=3Ceve=40evil.example=3E?=",
+                        ),
+                        (
+                            "To",
+                            "=?UTF-8?Q?Mallory_=3Ceve=40evil.example=3E=2C?= <bob@example.com>",
+                        ),
+                        ("Cc", "=?UTF-8?Q?eve=40evil.example?="),
+                        ("Reply-To", "ana@example.com, list@example.com"),
+                    ]
+                    .into_iter()
+                    .map(|(name, value)| MessageHeader {
+                        name: name.to_string(),
+                        value: value.to_string(),
+                    })
+                    .collect(),
+                    ..Default::default()
+                },
+            }],
+        };
+        let headers = thread_headers(&thread, "t-1");
+        let message = &headers.messages[0];
+        assert_eq!(message.from, "");
+        assert_eq!(message.to, ["Mallory eve@evil.example, <bob@example.com>"]);
+        assert!(message.cc.is_empty());
+        assert_eq!(message.reply_to, ["ana@example.com", "list@example.com"]);
+        assert_eq!(
+            crate::gmail::thread_addresses(&headers, "me@example.com"),
+            ["ana@example.com", "list@example.com", "bob@example.com"]
+        );
     }
 
     fn outgoing() -> OutgoingReply {

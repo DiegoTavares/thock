@@ -354,14 +354,38 @@ pub fn parse_thread_marks(text: &str) -> HashMap<String, KnownThread> {
 }
 
 /// One line of `threads.jsonl`.
-pub fn thread_mark_line(update: &ThreadUpdate, at: &str) -> String {
+pub fn thread_mark_line(thread: &str, history: &str, through: i64, at: &str) -> String {
     serde_json::json!({
-        "thread": update.thread,
-        "history": update.history,
-        "through": update.through,
+        "thread": thread,
+        "history": history,
+        "through": through,
         "at": at,
     })
     .to_string()
+}
+
+/// `threads.jsonl` with one line per thread, its last: what the file is
+/// rewritten as, so it grows with the threads captured and not with the polls.
+pub fn compact_thread_marks(text: &str) -> String {
+    let mut last: HashMap<String, usize> = HashMap::new();
+    let lines: Vec<&str> = text.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        let thread = serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|record| Some(record.get("thread")?.as_str()?.to_string()));
+        if let Some(thread) = thread {
+            last.insert(thread, index);
+        }
+    }
+    let kept: HashSet<usize> = last.into_values().collect();
+    let mut out = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        if kept.contains(&index) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// Every captured thread a refresh may ask about: one with a mark, or one
@@ -388,7 +412,8 @@ pub fn known_threads(
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MessageHeaders {
     pub from: String,
-    pub reply_to: Option<String>,
+    /// The mailboxes of `Reply-To`, when the message names any.
+    pub reply_to: Vec<String>,
     pub to: Vec<String>,
     pub cc: Vec<String>,
     pub subject: String,
@@ -537,9 +562,14 @@ pub fn reply_recipients(message: &MessageHeaders, mode: &ReplyMode, account: &st
             .filter(|address| *address != account)
             .collect()
     };
-    let author = others(addresses(
-        message.reply_to.iter().chain([&message.from]).take(1),
-    ));
+    // `Reply-To` stands in for the author; one that names nobody usable
+    // leaves the author.
+    let asked = others(addresses(&message.reply_to));
+    let author = if asked.is_empty() {
+        others(addresses([&message.from]))
+    } else {
+        asked
+    };
     let sent_to = others(addresses(&message.to));
     let to = if author.is_empty() { sent_to } else { author };
     match mode {
@@ -690,6 +720,28 @@ fn header_line(value: &str) -> String {
     collapse_whitespace(&value.replace(['\r', '\n'], " "))
 }
 
+/// A one-line header value folded at its spaces, so a long thread's
+/// `References` or a wide reply-all stays inside RFC 5322's line length.
+fn folded(name: &str, value: &str) -> String {
+    const LINE: usize = 78;
+    let mut out = String::new();
+    let mut length = name.len() + 2;
+    for (index, word) in value.split(' ').enumerate() {
+        if index > 0 {
+            if length + 1 + word.len() > LINE {
+                out.push_str("\r\n ");
+                length = 1;
+            } else {
+                out.push(' ');
+                length += 1;
+            }
+        }
+        out.push_str(word);
+        length += word.len();
+    }
+    out
+}
+
 /// An unstructured header's text, RFC 2047 encoded when it isn't ASCII.
 fn encoded_word(value: &str) -> String {
     let value = header_line(value);
@@ -729,16 +781,19 @@ pub fn reply_mime(reply: &OutgoingReply) -> String {
         mime.push_str("\r\n");
     };
     header("From", &header_line(&reply.from));
-    header("To", &header_line(&reply.to.join(", ")));
+    header("To", &folded("To", &header_line(&reply.to.join(", "))));
     if !reply.cc.is_empty() {
-        header("Cc", &header_line(&reply.cc.join(", ")));
+        header("Cc", &folded("Cc", &header_line(&reply.cc.join(", "))));
     }
     header("Subject", &encoded_word(&reply.subject));
     if let Some(id) = &reply.in_reply_to {
         header("In-Reply-To", &header_line(id));
     }
     if let Some(references) = &reply.references {
-        header("References", &header_line(references));
+        header(
+            "References",
+            &folded("References", &header_line(references)),
+        );
     }
     header("MIME-Version", "1.0");
     header("Content-Type", "text/plain; charset=\"UTF-8\"");
@@ -872,6 +927,9 @@ impl std::error::Error for MissingPermission {}
 pub struct GmailFetched {
     /// Index-aligned with the configured mappings.
     pub mappings: Vec<MappingFetched>,
+    /// Each fetched thread as Gmail had it: what its note will hold once
+    /// written, so a refresh starts from the thread and not from the clock.
+    pub threads: HashMap<String, KnownThread>,
 }
 
 /// How long a decision sits in the log before Gmail hears of it, so an undo
@@ -1943,7 +2001,12 @@ mod tests {
         };
         let marks = parse_thread_marks(&format!(
             "not json\n{}\n",
-            thread_mark_line(&update, "2026-11-10T10:00:00Z")
+            thread_mark_line(
+                &update.thread,
+                &update.history,
+                update.through,
+                "2026-11-10T10:00:00Z"
+            )
         ));
         let known = known_threads(&imported, &marks);
         let captured = DateTime::parse_from_rfc3339("2026-11-10T09:00:00-03:00")
@@ -2052,10 +2115,29 @@ mod tests {
         );
         // Reply-To wins over From.
         let mut listed = theirs.clone();
-        listed.reply_to = Some("list@example.com".to_string());
+        listed.reply_to = vec!["list@example.com".to_string()];
         assert_eq!(
             reply_recipients(&listed, &ReplyMode::Author, me).to,
             ["list@example.com"]
+        );
+        // Every address it names, and each may be written to.
+        listed.reply_to = vec![
+            "list@example.com".to_string(),
+            "Bea@example.com".to_string(),
+        ];
+        assert_eq!(
+            reply_recipients(&listed, &ReplyMode::Author, me).to,
+            ["list@example.com", "bea@example.com"]
+        );
+        let mut asked = thread.clone();
+        asked.messages[1].reply_to = vec!["list@example.com".to_string()];
+        assert!(thread_addresses(&asked, me).contains(&"list@example.com".to_string()));
+        // One that names nobody usable leaves the author, not the list it
+        // was sent to.
+        listed.reply_to = vec!["undisclosed-recipients:;".to_string()];
+        assert_eq!(
+            reply_recipients(&listed, &ReplyMode::Author, me).to,
+            ["ana@example.com"]
         );
         assert_eq!(
             thread_addresses(&thread, me),
@@ -2161,5 +2243,48 @@ mod tests {
             .unwrap();
         assert_eq!(String::from_utf8(decoded).unwrap(), reply.body);
         assert!(body.split("\r\n").all(|line| line.len() <= 76));
+    }
+
+    #[test]
+    fn long_headers_are_folded_inside_the_line_length() {
+        let ids: Vec<String> = (0..40)
+            .map(|index| format!("<message-{index}@mail.example.com>"))
+            .collect();
+        let reply = OutgoingReply {
+            thread: "t-1".to_string(),
+            from: "diego@example.com".to_string(),
+            to: (0..30)
+                .map(|index| format!("person{index}@example.com"))
+                .collect(),
+            cc: Vec::new(),
+            subject: "Re: Plans".to_string(),
+            in_reply_to: ids.last().cloned(),
+            references: Some(ids.join(" ")),
+            body: "Yes.\n".to_string(),
+        };
+        let mime = reply_mime(&reply);
+        let (headers, _) = mime.split_once("\r\n\r\n").unwrap();
+        for line in headers.split("\r\n") {
+            assert!(line.len() <= 78, "{line:?}");
+        }
+        // Unfolded, nothing was lost or reordered.
+        let unfolded = headers.replace("\r\n ", " ");
+        assert!(unfolded.contains(&format!("References: {}", ids.join(" "))));
+        assert!(unfolded.contains(&format!("To: {}", reply.to.join(", "))));
+    }
+
+    #[test]
+    fn the_thread_state_keeps_one_line_per_thread() {
+        let line = |thread: &str, history: &str| thread_mark_line(thread, history, 5, "at");
+        let text = format!(
+            "{}\nnot json\n{}\n{}\n",
+            line("t1", "1"),
+            line("t2", "7"),
+            line("t1", "2")
+        );
+        assert_eq!(
+            compact_thread_marks(&text),
+            format!("{}\n{}\n", line("t2", "7"), line("t1", "2"))
+        );
     }
 }

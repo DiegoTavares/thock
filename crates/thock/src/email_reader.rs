@@ -482,6 +482,11 @@ pub(crate) struct EmailReader {
     pub(crate) composer: Option<Composer>,
     /// Replies begun and left, by note path, while the host lives.
     drafts: HashMap<String, String>,
+    /// Replies on their way to Gmail, by note path. Held here and not by the
+    /// composer, so moving to another note doesn't lose track of one.
+    sends: HashMap<String, Task<()>>,
+    /// Why a reply wasn't sent, for a note that wasn't showing when it failed.
+    failed_sends: HashMap<String, SharedString>,
     pub(crate) reply_notice: Option<ReplyNotice>,
     /// The composer just opened, so the reader shows it once it's laid out.
     reveal_composer: bool,
@@ -520,6 +525,8 @@ pub(crate) enum ReplyNotice {
     Sent,
     NeedsPermission,
     NotConnected,
+    /// A send failed while another note was showing; the words are kept.
+    NotSent,
 }
 
 impl EmailReader {
@@ -536,6 +543,8 @@ impl EmailReader {
             project: None,
             composer: None,
             drafts: HashMap::default(),
+            sends: HashMap::default(),
+            failed_sends: HashMap::default(),
             reply_notice: None,
             reveal_composer: false,
         }
@@ -635,22 +644,37 @@ impl EmailReader {
                 composer.mode = mode;
             }
             composer.card = card;
+            // A thread that couldn't be read is asked for again.
+            let retry = composer.thread.is_none() && composer.task.is_none();
             composer.error = None;
             if composer.state != ComposerState::Sending && composer.thread.is_some() {
                 composer.state = ComposerState::Writing;
             }
+            if retry {
+                let task = self.load_thread(thread_id, window, cx);
+                if let Some(composer) = &mut self.composer {
+                    composer.task = task;
+                }
+            }
         } else {
-            let draft = self
-                .item
+            let path = self.item.as_ref().map(|item| item.path.clone());
+            let draft = path
                 .as_ref()
-                .and_then(|item| self.drafts.get(&item.path))
+                .and_then(|path| self.drafts.get(path))
                 .cloned()
                 .unwrap_or_default();
+            let error = path
+                .as_ref()
+                .and_then(|path| self.failed_sends.remove(path));
+            let sending = path
+                .as_ref()
+                .is_some_and(|path| self.sends.contains_key(path));
             let editor = cx.new(|cx| {
                 let mut editor = Editor::auto_height(3, 16, window, cx);
                 editor.set_placeholder_text("Write a reply", window, cx);
                 editor.set_soft_wrap_mode(SoftWrap::EditorWidth, cx);
                 editor.set_text(draft, window, cx);
+                editor.set_read_only(sending);
                 editor
             });
             let subscription = cx.subscribe(&editor, |host: &mut H, _, event: &EditorEvent, cx| {
@@ -658,25 +682,18 @@ impl EmailReader {
                     host.email_reader().reply_edited(cx);
                 }
             });
-            let load = self.gmail(cx).map(|service| {
-                service.update(cx, |service, cx| service.thread_headers(&thread_id, cx))
-            });
-            let task = load.map(|load| {
-                cx.spawn_in(window, async move |host, cx| {
-                    let result = load.await;
-                    host.update_in(cx, |host, window, cx| {
-                        host.email_reader().thread_loaded(result, window, cx);
-                    })
-                    .ok();
-                })
-            });
+            let task = self.load_thread(thread_id, window, cx);
             self.composer = Some(Composer {
                 editor,
                 mode: mode.unwrap_or(ReplyMode::Author),
                 card,
                 thread: None,
-                state: ComposerState::Loading,
-                error: None,
+                state: if sending {
+                    ComposerState::Sending
+                } else {
+                    ComposerState::Loading
+                },
+                error,
                 pick_when_loaded: false,
                 picker: None,
                 task,
@@ -686,6 +703,24 @@ impl EmailReader {
         self.reveal_composer = true;
         cx.notify();
         true
+    }
+
+    fn load_thread<H: EmailReaderHost>(
+        &self,
+        thread_id: String,
+        window: &mut Window,
+        cx: &mut Context<H>,
+    ) -> Option<Task<()>> {
+        let load = self
+            .gmail(cx)?
+            .update(cx, |service, cx| service.thread_headers(&thread_id, cx));
+        Some(cx.spawn_in(window, async move |host, cx| {
+            let result = load.await;
+            host.update_in(cx, |host, window, cx| {
+                host.email_reader().thread_loaded(result, window, cx);
+            })
+            .ok();
+        }))
     }
 
     fn thread_loaded<H: EmailReaderHost>(
@@ -700,13 +735,20 @@ impl EmailReader {
         match result {
             Ok(thread) => {
                 composer.thread = Some(thread);
-                composer.state = ComposerState::Writing;
+                if composer.state == ComposerState::Loading {
+                    composer.state = ComposerState::Writing;
+                }
                 if std::mem::take(&mut composer.pick_when_loaded) {
                     self.open_picker(window, cx);
                 }
             }
             Err(error) => {
                 log::warn!("Thock: reading the thread for a reply failed: {error:#}");
+                // No load in flight is what lets `r` ask again. This is that
+                // load, at its last step.
+                if let Some(task) = composer.task.take() {
+                    task.detach();
+                }
                 composer.error =
                     Some(format!("Couldn't read the thread from Gmail: {error:#}").into());
             }
@@ -782,7 +824,10 @@ impl EmailReader {
         if matches!(composer.state, ComposerState::Confirming(_)) {
             composer.state = ComposerState::Writing;
         }
-        composer.error = None;
+        // Why the thread couldn't be read stays until it is read.
+        if composer.thread.is_some() {
+            composer.error = None;
+        }
         cx.notify();
     }
 
@@ -844,22 +889,28 @@ impl EmailReader {
                 cx.notify();
             }
             ComposerState::Confirming(reply) => {
-                let Some(service) = self.gmail(cx) else {
+                let (Some(service), Some(path)) = (
+                    self.gmail(cx),
+                    self.item.as_ref().map(|item| item.path.clone()),
+                ) else {
                     return;
                 };
                 let send = service.update(cx, |service, cx| service.send_reply(reply, cx));
-                let task = cx.spawn_in(window, async move |host, cx| {
-                    let result = send.await;
-                    host.update_in(cx, |host, window, cx| {
-                        host.email_reader().reply_sent(result, window, cx);
-                    })
-                    .ok();
+                let task = cx.spawn_in(window, {
+                    let path = path.clone();
+                    async move |host, cx| {
+                        let result = send.await;
+                        host.update_in(cx, |host, window, cx| {
+                            host.email_reader().reply_sent(path, result, window, cx);
+                        })
+                        .ok();
+                    }
                 });
+                self.sends.insert(path, task);
                 let Some(composer) = &mut self.composer else {
                     return;
                 };
                 composer.state = ComposerState::Sending;
-                composer.task = Some(task);
                 composer
                     .editor
                     .update(cx, |editor, _| editor.set_read_only(true));
@@ -868,40 +919,81 @@ impl EmailReader {
         }
     }
 
+    /// A send answered. The note it was for may no longer be the one
+    /// showing: its outcome then waits with its draft.
     fn reply_sent<H: EmailReaderHost>(
         &mut self,
+        path: String,
         result: Result<()>,
         window: &mut Window,
         cx: &mut Context<H>,
     ) {
+        if let Some(task) = self.sends.remove(&path) {
+            // This is that task, at its last step.
+            task.detach();
+        }
+        let showing = self.item.as_ref().is_some_and(|item| item.path == path);
         match result {
             Ok(()) => {
-                if let Some(item) = &self.item {
-                    self.drafts.remove(&item.path);
-                }
-                let had_focus = self.is_composing(window, cx);
-                self.composer = None;
-                self.reply_notice = Some(ReplyNotice::Sent);
-                if had_focus {
-                    window.focus(&self.reader_focus, cx);
+                self.drafts.remove(&path);
+                if showing {
+                    let had_focus = self.is_composing(window, cx);
+                    self.composer = None;
+                    self.reply_notice = Some(ReplyNotice::Sent);
+                    if had_focus {
+                        window.focus(&self.reader_focus, cx);
+                    }
                 }
             }
             Err(error) => {
                 log::warn!("Thock: sending a reply failed: {error:#}");
                 let needs_permission = error.is::<crate::gmail::MissingPermission>();
-                if let Some(composer) = &mut self.composer {
-                    composer.state = ComposerState::Writing;
-                    composer.error = Some(format!("Not sent: {error:#}").into());
-                    composer
-                        .editor
-                        .update(cx, |editor, _| editor.set_read_only(false));
-                }
-                if needs_permission {
-                    self.reply_notice = Some(ReplyNotice::NeedsPermission);
+                let message: SharedString = format!("Not sent: {error:#}").into();
+                match &mut self.composer {
+                    Some(composer) if showing => {
+                        composer.state = if composer.thread.is_some() {
+                            ComposerState::Writing
+                        } else {
+                            ComposerState::Loading
+                        };
+                        composer.error = Some(message);
+                        composer
+                            .editor
+                            .update(cx, |editor, _| editor.set_read_only(false));
+                        if needs_permission {
+                            self.reply_notice = Some(ReplyNotice::NeedsPermission);
+                        }
+                    }
+                    _ => {
+                        self.failed_sends.insert(path, message);
+                        if showing {
+                            self.reply_notice = Some(ReplyNotice::NotSent);
+                        }
+                    }
                 }
             }
         }
         cx.notify();
+    }
+
+    /// The note was moved or renamed: what waits for it follows it.
+    pub(crate) fn note_moved(&mut self, to: &str) {
+        let Some(item) = &mut self.item else {
+            return;
+        };
+        if item.path == to {
+            return;
+        }
+        let from = std::mem::replace(&mut item.path, to.to_string());
+        if let Some(draft) = self.drafts.remove(&from) {
+            self.drafts.insert(to.to_string(), draft);
+        }
+        if let Some(send) = self.sends.remove(&from) {
+            self.sends.insert(to.to_string(), send);
+        }
+        if let Some(error) = self.failed_sends.remove(&from) {
+            self.failed_sends.insert(to.to_string(), error);
+        }
     }
 
     /// `escape` in the composer: out of the confirming step first, then back
@@ -919,9 +1011,7 @@ impl EmailReader {
             cx.notify();
             return;
         }
-        if composer.state != ComposerState::Sending {
-            self.stash_draft(cx);
-        }
+        self.stash_draft(cx);
         window.focus(&self.reader_focus, cx);
         cx.notify();
     }
@@ -936,7 +1026,7 @@ impl EmailReader {
         let Some(item) = &self.item else {
             return;
         };
-        if text.trim().is_empty() {
+        if text.trim().is_empty() && composer.state != ComposerState::Sending {
             self.drafts.remove(&item.path);
             self.composer = None;
         } else {
@@ -954,6 +1044,9 @@ impl EmailReader {
     ) {
         let Some((key, item)) = note else {
             if self.item.is_some() {
+                self.stash_draft(cx);
+                self.composer = None;
+                self.reply_notice = None;
                 self.item = None;
                 self.reader_note = ReaderNote::default();
             }
@@ -967,16 +1060,14 @@ impl EmailReader {
             .as_ref()
             .is_some_and(|shown| shown.path == item.path);
         if !same_note {
-            // A reply belongs to its note: it waits there for `r`.
-            let sending = self
-                .composer
-                .as_ref()
-                .is_some_and(|composer| composer.state == ComposerState::Sending);
-            if !sending {
-                self.stash_draft(cx);
-            }
+            // A reply belongs to its note: it waits there for `r`, and one
+            // being sent goes on being sent.
+            self.stash_draft(cx);
             self.composer = None;
-            self.reply_notice = None;
+            self.reply_notice = self
+                .failed_sends
+                .contains_key(&item.path)
+                .then_some(ReplyNotice::NotSent);
         }
         let is_email = item.source.as_deref() == Some(EMAIL_SOURCE);
         let body = without_leading_title(&item.body, &item.title);
@@ -1116,6 +1207,7 @@ impl EmailReader {
             ReplyNotice::Sent => "Reply sent. It joins the note at the next sync.",
             ReplyNotice::NeedsPermission => "Replying needs permission to send from your Gmail.",
             ReplyNotice::NotConnected => "Connect Google Workspace to reply from Thock.",
+            ReplyNotice::NotSent => "Your reply here wasn't sent. It is kept: reply to pick it up.",
         };
         Some(
             h_flex()
@@ -1128,14 +1220,7 @@ impl EmailReader {
                 .py_2()
                 .child(Label::new(text).size(LabelSize::Small).color(Color::Muted))
                 .when(notice == ReplyNotice::NeedsPermission, |this| {
-                    this.child(
-                        Button::new("email-allow-replies", "Allow replies")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::Small)
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(AllowGmailReplies.boxed_clone(), cx);
-                            }),
-                    )
+                    this.child(allow_replies_button())
                 })
                 .into_any_element(),
         )
@@ -1264,6 +1349,10 @@ impl EmailReader {
                     .debug_selector(|| "EMAIL_REPLY_ERROR".to_string())
                     .child(Label::new(error).size(LabelSize::Small).color(Color::Error))
             }))
+            .when(
+                self.reply_notice == Some(ReplyNotice::NeedsPermission),
+                |this| this.child(h_flex().child(allow_replies_button())),
+            )
             .child(footer)
             .into_any_element()
     }
@@ -2405,6 +2494,15 @@ pub(crate) fn quiet_action(
 
 /// The line a send waits on: every address the reply goes to, and the one
 /// it is sent as.
+fn allow_replies_button() -> Button {
+    Button::new("email-allow-replies", "Allow replies")
+        .style(ButtonStyle::Subtle)
+        .label_size(LabelSize::Small)
+        .on_click(|_, window, cx| {
+            window.dispatch_action(AllowGmailReplies.boxed_clone(), cx);
+        })
+}
+
 pub(crate) fn confirm_line(reply: &OutgoingReply) -> String {
     let mut line = format!("Send to {}", reply.to.join(", "));
     if !reply.cc.is_empty() {
