@@ -15,10 +15,11 @@ use thock_sync_core::{
     Anchor, Applied, Context, DailyNotes, DecisionClass, Due, Group, Heading, MirrorLine,
     MirrorMark, Operation, Outcome, Place, Placement, ReminderConfig, ReminderState, Task, When,
     Write, add_id, apply, attach, close, content_hash, cut_text, decision_class, drop_token,
-    effect_present, group, heading_key, is_reminder_path, is_syncable_image_path, is_syncable_path,
-    key_check, line_hash, mirror_text, open, parse_line, parse_note, parse_triage_log_line,
-    parse_write, place_token, reminder_text, reopen, rewrite, seal_with_nonce, section_hash,
-    snoozed_due, strip_reminder, trailing_comments_start, trailing_metadata_start,
+    effect_present, group, heading_key, is_automatic, is_reminder_path, is_syncable_image_path,
+    is_syncable_path, key_check, line_hash, mirror_text, open, parse_line, parse_note,
+    parse_triage_log_line, parse_write, place_token, reminder_text, reopen, rewrite,
+    seal_with_nonce, section_hash, snoozed_due, strip_reminder, trailing_comments_start,
+    trailing_metadata_start,
 };
 
 fn fixtures_root() -> PathBuf {
@@ -662,6 +663,8 @@ struct TriageLogVector {
     someday: String,
     parsed: Option<TriageLogParts>,
     class: Option<String>,
+    #[serde(default)]
+    automatic: bool,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -686,6 +689,13 @@ fn triage_log_vectors_match() {
                 digest: line.digest.clone(),
             }),
             vector.parsed,
+            "{vector:?}"
+        );
+        assert_eq!(
+            parsed
+                .as_ref()
+                .is_some_and(|line| is_automatic(&line.destination)),
+            vector.automatic,
             "{vector:?}"
         );
         let class = parsed

@@ -79,7 +79,8 @@ pub fn pi_config_dir(tier: ModelTier, vault_root: Option<&Path>) -> PathBuf {
 pub struct InstalledHarness {
     pub node_binary: PathBuf,
     pub pi_acp_entry: PathBuf,
-    /// The `pi` shim npm links into `node_modules/.bin`.
+    /// The wrapper that starts npm's `pi` shim with skill discovery off
+    /// (see [`pi_wrapper`]).
     pub pi_command: PathBuf,
     pub bin_dir: PathBuf,
 }
@@ -151,17 +152,41 @@ pub async fn ensure_installed(node: &NodeRuntime, fs: &Arc<dyn Fs>) -> Result<In
         .context("installing the Thock Agent")?;
     }
     let bin_dir = node_modules.join(".bin");
-    let pi_command = if cfg!(windows) {
-        bin_dir.join("pi.cmd")
+    let (pi, pi_command) = if cfg!(windows) {
+        (bin_dir.join("pi.cmd"), dir.join("thock-pi.cmd"))
     } else {
-        bin_dir.join("pi")
+        (bin_dir.join("pi"), dir.join("thock-pi"))
     };
+    fs.atomic_write(pi_command.clone(), pi_wrapper(&pi))
+        .await
+        .context("writing the Thock Agent launcher")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&pi_command, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("making {} executable", pi_command.display()))?;
+    }
     Ok(InstalledHarness {
         node_binary,
         pi_acp_entry,
         pi_command,
         bin_dir,
     })
+}
+
+/// A launcher for `pi` with `--no-skills`. Pi otherwise adds the person's
+/// global coding skills (`~/.agents/skills`, `~/.pi/agent/skills`) to its
+/// prompt, and a small model then looks for a vault ritual such as
+/// `routines/inbox/skills/…` among them instead of in the vault. pi-acp
+/// passes Pi a fixed argument list, so the flag needs a wrapper.
+fn pi_wrapper(pi: &Path) -> String {
+    let pi = pi.to_string_lossy();
+    if cfg!(windows) {
+        format!("@\"{pi}\" --no-skills %*\r\n")
+    } else {
+        let quoted = pi.replace('\'', r"'\''");
+        format!("#!/bin/sh\nexec '{quoted}' --no-skills \"$@\"\n")
+    }
 }
 
 /// Pi's `settings.json` for a tier: the OpenRouter provider, the model the
@@ -608,6 +633,19 @@ mod tests {
             pi_command: PathBuf::from("/agents/thock-hosted/node_modules/.bin/pi"),
             bin_dir: PathBuf::from("/agents/thock-hosted/node_modules/.bin"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_launcher_starts_pi_without_global_skills() {
+        let script = pi_wrapper(Path::new(
+            "/Users/me/Library/Application Support/Thock/it's/node_modules/.bin/pi",
+        ));
+        assert_eq!(
+            script,
+            "#!/bin/sh\nexec '/Users/me/Library/Application Support/Thock/it'\\''s/node_modules/.bin/pi' \
+             --no-skills \"$@\"\n"
+        );
     }
 
     #[test]

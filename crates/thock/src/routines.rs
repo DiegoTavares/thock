@@ -88,6 +88,8 @@ const INBOX_DOC: &str = include_str!("../assets/routines/inbox/doc.md");
 const INBOX_TRIAGE_POLICY: &str = include_str!("../assets/routines/inbox/triage-policy.md");
 const INBOX_TRIAGE_SKILL: &str = include_str!("../assets/routines/inbox/skills/triage-inbox.md");
 const INBOX_SETUP_SKILL: &str = include_str!("../assets/routines/inbox/skills/setup-inbox.md");
+const INBOX_REFRESH_POLICY_SKILL: &str =
+    include_str!("../assets/routines/inbox/skills/refresh-inbox-policy.md");
 
 const READING_MANIFEST: &str = include_str!("../assets/routines/reading/routine.toml");
 const READING_DOC: &str = include_str!("../assets/routines/reading/doc.md");
@@ -1145,6 +1147,7 @@ pub fn catalog() -> Result<Vec<CatalogRoutine>> {
                 ("triage-policy.md", INBOX_TRIAGE_POLICY),
                 ("skills/triage-inbox.md", INBOX_TRIAGE_SKILL),
                 ("skills/setup-inbox.md", INBOX_SETUP_SKILL),
+                ("skills/refresh-inbox-policy.md", INBOX_REFRESH_POLICY_SKILL),
             ],
         },
         CatalogRoutine {
@@ -2373,11 +2376,20 @@ mod tests {
             .iter()
             .map(|skill| (skill.id.as_str(), skill.kind.is_setup()))
             .collect();
-        assert_eq!(skills, vec![("triage-inbox", false), ("setup-inbox", true)]);
+        assert_eq!(
+            skills,
+            vec![
+                ("triage-inbox", false),
+                ("setup-inbox", true),
+                ("refresh-inbox-policy", false)
+            ]
+        );
         // Triage is mechanical filing against an explicit policy — it runs
-        // on the fast tier; setup is judgment and stays on the default.
+        // on the fast tier; setup is judgment and stays on the default. The
+        // weekly refresh runs on the fast tier like Reflect (V57 §6).
         assert_eq!(manifest.skills[0].model, ModelTier::Fast);
         assert_eq!(manifest.skills[1].model, ModelTier::Default);
+        assert_eq!(manifest.skills[2].model, ModelTier::Fast);
         // The landing zone is scaffolded even though capture doesn't depend
         // on the Routine; the default policy ships as an editable file.
         assert!(

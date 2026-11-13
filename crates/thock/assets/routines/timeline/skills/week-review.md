@@ -231,6 +231,14 @@ Rules:
 
 Read `skills/thock/reflect.md` at the vault root and run it in **weekly** mode over the week's daily notes, which you have already read. It folds the week into `memory/` (patterns, people, threads), resolves what changed, and appends a `## Things Thock could forget` checklist to the weekly note when anything has gone quiet for long enough. Skip this step in silence if that file is missing.
 
+## 11. Refresh the inbox policy
+
+Only if `routines/inbox/routine.toml` exists **and** `.thock/config.toml` sets
+`auto_archive = true` in its `[inbox]` table: read `routines/inbox/skills/refresh-inbox-policy.md`
+and run it (a plain refresh, no mode). It keeps the triage policy and `memory/work.md` current from
+the week's notes and the Inbox decisions. Otherwise skip this step without a word: a vault that
+hasn't turned auto-archive on keeps its triage policy as the person wrote it.
+
 ## Output
 
-After the appends have happened, tell the user in a few sentences what the review (§8) found, which reminders step 6 moved, closed or dropped, that it is at the end of the weekly note, which tasks (if any) moved to the backlog, that the dashboard entry was appended, and that they can open `weekly/site/index.html` to view it, plus Reflect's one line on what it learned and whether there is a forgetting list to look at. The review lives in the note; don't repeat it whole in the chat.
+After the appends have happened, tell the user in a few sentences what the review (§8) found, which reminders step 6 moved, closed or dropped, that it is at the end of the weekly note, which tasks (if any) moved to the backlog, that the dashboard entry was appended, and that they can open `weekly/site/index.html` to view it, plus Reflect's one line on what it learned and whether there is a forgetting list to look at, and the refresh's summary of what changed in the triage policy when step 11 ran. The review lives in the note; don't repeat it whole in the chat.

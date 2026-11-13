@@ -91,7 +91,13 @@ memory/
   people/<name>.md   ← one page per person who keeps coming up
   projects/<slug>.md ← one page per thread that spans weeks
   reading.md         ← books in progress and quotes they kept
+  work.md            ← what is theirs and what isn't; shared, section by section
 ```
+
+`memory/work.md` is shared with the Inbox's **Refresh Inbox Policy**: it keeps the sections
+*Projects that are yours*, *Near yours, not yours* and *Your team*. On that page, append a line
+to a section or replace one whole section; never rewrite the page, so neither ritual drops what
+the other wrote.
 
 `reading.md` holds to the same forty-line cap as every other page; when it
 grows past that, prune the oldest unannotated quotes first. Its pointer on

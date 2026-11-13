@@ -13,7 +13,9 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::time::Duration;
-use thock_sync_core::{DecisionClass, INBOX_ARCHIVE_DIR, decision_class, parse_triage_log_line};
+use thock_sync_core::{
+    DecisionClass, INBOX_ARCHIVE_DIR, decision_class, is_automatic, parse_triage_log_line,
+};
 
 use crate::calendar::GoogleClientOverride;
 use crate::inbox::{CapturedItem, parse_inbox_note};
@@ -947,6 +949,10 @@ pub const ARCHIVE_GRACE: Duration = Duration::from_secs(60);
 /// How long after Thock archived a thread an undo still puts it back.
 /// Tidying old log lines by hand never touches Gmail.
 pub const UNDO_HORIZON: Duration = Duration::from_secs(24 * 60 * 60);
+/// The same for a thread the morning run archived (V57 §7.3): its item waits
+/// in the Inbox's Auto-archived group, and a correction from there has to
+/// reach Gmail across a weekend.
+pub const AUTOMATIC_UNDO_HORIZON: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// One captured thread from `.thock/state/gmail/imported.jsonl`.
 #[derive(Debug, Clone, PartialEq)]
@@ -993,6 +999,8 @@ pub fn parse_imported_index(text: &str) -> ImportedIndex {
 pub struct LoggedDecision {
     pub digest: String,
     pub class: DecisionClass,
+    /// Written by the morning run (`Archived · auto`).
+    pub automatic: bool,
 }
 
 /// Every marked line of the triage log, in order, classified with the
@@ -1006,6 +1014,7 @@ pub fn logged_decisions(
         .filter_map(parse_triage_log_line)
         .map(|line| LoggedDecision {
             class: decision_class(&line.destination, soon_heading, someday_heading),
+            automatic: is_automatic(&line.destination),
             digest: line.digest,
         })
         .collect()
@@ -1018,8 +1027,13 @@ pub enum ArchiveMark {
     Baseline,
     /// Waiting out the grace period since `at`.
     Seen { at: DateTime<Utc> },
-    /// Thock took the thread out of the Gmail inbox at `at`.
-    Archived { thread: String, at: DateTime<Utc> },
+    /// Thock took the thread out of the Gmail inbox at `at`; `automatic`
+    /// when the decision was the morning run's.
+    Archived {
+        thread: String,
+        at: DateTime<Utc>,
+        automatic: bool,
+    },
     /// An undo put it back; a new decision may archive it again.
     Unarchived,
     /// The line left the log before the grace period ran out.
@@ -1048,6 +1062,7 @@ pub enum ArchiveEvent {
         digest: String,
         thread: String,
         at: DateTime<Utc>,
+        automatic: bool,
     },
     Unarchived {
         digest: String,
@@ -1094,9 +1109,16 @@ impl ArchiveEvent {
                 digest,
                 thread,
                 at: when,
-            } => serde_json::json!({
-                "digest": digest, "thread": thread, "event": "archived", "at": at(when),
-            }),
+                automatic,
+            } => {
+                let mut value = serde_json::json!({
+                    "digest": digest, "thread": thread, "event": "archived", "at": at(when),
+                });
+                if *automatic {
+                    value["automatic"] = serde_json::Value::Bool(true);
+                }
+                value
+            }
             Self::Unarchived {
                 digest,
                 thread,
@@ -1146,6 +1168,10 @@ impl ArchiveEvent {
                 digest,
                 thread: thread()?,
                 at,
+                automatic: record
+                    .get("automatic")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
             },
             "unarchived" => Self::Unarchived {
                 digest,
@@ -1191,11 +1217,17 @@ impl ArchiveState {
             ArchiveEvent::Failed { .. } => return,
             ArchiveEvent::Baseline { digest, .. } => (digest, ArchiveMark::Baseline),
             ArchiveEvent::Seen { digest, at, .. } => (digest, ArchiveMark::Seen { at: *at }),
-            ArchiveEvent::Archived { digest, thread, at } => (
+            ArchiveEvent::Archived {
+                digest,
+                thread,
+                at,
+                automatic,
+            } => (
                 digest,
                 ArchiveMark::Archived {
                     thread: thread.clone(),
                     at: *at,
+                    automatic: *automatic,
                 },
             ),
             ArchiveEvent::Unarchived { digest, .. } => (digest, ArchiveMark::Unarchived),
@@ -1211,6 +1243,9 @@ pub struct ArchiveAction {
     pub digest: String,
     pub thread: String,
     pub change: ThreadMove,
+    /// The decision behind an archive was the morning run's, so the record
+    /// keeps the longer undo horizon.
+    pub automatic: bool,
 }
 
 /// One reconcile pass: records to append now, and writes to send.
@@ -1223,9 +1258,12 @@ pub struct ArchivePlan {
 /// The pure reconciler (V53 §7.1). Archives a logged decision once it has
 /// been seen for [`ARCHIVE_GRACE`], when its class is in `on` and its thread
 /// was captured into `inbox_dir`; puts back a thread Thock archived less than
-/// [`UNDO_HORIZON`] ago whose line left the log. Decisions logged before a
-/// class was turned on are baselined and never touched, and a thread is
-/// archived at most once per decision, so a move back in Gmail sticks.
+/// [`UNDO_HORIZON`] ago whose line left the log. A thread the morning run
+/// archived (V57) gets [`AUTOMATIC_UNDO_HORIZON`] instead, and is also put
+/// back when its line was re-filed to a class `on` doesn't list. Decisions
+/// logged before a class was turned on are baselined and never touched, and
+/// a thread is archived at most once per decision, so a move back in Gmail
+/// sticks.
 pub fn plan_archive(
     log: &[LoggedDecision],
     imported: &ImportedIndex,
@@ -1236,7 +1274,7 @@ pub fn plan_archive(
 ) -> ArchivePlan {
     let mut plan = ArchivePlan::default();
     let inbox_dir = inbox_dir.trim_matches('/');
-    let mut present: Vec<(&str, DecisionClass, &ImportedThread)> = Vec::new();
+    let mut present: Vec<(&str, DecisionClass, bool, &ImportedThread)> = Vec::new();
     // Every digest still in the log counts as present, captured here or not:
     // an unreadable capture record or a moved inbox folder must never read
     // as an undo.
@@ -1250,7 +1288,7 @@ pub fn plan_archive(
             .get(&decision.digest)
             .filter(|thread| thread.path == inbox_dir)
         {
-            present.push((&decision.digest, decision.class, thread));
+            present.push((&decision.digest, decision.class, decision.automatic, thread));
         }
     }
     present.reverse();
@@ -1258,7 +1296,7 @@ pub fn plan_archive(
     let mut baselined: HashSet<&str> = HashSet::new();
     if state.last_on.as_ref() != Some(on) {
         let previous = state.last_on.clone().unwrap_or_default();
-        for (digest, class, _) in &present {
+        for (digest, class, _, _) in &present {
             if !on.contains(class) || previous.contains(class) {
                 continue;
             }
@@ -1281,8 +1319,29 @@ pub fn plan_archive(
     }
 
     let grace = chrono::Duration::from_std(ARCHIVE_GRACE).unwrap_or_default();
-    for (digest, class, thread) in &present {
-        if !on.contains(class) || baselined.contains(digest) {
+    let horizon = chrono::Duration::from_std(UNDO_HORIZON).unwrap_or_default();
+    let automatic_horizon = chrono::Duration::from_std(AUTOMATIC_UNDO_HORIZON).unwrap_or_default();
+    for (digest, class, automatic, thread) in &present {
+        if baselined.contains(digest) {
+            continue;
+        }
+        if !on.contains(class) {
+            // A correction from the Auto-archived group replaces the auto
+            // line with one Gmail archive doesn't count: the thread goes back.
+            if let Some(ArchiveMark::Archived {
+                thread,
+                at,
+                automatic: true,
+            }) = state.marks.get(*digest)
+                && now - *at < automatic_horizon
+            {
+                plan.actions.push(ArchiveAction {
+                    digest: digest.to_string(),
+                    thread: thread.clone(),
+                    change: ThreadMove::Unarchive,
+                    automatic: true,
+                });
+            }
             continue;
         }
         match state.marks.get(*digest) {
@@ -1293,6 +1352,7 @@ pub fn plan_archive(
                         digest: digest.to_string(),
                         thread: thread.thread.clone(),
                         change: ThreadMove::Archive,
+                        automatic: *automatic,
                     });
                 }
             }
@@ -1306,17 +1366,27 @@ pub fn plan_archive(
         }
     }
 
-    let horizon = chrono::Duration::from_std(UNDO_HORIZON).unwrap_or_default();
     for (digest, mark) in &state.marks {
         if present_digests.contains(digest.as_str()) {
             continue;
         }
         match mark {
-            ArchiveMark::Archived { thread, at } if now - *at < horizon => {
+            ArchiveMark::Archived {
+                thread,
+                at,
+                automatic,
+            } if now - *at
+                < if *automatic {
+                    automatic_horizon
+                } else {
+                    horizon
+                } =>
+            {
                 plan.actions.push(ArchiveAction {
                     digest: digest.clone(),
                     thread: thread.clone(),
                     change: ThreadMove::Unarchive,
+                    automatic: *automatic,
                 });
             }
             ArchiveMark::Seen { .. } => plan.events.push(ArchiveEvent::Withdrawn {
@@ -1585,6 +1655,14 @@ mod tests {
         LoggedDecision {
             digest: digest.to_string(),
             class,
+            automatic: false,
+        }
+    }
+
+    fn automatic(digest: &str) -> LoggedDecision {
+        LoggedDecision {
+            automatic: true,
+            ..decision(digest, DecisionClass::Archive)
         }
     }
 
@@ -1614,6 +1692,7 @@ mod tests {
                     digest: action.digest.clone(),
                     thread: action.thread.clone(),
                     at: now,
+                    automatic: action.automatic,
                 },
                 ThreadMove::Unarchive => ArchiveEvent::Unarchived {
                     digest: action.digest.clone(),
@@ -1630,6 +1709,7 @@ mod tests {
             digest: digest.to_string(),
             thread: thread.to_string(),
             change: ThreadMove::Archive,
+            automatic: false,
         }
     }
 
@@ -1682,12 +1762,14 @@ mod tests {
         let log = "# Triage log\n\
                    - 2026-11-02 · Q4 → Archived <!--inbox:d-1-->\n\
                    - 2026-11-02 · Milk → Archived\n\
-                   - 2026-11-02 · Call → Backlog · Next <!--inbox:d-2-->\n";
+                   - 2026-11-02 · Call → Backlog · Next <!--inbox:d-2-->\n\
+                   - 2026-11-08 · HD 1 → Archived · auto <!--inbox:d-3-->\n";
         assert_eq!(
             logged_decisions(log, "Next", "Later"),
             vec![
                 decision("d-1", DecisionClass::Archive),
                 decision("d-2", DecisionClass::Soon),
+                automatic("d-3"),
             ]
         );
     }
@@ -1712,6 +1794,13 @@ mod tests {
                 digest: "d-1".to_string(),
                 thread: "t-1".to_string(),
                 at: at(61),
+                automatic: false,
+            },
+            ArchiveEvent::Archived {
+                digest: "d-4".to_string(),
+                thread: "t-4".to_string(),
+                at: at(62),
+                automatic: true,
             },
             ArchiveEvent::Failed {
                 digest: "d-1".to_string(),
@@ -1751,6 +1840,15 @@ mod tests {
             Some(&ArchiveMark::Archived {
                 thread: "t-1".to_string(),
                 at: at(61),
+                automatic: false,
+            })
+        );
+        assert_eq!(
+            state.marks.get("d-4"),
+            Some(&ArchiveMark::Archived {
+                thread: "t-4".to_string(),
+                at: at(62),
+                automatic: true,
             })
         );
         assert_eq!(state.marks.get("d-2"), Some(&ArchiveMark::Withdrawn));
@@ -1861,6 +1959,85 @@ mod tests {
         // d-2's line goes after a day: Gmail is left alone.
         let log = vec![decision("d-1", DecisionClass::Archive)];
         assert_eq!(run(&mut state, &log, &on, at(100 + 24 * 3600)), vec![]);
+    }
+
+    #[test]
+    fn an_automatic_archive_stays_undoable_for_a_week() {
+        let on = classes(&[DecisionClass::Archive]);
+        let mut state = ArchiveState::default();
+        run(&mut state, &[], &on, at(0));
+        let log = vec![automatic("d-1"), decision("d-2", DecisionClass::Archive)];
+        run(&mut state, &log, &on, at(10));
+        assert_eq!(
+            run(&mut state, &log, &on, at(100)),
+            vec![
+                ArchiveAction {
+                    automatic: true,
+                    ..archive("d-1", "t-1")
+                },
+                archive("d-2", "t-2"),
+            ]
+        );
+        assert!(matches!(
+            state.marks.get("d-1"),
+            Some(ArchiveMark::Archived {
+                automatic: true,
+                ..
+            })
+        ));
+
+        // Both lines leave the log after three days: only the automatic one
+        // still puts its thread back.
+        let three_days = 100 + 3 * 24 * 3600;
+        assert_eq!(
+            run(&mut state, &[], &on, at(three_days)),
+            vec![ArchiveAction {
+                automatic: true,
+                ..unarchive("d-1", "t-1")
+            }]
+        );
+
+        // Past seven days, not even an automatic one does.
+        let mut state = ArchiveState::default();
+        run(&mut state, &[], &on, at(0));
+        let log = vec![automatic("d-1")];
+        run(&mut state, &log, &on, at(10));
+        run(&mut state, &log, &on, at(100));
+        assert_eq!(run(&mut state, &[], &on, at(100 + 7 * 24 * 3600)), vec![]);
+    }
+
+    #[test]
+    fn re_filing_an_automatic_archive_puts_the_thread_back() {
+        let on = classes(&[DecisionClass::Archive]);
+        let mut state = ArchiveState::default();
+        run(&mut state, &[], &on, at(0));
+        let log = vec![automatic("d-1"), decision("d-2", DecisionClass::Archive)];
+        run(&mut state, &log, &on, at(10));
+        run(&mut state, &log, &on, at(100));
+
+        // The auto line became a Soon line, which `on` doesn't list.
+        let refiled = vec![
+            decision("d-1", DecisionClass::Soon),
+            decision("d-2", DecisionClass::Soon),
+        ];
+        assert_eq!(
+            run(&mut state, &refiled, &on, at(2 * 24 * 3600)),
+            vec![ArchiveAction {
+                automatic: true,
+                ..unarchive("d-1", "t-1")
+            }]
+        );
+        assert_eq!(run(&mut state, &refiled, &on, at(3 * 24 * 3600)), vec![]);
+
+        // With Soon in `on` the re-filed thread stays archived.
+        let with_soon = classes(&[DecisionClass::Archive, DecisionClass::Soon]);
+        let mut state = ArchiveState::default();
+        run(&mut state, &[], &with_soon, at(0));
+        let log = vec![automatic("d-1")];
+        run(&mut state, &log, &with_soon, at(10));
+        run(&mut state, &log, &with_soon, at(100));
+        let refiled = vec![decision("d-1", DecisionClass::Soon)];
+        assert_eq!(run(&mut state, &refiled, &with_soon, at(200)), vec![]);
     }
 
     #[test]

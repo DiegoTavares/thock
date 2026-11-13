@@ -73,13 +73,17 @@ actions!(
 
 /// Runs an installed Routine skill with your connected agent. Without data
 /// it opens the skill picker; a keybinding can pass a skill id directly (V7
-/// §7.5), e.g. `["thock::RunSkill", { "skill": "wrap-today" }]`.
+/// §7.5), e.g. `["thock::RunSkill", { "skill": "wrap-today" }]`, and a mode
+/// the skill describes, e.g. `{ "skill": "refresh-inbox-policy", "mode":
+/// "enable" }`.
 #[derive(Clone, Default, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = thock)]
 #[serde(deny_unknown_fields)]
 pub struct RunSkill {
     #[serde(default)]
     pub skill: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 /// Bumped whenever the connect flow saves a launch command, so other panels
@@ -106,7 +110,9 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action(|workspace, action: &RunSkill, window, cx| {
             match action.skill.as_deref() {
-                Some(skill_id) => run_skill_by_id(workspace, skill_id, window, cx),
+                Some(skill_id) => {
+                    run_skill_by_id(workspace, skill_id, action.mode.as_deref(), window, cx)
+                }
                 None => toggle_run_skill_picker(workspace, window, cx),
             }
         });
@@ -186,6 +192,7 @@ pub fn init(cx: &mut App) {
 fn run_skill_by_id(
     workspace: &mut Workspace,
     skill_id: &str,
+    mode: Option<&str>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -207,12 +214,13 @@ fn run_skill_by_id(
         .flat_map(|manifest| manifest.skills)
         .find(|skill| skill.id == skill_id);
     match skill {
-        Some(skill) => AgentPanel::launch_in_workspace(
-            workspace,
-            LaunchRequest::run_skill(&skill.name, &skill.file, skill.model),
-            window,
-            cx,
-        ),
+        Some(skill) => {
+            let mut request = LaunchRequest::run_skill(&skill.name, &skill.file, skill.model);
+            if let Some(mode) = mode {
+                request.kickoff = Some(agent::run_skill_kickoff_in_mode(&skill.file, mode));
+            }
+            AgentPanel::launch_in_workspace(workspace, request, window, cx)
+        }
         None => workspace.show_error(
             format!("No enabled Routine skill {skill_id:?} in this vault."),
             cx,
@@ -473,16 +481,18 @@ impl AgentPanel {
             return;
         };
         self.connected = Some(connected.clone());
-        let launch = match agent::build_launch(
-            &connected.command_for(request.tier),
-            request.kickoff.as_deref(),
-        ) {
-            Ok(launch) => launch,
-            Err(error) => {
-                self.show_error(format!("Couldn't launch the agent: {error}"), cx);
-                return;
-            }
-        };
+        let kickoff = request
+            .kickoff
+            .as_deref()
+            .map(|kickoff| agent::kickoff_in_vault(kickoff, &vault_root));
+        let launch =
+            match agent::build_launch(&connected.command_for(request.tier), kickoff.as_deref()) {
+                Ok(launch) => launch,
+                Err(error) => {
+                    self.show_error(format!("Couldn't launch the agent: {error}"), cx);
+                    return;
+                }
+            };
 
         // Pre-session checkpoint (spec §6.5): a soft dependency — the history
         // service no-ops when unavailable, and the launch never waits on it.

@@ -28,7 +28,10 @@ use crate::calendar_service::{
     HoldReason, SyncCalendarNow, SyncState,
 };
 use crate::gmail_service::{self, ArchiveStatus, EnableGmailArchive, GmailService, SyncGmailNow};
-use crate::inbox_service::{self, InboxService, SyncInboxNow};
+use crate::inbox_auto_archive::{RunStatus, popover_line};
+use crate::inbox_service::{
+    self, InboxService, RefreshInboxPolicy, RunInboxAutoArchive, SyncInboxNow,
+};
 use crate::inbox_suggest::format_cost;
 use crate::inbox_view::OpenInbox;
 use crate::readwise_service::{self, ConnectReadwise, ReadwiseService, SyncReadwiseNow};
@@ -124,6 +127,8 @@ pub enum ActionKind {
     AddPlannerHeading,
     ChoosePlannerHeading,
     OpenInbox,
+    RunInboxAutoArchive,
+    RefreshInboxPolicy,
     RetryReminders,
     ShowSyncStatus,
 }
@@ -143,6 +148,8 @@ impl ActionKind {
             Self::AddPlannerHeading => AddPlannerHeading.boxed_clone(),
             Self::ChoosePlannerHeading => ChoosePlannerHeading.boxed_clone(),
             Self::OpenInbox => OpenInbox.boxed_clone(),
+            Self::RunInboxAutoArchive => RunInboxAutoArchive.boxed_clone(),
+            Self::RefreshInboxPolicy => RefreshInboxPolicy.boxed_clone(),
             Self::RetryReminders => RetryReminders.boxed_clone(),
             Self::ShowSyncStatus => ToggleSyncStatus.boxed_clone(),
         }
@@ -604,15 +611,57 @@ pub fn gmail_status(service: &GmailService) -> Option<ConnectorStatus> {
 pub fn inbox_status(
     service: &InboxService,
     gmail: Option<&GmailService>,
+    cx: &App,
 ) -> Option<ConnectorStatus> {
     let gmail_offers_connect =
         gmail.is_some_and(|gmail| matches!(gmail.state(), SyncState::NeverConnected));
     let status = status_for_inbox(service.state(), service.queue_depth(), gmail_offers_connect)?;
-    Some(with_suggestion_report(
+    let status = with_suggestion_report(
         status,
         service.month_cost(),
         service.decision_report().summary(),
+    );
+    Some(with_auto_archive(
+        status,
+        &service.auto_archive_status(cx),
+        chrono::Local::now().date_naive(),
     ))
+}
+
+/// The morning run's line on the Inbox row (V57 §9): what it filed today, or
+/// why it is waiting or stopped, with the fix as the row's first action.
+fn with_auto_archive(
+    mut status: ConnectorStatus,
+    run: &RunStatus,
+    today: chrono::NaiveDate,
+) -> ConnectorStatus {
+    let Some(line) = popover_line(run, today) else {
+        return status;
+    };
+    status.summary = format!("{} · {line}", status.summary).into();
+    let fix = match run {
+        RunStatus::WaitingForPolicy => Some(ConnectorAction::new(
+            ActionKind::RefreshInboxPolicy,
+            "Refresh",
+        )),
+        RunStatus::Stopped {
+            reason, retryable, ..
+        } => {
+            let detail = match status.detail.take() {
+                Some(detail) => format!("Auto-archive stopped: {reason}\n{detail}"),
+                None => format!("Auto-archive stopped: {reason}"),
+            };
+            status.detail = Some(detail.into());
+            // Without a grant or allowance Retry can't work, so none is shown.
+            retryable.then(|| ConnectorAction::new(ActionKind::RunInboxAutoArchive, "Retry"))
+        }
+        _ => None,
+    };
+    if let Some(fix) = fix {
+        status.actions.insert(0, fix);
+        status.attention = status.attention.max(Attention::Warning);
+    }
+    status
 }
 
 /// What the suggestions cost this month, on the row, and how often they were
@@ -1035,7 +1084,7 @@ impl SyncStatusIndicator {
         statuses.extend(
             self.inbox
                 .as_ref()
-                .and_then(|service| inbox_status(service.read(cx), gmail)),
+                .and_then(|service| inbox_status(service.read(cx), gmail, cx)),
         );
         statuses.extend(
             self.readwise
@@ -1601,6 +1650,90 @@ mod tests {
         assert_eq!(labels(&with_report), ["Open", "Sync now"]);
         let quiet = with_suggestion_report(inbox, 0.0, None);
         assert_eq!(quiet.summary.as_ref(), "3 waiting");
+    }
+
+    #[test]
+    fn the_inbox_row_says_what_auto_archive_did() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 8).unwrap();
+        let inbox = status_for_inbox(&synced(), 3, false).unwrap();
+        let ran = with_auto_archive(
+            inbox.clone(),
+            &RunStatus::Ran {
+                day: today,
+                archived: 7,
+            },
+            today,
+        );
+        assert_eq!(ran.summary.as_ref(), "3 waiting · Auto-archived 7 today");
+        assert_eq!(labels(&ran), ["Open", "Sync now"]);
+        let yesterday = today.pred_opt().unwrap();
+        let old = with_auto_archive(
+            inbox.clone(),
+            &RunStatus::Ran {
+                day: yesterday,
+                archived: 7,
+            },
+            today,
+        );
+        assert_eq!(old.summary.as_ref(), "3 waiting");
+        let nothing = with_auto_archive(
+            inbox.clone(),
+            &RunStatus::Ran {
+                day: today,
+                archived: 0,
+            },
+            today,
+        );
+        assert_eq!(
+            nothing.summary.as_ref(),
+            "3 waiting · Auto-archive ran · nothing to clear"
+        );
+        let stopped = with_auto_archive(
+            inbox.clone(),
+            &RunStatus::Stopped {
+                processed: 4,
+                candidates: 11,
+                reason: "Thock Plus allowance spent for this cycle".to_string(),
+                retryable: true,
+            },
+            today,
+        );
+        assert_eq!(
+            stopped.summary.as_ref(),
+            "3 waiting · Auto-archive stopped after 4 of 11"
+        );
+        assert_eq!(labels(&stopped), ["Retry", "Open", "Sync now"]);
+        assert_eq!(
+            stopped.detail.as_deref(),
+            Some("Auto-archive stopped: Thock Plus allowance spent for this cycle")
+        );
+        let spent = with_auto_archive(
+            inbox.clone(),
+            &RunStatus::Stopped {
+                processed: 4,
+                candidates: 11,
+                reason: "Thock Plus allowance spent for this cycle".to_string(),
+                retryable: false,
+            },
+            today,
+        );
+        assert_eq!(
+            spent.summary.as_ref(),
+            "3 waiting · Auto-archive stopped after 4 of 11 · allowance spent"
+        );
+        assert_eq!(
+            labels(&spent),
+            ["Open", "Sync now"],
+            "no Retry that can't work"
+        );
+        let waiting = with_auto_archive(inbox.clone(), &RunStatus::WaitingForPolicy, today);
+        assert_eq!(
+            waiting.summary.as_ref(),
+            "3 waiting · Auto-archive waiting for a policy"
+        );
+        assert_eq!(labels(&waiting), ["Refresh", "Open", "Sync now"]);
+        let off = with_auto_archive(inbox.clone(), &RunStatus::Off, today);
+        assert_eq!(off, inbox);
     }
 
     #[test]

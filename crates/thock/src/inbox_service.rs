@@ -7,9 +7,15 @@
 //! this service exposes.
 //!
 //! For the Inbox view (V41 §8.2) it also keeps the parsed queue, asks Jev for
-//! a suggested destination per item while a view is open, and owns the two
+//! a suggested destination per item while a view is open, and owns the
 //! append-only records under `.thock/state/inbox/`: the suggestion cache and
 //! the decision log.
+//!
+//! Once a day, when `[inbox] auto_archive` is on, it also drives the morning
+//! run (V57 §7): after the first Gmail poll of the local day it asks Jev about
+//! what arrived since the last run, files what clears the bar to Archive the
+//! way `e` would, and keeps the run's record in `auto-archive.jsonl`, which
+//! the view's Auto-archived group reads.
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Local, Utc};
@@ -38,9 +44,16 @@ use crate::inbox::{
     TRIAGE_LOG_PATH, inbox_note_digest, is_new, note_hash, parse_inbox_config, parse_inbox_note,
     parse_watermark, plan_inbox_capture, scan_triage_log_markers,
 };
+use crate::inbox_auto_archive::{
+    AUTO_ARCHIVE_FILE, ArchivedItem, Due, GroupItem, RunEvent, RunLog, RunStatus, SkipReason,
+    candidates, clears_bar, due, effective_threshold, group_items, person_wrote, policy_refreshed,
+    run_id, without_auto_archive_keys,
+};
+use crate::inbox_email::parse_thread;
 use crate::inbox_suggest::{
-    DECISIONS_ENDPOINT, DecisionRecord, DecisionReport, MAX_IN_FLIGHT, OPENROUTER_PROVIDER,
-    Suggestion, SuggestionRecord, build_request, flatten_policy, month_cost, parse_response,
+    Criteria, DECISIONS_ENDPOINT, DEFAULT_POLICY, DecisionRecord, DecisionReport, Destination,
+    MAX_IN_FLIGHT, OPENROUTER_PROVIDER, Suggestion, SuggestionRecord, VIA_AUTO, build_request,
+    flatten_policy, month_cost, parse_criteria, parse_response, policy_hash,
 };
 use crate::plus;
 use crate::tasks_google::GoogleTasksSource;
@@ -55,7 +68,8 @@ const LAST_TRIAGE_FILE: &str = "last-triage";
 const SUGGESTIONS_FILE: &str = "suggestions.jsonl";
 const DECISIONS_FILE: &str = "decisions.jsonl";
 /// The editable judgment both the ritual and the suggestion follow.
-const POLICY_PATH: &str = "routines/inbox/triage-policy.md";
+pub(crate) const POLICY_PATH: &str = "routines/inbox/triage-policy.md";
+const REFRESH_POLICY_SKILL: &str = "refresh-inbox-policy";
 
 actions!(
     thock,
@@ -67,7 +81,20 @@ actions!(
         /// project panel.
         RevealInboxFolder,
         /// Runs the Triage Inbox ritual on what's waiting in the inbox.
-        TriageInbox
+        TriageInbox,
+        /// Archives what the inbox is sure needs nothing from you, now,
+        /// instead of after the morning's first sync, or picks up a run that
+        /// stopped.
+        RunInboxAutoArchive,
+        /// Lets the inbox archive, once a day, what is sure to need nothing
+        /// from you. Refreshes the triage policy from your notes first.
+        TurnOnInboxAutoArchive,
+        /// Stops the inbox archiving things on its own. The policy and what
+        /// it learned stay.
+        TurnOffInboxAutoArchive,
+        /// Rewrites the triage policy and the map of your work from your
+        /// notes and your inbox decisions.
+        RefreshInboxPolicy
     ]
 );
 
@@ -82,6 +109,11 @@ pub fn init(cx: &mut App) {
             show_sync_toast(workspace, event, cx);
         })
         .detach();
+        // Gmail's service is created first (see `thock::init`), so its polls
+        // can start the morning run.
+        if let Some(gmail) = crate::gmail_service::service_for_project(&project, cx) {
+            service.update(cx, |service, cx| service.watch_gmail(&gmail, cx));
+        }
         let project_id = project.entity_id();
         cx.default_global::<GlobalInboxServices>()
             .0
@@ -108,8 +140,41 @@ pub fn init(cx: &mut App) {
                 .and_then(|service| service.read(cx).vault_root());
             dispatch_triage(vault_root, window, cx);
         });
+        workspace.register_action(|workspace, _: &RunInboxAutoArchive, _window, cx| {
+            if let Some(service) = service_for_project(workspace.project(), cx) {
+                service.update(cx, |service, cx| service.run_auto_archive_now(cx));
+            }
+        });
+        workspace.register_action(|_, _: &TurnOnInboxAutoArchive, window, cx| {
+            run_refresh_skill(Some("enable"), window, cx);
+        });
+        workspace.register_action(|_, _: &RefreshInboxPolicy, window, cx| {
+            run_refresh_skill(None, window, cx);
+        });
+        workspace.register_action(|workspace, _: &TurnOffInboxAutoArchive, _window, cx| {
+            let Some(service) = service_for_project(workspace.project(), cx) else {
+                return;
+            };
+            let workspace = workspace.weak_handle();
+            service.update(cx, |service, cx| {
+                service.turn_off_auto_archive(workspace, cx)
+            });
+        });
     })
     .detach();
+}
+
+/// The refresh runs through `thock::RunSkill` like any Routine skill, so a
+/// vault without the Inbox Routine gets the usual "no enabled skill" note.
+fn run_refresh_skill(mode: Option<&str>, window: &mut Window, cx: &mut App) {
+    window.dispatch_action(
+        crate::agent_panel::RunSkill {
+            skill: Some(REFRESH_POLICY_SKILL.to_string()),
+            mode: mode.map(str::to_string),
+        }
+        .boxed_clone(),
+        cx,
+    );
 }
 
 /// `thock::TriageInbox` runs the Triage Inbox ritual (the generic
@@ -133,6 +198,7 @@ fn dispatch_triage(vault_root: Option<PathBuf>, window: &mut Window, cx: &mut Ap
         window.dispatch_action(
             crate::agent_panel::RunSkill {
                 skill: Some("triage-inbox".to_string()),
+                mode: None,
             }
             .boxed_clone(),
             cx,
@@ -204,6 +270,49 @@ pub struct InboxEntry {
     pub hash: String,
     /// New since the last triage, by the ritual's own rule.
     pub is_new: bool,
+    /// The `captured:` time, else the file's: what the list sorts on and
+    /// the morning run's watermark is compared with.
+    pub arrived: Option<DateTime<Utc>>,
+}
+
+/// An item of the view's Auto-archived group (V57 §8.1): the archived note,
+/// read like an inbox row, with what the run said about it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoArchivedEntry {
+    pub entry: InboxEntry,
+    pub run: String,
+    pub confidence: f64,
+    /// The `Archived · auto` line the run wrote to the triage log.
+    pub line: String,
+}
+
+/// The policy as Jev is given it (V57 §4.4, §7.5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedPolicy {
+    pub rows: Vec<String>,
+    pub criteria: Criteria,
+    pub hash: String,
+    /// The refresh skill's `refreshed:` stamp is in the front matter.
+    pub stamped: bool,
+}
+
+impl LoadedPolicy {
+    /// The rows `triage-policy.md` flattens to, or the shipped defaults when
+    /// it is missing or has no table; the criteria per key the same way.
+    pub fn from_text(text: Option<&str>) -> Self {
+        let text = text.unwrap_or_default();
+        let mut rows = flatten_policy(text);
+        if rows.is_empty() {
+            rows = DEFAULT_POLICY.iter().map(|row| row.to_string()).collect();
+        }
+        let criteria = parse_criteria(text);
+        Self {
+            hash: policy_hash(&rows, &criteria),
+            rows,
+            criteria,
+            stamped: policy_refreshed(text).is_some(),
+        }
+    }
 }
 
 /// Whether the view may ask for suggestions, and if not, why (V41 §7.3).
@@ -232,7 +341,8 @@ enum AskOutcome {
 struct Suggestions {
     loaded: bool,
     loading: Option<Task<()>>,
-    cached: HashMap<String, Suggestion>,
+    /// By note hash: the answer and the policy hash it was asked under.
+    cached: HashMap<String, (Suggestion, Option<String>)>,
     /// The cache file's text, rewritten whole on each append so concurrent
     /// answers can't drop each other's lines.
     cache_text: String,
@@ -248,6 +358,31 @@ struct Suggestions {
     /// Decisions made before the log finished loading; appended once it
     /// has, so the file is never rewritten from a partial copy.
     pending_decisions: Vec<DecisionRecord>,
+}
+
+/// The morning run's side of the service (V57 §7), loaded with the cache.
+#[derive(Default)]
+struct AutoArchive {
+    /// `auto-archive.jsonl` as last written; the in-memory text is the
+    /// source of truth, like the cache's.
+    log_text: String,
+    log: RunLog,
+    /// A poll or a scan asked for the run; it starts once what it reads is
+    /// loaded, if it is due.
+    triggered: bool,
+    /// `thock::RunInboxAutoArchive` asked, whatever the day.
+    manual: bool,
+    running: Option<Task<()>>,
+    /// Note hashes the running job asks Jev about itself, so the view's
+    /// suggestions don't ask a second time.
+    asking: HashSet<String>,
+    /// The last run's filings nobody corrected, whose notes are still in
+    /// the archive, in the order they were filed.
+    group: Vec<AutoArchivedEntry>,
+    /// Latest-wins, like the queue's re-read.
+    group_task: Option<Task<()>>,
+    /// The threshold was clamped and that was logged, once per service.
+    clamp_logged: bool,
 }
 
 /// What moving an inbox note into the archive did (V40 §6.1).
@@ -301,9 +436,18 @@ pub struct InboxService {
     /// Latest-wins re-read of the landing zone; cancel-by-replace is correct
     /// because only the newest listing matters.
     items_task: Option<Task<()>>,
+    /// The queue has been read at least once since the vault loaded.
+    items_loaded: bool,
     /// Inbox views currently open; suggestions are asked only while one is.
     open_views: usize,
     suggestions: Suggestions,
+    /// `triage-policy.md` as Jev reads it; `None` until it has been read.
+    policy: Option<LoadedPolicy>,
+    policy_task: Option<Task<()>>,
+    auto_archive: AutoArchive,
+    gmail: Option<WeakEntity<crate::gmail_service::GmailService>>,
+    #[cfg(test)]
+    gmail_polling_for_test: Option<bool>,
     /// Set by `sync_now` so the next completed sync announces itself
     /// ([`ManualSyncFinished`]); background polls stay quiet.
     announce_next_sync: bool,
@@ -331,8 +475,15 @@ impl InboxService {
             imported: None,
             items: Vec::new(),
             items_task: None,
+            items_loaded: false,
             open_views: 0,
             suggestions: Suggestions::default(),
+            policy: None,
+            policy_task: None,
+            auto_archive: AutoArchive::default(),
+            gmail: None,
+            #[cfg(test)]
+            gmail_polling_for_test: None,
             announce_next_sync: false,
             _subscriptions: vec![project_subscription, entitlement_subscription],
         };
@@ -469,6 +620,19 @@ impl InboxService {
                 }) {
                     self.refresh_items(cx);
                 }
+                if changes
+                    .iter()
+                    .any(|(path, _, _)| path.as_unix_str() == POLICY_PATH)
+                {
+                    self.load_policy(cx);
+                }
+                let archive_prefix = format!("{}/", thock_sync_core::INBOX_ARCHIVE_DIR);
+                if changes
+                    .iter()
+                    .any(|(path, _, _)| path.as_unix_str().starts_with(&archive_prefix))
+                {
+                    self.refresh_group(cx);
+                }
             }
             _ => {}
         }
@@ -495,6 +659,13 @@ impl InboxService {
                     cx.emit(InboxEvent::ItemsChanged);
                     cx.notify();
                 }
+                service.items_loaded = true;
+                // Without Gmail polling, the day's first scan of the queue
+                // is what starts the morning run (§7.3).
+                if !service.gmail_polling(cx) {
+                    service.auto_archive.triggered = true;
+                }
+                service.try_auto_archive(cx);
                 service.pump_suggestions(cx);
             })
             .ok();
@@ -551,8 +722,13 @@ impl InboxService {
         if self.vault.as_ref() != Some(&vault) {
             // A different vault has its own cache and log.
             self.suggestions = Suggestions::default();
+            self.auto_archive = AutoArchive::default();
+            self.policy = None;
+            self.items_loaded = false;
         }
         self.vault = Some(vault);
+        self.load_policy(cx);
+        self.note_auto_archive_setting(cx);
         // The cache and decision log feed the sync popover's Inbox row and
         // every decision the view records, grant or not, so they load as
         // soon as there is a vault to read them from.
@@ -926,9 +1102,40 @@ impl InboxService {
             .map(|gateway| gateway.api_key.clone())
     }
 
-    /// The cached answer for a note's bytes, whatever its tier.
+    /// The key the morning run asks with. `[inbox] suggestions = false`
+    /// hides the view's chips but doesn't stop a run the person turned on
+    /// (§5.2); a spent allowance or another provider does.
+    fn auto_archive_key(cx: &App) -> Option<String> {
+        let entitlement = plus::current_entitlement(cx)?;
+        if entitlement.is_exhausted() {
+            return None;
+        }
+        entitlement
+            .gateway
+            .as_ref()
+            .filter(|gateway| gateway.provider == OPENROUTER_PROVIDER)
+            .map(|gateway| gateway.api_key.clone())
+    }
+
+    /// The cached answer for a note's bytes under the current policy,
+    /// whatever its tier. An answer asked under another policy is stale
+    /// (V57 §7.5).
     pub fn suggestion_for(&self, hash: &str) -> Option<&Suggestion> {
-        self.suggestions.cached.get(hash)
+        let policy = &self.policy.as_ref()?.hash;
+        self.suggestions
+            .cached
+            .get(hash)
+            .filter(|(_, asked_under)| asked_under.as_ref() == Some(policy))
+            .map(|(suggestion, _)| suggestion)
+    }
+
+    /// The last answer recorded for a note's bytes under any policy: what
+    /// the Auto-archived group shows the run decided on.
+    pub fn recorded_suggestion_for(&self, hash: &str) -> Option<&Suggestion> {
+        self.suggestions
+            .cached
+            .get(hash)
+            .map(|(suggestion, _)| suggestion)
     }
 
     /// Why an item has no answer, for the chip's tooltip.
@@ -994,20 +1201,25 @@ impl InboxService {
         let Some(api_key) = self.gateway_key(cx) else {
             return;
         };
-        let Some(vault) = self.vault.clone() else {
+        if self.vault.is_none() {
             return;
-        };
+        }
         if !self.suggestions.loaded {
             self.load_suggestion_state(cx);
             return;
         }
+        let Some(policy) = self.policy.clone() else {
+            self.load_policy(cx);
+            return;
+        };
         let free = MAX_IN_FLIGHT.saturating_sub(self.suggestions.in_flight.len());
         let candidates: Vec<InboxEntry> = self
             .items
             .iter()
             .filter(|entry| {
-                !self.suggestions.cached.contains_key(&entry.hash)
+                self.suggestion_for(&entry.hash).is_none()
                     && !self.suggestions.in_flight.contains_key(&entry.hash)
+                    && !self.auto_archive.asking.contains(&entry.hash)
                     && !self.suggestions.failed.contains_key(&entry.hash)
             })
             .take(free)
@@ -1016,23 +1228,31 @@ impl InboxService {
         if candidates.is_empty() {
             return;
         }
-        let fs = self.project.read(cx).fs().clone();
         let http = cx.http_client();
         for entry in candidates {
             let hash = entry.hash.clone();
             let task = cx.spawn({
-                let fs = fs.clone();
                 let http = http.clone();
-                let vault = vault.clone();
                 let api_key = api_key.clone();
                 let hash = hash.clone();
+                let policy = policy.clone();
                 async move |this, cx| {
-                    let policy = load_policy(&fs, &vault).await;
-                    let request =
-                        build_request(&entry.item, &policy, Local::now().date_naive()).to_string();
+                    let request = build_request(
+                        &entry.item,
+                        &policy.rows,
+                        &policy.criteria,
+                        Local::now().date_naive(),
+                    )
+                    .to_string();
                     let outcome = ask_jev(&http, &api_key, request, cx).await;
                     this.update(cx, |service, cx| {
-                        service.finish_suggestion(&hash, &entry.item.stem, outcome, cx)
+                        service.finish_suggestion(
+                            &hash,
+                            &entry.item.stem,
+                            &policy.hash,
+                            outcome,
+                            cx,
+                        )
                     })
                     .ok();
                 }
@@ -1045,21 +1265,14 @@ impl InboxService {
         &mut self,
         hash: &str,
         stem: &str,
+        policy: &str,
         outcome: AskOutcome,
         cx: &mut Context<Self>,
     ) {
         self.suggestions.in_flight.remove(hash);
         match outcome {
             AskOutcome::Answered(suggestion) => {
-                self.suggestions.session_cost += suggestion.cost;
-                let record =
-                    SuggestionRecord::new(hash, stem, &suggestion, &Utc::now().to_rfc3339());
-                if let Ok(line) = serde_json::to_string(&record) {
-                    self.suggestions.cache_text.push_str(&line);
-                    self.suggestions.cache_text.push('\n');
-                    self.persist(SUGGESTIONS_FILE, self.suggestions.cache_text.clone(), cx);
-                }
-                self.suggestions.cached.insert(hash.to_string(), suggestion);
+                self.cache_answer(hash, stem, policy, suggestion, cx)
             }
             AskOutcome::Paused(reason) => self.suggestions.paused = Some(reason),
             AskOutcome::Failed(reason) => {
@@ -1069,6 +1282,32 @@ impl InboxService {
         cx.emit(InboxEvent::SuggestionsChanged);
         cx.notify();
         self.pump_suggestions(cx);
+    }
+
+    /// Records an answer in the cache file and in memory, and counts its
+    /// cost.
+    fn cache_answer(
+        &mut self,
+        hash: &str,
+        stem: &str,
+        policy: &str,
+        suggestion: Suggestion,
+        cx: &mut Context<Self>,
+    ) {
+        self.suggestions.session_cost += suggestion.cost;
+        let record =
+            SuggestionRecord::new(hash, stem, &suggestion, &Utc::now().to_rfc3339(), policy);
+        match serde_json::to_string(&record) {
+            Ok(line) => {
+                self.suggestions.cache_text.push_str(&line);
+                self.suggestions.cache_text.push('\n');
+                self.persist(SUGGESTIONS_FILE, self.suggestions.cache_text.clone(), cx);
+            }
+            Err(error) => log::warn!("Thock: couldn't record a suggestion: {error:#}"),
+        }
+        self.suggestions
+            .cached
+            .insert(hash.to_string(), (suggestion, Some(policy.to_string())));
     }
 
     /// Loads the cache and the decision log once; `pump_suggestions` runs
@@ -1090,22 +1329,33 @@ impl InboxService {
                 .load(&state_path(&vault, DECISIONS_FILE))
                 .await
                 .unwrap_or_default();
+            let auto_archive_text = fs
+                .load(&state_path(&vault, AUTO_ARCHIVE_FILE))
+                .await
+                .unwrap_or_default();
             this.update(cx, |service, cx| {
+                // The newest record for a note wins, so a re-ask under a new
+                // policy replaces the stale answer.
                 let cached = cache_text
                     .lines()
                     .filter_map(|line| serde_json::from_str::<SuggestionRecord>(line).ok())
-                    .map(|record| (record.hash.clone(), record.suggestion()))
+                    .map(|record| (record.hash.clone(), (record.suggestion(), record.policy)))
                     .collect();
                 service.suggestions.cached = cached;
                 service.suggestions.cache_text = cache_text;
                 service.suggestions.decisions_text = decisions_text;
                 service.suggestions.loaded = true;
                 service.suggestions.loading = None;
+                service.auto_archive.log = RunLog::parse(&auto_archive_text);
+                service.auto_archive.log_text = auto_archive_text;
                 for record in std::mem::take(&mut service.suggestions.pending_decisions) {
                     service.record_decision(&record, cx);
                 }
+                service.note_auto_archive_setting(cx);
+                service.refresh_group(cx);
                 cx.emit(InboxEvent::SuggestionsChanged);
                 cx.notify();
+                service.try_auto_archive(cx);
                 service.pump_suggestions(cx);
             })
             .ok();
@@ -1126,16 +1376,39 @@ impl InboxService {
         self.suggestions.decisions_text.push_str(&line);
         self.suggestions.decisions_text.push('\n');
         self.persist(DECISIONS_FILE, self.suggestions.decisions_text.clone(), cx);
+        if record.corrects.is_some() {
+            self.refresh_group(cx);
+        }
     }
 
     /// Marks the decision for `stem` made at `at` undone (§6.2).
     pub fn mark_decision_undone(&mut self, stem: &str, at: &str, cx: &mut Context<Self>) {
+        self.mark_undone_where(|record| record.stem == stem && record.at == at, cx);
+    }
+
+    /// Marks the morning run's filing of `stem` undone: the group's `u`
+    /// (V57 §8.2).
+    pub fn mark_automatic_undone(&mut self, stem: &str, run: &str, cx: &mut Context<Self>) {
+        self.mark_undone_where(
+            |record| {
+                record.stem == stem && record.via == VIA_AUTO && record.run.as_deref() == Some(run)
+            },
+            cx,
+        );
+        self.refresh_group(cx);
+    }
+
+    fn mark_undone_where(
+        &mut self,
+        matches: impl Fn(&DecisionRecord) -> bool,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(pending) = self
             .suggestions
             .pending_decisions
             .iter_mut()
             .rev()
-            .find(|record| record.stem == stem && record.at == at)
+            .find(|record| matches(record))
         {
             pending.undone = true;
             return;
@@ -1147,8 +1420,7 @@ impl InboxService {
             .map(str::to_string)
             .collect();
         let target = lines.iter().rposition(|line| {
-            serde_json::from_str::<DecisionRecord>(line)
-                .is_ok_and(|record| record.stem == stem && record.at == at)
+            serde_json::from_str::<DecisionRecord>(line).is_ok_and(|record| matches(&record))
         });
         let Some(index) = target else {
             return;
@@ -1199,6 +1471,549 @@ impl InboxService {
         .detach();
     }
 
+    // ----- The policy (V57 §4.4, §7.5) -----
+
+    /// Re-reads `triage-policy.md`. A changed policy makes every cached
+    /// answer stale, so the view's chips and the next run re-ask.
+    fn load_policy(&mut self, cx: &mut Context<Self>) {
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let fs = self.project.read(cx).fs().clone();
+        self.policy_task = Some(cx.spawn(async move |this, cx| {
+            let text = fs.load(&vault.root.join(POLICY_PATH)).await.ok();
+            let policy = LoadedPolicy::from_text(text.as_deref());
+            this.update(cx, |service, cx| {
+                if service.policy.as_ref() == Some(&policy) {
+                    return;
+                }
+                service.policy = Some(policy);
+                cx.emit(InboxEvent::SuggestionsChanged);
+                cx.notify();
+                service.try_auto_archive(cx);
+                service.pump_suggestions(cx);
+            })
+            .ok();
+        }));
+    }
+
+    // ----- The morning run (V57 §7) -----
+
+    /// Starts the morning run on Gmail's polls. Called once, at creation.
+    pub fn watch_gmail(
+        &mut self,
+        gmail: &Entity<crate::gmail_service::GmailService>,
+        cx: &mut Context<Self>,
+    ) {
+        self.gmail = Some(gmail.downgrade());
+        let subscription = cx.subscribe(
+            gmail,
+            |service, _, _: &crate::gmail_service::GmailPollFinished, cx| {
+                service.gmail_poll_finished(cx)
+            },
+        );
+        self._subscriptions.push(subscription);
+    }
+
+    /// A Gmail poll landed what it found. The run waits for the scan that
+    /// follows, so nothing else that finishes first (the policy, the cache)
+    /// starts it on a listing from before the poll's notes.
+    fn gmail_poll_finished(&mut self, cx: &mut Context<Self>) {
+        // The poll's own file events already re-read the queue.
+        if !self.auto_archive_on() {
+            return;
+        }
+        self.auto_archive.triggered = true;
+        self.items_loaded = false;
+        self.refresh_items(cx);
+    }
+
+    /// Whether Gmail polls are what start the run.
+    fn gmail_polling(&self, cx: &App) -> bool {
+        #[cfg(test)]
+        if let Some(polling) = self.gmail_polling_for_test {
+            return polling;
+        }
+        self.gmail
+            .as_ref()
+            .and_then(|gmail| gmail.upgrade())
+            .is_some_and(|gmail| gmail.read(cx).is_polling())
+    }
+
+    fn auto_archive_on(&self) -> bool {
+        self.vault
+            .as_ref()
+            .is_some_and(|vault| vault.config.inbox.auto_archive)
+    }
+
+    /// Where auto-archive stands (§9).
+    pub fn auto_archive_status(&self, cx: &App) -> RunStatus {
+        let stamped = self.policy.as_ref().is_some_and(|policy| policy.stamped);
+        crate::inbox_auto_archive::status(
+            self.auto_archive_on(),
+            stamped,
+            Self::auto_archive_key(cx).is_some(),
+            &self.auto_archive.log,
+            |moment| moment.with_timezone(&Local).date_naive(),
+        )
+    }
+
+    /// The day the group's run finished, locally, for its header: the latest
+    /// run that archived anything (§8.1).
+    pub fn auto_archive_day(&self) -> Option<chrono::NaiveDate> {
+        let run = crate::inbox_auto_archive::group_run(&self.auto_archive.log)?;
+        let moment = run
+            .finished
+            .as_ref()
+            .map_or(run.started_at, |finished| finished.at);
+        Some(moment.with_timezone(&Local).date_naive())
+    }
+
+    /// The view's Auto-archived group (§8.1).
+    pub fn auto_archived(&self) -> &[AutoArchivedEntry] {
+        &self.auto_archive.group
+    }
+
+    /// Records the moment `[inbox] auto_archive` is seen turned on or off,
+    /// so the first run looks only at what arrives after it was turned on.
+    /// A vault that never turns it on never gets the file (G1).
+    fn note_auto_archive_setting(&mut self, cx: &mut Context<Self>) {
+        if !self.suggestions.loaded {
+            return;
+        }
+        let on = self.auto_archive_on();
+        if on == self.auto_archive.log.is_enabled() {
+            return;
+        }
+        let at = Utc::now();
+        let event = if on {
+            RunEvent::Enabled { at }
+        } else {
+            RunEvent::Disabled { at }
+        };
+        self.append_run_event(event, cx);
+    }
+
+    fn append_run_event(&mut self, event: RunEvent, cx: &mut Context<Self>) {
+        match event.to_json_line() {
+            Ok(line) => {
+                self.auto_archive.log_text.push_str(&line);
+                self.auto_archive.log_text.push('\n');
+                self.persist(AUTO_ARCHIVE_FILE, self.auto_archive.log_text.clone(), cx);
+            }
+            Err(error) => log::warn!("Thock: couldn't record the auto-archive run: {error:#}"),
+        }
+        self.auto_archive.log.apply(event);
+        cx.notify();
+    }
+
+    /// `thock::RunInboxAutoArchive`: runs now, or picks up a stopped run.
+    pub fn run_auto_archive_now(&mut self, cx: &mut Context<Self>) {
+        self.auto_archive.triggered = true;
+        self.auto_archive.manual = true;
+        self.try_auto_archive(cx);
+    }
+
+    /// Starts the run when one was asked for, everything it reads is in,
+    /// and it is due (§7.3). Safe to call often.
+    fn try_auto_archive(&mut self, cx: &mut Context<Self>) {
+        if !self.auto_archive.triggered || self.auto_archive.running.is_some() {
+            return;
+        }
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        if !vault.config.inbox.auto_archive {
+            self.auto_archive.triggered = false;
+            self.auto_archive.manual = false;
+            return;
+        }
+        if !self.suggestions.loaded || !self.items_loaded {
+            return;
+        }
+        let Some(policy) = self.policy.clone() else {
+            return;
+        };
+        // Never on the shipped defaults (G2), and never without a grant:
+        // both are shown as the group's status, nothing is written.
+        let Some(api_key) = Self::auto_archive_key(cx).filter(|_| policy.stamped) else {
+            self.auto_archive.triggered = false;
+            self.auto_archive.manual = false;
+            cx.notify();
+            return;
+        };
+        let manual = std::mem::take(&mut self.auto_archive.manual);
+        self.auto_archive.triggered = false;
+        let now = Utc::now();
+        let (run, watermark, skip, fresh) =
+            match due(&self.auto_archive.log, &now.with_timezone(&Local), manual) {
+                Due::No => return,
+                Due::Resume {
+                    run,
+                    watermark,
+                    skip,
+                } => (run, watermark, skip, false),
+                Due::Fresh { watermark, skip } => (run_id(now), watermark, skip, true),
+            };
+        let configured = vault.config.inbox.auto_archive_threshold;
+        let threshold = effective_threshold(configured);
+        if configured.is_some_and(|configured| configured != threshold)
+            && !std::mem::replace(&mut self.auto_archive.clamp_logged, true)
+        {
+            log::warn!(
+                "Thock: [inbox] auto_archive_threshold {configured:?} is outside 0.85–1.0; using {threshold}"
+            );
+        }
+        let stems = candidates(
+            self.items
+                .iter()
+                .map(|entry| (entry.item.stem.as_str(), entry.arrived)),
+            watermark,
+            &skip,
+        );
+        let entries: Vec<InboxEntry> = stems
+            .iter()
+            .filter_map(|stem| {
+                self.items
+                    .iter()
+                    .find(|entry| &entry.item.stem == stem)
+                    .cloned()
+            })
+            .collect();
+        if fresh {
+            self.append_run_event(
+                RunEvent::Started {
+                    run: run.clone(),
+                    at: now,
+                    watermark,
+                    policy: policy.hash.clone(),
+                    threshold,
+                    candidates: entries.len(),
+                },
+                cx,
+            );
+        }
+        let account = self
+            .gmail
+            .as_ref()
+            .and_then(|gmail| gmail.upgrade())
+            .and_then(|gmail| gmail.read(cx).account());
+        let account = account.or_else(|| self.account.clone());
+        let mut names = vault.config.inbox.names.clone();
+        if let Some(account) = &account {
+            names.extend(crate::inbox_auto_archive::account_names(
+                self.items
+                    .iter()
+                    .filter_map(|entry| entry.item.from.as_deref()),
+                account,
+            ));
+        }
+        let cached: HashMap<String, Suggestion> = entries
+            .iter()
+            .filter_map(|entry| {
+                Some((
+                    entry.hash.clone(),
+                    self.suggestion_for(&entry.hash)?.clone(),
+                ))
+            })
+            .collect();
+        self.auto_archive.asking = entries
+            .iter()
+            .filter(|entry| !cached.contains_key(&entry.hash))
+            .map(|entry| entry.hash.clone())
+            .collect();
+        let job = RunJob {
+            run,
+            vault,
+            policy,
+            threshold,
+            account,
+            names,
+            entries,
+            cached,
+            api_key,
+        };
+        let project = self.project.clone();
+        let http = cx.http_client();
+        self.auto_archive.running = Some(cx.spawn(async move |this, cx| {
+            let outcome = Self::auto_archive_run(&this, &project, &http, &job, cx).await;
+            this.update(cx, |service, cx| {
+                service.finish_auto_archive(&job.run, outcome, cx);
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// One run over its candidates, newest first: the guardrail, then Jev at
+    /// most [`MAX_IN_FLIGHT`] at a time, then each filing in order. A 402,
+    /// or auto-archive being turned off, stops it where it is.
+    async fn auto_archive_run(
+        this: &WeakEntity<Self>,
+        project: &Entity<Project>,
+        http: &Arc<dyn HttpClient>,
+        job: &RunJob,
+        cx: &mut AsyncApp,
+    ) -> RunOutcome {
+        let fs = project.read_with(cx, |project, _| project.fs().clone());
+        let today = Local::now().date_naive();
+        let mut stopped: Option<String> = None;
+        for chunk in job.entries.chunks(MAX_IN_FLIGHT) {
+            let asks = chunk.iter().map(|entry| {
+                let cached = job.cached.get(&entry.hash).cloned();
+                let replied = entry.item.source.as_deref() == Some("gmail")
+                    && person_wrote(
+                        &parse_thread(&entry.item.body, entry.item.from.as_deref()),
+                        job.account.as_deref(),
+                        &job.names,
+                    );
+                let request =
+                    build_request(&entry.item, &job.policy.rows, &job.policy.criteria, today)
+                        .to_string();
+                let cx: &AsyncApp = cx;
+                async move {
+                    if replied {
+                        return None;
+                    }
+                    Some(match cached {
+                        Some(suggestion) => (AskOutcome::Answered(suggestion), true),
+                        None => (ask_jev(http, &job.api_key, request, cx).await, false),
+                    })
+                }
+            });
+            let answers = futures::future::join_all(asks).await;
+            for (entry, answer) in chunk.iter().zip(answers) {
+                // An answer is paid for even when the run stops before it,
+                // so it is cached either way.
+                if let Some((AskOutcome::Answered(suggestion), false)) = &answer {
+                    this.update(cx, |service, cx| {
+                        service.cache_answer(
+                            &entry.hash,
+                            &entry.item.stem,
+                            &job.policy.hash,
+                            suggestion.clone(),
+                            cx,
+                        )
+                    })
+                    .ok();
+                }
+                if stopped.is_some() {
+                    continue;
+                }
+                // Turning auto-archive off stops a run between filings.
+                match this.read_with(cx, |service, _| service.auto_archive_on()) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        stopped = Some(TURNED_OFF.to_string());
+                        continue;
+                    }
+                    Err(_) => return RunOutcome::Released,
+                }
+                let event = match answer {
+                    None => skipped(job, entry, SkipReason::Replied),
+                    Some((AskOutcome::Paused(reason), _)) => {
+                        stopped = Some(reason.to_string());
+                        continue;
+                    }
+                    Some((AskOutcome::Failed(reason), _)) => {
+                        log::warn!("Thock: auto-archive couldn't ask about an item: {reason}");
+                        skipped(job, entry, SkipReason::Error)
+                    }
+                    Some((AskOutcome::Answered(suggestion), _)) => {
+                        if clears_bar(&suggestion, job.threshold) {
+                            Self::file_automatically(
+                                this,
+                                project,
+                                &fs,
+                                job,
+                                entry,
+                                &suggestion,
+                                cx,
+                            )
+                            .await
+                        } else {
+                            skipped(job, entry, SkipReason::Below)
+                        }
+                    }
+                };
+                if this
+                    .update(cx, |service, cx| service.append_run_event(event, cx))
+                    .is_err()
+                {
+                    return RunOutcome::Released;
+                }
+            }
+            if stopped.is_some() {
+                break;
+            }
+        }
+        RunOutcome::Done { stopped }
+    }
+
+    /// The filing `e` does (§7.1), with the automatic log line, then the
+    /// decision record. A failure leaves the item where it was.
+    async fn file_automatically(
+        this: &WeakEntity<Self>,
+        project: &Entity<Project>,
+        fs: &Arc<dyn Fs>,
+        job: &RunJob,
+        entry: &InboxEntry,
+        suggestion: &Suggestion,
+        cx: &mut AsyncApp,
+    ) -> RunEvent {
+        match crate::inbox_view::archive_automatically(project, fs, &job.vault, &entry.item, cx)
+            .await
+        {
+            Ok(Some(filed)) => {
+                let record = DecisionRecord {
+                    stem: entry.item.stem.clone(),
+                    suggested: Some(suggestion.choice.clone()),
+                    confidence: Some(suggestion.confidence),
+                    chosen: Destination::Archive.key().to_string(),
+                    via: VIA_AUTO.to_string(),
+                    at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    undone: false,
+                    run: Some(job.run.clone()),
+                    corrects: None,
+                };
+                this.update(cx, |service, cx| service.record_decision(&record, cx))
+                    .ok();
+                RunEvent::Archived {
+                    run: job.run.clone(),
+                    stem: entry.item.stem.clone(),
+                    path: filed.path,
+                    confidence: suggestion.confidence,
+                    line: filed.line,
+                }
+            }
+            Ok(None) => skipped(job, entry, SkipReason::Error),
+            Err(error) => {
+                log::warn!(
+                    "Thock: auto-archive couldn't file {}: {error:#}",
+                    entry.item.stem
+                );
+                skipped(job, entry, SkipReason::Error)
+            }
+        }
+    }
+
+    fn finish_auto_archive(&mut self, run: &str, outcome: RunOutcome, cx: &mut Context<Self>) {
+        self.auto_archive.running = None;
+        self.auto_archive.asking.clear();
+        let RunOutcome::Done { stopped } = outcome else {
+            return;
+        };
+        let (archived, skipped) = self
+            .auto_archive
+            .log
+            .runs
+            .iter()
+            .rev()
+            .find(|candidate| candidate.id == run)
+            .map_or((0, 0), |run| (run.archived.len(), run.skipped.len()));
+        self.append_run_event(
+            RunEvent::Finished {
+                run: run.to_string(),
+                at: Utc::now(),
+                archived,
+                skipped,
+                stopped,
+            },
+            cx,
+        );
+        self.refresh_items(cx);
+        self.refresh_group(cx);
+        if archived > 0
+            && let Some(gmail) = crate::gmail_service::service_for_project(&self.project, cx)
+        {
+            gmail.update(cx, |gmail, cx| gmail.reconcile_soon(cx));
+        }
+        cx.emit(InboxEvent::SuggestionsChanged);
+        cx.notify();
+    }
+
+    /// Re-reads the group: the last run's filings nobody corrected whose
+    /// notes are still in the archive, read like inbox rows.
+    fn refresh_group(&mut self, cx: &mut Context<Self>) {
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let items: Vec<GroupItem> = crate::inbox_auto_archive::group_run(&self.auto_archive.log)
+            .map(|run| group_items(run, &self.suggestions.decisions_text))
+            .unwrap_or_default();
+        let fs = self.project.read(cx).fs().clone();
+        self.auto_archive.group_task = Some(cx.spawn(async move |this, cx| {
+            let mut group = Vec::new();
+            for GroupItem { run, item } in items {
+                if let Some(entry) = load_archived(&fs, &vault, &item).await {
+                    group.push(AutoArchivedEntry {
+                        entry,
+                        run,
+                        confidence: item.confidence,
+                        line: item.line,
+                    });
+                }
+            }
+            this.update(cx, |service, cx| {
+                if service.auto_archive.group != group {
+                    service.auto_archive.group = group;
+                    cx.emit(InboxEvent::ItemsChanged);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// `thock::TurnOffInboxAutoArchive` (§5.3): the two keys leave `[inbox]`
+    /// and nothing else in the config changes.
+    pub fn turn_off_auto_archive(
+        &mut self,
+        workspace: WeakEntity<Workspace>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(vault) = self.vault.clone() else {
+            return;
+        };
+        let fs = self.project.read(cx).fs().clone();
+        cx.spawn(async move |this, cx| {
+            let path = vault.root.join(VAULT_MARKER_DIR).join(VAULT_CONFIG_FILE);
+            let result = async {
+                let text = fs.load(&path).await.context("reading .thock/config.toml")?;
+                let edited = without_auto_archive_keys(&text)?;
+                if edited != text {
+                    fs.atomic_write(path.clone(), edited)
+                        .await
+                        .context("writing .thock/config.toml")?;
+                }
+                anyhow::Ok(())
+            }
+            .await;
+            let message = match &result {
+                Ok(()) => {
+                    "Auto-archive is off. The policy and the map of your work stay.".to_string()
+                }
+                Err(error) => format!("Couldn't turn auto-archive off: {error:#}"),
+            };
+            if result.is_ok() {
+                this.update(cx, |service, cx| service.reload(cx)).ok();
+            }
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.show_toast(
+                        workspace::Toast::new(
+                            workspace::notifications::NotificationId::unique::<AutoArchiveToast>(),
+                            message,
+                        )
+                        .autohide(),
+                        cx,
+                    );
+                })
+                .ok();
+        })
+        .detach();
+    }
+
     #[cfg(test)]
     pub(crate) fn set_state_for_test(&mut self, state: SyncState, cx: &mut Context<Self>) {
         self.state = state;
@@ -1224,12 +2039,80 @@ impl InboxService {
     }
 
     #[cfg(test)]
+    pub(crate) fn replace_run_log_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.auto_archive.log = RunLog::parse(text);
+        self.auto_archive.log_text = text.to_string();
+        self.refresh_group(cx);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_account_for_test(&mut self, account: &str) {
+        self.account = Some(account.to_string());
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_vault_for_test(&mut self, vault: Vault, cx: &mut Context<Self>) {
         self.vault = Some(vault);
         self.suggestions.loaded = false;
+        self.load_policy(cx);
         self.load_suggestion_state(cx);
         self.refresh_items(cx);
     }
+}
+
+/// The toast turning auto-archive off shows.
+struct AutoArchiveToast;
+
+/// Why a run that was going when auto-archive was turned off stopped.
+const TURNED_OFF: &str = "auto-archive was turned off";
+
+/// What a run needs, captured when it starts.
+struct RunJob {
+    run: String,
+    vault: Vault,
+    policy: LoadedPolicy,
+    threshold: f64,
+    account: Option<String>,
+    names: Vec<String>,
+    /// Newest first.
+    entries: Vec<InboxEntry>,
+    /// Answers already asked under this policy, by note hash.
+    cached: HashMap<String, Suggestion>,
+    api_key: String,
+}
+
+enum RunOutcome {
+    Done {
+        stopped: Option<String>,
+    },
+    /// The service went away mid-run; the next start resumes it.
+    Released,
+}
+
+fn skipped(job: &RunJob, entry: &InboxEntry, reason: SkipReason) -> RunEvent {
+    RunEvent::Skipped {
+        run: job.run.clone(),
+        stem: entry.item.stem.clone(),
+        reason,
+    }
+}
+
+/// A filed note read back from the archive as a row. `None` once the note
+/// has left it (sent back, or moved by hand).
+async fn load_archived(fs: &Arc<dyn Fs>, vault: &Vault, item: &ArchivedItem) -> Option<InboxEntry> {
+    let content = fs.load(&vault.root.join(&item.path)).await.ok()?;
+    let item = parse_inbox_note(&item.path, &content);
+    let arrived = item
+        .captured
+        .as_deref()
+        .and_then(|captured| DateTime::parse_from_rfc3339(captured).ok())
+        .map(|captured| captured.with_timezone(&Utc));
+    Some(InboxEntry {
+        hash: note_hash(&content),
+        is_new: false,
+        arrived,
+        item,
+    })
 }
 
 fn state_path(vault: &Vault, file: &str) -> PathBuf {
@@ -1241,23 +2124,6 @@ async fn write_state(fs: &Arc<dyn Fs>, path: PathBuf, contents: String) -> Resul
         fs.create_dir(parent).await?;
     }
     fs.atomic_write(path, contents).await
-}
-
-/// The policy rows Jev is given: the vault's `triage-policy.md` flattened,
-/// or the shipped defaults when the file is missing or has no table.
-async fn load_policy(fs: &Arc<dyn Fs>, vault: &Vault) -> Vec<String> {
-    let rows = match fs.load(&vault.root.join(POLICY_PATH)).await {
-        Ok(text) => flatten_policy(&text),
-        Err(_) => Vec::new(),
-    };
-    if rows.is_empty() {
-        crate::inbox_suggest::DEFAULT_POLICY
-            .iter()
-            .map(|row| row.to_string())
-            .collect()
-    } else {
-        rows
-    }
 }
 
 /// One decision request (§7.3): a 429 or 5xx retries with backoff, a 402
@@ -1380,6 +2246,7 @@ async fn load_items(fs: &Arc<dyn Fs>, vault: &Vault, dir: &str) -> Vec<InboxEntr
             InboxEntry {
                 hash: note_hash(&content),
                 is_new: is_new(&item, modified, watermark),
+                arrived: moment,
                 item,
             },
         ));
@@ -2095,6 +2962,8 @@ mod tests {
             via: "space".to_string(),
             at: "2026-10-10T09:14:40Z".to_string(),
             undone: false,
+            run: None,
+            corrects: None,
         };
         service.update(cx, |service, cx| {
             service.record_decision(&record, cx);
@@ -2120,7 +2989,8 @@ mod tests {
                 service.decision_report(),
                 DecisionReport {
                     decisions: 2,
-                    taken: 1
+                    taken: 1,
+                    ..DecisionReport::default()
                 }
             );
         });
@@ -2142,7 +3012,8 @@ mod tests {
                 service.decision_report(),
                 DecisionReport {
                     decisions: 1,
-                    taken: 0
+                    taken: 0,
+                    ..DecisionReport::default()
                 }
             );
         });
@@ -2169,6 +3040,7 @@ mod tests {
                     "s",
                     &crate::inbox_suggest::parse_response(&jev_answer("soon", 0.9)).unwrap(),
                     "2026-10-01T09:00:00Z",
+                    &LoadedPolicy::from_text(None).hash,
                 ))
                 .unwrap()
             )
@@ -2192,6 +3064,8 @@ mod tests {
                     via: "e".to_string(),
                     at: "2026-10-10T09:00:00Z".to_string(),
                     undone: false,
+                    run: None,
+                    corrects: None,
                 },
                 cx,
             );
@@ -2286,6 +3160,470 @@ mod tests {
             .await
             .unwrap(),
             MoveOutcome::Moved
+        );
+    }
+
+    const STAMPED_POLICY: &str = "---\nrefreshed: 2026-11-01\n---\n# Triage policy\n\n## Proposals\n\n\
+        | If it looks like… | Propose |\n| --- | --- |\n| A ticket about licences | Archive |\n";
+
+    /// A vault with auto-archive on since 2026-01-01, a stamped policy (or
+    /// `policy`), these notes in the inbox, and a fake Jev answering by
+    /// title: `(status, choice, confidence)`.
+    async fn auto_archive_service(
+        cx: &mut TestAppContext,
+        notes: &[(&str, String)],
+        policy: &str,
+        answer: fn(&str) -> (u16, &'static str, f64),
+    ) -> (Arc<FakeFs>, Entity<InboxService>, Arc<AtomicUsize>) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        auto_archive_service_on(cx, fs, notes, policy, answer, false).await
+    }
+
+    /// The same on `fs`, with an Inbox view open when `view_open`.
+    async fn auto_archive_service_on(
+        cx: &mut TestAppContext,
+        fs: Arc<FakeFs>,
+        notes: &[(&str, String)],
+        policy: &str,
+        answer: fn(&str) -> (u16, &'static str, f64),
+        view_open: bool,
+    ) -> (Arc<FakeFs>, Entity<InboxService>, Arc<AtomicUsize>) {
+        fs.create_dir(Path::new("/vault/inbox")).await.unwrap();
+        fs.create_dir(Path::new("/vault/routines/inbox"))
+            .await
+            .unwrap();
+        fs.create_dir(Path::new("/vault/.thock/state/inbox"))
+            .await
+            .unwrap();
+        fs.insert_file(
+            Path::new("/vault/routines/inbox/triage-policy.md"),
+            policy.as_bytes().to_vec(),
+        )
+        .await;
+        fs.insert_file(
+            Path::new("/vault/.thock/state/inbox/auto-archive.jsonl"),
+            b"{\"event\":\"enabled\",\"at\":\"2026-01-01T00:00:00Z\"}\n".to_vec(),
+        )
+        .await;
+        for (name, content) in notes {
+            fs.insert_file(
+                Path::new(&format!("/vault/inbox/{name}.md")),
+                content.as_bytes().to_vec(),
+            )
+            .await;
+        }
+        let requests = Arc::new(AtomicUsize::new(0));
+        let client = FakeHttpClient::create({
+            let requests = requests.clone();
+            move |request| {
+                requests.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let mut body = String::new();
+                    request.into_body().read_to_string(&mut body).await?;
+                    let value: serde_json::Value = serde_json::from_str(&body)?;
+                    let title = value["state"]["item"]["title"].as_str().unwrap_or_default();
+                    let (status, choice, confidence) = answer(title);
+                    Ok(Response::builder()
+                        .status(status)
+                        .body(AsyncBody::from(jev_answer(choice, confidence).into_bytes()))
+                        .unwrap())
+                }
+            }
+        });
+        cx.update(|cx| {
+            cx.set_http_client(client);
+            plus::set_current_entitlement(Some(entitlement(false)), cx);
+        });
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+        let service = cx.new(|cx| InboxService::new(project.clone(), cx));
+        let mut vault = test_vault();
+        vault.config.inbox.auto_archive = true;
+        service.update(cx, |service, cx| {
+            service.set_account_for_test("diego@example.com");
+            if view_open {
+                service.open_views += 1;
+            }
+            service.set_vault_for_test(vault, cx);
+        });
+        cx.run_until_parked();
+        (fs, service, requests)
+    }
+
+    #[gpui::test]
+    async fn an_open_view_does_not_ask_about_what_the_run_asks(cx: &mut TestAppContext) {
+        init_test(cx);
+        let notes = [
+            (
+                "2026-11-07-0900-a",
+                note("A", "2026-11-07T09:00:00Z", "a2a2a2a2a2a2"),
+            ),
+            (
+                "2026-11-07-0800-b",
+                note("B", "2026-11-07T08:00:00Z", "b2b2b2b2b2b2"),
+            ),
+            (
+                "2026-11-07-0700-c",
+                note("C", "2026-11-07T07:00:00Z", "c2c2c2c2c2c2"),
+            ),
+        ];
+        let fs = FakeFs::new(cx.executor());
+        let (_, service, requests) = auto_archive_service_on(
+            cx,
+            fs,
+            &notes,
+            STAMPED_POLICY,
+            |_| (200, "unsure", 0.9),
+            true,
+        )
+        .await;
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        service.read_with(cx, |service, _| {
+            assert!(service.auto_archive.asking.is_empty());
+            for (_, content) in &notes {
+                assert!(service.suggestion_for(&note_hash(content)).is_some());
+            }
+        });
+    }
+
+    fn run_log(text: &str) -> RunLog {
+        RunLog::parse(text)
+    }
+
+    #[gpui::test]
+    async fn the_morning_run_files_what_clears_the_bar_once_a_day(cx: &mut TestAppContext) {
+        let replied = "---\nsource:   gmail\ncapture:  r0r0r0r0r0r0\ncaptured: 2026-11-07T09:00:00Z\n\
+                       title:    Licence renewal\nfrom:     Ana <ana@example.com>\n---\n\n# Licence renewal\n\n\
+                       ## Ana <ana@example.com> — 2026-11-07 09:00\n\nRenewing?\n\n\
+                       ## Diego Tavares <diego@example.com> — 2026-11-07 10:00\n\nOn it.\n";
+        let notes = [
+            (
+                "2026-11-07-0800-maya",
+                note("Maya licence", "2026-11-07T08:00:00Z", "a0a0a0a0a0a0"),
+            ),
+            (
+                "2026-11-07-0700-houdini",
+                note("Houdini licence", "2026-11-07T07:00:00Z", "b0b0b0b0b0b0"),
+            ),
+            (
+                "2026-11-07-0600-review",
+                note("Review the plan", "2026-11-07T06:00:00Z", "c0c0c0c0c0c0"),
+            ),
+            ("2026-11-07-0900-renewal", replied.to_string()),
+            (
+                "2025-12-01-0900-old",
+                note("Old licence", "2025-12-01T09:00:00Z", "e0e0e0e0e0e0"),
+            ),
+        ];
+        let (fs, service, requests) =
+            auto_archive_service(cx, &notes, STAMPED_POLICY, |title| match title {
+                "Maya licence" => (200, "archive", 0.97),
+                "Houdini licence" => (200, "archive", 0.94),
+                _ => (200, "unsure", 0.99),
+            })
+            .await;
+
+        // Asked about the three new items the person didn't write in; never
+        // about what came before auto-archive was on.
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        assert!(
+            fs.is_file(Path::new("/vault/archives/inbox/2026-11-07-0800-maya.md"))
+                .await
+        );
+        for kept in [
+            "2026-11-07-0700-houdini",
+            "2026-11-07-0600-review",
+            "2026-11-07-0900-renewal",
+            "2025-12-01-0900-old",
+        ] {
+            assert!(
+                fs.is_file(Path::new(&format!("/vault/inbox/{kept}.md")))
+                    .await,
+                "{kept}"
+            );
+        }
+        let log = fs
+            .load(Path::new(&format!("/vault/{TRIAGE_LOG_PATH}")))
+            .await
+            .unwrap();
+        assert!(
+            log.ends_with("· Maya licence → Archived · auto <!--inbox:a0a0a0a0a0a0-->\n"),
+            "{log}"
+        );
+        let decisions = fs
+            .load(Path::new("/vault/.thock/state/inbox/decisions.jsonl"))
+            .await
+            .unwrap();
+        let record: DecisionRecord =
+            serde_json::from_str(decisions.lines().next().unwrap()).unwrap();
+        assert_eq!(record.via, "auto");
+        assert_eq!(record.chosen, "archive");
+        assert_eq!(record.suggested.as_deref(), Some("archive"));
+        assert!(record.run.is_some());
+
+        let text = fs
+            .load(Path::new("/vault/.thock/state/inbox/auto-archive.jsonl"))
+            .await
+            .unwrap();
+        let runs = run_log(&text);
+        let run = runs.latest().expect("a run");
+        assert_eq!(run.candidates, 4);
+        assert_eq!(run.archived.len(), 1);
+        let mut skipped = run.skipped.clone();
+        skipped.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            skipped,
+            [
+                ("2026-11-07-0600-review".to_string(), SkipReason::Below),
+                ("2026-11-07-0700-houdini".to_string(), SkipReason::Below),
+                ("2026-11-07-0900-renewal".to_string(), SkipReason::Replied),
+            ]
+        );
+        assert!(
+            run.finished
+                .as_ref()
+                .is_some_and(|finished| finished.stopped.is_none())
+        );
+        service.read_with(cx, |service, cx| {
+            assert_eq!(service.auto_archived().len(), 1);
+            assert!(matches!(
+                service.auto_archive_status(cx),
+                RunStatus::Ran { archived: 1, .. }
+            ));
+        });
+
+        // Another scan the same day asks nothing.
+        service.update(cx, |service, cx| {
+            service.auto_archive.triggered = true;
+            service.refresh_items(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        let again = fs
+            .load(Path::new("/vault/.thock/state/inbox/auto-archive.jsonl"))
+            .await
+            .unwrap();
+        assert_eq!(run_log(&again).runs.len(), 1);
+    }
+
+    #[gpui::test]
+    async fn a_402_stops_the_run_and_leaves_the_rest(cx: &mut TestAppContext) {
+        let notes = [
+            (
+                "2026-11-07-0900-a",
+                note("A", "2026-11-07T09:00:00Z", "a1a1a1a1a1a1"),
+            ),
+            (
+                "2026-11-07-0800-b",
+                note("B", "2026-11-07T08:00:00Z", "b1b1b1b1b1b1"),
+            ),
+            (
+                "2026-11-07-0700-c",
+                note("C", "2026-11-07T07:00:00Z", "c1c1c1c1c1c1"),
+            ),
+        ];
+        let (fs, service, _) =
+            auto_archive_service(cx, &notes, STAMPED_POLICY, |title| match title {
+                "B" => (402, "archive", 0.99),
+                _ => (200, "archive", 0.99),
+            })
+            .await;
+        assert!(
+            fs.is_file(Path::new("/vault/archives/inbox/2026-11-07-0900-a.md"))
+                .await
+        );
+        assert!(
+            fs.is_file(Path::new("/vault/inbox/2026-11-07-0800-b.md"))
+                .await
+        );
+        assert!(
+            fs.is_file(Path::new("/vault/inbox/2026-11-07-0700-c.md"))
+                .await,
+            "untouched"
+        );
+        let text = fs
+            .load(Path::new("/vault/.thock/state/inbox/auto-archive.jsonl"))
+            .await
+            .unwrap();
+        let runs = run_log(&text);
+        let run = runs.latest().unwrap();
+        assert_eq!(run.recorded(), ["2026-11-07-0900-a".to_string()].into());
+        assert!(run.stopped().is_some());
+        service.read_with(cx, |service, cx| {
+            assert_eq!(
+                service.auto_archive_status(cx),
+                RunStatus::Stopped {
+                    processed: 1,
+                    candidates: 3,
+                    reason: "Thock Plus allowance spent for this cycle".to_string(),
+                    retryable: true,
+                }
+            );
+        });
+        // With the allowance spent Retry couldn't work, so it isn't offered.
+        cx.update(|cx| plus::set_current_entitlement(Some(entitlement(true)), cx));
+        service.read_with(cx, |service, cx| {
+            let status = service.auto_archive_status(cx);
+            assert!(
+                matches!(
+                    status,
+                    RunStatus::Stopped {
+                        retryable: false,
+                        ..
+                    }
+                ),
+                "{status:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn without_a_refreshed_policy_nothing_runs(cx: &mut TestAppContext) {
+        let notes = [(
+            "2026-11-07-0900-a",
+            note("A", "2026-11-07T09:00:00Z", "a2a2a2a2a2a2"),
+        )];
+        let (fs, service, requests) = auto_archive_service(
+            cx,
+            &notes,
+            include_str!("../assets/routines/inbox/triage-policy.md"),
+            |_| (200, "archive", 0.99),
+        )
+        .await;
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        assert!(
+            fs.is_file(Path::new("/vault/inbox/2026-11-07-0900-a.md"))
+                .await
+        );
+        let text = fs
+            .load(Path::new("/vault/.thock/state/inbox/auto-archive.jsonl"))
+            .await
+            .unwrap();
+        assert!(run_log(&text).runs.is_empty(), "{text}");
+        service.read_with(cx, |service, cx| {
+            assert_eq!(service.auto_archive_status(cx), RunStatus::WaitingForPolicy);
+        });
+    }
+
+    #[gpui::test]
+    async fn turning_off_removes_only_the_keys_it_added(cx: &mut TestAppContext) {
+        let (fs, service, _) =
+            auto_archive_service(cx, &[], STAMPED_POLICY, |_| (200, "unsure", 0.5)).await;
+        fs.insert_file(
+            Path::new("/vault/.thock/config.toml"),
+            b"schema = 1\n\n[inbox]\nsuggestions = false\nauto_archive = true\nauto_archive_threshold = 0.9\n".to_vec(),
+        )
+        .await;
+        service.update(cx, |service, cx| {
+            service.turn_off_auto_archive(WeakEntity::new_invalid(), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            fs.load(Path::new("/vault/.thock/config.toml"))
+                .await
+                .unwrap(),
+            "schema = 1\n\n[inbox]\nsuggestions = false\n"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_poll_triggered_run_waits_for_the_scan_after_the_poll(cx: &mut TestAppContext) {
+        let notes = [(
+            "2026-11-07-0800-a",
+            note("A", "2026-11-07T08:00:00Z", "a3a3a3a3a3a3"),
+        )];
+        // Not stamped yet: the first scan's trigger runs nothing.
+        let (fs, service, requests) = auto_archive_service(
+            cx,
+            &notes,
+            include_str!("../assets/routines/inbox/triage-policy.md"),
+            |_| (200, "archive", 0.99),
+        )
+        .await;
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        service.update(cx, |service, _| service.gmail_polling_for_test = Some(true));
+        fs.insert_file(
+            Path::new("/vault/routines/inbox/triage-policy.md"),
+            STAMPED_POLICY.as_bytes().to_vec(),
+        )
+        .await;
+        cx.run_until_parked();
+        assert_eq!(requests.load(Ordering::SeqCst), 0, "no poll yet");
+
+        // The poll lands B; the policy reload finishes before the scan does.
+        fs.insert_file(
+            Path::new("/vault/inbox/2026-11-07-0900-b.md"),
+            note("B", "2026-11-07T09:00:00Z", "b3b3b3b3b3b3").into_bytes(),
+        )
+        .await;
+        service.update(cx, |service, cx| {
+            service.gmail_poll_finished(cx);
+            service.policy = None;
+            service.load_policy(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            fs.is_file(Path::new("/vault/archives/inbox/2026-11-07-0900-b.md"))
+                .await
+        );
+        assert!(
+            fs.is_file(Path::new("/vault/archives/inbox/2026-11-07-0800-a.md"))
+                .await
+        );
+        let text = fs
+            .load(Path::new("/vault/.thock/state/inbox/auto-archive.jsonl"))
+            .await
+            .unwrap();
+        assert_eq!(run_log(&text).latest().unwrap().candidates, 2, "{text}");
+    }
+
+    #[gpui::test]
+    async fn a_failed_log_write_puts_the_note_back(cx: &mut TestAppContext) {
+        let notes = [(
+            "2026-11-07-0800-a",
+            note("A", "2026-11-07T08:00:00Z", "a4a4a4a4a4a4"),
+        )];
+        init_test(cx);
+        // A folder where the triage log should be: the log write fails after
+        // the move.
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(Path::new(&format!("/vault/{TRIAGE_LOG_PATH}")))
+            .await
+            .unwrap();
+        let (fs, _service, _) = auto_archive_service_on(
+            cx,
+            fs,
+            &notes,
+            STAMPED_POLICY,
+            |_| (200, "archive", 0.99),
+            false,
+        )
+        .await;
+        assert!(
+            fs.is_file(Path::new("/vault/inbox/2026-11-07-0800-a.md"))
+                .await
+        );
+        assert!(
+            !fs.is_file(Path::new("/vault/archives/inbox/2026-11-07-0800-a.md"))
+                .await
+        );
+        let text = fs
+            .load(Path::new("/vault/.thock/state/inbox/auto-archive.jsonl"))
+            .await
+            .unwrap();
+        let runs = run_log(&text);
+        let run = runs.latest().unwrap();
+        assert!(run.archived.is_empty());
+        assert_eq!(
+            run.skipped,
+            [("2026-11-07-0800-a".to_string(), SkipReason::Error)]
+        );
+        assert!(
+            fs.load(Path::new("/vault/.thock/state/inbox/decisions.jsonl"))
+                .await
+                .unwrap_or_default()
+                .is_empty()
         );
     }
 }
