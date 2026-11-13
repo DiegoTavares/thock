@@ -238,7 +238,7 @@ pub fn run_skill_kickoff(vault_relative_path: &str) -> String {
 }
 
 /// The same, run in one of the modes the skill describes (`enable` for
-/// Refresh Inbox Policy, V56 §5.1).
+/// Refresh Inbox Policy, V57 §5.1).
 pub fn run_skill_kickoff_in_mode(vault_relative_path: &str, mode: &str) -> String {
     format!("{} in {mode} mode", run_skill_kickoff(vault_relative_path))
 }

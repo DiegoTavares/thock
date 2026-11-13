@@ -1,4 +1,4 @@
-# Thock V56 - Auto-archive: the Inbox clears what isn't yours before you sit down
+# Thock V57 - Auto-archive: the Inbox clears what isn't yours before you sit down
 
 **Status:** Implemented (2026-11-08): PR #197; §15 lists where the code differs from the text
 **Owner:** Diego · **Date:** 2026-11-08
@@ -17,7 +17,7 @@ wrong team, notifications, things another group owns. The person reporting a tic
 category, so the category is often wrong, and a rule on the category can't tell what is really the
 person's. Today each one costs a look and an `e`.
 
-V56 adds two parts that work together:
+V57 adds two parts that work together:
 
 1. **A morning run (Rust, desk).** Once a day, right after the first Gmail sync that completes,
    the desk asks Jev about each item that arrived since the previous run. Any item Jev answers
@@ -88,7 +88,7 @@ then it improves the Inbox view's chips too.
 ### 4.2 The policy file becomes the agent's
 
 `routines/inbox/triage-policy.md` was the person's file: Set Up Inbox wrote it and the person
-edited it by hand. With V56 it is the refresh skill's synthesis, the same standing `memory/` has
+edited it by hand. With V57 it is the refresh skill's synthesis, the same standing `memory/` has
 under V28 decision 14. Concretely:
 
 - The skill rewrites `## Proposals` and `## Criteria` wholesale each run. It reads the current
@@ -187,8 +187,8 @@ at that moment, §7.2).
 ```toml
 [inbox]
 suggestions = true
-auto_archive = true          # V56; absent = off
-auto_archive_threshold = 0.95 # V56; clamped to [0.85, 1.0]
+auto_archive = true          # V57; absent = off
+auto_archive_threshold = 0.95 # V57; clamped to [0.85, 1.0]
 ```
 
 A threshold below `FILLED_THRESHOLD` (0.85) is clamped up and logged: below the filled chip, the
@@ -198,7 +198,7 @@ view keeps hiding chips.
 
 ### 5.3 Turning it off
 
-`thock::TurnOffInboxAutoArchive` removes the two V56 keys from `[inbox]`, leaving the rest of the
+`thock::TurnOffInboxAutoArchive` removes the two V57 keys from `[inbox]`, leaving the rest of the
 table alone. The policy file and memory page stay; they keep steering the view's chips. The
 current group stays visible until its items are triaged, but no new run happens.
 
@@ -325,7 +325,7 @@ OpenRouter, reads *Auto-archive needs suggestions to be available*, and nothing 
 
 `SuggestionRecord` gains `policy`: the sha256 of the flattened Proposals rows plus the resolved
 criteria, in request order. A record answers for an item only when both `hash` and `policy`
-match. A record without `policy` (written before V56) counts as stale, so the view re-asks once,
+match. A record without `policy` (written before V57) counts as stale, so the view re-asks once,
 at the V41 rate. The same rule applies to the view's chips, so a refreshed policy shows up in
 the chips without deleting the cache.
 
@@ -426,7 +426,7 @@ The existing *suggestion taken 83%* tooltip gains *auto-archive undone 2 of 61* 
   ignored.
 - `build_request` with parsed criteria matches the JSON of §4.4.
 - `policy_hash` changes with a row or a criterion, not with whitespace outside the table.
-- A cached record matches only on `hash` + `policy`. A pre-V56 record is stale.
+- A cached record matches only on `hash` + `policy`. A pre-V57 record is stale.
 
 ### 11.3 The run (`inbox_auto_archive.rs`, pure, injected `now` and a stub Jev)
 - Candidates: watermark filtering by `captured:`, falling back to file time. Items before the
@@ -454,7 +454,7 @@ The existing *suggestion taken 83%* tooltip gains *auto-archive undone 2 of 61* 
   days → nothing (the V53 horizon still holds).
 
 ### 11.6 Config and actions
-- `TurnOffInboxAutoArchive` removes only the V56 keys. A temp vault, never the real config.
+- `TurnOffInboxAutoArchive` removes only the V57 keys. A temp vault, never the real config.
 - The skill's `enable` step: a test parses exactly the TOML insert the skill tells the agent to
   write, against a config with and without `[inbox]`.
 
@@ -525,7 +525,7 @@ No inherited crate changes beyond the keymaps.
 12. **Turning it on runs the refresh first.** The morning run never works from the shipped
     defaults.
 13. **Only items since the last run.** What the person has left in the Inbox is theirs.
-14. **The phone just sees the moves.** No phone group in V56.
+14. **The phone just sees the moves.** No phone group in V57.
 15. **The suggestion cache keys on the policy too**, so a refresh re-asks at the next view or
     run.
 

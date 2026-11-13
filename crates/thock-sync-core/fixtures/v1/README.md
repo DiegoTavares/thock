@@ -179,4 +179,4 @@ Decisions the implementation had to take; the contract will be amended to match.
 without a marker or out of the log's shape; `class` is
 `decision_class(parsed.destination, soon, someday)` by name, null when `parsed` is. An optional
 `automatic` (false when absent) is `is_automatic(parsed.destination)`: the morning run's
-`Archived · auto` (V56 §7.1).
+`Archived · auto` (V57 §7.1).

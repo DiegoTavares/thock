@@ -251,7 +251,7 @@ type FilingPlan = Vec<(InboxEntry, Destination)>;
 /// The one toast a decision shows; undo dismisses it by this id.
 struct InboxDecisionToast;
 
-/// Where the selection is when it is in the Auto-archived group (V56 §8.2).
+/// Where the selection is when it is in the Auto-archived group (V57 §8.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GroupCursor {
     Header,
@@ -319,7 +319,7 @@ pub struct InboxView {
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     /// The tab that was active when the view opened; `escape` returns to it.
     previous_item: Option<Box<dyn WeakItemHandle>>,
-    /// The Auto-archived group's rows as shown, filtered (V56 §8.1).
+    /// The Auto-archived group's rows as shown, filtered (V57 §8.1).
     group: Vec<AutoArchivedEntry>,
     group_expanded: bool,
     group_status: Option<GroupStatus>,
@@ -632,7 +632,7 @@ impl InboxView {
         }
     }
 
-    // ----- The Auto-archived group (V56 §8) -----
+    // ----- The Auto-archived group (V57 §8) -----
 
     /// Re-reads the group from the service, filtered like the rows, and
     /// keeps the selection on its row, or moves it where a correction said
@@ -1971,7 +1971,7 @@ impl InboxView {
     /// probabilities show; an `unsure` answer still shows its spread.
     fn bar_state(&self, entry: &InboxEntry, cx: &App) -> BarState {
         // An auto-archived row shows what the run decided on, Archive filled,
-        // whatever the policy or the grant say now (V56 §8.1).
+        // whatever the policy or the grant say now (V57 §8.1).
         if let Some(row) = self
             .group
             .iter()
@@ -3653,7 +3653,7 @@ impl InboxView {
         self.render_keys_sheet_with(decide_heading, decide, window, cx)
     }
 
-    /// The group's rows of the keys sheet (V56 §8.2). Showing and hiding the
+    /// The group's rows of the keys sheet (V57 §8.2). Showing and hiding the
     /// group is the keys that open and close it, `→`/`←` or `l`/`h`.
     fn group_keys(&self, window: &Window, cx: &App) -> Vec<(Vec<KeyBinding>, &'static str)> {
         let key = |action: &dyn Action| vec![self.keycap(action, list_key_context(), window, cx)];
@@ -4017,7 +4017,7 @@ fn destination_action(destination: Destination) -> Box<dyn Action> {
 }
 
 impl SectionedListDelegate for InboxView {
-    /// New, Carried over, and the Auto-archived group (V56 §8.1).
+    /// New, Carried over, and the Auto-archived group (V57 §8.1).
     fn sections(&self) -> usize {
         3
     }
@@ -4693,7 +4693,7 @@ pub(crate) struct AutoFiled {
     pub line: String,
 }
 
-/// The morning run's filing (V56 §7.1): `e`'s move and log line, with the
+/// The morning run's filing (V57 §7.1): `e`'s move and log line, with the
 /// automatic destination word, and no task. `None` when the note is gone or
 /// its name is already taken in the archive; nothing is written then. A log
 /// line that can't be written puts the note back in the inbox, so nothing
@@ -4857,7 +4857,7 @@ mod tests {
         vim: bool,
         grant: bool,
         cached: Vec<(&'static str, &'static str, f64)>,
-        /// A morning run that filed [`MAYA`] and [`HOUDINI`] (V56).
+        /// A morning run that filed [`MAYA`] and [`HOUDINI`] (V57).
         auto_archived: bool,
     }
 

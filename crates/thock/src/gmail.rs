@@ -949,7 +949,7 @@ pub const ARCHIVE_GRACE: Duration = Duration::from_secs(60);
 /// How long after Thock archived a thread an undo still puts it back.
 /// Tidying old log lines by hand never touches Gmail.
 pub const UNDO_HORIZON: Duration = Duration::from_secs(24 * 60 * 60);
-/// The same for a thread the morning run archived (V56 §7.3): its item waits
+/// The same for a thread the morning run archived (V57 §7.3): its item waits
 /// in the Inbox's Auto-archived group, and a correction from there has to
 /// reach Gmail across a weekend.
 pub const AUTOMATIC_UNDO_HORIZON: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -1259,7 +1259,7 @@ pub struct ArchivePlan {
 /// been seen for [`ARCHIVE_GRACE`], when its class is in `on` and its thread
 /// was captured into `inbox_dir`; puts back a thread Thock archived less than
 /// [`UNDO_HORIZON`] ago whose line left the log. A thread the morning run
-/// archived (V56) gets [`AUTOMATIC_UNDO_HORIZON`] instead, and is also put
+/// archived (V57) gets [`AUTOMATIC_UNDO_HORIZON`] instead, and is also put
 /// back when its line was re-filed to a class `on` doesn't list. Decisions
 /// logged before a class was turned on are baselined and never touched, and
 /// a thread is archived at most once per decision, so a move back in Gmail

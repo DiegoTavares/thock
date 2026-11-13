@@ -12,7 +12,7 @@
 //! the decision log.
 //!
 //! Once a day, when `[inbox] auto_archive` is on, it also drives the morning
-//! run (V56 §7): after the first Gmail poll of the local day it asks Jev about
+//! run (V57 §7): after the first Gmail poll of the local day it asks Jev about
 //! what arrived since the last run, files what clears the bar to Archive the
 //! way `e` would, and keeps the run's record in `auto-archive.jsonl`, which
 //! the view's Auto-archived group reads.
@@ -275,7 +275,7 @@ pub struct InboxEntry {
     pub arrived: Option<DateTime<Utc>>,
 }
 
-/// An item of the view's Auto-archived group (V56 §8.1): the archived note,
+/// An item of the view's Auto-archived group (V57 §8.1): the archived note,
 /// read like an inbox row, with what the run said about it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AutoArchivedEntry {
@@ -286,7 +286,7 @@ pub struct AutoArchivedEntry {
     pub line: String,
 }
 
-/// The policy as Jev is given it (V56 §4.4, §7.5).
+/// The policy as Jev is given it (V57 §4.4, §7.5).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedPolicy {
     pub rows: Vec<String>,
@@ -360,7 +360,7 @@ struct Suggestions {
     pending_decisions: Vec<DecisionRecord>,
 }
 
-/// The morning run's side of the service (V56 §7), loaded with the cache.
+/// The morning run's side of the service (V57 §7), loaded with the cache.
 #[derive(Default)]
 struct AutoArchive {
     /// `auto-archive.jsonl` as last written; the in-memory text is the
@@ -1119,7 +1119,7 @@ impl InboxService {
 
     /// The cached answer for a note's bytes under the current policy,
     /// whatever its tier. An answer asked under another policy is stale
-    /// (V56 §7.5).
+    /// (V57 §7.5).
     pub fn suggestion_for(&self, hash: &str) -> Option<&Suggestion> {
         let policy = &self.policy.as_ref()?.hash;
         self.suggestions
@@ -1387,7 +1387,7 @@ impl InboxService {
     }
 
     /// Marks the morning run's filing of `stem` undone: the group's `u`
-    /// (V56 §8.2).
+    /// (V57 §8.2).
     pub fn mark_automatic_undone(&mut self, stem: &str, run: &str, cx: &mut Context<Self>) {
         self.mark_undone_where(
             |record| {
@@ -1471,7 +1471,7 @@ impl InboxService {
         .detach();
     }
 
-    // ----- The policy (V56 §4.4, §7.5) -----
+    // ----- The policy (V57 §4.4, §7.5) -----
 
     /// Re-reads `triage-policy.md`. A changed policy makes every cached
     /// answer stale, so the view's chips and the next run re-ask.
@@ -1497,7 +1497,7 @@ impl InboxService {
         }));
     }
 
-    // ----- The morning run (V56 §7) -----
+    // ----- The morning run (V57 §7) -----
 
     /// Starts the morning run on Gmail's polls. Called once, at creation.
     pub fn watch_gmail(

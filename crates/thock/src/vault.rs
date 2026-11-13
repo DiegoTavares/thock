@@ -456,7 +456,7 @@ impl InboxViewConfigContent {
     }
 }
 
-/// The `[inbox]` table of `config.toml` (V41 §10, V56 §5.2): whether a Plus
+/// The `[inbox]` table of `config.toml` (V41 §10, V57 §5.2): whether a Plus
 /// vault asks for suggested destinations in the Inbox view, and whether the
 /// morning run archives what it is sure needs nothing. The landing zone and
 /// its transports live in `.thock/inbox.toml`, not here.

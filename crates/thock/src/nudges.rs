@@ -108,7 +108,7 @@ pub struct VaultSnapshot {
     /// The days of the reviewed week that have a daily note, by existence
     /// alone.
     pub week_days: BTreeSet<NaiveDate>,
-    /// `[inbox] auto_archive` is on (V56 §6.1).
+    /// `[inbox] auto_archive` is on (V57 §6.1).
     pub inbox_auto_archive: bool,
     /// `triage-policy.md`'s `refreshed:` stamp.
     pub inbox_policy_refreshed: Option<NaiveDate>,
@@ -209,7 +209,7 @@ const WEEK_REVIEW: Nudge = Nudge {
     due: week_review_due,
 };
 
-/// The Inbox Routine's weekly refresh (V56 §6.1). Its skill being enabled is
+/// The Inbox Routine's weekly refresh (V57 §6.1). Its skill being enabled is
 /// what "the Inbox Routine is installed" means here.
 const REFRESH_INBOX_POLICY: Nudge = Nudge {
     id: "refresh-inbox-policy",
@@ -706,7 +706,7 @@ mod tests {
         let review = include_str!("../assets/routines/timeline/skills/week-review.md");
         assert!(review.contains("the ISO week that contains today when today is Friday"));
         // Like the refresh nudge, Week Review refreshes the inbox policy only
-        // with auto-archive on (V56 §6.1).
+        // with auto-archive on (V57 §6.1).
         let step = review
             .split("## 11. Refresh the inbox policy")
             .nth(1)

@@ -489,9 +489,9 @@ Built by `inbox_suggest::build_request(item, policy, today)`, pure, no I/O:
   append rows → `unsure`). A missing or unparseable policy file sends the shipped defaults. One
   editable file steers the ritual and the suggestion.
 - **Criteria are full sentences** with boundary cases, because Jev reads literally. _(Amended by
-  V56 §4.4: the sentences now come from the policy file's `## Criteria`, per key, with the shipped
+  V57 §4.4: the sentences now come from the policy file's `## Criteria`, per key, with the shipped
   sentences as the fallback; the order stays fixed in Rust. The cache also keys on a hash of the
-  policy, V56 §7.5.)_ `unsure` is
+  policy, V57 §7.5.)_ `unsure` is
   last and the order is fixed (Jev leans to the first option); `decisions.jsonl` is how the bias
   gets measured rather than a second reversed call (decision 4).
 - A `has_image` note sends only its alt text; the picture itself is not evidence Jev can see.

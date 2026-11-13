@@ -41,7 +41,7 @@ pub const DEFAULT_POLICY: [&str; 5] = [
 pub const CRITERIA_KEYS: [&str; 5] = ["today", "soon", "someday", "archive", "unsure"];
 
 /// The shipped sentence for each of [`CRITERIA_KEYS`], used when the
-/// policy's `## Criteria` lacks a key (V56 §4.4).
+/// policy's `## Criteria` lacks a key (V57 §4.4).
 pub const DEFAULT_CRITERIA: [&str; 5] = [
     "Something to do, call, or read today, or a line for today's page.",
     "A task for the coming days: `item.due_in` is within a week, or the wording is urgent.",
@@ -85,7 +85,7 @@ impl Criteria {
     }
 }
 
-/// The `## Criteria` section of `triage-policy.md` (V56 §4.4): one list item
+/// The `## Criteria` section of `triage-policy.md` (V57 §4.4): one list item
 /// per option, `- **archive**: <sentence>`, a sentence free to wrap onto
 /// indented lines. A missing key, a missing section or a sentence over
 /// [`CRITERION_LIMIT`] falls back per key; unknown keys are ignored.
@@ -152,7 +152,7 @@ fn criterion_item(item: &str) -> Option<(&'static str, String)> {
     Some((key, sentence.trim().to_string()))
 }
 
-/// What the cache keys a suggestion on beside the note (V56 §7.5): the
+/// What the cache keys a suggestion on beside the note (V57 §7.5): the
 /// sha256 of the policy rows and the resolved criteria, in request order.
 pub fn policy_hash(policy: &[String], criteria: &Criteria) -> String {
     let mut hasher = Sha256::new();
@@ -462,7 +462,7 @@ pub fn tier(suggestion: &Suggestion) -> Tier {
 }
 
 /// One line of `.thock/state/inbox/suggestions.jsonl` (§7.5), keyed by the
-/// note's byte hash and the policy it was asked under (V56 §7.5).
+/// note's byte hash and the policy it was asked under (V57 §7.5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuggestionRecord {
     pub hash: String,
@@ -473,7 +473,7 @@ pub struct SuggestionRecord {
     pub probabilities: BTreeMap<String, f64>,
     pub cost: f64,
     pub asked_at: String,
-    /// [`policy_hash`] at asking time; `None` on records written before V56,
+    /// [`policy_hash`] at asking time; `None` on records written before V57,
     /// which count as stale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<String>,
@@ -526,7 +526,7 @@ pub struct DecisionRecord {
     pub confidence: Option<f64>,
     pub chosen: String,
     /// The key: `space`, `t`, `s`, `S`, `e`, or `menu`; `auto` for the
-    /// morning run (V56 §7.1).
+    /// morning run (V57 §7.1).
     pub via: String,
     pub at: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -544,7 +544,7 @@ pub const VIA_AUTO: &str = "auto";
 
 /// What the decision log says so far (§7.6): how often the suggestion was
 /// taken, over how many decisions that had one, and how many of the morning
-/// run's filings were sent back or re-filed (V56 §9).
+/// run's filings were sent back or re-filed (V57 §9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DecisionReport {
     pub decisions: usize,
@@ -1026,7 +1026,7 @@ mod tests {
         assert!(record.answers("h-1", "p-1"));
         assert!(!record.answers("h-1", "p-2"));
         assert!(!record.answers("h-2", "p-1"));
-        // A record from before V56 has no policy and never answers.
+        // A record from before V57 has no policy and never answers.
         let old: SuggestionRecord = serde_json::from_str(
             r#"{"hash":"h-1","stem":"stem","model":"typesafe/jev-1.13","choice":"someday",
                 "confidence":0.91,"probabilities":{},"cost":0.0,"asked_at":"2026-10-10T09:14:02Z"}"#,

@@ -587,7 +587,7 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   bottom of the Inbox until the next run, one key from being sent back. A weekly ritual keeps a
   map of your work in memory and rewrites the triage policy from your notes and your past
   decisions, so a miscategorised ticket is judged by what it's about. Opt-in. Spec
-  `specs/v56-inbox-auto-archive.md`. _(planned)_
+  `specs/v57-inbox-auto-archive.md`. _(planned)_
 
 - [x] **Your other agents share the vault's memory:** an opt-in **Agents** Routine makes the
   running desk serve the vault's memory on the local network, and a small `thock-bridge` client

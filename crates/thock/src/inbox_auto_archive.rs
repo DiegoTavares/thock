@@ -1,4 +1,4 @@
-//! The Inbox's morning run (spec `v56-inbox-auto-archive.md` §7): which
+//! The Inbox's morning run (spec `v57-inbox-auto-archive.md` §7): which
 //! items it asks Jev about, the bar an answer must clear, the guardrail for
 //! threads the person wrote in, the record it keeps in
 //! `.thock/state/inbox/auto-archive.jsonl`, and what the view's
@@ -15,7 +15,7 @@ use crate::inbox_suggest::{DecisionRecord, Destination, FILLED_THRESHOLD, Sugges
 
 /// The run's record, beside the suggestion cache and the decision log.
 pub const AUTO_ARCHIVE_FILE: &str = "auto-archive.jsonl";
-/// `[inbox] auto_archive_threshold` when unset (V56 decision 6).
+/// `[inbox] auto_archive_threshold` when unset (V57 decision 6).
 pub const DEFAULT_THRESHOLD: f64 = 0.95;
 /// Below the filled chip the run would archive what the view wouldn't even
 /// highlight.
@@ -30,7 +30,7 @@ pub fn effective_threshold(configured: Option<f64>) -> f64 {
     }
 }
 
-/// The `refreshed:` stamp in `triage-policy.md`'s front matter (V56 §4.2):
+/// The `refreshed:` stamp in `triage-policy.md`'s front matter (V57 §4.2):
 /// the refresh skill wrote the file, so the run may follow it.
 pub fn policy_refreshed(markdown: &str) -> Option<NaiveDate> {
     let mut lines = markdown.lines();
@@ -62,7 +62,7 @@ pub enum SkipReason {
     Error,
 }
 
-/// One line of `auto-archive.jsonl` (V56 §7.3). `enabled` and `disabled`
+/// One line of `auto-archive.jsonl` (V57 §7.3). `enabled` and `disabled`
 /// mark when `[inbox] auto_archive` was seen to change, so the first run's
 /// watermark is the moment it was turned on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -259,7 +259,7 @@ impl RunLog {
     }
 }
 
-/// What the run should do on this trigger (V56 §7.3).
+/// What the run should do on this trigger (V57 §7.3).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Due {
     /// It already ran today.
@@ -569,7 +569,7 @@ pub fn popover_line(status: &RunStatus, today: NaiveDate) -> Option<String> {
     }
 }
 
-/// `.thock/config.toml` without the two V56 keys in `[inbox]`
+/// `.thock/config.toml` without the two V57 keys in `[inbox]`
 /// (`thock::TurnOffInboxAutoArchive`, §5.3). Everything else, comments and
 /// order included, stays as written.
 pub fn without_auto_archive_keys(text: &str) -> Result<String> {
@@ -1007,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn turning_off_removes_only_the_v56_keys() {
+    fn turning_off_removes_only_the_v57_keys() {
         let config = "schema = 1\n\n# Mine.\n[inbox]\nsuggestions = false\nauto_archive = true\n\
                       auto_archive_threshold = 0.97\nnames = [\"D. Tavares\"]\n\n[backlog]\nfile = \"todo.md\"\n";
         let off = without_auto_archive_keys(config).expect("edits");

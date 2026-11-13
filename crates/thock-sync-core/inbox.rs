@@ -9,7 +9,7 @@ pub const INBOX_ARCHIVE_DIR: &str = "archives/inbox";
 /// The append-only record of every decision (V13 §9.5).
 pub const TRIAGE_LOG_PATH: &str = "archives/inbox/triage-log.md";
 
-/// The destination word the desk's morning run writes (V56 §7.1): an
+/// The destination word the desk's morning run writes (V57 §7.1): an
 /// Archive decision nobody keyed.
 pub const ARCHIVED_AUTOMATICALLY: &str = "Archived · auto";
 
@@ -132,7 +132,7 @@ pub fn decision_class(
 }
 
 /// Whether a log line's destination was written by the morning run rather
-/// than a person (V56 §7.1). Gmail archive keeps these undoable for longer.
+/// than a person (V57 §7.1). Gmail archive keeps these undoable for longer.
 pub fn is_automatic(destination: &str) -> bool {
     destination.trim() == ARCHIVED_AUTOMATICALLY
 }

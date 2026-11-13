@@ -2386,7 +2386,7 @@ mod tests {
         );
         // Triage is mechanical filing against an explicit policy — it runs
         // on the fast tier; setup is judgment and stays on the default. The
-        // weekly refresh runs on the fast tier like Reflect (V56 §6).
+        // weekly refresh runs on the fast tier like Reflect (V57 §6).
         assert_eq!(manifest.skills[0].model, ModelTier::Fast);
         assert_eq!(manifest.skills[1].model, ModelTier::Default);
         assert_eq!(manifest.skills[2].model, ModelTier::Fast);

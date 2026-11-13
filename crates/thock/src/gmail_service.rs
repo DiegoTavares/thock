@@ -266,7 +266,7 @@ impl EventEmitter<ManualSyncFinished> for GmailService {}
 impl EventEmitter<GmailPollFinished> for GmailService {}
 
 /// A poll that reached Gmail and landed what it found, manual or not. The
-/// Inbox's morning run starts on the first one of the day (V56 §7.3).
+/// Inbox's morning run starts on the first one of the day (V57 §7.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GmailPollFinished;
 

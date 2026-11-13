@@ -628,7 +628,7 @@ pub fn inbox_status(
     ))
 }
 
-/// The morning run's line on the Inbox row (V56 §9): what it filed today, or
+/// The morning run's line on the Inbox row (V57 §9): what it filed today, or
 /// why it is waiting or stopped, with the fix as the row's first action.
 fn with_auto_archive(
     mut status: ConnectorStatus,
