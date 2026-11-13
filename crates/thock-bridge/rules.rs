@@ -3,7 +3,7 @@
 //! desk appends on an agent's behalf.
 
 use chrono::NaiveDate;
-use thock_sync_core::{Heading, Operation, Placement, Write};
+use thock_sync_core::{Heading, Operation, Outcome, Placement, Write, apply};
 
 use crate::ClientIdentity;
 
@@ -491,22 +491,51 @@ pub fn inbox_write(client_id: &str, line: &str) -> Write {
 }
 
 /// The sync-core write that appends lines under the agents section of a
-/// daily note (§6.4): the section is created at the end when missing and
-/// the note from the daily template, through the same `Append` the phone
-/// uses, so the rule is one.
-pub fn today_write(client_id: &str, note_path: &str, heading: &str, lines: &[String]) -> Write {
-    Write::new(
+/// daily note (§6.4), and whether it adds that section. `note` is the
+/// note's text, or the daily template it will be created from. A missing
+/// section goes at the very end of the note, after every other section:
+/// the shared missing-heading rule would put it before the next level-1
+/// heading, which in a daily note is the middle of the day.
+pub fn today_write(
+    client_id: &str,
+    note_path: &str,
+    heading: &str,
+    lines: &[String],
+    note: Option<&str>,
+) -> (Write, bool) {
+    let heading = Heading::new(heading.trim());
+    let under_heading = Write::new(
         client_id,
         note_path,
         Operation::Append {
-            heading: Some(Heading::new(heading.trim())),
+            heading: Some(heading.clone()),
             lines: lines.to_vec(),
             placement: Placement::End,
             blank_line_before: false,
             create_from_template: true,
             after: None,
         },
-    )
+    );
+    let section_missing = apply(Some(note.unwrap_or_default()), &under_heading, None).outcome
+        == Outcome::SectionAdded;
+    if !section_missing {
+        return (under_heading, false);
+    }
+    let mut section = vec![format!("## {}", heading.text), String::new()];
+    section.extend_from_slice(lines);
+    let at_end = Write::new(
+        client_id,
+        note_path,
+        Operation::Append {
+            heading: None,
+            lines: section,
+            placement: Placement::End,
+            blank_line_before: true,
+            create_from_template: true,
+            after: None,
+        },
+    );
+    (at_end, true)
 }
 
 #[cfg(test)]
@@ -667,29 +696,70 @@ mod tests {
             "the same line is not written twice"
         );
 
-        let write = today_write(
-            "bridge",
-            "daily/2026-11-04.md",
-            "From your agents",
-            vec![today_line(&identity(), "Shipped it.")].as_slice(),
-        );
-        let created = apply(None, &write, Some("# Wednesday\n\n## Notes\n"));
+        let lines = vec![today_line(&identity(), "Shipped it.")];
+        let today = |note: Option<&str>| {
+            today_write(
+                "bridge",
+                "daily/2026-11-04.md",
+                "From your agents",
+                &lines,
+                note,
+            )
+        };
+        let template = "# Wednesday\n\n## Notes\n";
+        let (write, adds_section) = today(Some(template));
+        assert!(adds_section);
+        let created = apply(None, &write, Some(template));
         assert_eq!(created.outcome, Outcome::Created);
-        assert!(created.text.contains("## From your agents\n"));
-        assert!(
-            created
-                .text
-                .ends_with("- claude-code@robin · Shipped it.\n")
+        assert_eq!(
+            created.text,
+            "# Wednesday\n\n## Notes\n\n## From your agents\n\n- claude-code@robin · Shipped it.\n"
         );
-        let added = apply(Some("# Wednesday\n\n## Notes\n- x\n"), &write, None);
-        assert_eq!(added.outcome, Outcome::SectionAdded);
         let existing = "# Wednesday\n\n## From your agents\n\n- codex@hp · Earlier.\n";
+        let (write, adds_section) = today(Some(existing));
+        assert!(!adds_section);
         let appended = apply(Some(existing), &write, None);
         assert_eq!(appended.outcome, Outcome::Applied);
         assert!(
             appended
                 .text
                 .contains("- codex@hp · Earlier.\n- claude-code@robin · Shipped it.\n")
+        );
+    }
+
+    #[test]
+    fn a_missing_agents_section_goes_at_the_end_of_the_day() {
+        let note = "# Journal\n___\nSlept well.\n\n# Day planner\n- 09:00 Standup\n\n\
+                    ## Reminders\n- [ ] Call the bank\n\n## Calendar\n- 10:00 Review\n";
+        let lines = vec![today_line(&identity(), "Shipped it.")];
+        let (write, adds_section) = today_write(
+            "bridge",
+            "daily/20261109_Nov-Mon.md",
+            "From your agents",
+            &lines,
+            Some(note),
+        );
+        assert!(adds_section);
+        let added = apply(Some(note), &write, None);
+        assert_eq!(added.outcome, Outcome::Applied);
+        assert_eq!(
+            added.text,
+            format!("{note}\n## From your agents\n\n- claude-code@robin · Shipped it.\n")
+        );
+
+        let (write, adds_section) = today_write(
+            "bridge",
+            "daily/20261109_Nov-Mon.md",
+            "From your agents",
+            &[today_line(&identity(), "Then this.")],
+            Some(&added.text),
+        );
+        assert!(!adds_section);
+        let appended = apply(Some(&added.text), &write, None);
+        assert!(
+            appended
+                .text
+                .ends_with("- claude-code@robin · Shipped it.\n- claude-code@robin · Then this.\n")
         );
     }
 

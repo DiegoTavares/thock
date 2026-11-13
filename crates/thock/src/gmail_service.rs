@@ -36,8 +36,10 @@ use crate::calendar_service::ConnectGoogleWorkspace;
 use crate::calendar_service::{ManualSyncFinished, SyncState, show_sync_toast};
 use crate::gmail::{
     ARCHIVE_GRACE, ArchiveConfig, ArchiveEvent, ArchiveState, GMAIL_CONFIG_FILE, GmailConfig,
-    MailTransport, MappingFetched, MissingPermission, ThreadMove, archive_frontmatter_digest,
-    logged_decisions, parse_gmail_config, parse_imported_index, plan_archive, scan_backlog_markers,
+    KnownThread, MailTransport, MappingFetched, MissingPermission, OutgoingReply, REFRESH_BUDGET,
+    ThreadHeaders, ThreadMove, ThreadUpdate, archive_frontmatter_digest, compact_thread_marks,
+    known_threads, logged_decisions, parse_gmail_config, parse_imported_index, parse_thread_marks,
+    plan_archive, plan_note_refresh, returns_to_inbox, scan_backlog_markers, thread_mark_line,
 };
 use crate::gmail_google::GmailTransport;
 use crate::google_auth::{
@@ -47,7 +49,9 @@ use crate::inbox::{
     INBOX_CONFIG_FILE, ImportRecord, TRIAGE_LOG_PATH, inbox_note_digest, parse_inbox_config,
     plan_inbox_capture, scan_triage_log_markers,
 };
+use crate::inbox_service::move_note;
 use crate::vault::{VAULT_CONFIG_FILE, VAULT_MARKER_DIR, Vault, VaultStatus};
+use thock_sync_core::INBOX_ARCHIVE_DIR;
 
 /// Same typing guard and backoff as the calendar service (V8 §9 guard 1).
 const TYPING_GUARD_QUIET: Duration = Duration::from_secs(2);
@@ -58,6 +62,9 @@ const STATE_DIR: &str = "state/gmail";
 const STATE_FILE: &str = "imported.jsonl";
 /// Gmail archive's record (V53 §7.2), beside the capture state.
 const ARCHIVE_STATE_FILE: &str = "archive.jsonl";
+/// What each captured thread's note holds, and where Gmail had the thread
+/// when Thock last looked (V56 §6.3).
+const THREADS_STATE_FILE: &str = "threads.jsonl";
 /// Read for its digests during dedup (pre-V15 Gmail captures were recorded
 /// there); never written by this service.
 const INBOX_STATE_DIR: &str = "state/inbox";
@@ -75,6 +82,9 @@ actions!(
         /// Stops archiving emails in Gmail when you file them. Nothing
         /// already archived moves.
         DisableGmailArchive,
+        /// Lets Thock send your replies from Gmail. Asks Google for
+        /// permission first.
+        AllowGmailReplies,
     ]
 );
 
@@ -109,6 +119,12 @@ pub fn init(cx: &mut App) {
             let handle = workspace.weak_handle();
             if let Some(service) = service_for_project(workspace.project(), cx) {
                 service.update(cx, |service, cx| service.enable_archive(handle, cx));
+            }
+        });
+        workspace.register_action(|workspace, _: &AllowGmailReplies, _window, cx| {
+            let handle = workspace.weak_handle();
+            if let Some(service) = service_for_project(workspace.project(), cx) {
+                service.update(cx, |service, cx| service.allow_replies(handle, cx));
             }
         });
         workspace.register_action(|workspace, _: &DisableGmailArchive, _window, cx| {
@@ -147,6 +163,16 @@ struct ArchivePass {
     permission_missing: bool,
     failed: usize,
     error: Option<String>,
+}
+
+/// Whether Thock can send a reply, and if not, what it needs first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyAvailability {
+    Ready,
+    /// The Google grant is read-only.
+    NeedsPermission,
+    /// No Gmail account is connected.
+    NotConnected,
 }
 
 #[derive(Default)]
@@ -290,14 +316,120 @@ impl GmailService {
         }
     }
 
-    /// The Google account the mail is captured from.
-    pub fn account(&self) -> Option<&str> {
-        self.config.as_ref()?.account.as_deref()
-    }
-
     /// Whether polls are running: a config, an account, and a transport.
     pub fn is_polling(&self) -> bool {
         self.transport.is_some()
+    }
+
+    /// Whether a reply can be sent from here, and if not, what is missing
+    /// (V56 §7.1).
+    pub fn reply_availability(&self) -> ReplyAvailability {
+        let connected = self
+            .config
+            .as_ref()
+            .is_some_and(|config| config.account.is_some());
+        match &self.transport {
+            Some(transport) if connected => {
+                if self.archive_permission_missing || transport.archive_permission() == Some(false)
+                {
+                    ReplyAvailability::NeedsPermission
+                } else {
+                    ReplyAvailability::Ready
+                }
+            }
+            _ => ReplyAvailability::NotConnected,
+        }
+    }
+
+    /// The connected Gmail account, which a reply is sent as.
+    pub fn account(&self) -> Option<String> {
+        self.config.as_ref()?.account.clone()
+    }
+
+    /// The thread's messages with the headers a reply is addressed from.
+    pub fn thread_headers(
+        &self,
+        thread_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<ThreadHeaders>> {
+        let Some(transport) = self.transport.clone() else {
+            return Task::ready(Err(anyhow!("Gmail isn't connected")));
+        };
+        let thread_id = thread_id.to_string();
+        cx.spawn(async move |_, cx| transport.thread_headers(&thread_id, cx).await)
+    }
+
+    /// Sends `reply` into its thread. The poll that follows brings it into
+    /// the note like any other message (V56 §7.4).
+    pub fn send_reply(&mut self, reply: OutgoingReply, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let Some(transport) = self.transport.clone() else {
+            return Task::ready(Err(anyhow!("Gmail isn't connected")));
+        };
+        // Detached: a message on its way to Gmail is not taken back because
+        // the view that sent it closed. A caller that stopped listening
+        // still gets the failure in the log.
+        let (finished, wait) = futures::channel::oneshot::channel::<Result<()>>();
+        cx.spawn(async move |this, cx| {
+            let result = transport.send_reply(&reply, cx).await;
+            this.update(cx, |service, cx| match &result {
+                Ok(()) => service.start_poll(cx),
+                Err(error) if error.is::<MissingPermission>() => {
+                    service.archive_permission_missing = true;
+                    cx.notify();
+                }
+                Err(_) => {}
+            })
+            .ok();
+            if let Err(Err(error)) = finished.send(result) {
+                log::warn!("Thock: a reply nobody was waiting on wasn't sent: {error:#}");
+            }
+        })
+        .detach();
+        cx.background_spawn(async move {
+            wait.await
+                .unwrap_or_else(|_| Err(anyhow!("the send was interrupted")))
+        })
+    }
+
+    /// `thock::AllowGmailReplies` (V56 §7.1): Google's consent for
+    /// `gmail.modify`, and nothing else. `[archive]` stays as it is.
+    fn allow_replies(&mut self, workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) {
+        let context = self
+            .config
+            .as_ref()
+            .and_then(|config| Some((config.account.clone()?, config.google.clone())));
+        let Some((account, overrides)) = context else {
+            show_archive_toast(
+                &workspace,
+                "Connect Google Workspace first, then allow replies.".into(),
+                None,
+                cx,
+            );
+            return;
+        };
+        let http = cx.http_client();
+        self.archive_toggle_task = Some(cx.spawn(async move |this, cx| {
+            let result = async {
+                let client = GoogleClient::resolve(&overrides)?;
+                google_auth::grant_gmail_modify(http, client, &account, cx).await
+            }
+            .await;
+            let message: SharedString = match result {
+                Ok(true) => {
+                    // The new grant is in the keychain; a fresh transport
+                    // reads it instead of the cached read-only token.
+                    this.update(cx, |service, cx| service.reload_config(cx))
+                        .ok();
+                    "Thock can send your replies from Gmail".into()
+                }
+                Ok(false) => "Replying stays off: Google wasn't given the permission".into(),
+                Err(error) => {
+                    log::warn!("Thock: allowing Gmail replies failed: {error:#}");
+                    format!("Couldn't allow replies: {error:#}").into()
+                }
+            };
+            cx.update(|cx| show_archive_toast(&workspace, message, None, cx));
+        }));
     }
 
     /// Whether `.thock/gmail.toml` turns Gmail archive on.
@@ -689,9 +821,26 @@ impl GmailService {
             {
                 return SyncOutcome::Failed(error);
             }
+            if let Err(error) =
+                Self::mark_captured_threads(&fs, &vault, &imported, &fetched.threads).await
+            {
+                // Without its mark a thread is dated by its capture instead.
+                log::warn!("Thock: recording captured Gmail threads failed: {error:#}");
+            }
+        }
+
+        // The archive pass runs whatever the refresh did (V53: nothing else
+        // holds it up); a refresh that failed is the poll's outcome after it.
+        let refreshed = Self::refresh_threads(&fs, &vault, &config, &project, &transport, cx).await;
+        if matches!(&refreshed, Err(error) if error.is::<AuthRevoked>()) {
+            return SyncOutcome::AuthRevoked;
         }
 
         Self::reconcile_archive(this, cx).await;
+
+        if let Err(error) = refreshed {
+            return SyncOutcome::Failed(error.context("bringing in new replies"));
+        }
 
         if let Some(reason) = hold_reason(&holding) {
             return SyncOutcome::Held(reason.into());
@@ -1110,6 +1259,272 @@ impl GmailService {
         Ok(())
     }
 
+    /// The refresh pass (V56 §6): messages that reached a captured thread
+    /// since its note was written are appended to the note, and a reply on
+    /// a triaged note brings it back to the inbox. The note is written
+    /// before the state, so a crash between them re-plans into a no-op.
+    async fn refresh_threads(
+        fs: &Arc<dyn Fs>,
+        vault: &Vault,
+        config: &GmailConfig,
+        project: &Entity<Project>,
+        transport: &Arc<dyn MailTransport>,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
+        let imported = load_if_present(fs, &state_file_path(vault))
+            .await
+            .context("reading the Gmail capture state")?;
+        let imported = parse_imported_index(&imported);
+        let marks_path = threads_state_path(vault);
+        let mut marks_text = load_if_present(fs, &marks_path)
+            .await
+            .context("reading the Gmail thread state")?;
+        let known = known_threads(&imported, &parse_thread_marks(&marks_text));
+        if known.is_empty() {
+            return Ok(());
+        }
+        let updates = transport.refresh(&known, REFRESH_BUDGET, cx).await?;
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        let digests: HashMap<&str, &str> = imported
+            .iter()
+            .map(|(digest, thread)| (thread.thread.as_str(), digest.as_str()))
+            .collect();
+        let log = load_if_present(fs, &vault.root.join(TRIAGE_LOG_PATH))
+            .await
+            .context("reading the triage log")?;
+        let headings = &vault.config.backlog.headings;
+        let decisions = logged_decisions(&log, &headings.soon, &headings.someday);
+        let inbox_dir = inbox_dir(fs, vault).await;
+        let mut folders: Vec<&str> = vec![inbox_dir.as_str(), INBOX_ARCHIVE_DIR];
+        folders.extend(config.mappings.iter().map(|mapping| mapping.path.as_str()));
+
+        // One note's trouble doesn't hold the others back; a thread whose
+        // note isn't on disk yet keeps no mark, so the next poll asks again.
+        let mut failure = None;
+        let mut settled = Vec::new();
+        for update in &updates {
+            let context = RefreshContext {
+                fs,
+                vault,
+                project,
+                folders: &folders,
+                inbox_dir: &inbox_dir,
+                decisions: &decisions,
+            };
+            let digest = digests.get(update.thread.as_str()).copied();
+            match Self::apply_update(&context, update, digest, cx).await {
+                Ok(true) => settled.push(update),
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!("Thock: appending new replies to a note failed: {error:#}");
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+
+        if !settled.is_empty() {
+            let at = Local::now().to_rfc3339();
+            for update in settled {
+                marks_text.push_str(&thread_mark_line(
+                    &update.thread,
+                    &update.history,
+                    update.through,
+                    &at,
+                ));
+                marks_text.push('\n');
+            }
+            if let Some(parent) = marks_path.parent() {
+                fs.create_dir(parent).await?;
+            }
+            fs.atomic_write(marks_path, compact_thread_marks(&marks_text))
+                .await?;
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    /// Records each newly captured thread as Gmail had it when fetched, so
+    /// its refresh starts from the thread itself: a reply that arrived
+    /// while the capture ran is neither missed nor written twice.
+    async fn mark_captured_threads(
+        fs: &Arc<dyn Fs>,
+        vault: &Vault,
+        already_imported: &HashSet<String>,
+        fetched: &HashMap<String, KnownThread>,
+    ) -> Result<()> {
+        if fetched.is_empty() {
+            return Ok(());
+        }
+        let imported = load_if_present(fs, &state_file_path(vault)).await?;
+        let imported = parse_imported_index(&imported);
+        let path = threads_state_path(vault);
+        let mut text = load_if_present(fs, &path).await?;
+        let marks = parse_thread_marks(&text);
+        let at = Local::now().to_rfc3339();
+        let mut added = false;
+        for (digest, thread) in &imported {
+            if already_imported.contains(digest) || marks.contains_key(&thread.thread) {
+                continue;
+            }
+            let Some(known) = fetched.get(&thread.thread) else {
+                continue;
+            };
+            let Some(history) = &known.history else {
+                continue;
+            };
+            text.push_str(&thread_mark_line(
+                &thread.thread,
+                history,
+                known.through,
+                &at,
+            ));
+            text.push('\n');
+            added = true;
+        }
+        if !added {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            fs.create_dir(parent).await?;
+        }
+        fs.atomic_write(path, text).await
+    }
+
+    /// One thread's refresh: its new messages into its note, and the note
+    /// back to the inbox when the reply calls for it. `Ok(true)` once the
+    /// thread needs no further look: the file holds the messages, or there
+    /// is no note to hold them.
+    async fn apply_update(
+        context: &RefreshContext<'_>,
+        update: &ThreadUpdate,
+        digest: Option<&str>,
+        cx: &mut AsyncApp,
+    ) -> Result<bool> {
+        let RefreshContext {
+            fs,
+            vault,
+            project,
+            folders,
+            inbox_dir,
+            decisions,
+        } = context;
+        if update.new_messages.is_empty() {
+            return Ok(true);
+        }
+        let Some(digest) = digest else {
+            return Ok(true);
+        };
+        // A note that is gone stays gone.
+        let Some(note) = find_note(fs, vault, folders, digest).await else {
+            return Ok(true);
+        };
+        let on_disk = Self::append_messages(fs, project, &note, update, cx).await?;
+
+        let last_decision = decisions
+            .iter()
+            .rev()
+            .find(|decision| decision.digest == digest)
+            .map(|decision| decision.class);
+        let note_dir = note
+            .strip_prefix(&vault.root)
+            .ok()
+            .and_then(|path| path.parent())
+            .map(|dir| dir.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let from_someone_else = update.new_messages.iter().any(|message| !message.own);
+        if returns_to_inbox(&note_dir, last_decision, from_someone_else)
+            && let Some(name) = note.file_name()
+        {
+            // Never over a file that is already there.
+            move_note(fs, &note, &vault.root.join(inbox_dir).join(name)).await?;
+        }
+        Ok(on_disk)
+    }
+
+    /// Appends a refresh's messages to the note at `path`: through the open
+    /// buffer behind the typing guard when the note is open, read-modify-write
+    /// through the project `Fs` otherwise. A buffer that was saved is saved
+    /// again; one with unsaved words of the user's is left for them to save.
+    /// Says whether the file now holds the messages.
+    async fn append_messages(
+        fs: &Arc<dyn Fs>,
+        project: &Entity<Project>,
+        path: &std::path::Path,
+        update: &ThreadUpdate,
+        cx: &mut AsyncApp,
+    ) -> Result<bool> {
+        let sections: Vec<String> = update
+            .new_messages
+            .iter()
+            .map(|message| message.section())
+            .collect();
+        let first_heading = update.first.as_ref().map(|message| message.heading());
+        let buffer = project.update(cx, |project, cx| {
+            project
+                .project_path_for_absolute_path(path, cx)
+                .and_then(|path| project.get_open_buffer(&path, cx))
+        });
+
+        let Some(buffer) = buffer else {
+            let text = fs.load(path).await?;
+            if let Some(refresh) = plan_note_refresh(&text, first_heading.as_deref(), &sections) {
+                fs.atomic_write(path.to_path_buf(), refresh.apply(&text))
+                    .await?;
+            }
+            return Ok(true);
+        };
+
+        for _ in 0..TYPING_GUARD_MAX_TRIES {
+            let version = buffer.read_with(cx, |buffer, _| buffer.version());
+            cx.background_executor().timer(TYPING_GUARD_QUIET).await;
+            if buffer.read_with(cx, |buffer, _| buffer.version() == version) {
+                break;
+            }
+        }
+
+        // `apply_diff` refuses a diff the buffer moved under, and inside a
+        // transaction it doesn't say so. The plan skips sections already
+        // there, so the next pass over fresh text is what tells.
+        let was_saved = buffer.read_with(cx, |buffer, _| !buffer.is_dirty());
+        let mut edited = false;
+        // What the last pass meant the buffer to hold. A buffer that holds
+        // it is done, whatever the plan makes of the text: appending again
+        // would write the messages twice.
+        let mut intended: Option<String> = None;
+        for _ in 0..4 {
+            let text = buffer.read_with(cx, |buffer, _| buffer.text());
+            let plan = plan_note_refresh(&text, first_heading.as_deref(), &sections)
+                .filter(|_| intended.as_deref() != Some(text.as_str()));
+            let Some(refresh) = plan else {
+                if edited && was_saved {
+                    project
+                        .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
+                        .await?;
+                }
+                return Ok(buffer.read_with(cx, |buffer, _| !buffer.is_dirty()));
+            };
+            let mut new_text = refresh.apply(&text);
+            text::LineEnding::normalize(&mut new_text);
+            intended = Some(new_text.clone());
+            let diff = buffer
+                .read_with(cx, |buffer, cx| buffer.diff(new_text, cx))
+                .await;
+            buffer.update(cx, |buffer, cx| {
+                buffer.start_transaction();
+                buffer.apply_diff(diff, cx);
+                buffer.end_transaction(cx);
+                // Not grouped with the user's own edit history entry.
+                buffer.finalize_last_transaction();
+            });
+            edited = true;
+        }
+        Err(anyhow!(
+            "the buffer kept changing while appending new messages"
+        ))
+    }
+
     /// Appends the pending Someday lines, marker-guarded so retries and
     /// crash repairs never duplicate: through the open buffer as one
     /// finalized transaction behind the typing guard when `backlog.md` is
@@ -1282,6 +1697,34 @@ pub(crate) struct StubTransport {
     /// When set, every write fails with it.
     pub(crate) modify_error: std::sync::Mutex<Option<String>>,
     pub(crate) permission: std::sync::Mutex<Option<bool>>,
+    /// Threads as Gmail has them now, for the refresh pass.
+    pub(crate) thread_updates: std::sync::Mutex<Vec<ThreadUpdate>>,
+    /// What a reply is addressed from, by thread.
+    pub(crate) headers: std::sync::Mutex<HashMap<String, ThreadHeaders>>,
+    /// Every reply sent.
+    pub(crate) sent: Arc<std::sync::Mutex<Vec<OutgoingReply>>>,
+    /// When set, every send fails with it.
+    pub(crate) send_error: std::sync::Mutex<Option<String>>,
+    /// When set, the next send waits for it before answering.
+    pub(crate) send_gate: std::sync::Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+    /// When set, every refresh fails with it.
+    pub(crate) refresh_error: std::sync::Mutex<Option<String>>,
+    /// Each fetched thread as Gmail had it.
+    pub(crate) fetched_threads: std::sync::Mutex<HashMap<String, KnownThread>>,
+}
+
+#[cfg(test)]
+impl StubTransport {
+    fn send_now(&self, reply: &OutgoingReply) -> Result<()> {
+        if *self.permission.lock().unwrap() == Some(false) {
+            return Err(anyhow!(MissingPermission));
+        }
+        if let Some(error) = self.send_error.lock().unwrap().clone() {
+            return Err(anyhow!(error));
+        }
+        self.sent.lock().unwrap().push(reply.clone());
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1306,6 +1749,68 @@ impl MailTransport for StubTransport {
         *self.permission.lock().unwrap()
     }
 
+    fn thread_headers(&self, thread_id: &str, _cx: &AsyncApp) -> Task<Result<ThreadHeaders>> {
+        Task::ready(
+            self.headers
+                .lock()
+                .unwrap()
+                .get(thread_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("no such thread")),
+        )
+    }
+
+    fn send_reply(&self, reply: &OutgoingReply, cx: &AsyncApp) -> Task<Result<()>> {
+        let Some(gate) = self.send_gate.lock().unwrap().take() else {
+            return Task::ready(self.send_now(reply));
+        };
+        let error = self.send_error.lock().unwrap().clone();
+        let sent = self.sent.clone();
+        let reply = reply.clone();
+        cx.background_spawn(async move {
+            gate.await.ok();
+            match error {
+                Some(error) => Err(anyhow!(error)),
+                None => {
+                    sent.lock().unwrap().push(reply);
+                    Ok(())
+                }
+            }
+        })
+    }
+
+    fn refresh(
+        &self,
+        known: &HashMap<String, crate::gmail::KnownThread>,
+        budget: usize,
+        _cx: &AsyncApp,
+    ) -> Task<Result<Vec<ThreadUpdate>>> {
+        if let Some(error) = self.refresh_error.lock().unwrap().clone() {
+            return Task::ready(Err(anyhow!(error)));
+        }
+        let updates = self
+            .thread_updates
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|update| {
+                let known = known.get(&update.thread)?;
+                if known.history.as_deref() == Some(update.history.as_str()) {
+                    return None;
+                }
+                let mut update = update.clone();
+                update.new_messages.retain(|message| {
+                    message
+                        .sent
+                        .is_some_and(|sent| sent.timestamp_millis() > known.through)
+                });
+                Some(update)
+            })
+            .take(budget)
+            .collect();
+        Task::ready(Ok(updates))
+    }
+
     fn fetch(
         &self,
         skip: &HashSet<String>,
@@ -1320,7 +1825,10 @@ impl MailTransport for StubTransport {
             .into_iter()
             .map(MappingFetched::Items)
             .collect();
-        Task::ready(Ok(crate::gmail::GmailFetched { mappings }))
+        Task::ready(Ok(crate::gmail::GmailFetched {
+            mappings,
+            threads: self.fetched_threads.lock().unwrap().clone(),
+        }))
     }
 }
 
@@ -1493,6 +2001,82 @@ async fn inbox_dir(fs: &Arc<dyn Fs>, vault: &Vault) -> String {
         .and_then(|text| parse_inbox_config(&text).ok())
         .map(|config| config.dir)
         .unwrap_or_else(|| crate::inbox::InboxConfig::default().dir)
+}
+
+/// What every thread of a refresh pass is applied with.
+struct RefreshContext<'a> {
+    fs: &'a Arc<dyn Fs>,
+    vault: &'a Vault,
+    project: &'a Entity<Project>,
+    folders: &'a [&'a str],
+    inbox_dir: &'a str,
+    decisions: &'a [crate::gmail::LoggedDecision],
+}
+
+fn threads_state_path(vault: &Vault) -> PathBuf {
+    vault
+        .root
+        .join(VAULT_MARKER_DIR)
+        .join(STATE_DIR)
+        .join(THREADS_STATE_FILE)
+}
+
+/// The note that carries `digest` in its frontmatter: looked for where notes
+/// usually are, then anywhere in the vault, since a note can be filed by hand.
+/// Hidden folders are never read.
+async fn find_note(
+    fs: &Arc<dyn Fs>,
+    vault: &Vault,
+    folders: &[&str],
+    digest: &str,
+) -> Option<PathBuf> {
+    use futures::StreamExt as _;
+    // The folders first, each alone; the vault's root last, with all under it.
+    let mut pending: Vec<(PathBuf, bool)> = vec![(vault.root.clone(), true)];
+    pending.extend(
+        folders
+            .iter()
+            .rev()
+            .map(|folder| (vault.root.join(folder), false)),
+    );
+    while let Some((dir, recurse)) = pending.pop() {
+        let Ok(mut entries) = fs.read_dir(&dir).await else {
+            continue;
+        };
+        let mut below = Vec::new();
+        while let Some(entry) = entries.next().await {
+            let Ok(path) = entry else { continue };
+            let hidden = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| name.starts_with('.'));
+            if hidden {
+                continue;
+            }
+            let Ok(Some(metadata)) = fs.metadata(&path).await else {
+                continue;
+            };
+            if metadata.is_dir {
+                // A linked folder is not walked: it may lead back up.
+                if recurse && !metadata.is_symlink {
+                    below.push((path, true));
+                }
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(content) = fs.load(&path).await else {
+                continue;
+            };
+            if inbox_note_digest(&content).as_deref() == Some(digest) {
+                return Some(path);
+            }
+        }
+        // Under what is still waiting, so the folders are read before the walk.
+        pending.splice(0..0, below);
+    }
+    None
 }
 
 fn state_file_path(vault: &Vault) -> PathBuf {
@@ -1849,6 +2433,7 @@ mod tests {
 
             fn fetch(&self, _: &HashSet<String>, _cx: &AsyncApp) -> Task<Result<GmailFetched>> {
                 Task::ready(Ok(GmailFetched {
+                    threads: HashMap::new(),
                     mappings: vec![
                         MappingFetched::LabelNotFound,
                         MappingFetched::Items(Vec::new()),
@@ -2110,5 +2695,417 @@ mod tests {
         let fresh = with_archive_table("").unwrap();
         assert!(fresh.starts_with("schema = 2\n"), "{fresh}");
         assert!(with_archive_table("not [toml").is_err());
+    }
+
+    const IDEA_NOTE: &str = "/vault/inbox/2026-08-18-0930-an-idea-from-the-road.md";
+    const IDEA_ARCHIVED: &str = "/vault/archives/inbox/2026-08-18-0930-an-idea-from-the-road.md";
+    const THREADS_STATE: &str = "/vault/.thock/state/gmail/threads.jsonl";
+
+    fn reply(from: &str, text: &str, minutes: i64, own: bool) -> crate::gmail::ThreadMessage {
+        crate::gmail::ThreadMessage {
+            from: from.to_string(),
+            // After the capture, which is stamped with the real clock.
+            sent: Some(Utc::now() + chrono::Duration::minutes(minutes)),
+            text: Some(text.to_string()),
+            own,
+        }
+    }
+
+    fn update(history: &str, new_messages: Vec<crate::gmail::ThreadMessage>) -> ThreadUpdate {
+        ThreadUpdate {
+            thread: "t-idea".to_string(),
+            history: history.to_string(),
+            through: new_messages
+                .iter()
+                .filter_map(|message| message.sent)
+                .map(|sent| sent.timestamp_millis())
+                .max()
+                .unwrap_or(0),
+            first: Some(crate::gmail::ThreadMessage {
+                from: "Ana <ana@example.com>".to_string(),
+                sent: Some(Utc.with_ymd_and_hms(2026, 8, 18, 16, 30, 0).unwrap()),
+                text: Some("Two thoughts.".to_string()),
+                own: false,
+            }),
+            new_messages,
+        }
+    }
+
+    /// One thread captured into the inbox, then the stub's clock to hand.
+    async fn refresh_harness(
+        cx: &mut TestAppContext,
+    ) -> (Arc<FakeFs>, Entity<Project>, Arc<StubTransport>) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(Path::new("/vault")).await.unwrap();
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+        let service = cx.new(|cx| GmailService::new(project.clone(), cx));
+        let transport = Arc::new(StubTransport {
+            items: Mutex::new(vec![
+                vec![],
+                vec![email("t-idea", "An idea from the road", "Two thoughts.")],
+            ]),
+            ..Default::default()
+        });
+        service.update(cx, |service, cx| {
+            service.configure_for_test(test_vault(), test_config(), transport.clone(), cx)
+        });
+        cx.run_until_parked();
+        assert!(fs.is_file(Path::new(IDEA_NOTE)).await);
+        // Kept alive by the test's app for the polls that follow.
+        cx.update(|cx| cx.set_global(KeepService(service)));
+        (fs, project, transport)
+    }
+
+    struct KeepService(#[allow(dead_code)] Entity<GmailService>);
+    impl Global for KeepService {}
+
+    fn poll(cx: &mut TestAppContext) {
+        cx.executor().advance_clock(Duration::from_secs(301));
+        cx.run_until_parked();
+    }
+
+    async fn triage(fs: &FakeFs, destination: &str) {
+        fs.rename(
+            Path::new(IDEA_NOTE),
+            Path::new(IDEA_ARCHIVED),
+            fs::RenameOptions {
+                create_parents: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let digest = capture_digest("diego@example.com", "gmail", "t-idea");
+        write_log(
+            fs,
+            &format!(
+                "- 2026-11-02 · An idea from the road → {destination} <!--inbox:{digest}-->\n"
+            ),
+        )
+        .await;
+    }
+
+    #[gpui::test]
+    async fn a_reply_reaches_its_note_once_and_a_lone_message_gets_its_heading(
+        cx: &mut TestAppContext,
+    ) {
+        let (fs, _project, transport) = refresh_harness(cx).await;
+        let bea = reply("Bea <bea@example.com>", "Count me in.", 5, false);
+        *transport.thread_updates.lock().unwrap() = vec![update("h2", vec![bea.clone()])];
+        poll(cx);
+
+        let note = fs.load(Path::new(IDEA_NOTE)).await.unwrap();
+        let first = note
+            .find("## Ana <ana@example.com> — ")
+            .expect("the first heading");
+        let words = note.find("Two thoughts.").unwrap();
+        let second = note.find(&bea.heading()).expect("the reply's heading");
+        assert!(first < words && words < second, "{note}");
+        assert!(note.ends_with("Count me in.\n"), "{note}");
+        assert!(note.contains("# An idea from the road\n\n## Ana"), "{note}");
+        let state = fs.load(Path::new(THREADS_STATE)).await.unwrap();
+        assert!(state.contains("\"history\":\"h2\""), "{state}");
+
+        // The same answer again changes nothing, and neither does losing the
+        // state between the note and its record.
+        poll(cx);
+        assert_eq!(fs.load(Path::new(IDEA_NOTE)).await.unwrap(), note);
+        fs.remove_file(Path::new(THREADS_STATE), Default::default())
+            .await
+            .unwrap();
+        poll(cx);
+        assert_eq!(fs.load(Path::new(IDEA_NOTE)).await.unwrap(), note);
+        assert!(fs.is_file(Path::new(THREADS_STATE)).await);
+
+        // A later message is appended under it, with no second first heading.
+        let ana = reply("Ana <ana@example.com>", "Great.", 9, false);
+        *transport.thread_updates.lock().unwrap() = vec![update("h3", vec![bea, ana])];
+        poll(cx);
+        let note = fs.load(Path::new(IDEA_NOTE)).await.unwrap();
+        assert_eq!(note.matches("## Ana <ana@example.com> — ").count(), 2);
+        assert_eq!(note.matches("Count me in.").count(), 1);
+        assert!(note.ends_with("Great.\n"), "{note}");
+    }
+
+    #[gpui::test]
+    async fn a_reply_brings_a_triaged_note_back_but_not_an_archived_one(cx: &mut TestAppContext) {
+        let (fs, _project, transport) = refresh_harness(cx).await;
+        triage(&fs, "Today · Day planner").await;
+        // Your own reply is appended where the note is.
+        *transport.thread_updates.lock().unwrap() = vec![update(
+            "h2",
+            vec![reply("Diego <diego@example.com>", "On it.", 5, true)],
+        )];
+        poll(cx);
+        let note = fs.load(Path::new(IDEA_ARCHIVED)).await.unwrap();
+        assert!(note.ends_with("On it.\n"), "{note}");
+        assert!(!fs.is_file(Path::new(IDEA_NOTE)).await);
+
+        // Someone else's brings it back.
+        *transport.thread_updates.lock().unwrap() = vec![update(
+            "h3",
+            vec![reply("Bea <bea@example.com>", "Thanks!", 9, false)],
+        )];
+        poll(cx);
+        let note = fs.load(Path::new(IDEA_NOTE)).await.unwrap();
+        assert!(note.ends_with("Thanks!\n"), "{note}");
+        assert!(!fs.is_file(Path::new(IDEA_ARCHIVED)).await);
+
+        // Archived this time: the next reply is appended in place.
+        triage(&fs, "Archived").await;
+        *transport.thread_updates.lock().unwrap() = vec![update(
+            "h4",
+            vec![reply("Bea <bea@example.com>", "One more thing.", 15, false)],
+        )];
+        poll(cx);
+        let note = fs.load(Path::new(IDEA_ARCHIVED)).await.unwrap();
+        assert!(note.ends_with("One more thing.\n"), "{note}");
+        assert!(!fs.is_file(Path::new(IDEA_NOTE)).await);
+    }
+
+    #[gpui::test]
+    async fn a_note_filed_by_hand_is_found_and_appended_in_place(cx: &mut TestAppContext) {
+        let (fs, _project, transport) = refresh_harness(cx).await;
+        let filed = Path::new("/vault/projects/road/idea.md");
+        fs.rename(
+            Path::new(IDEA_NOTE),
+            filed,
+            fs::RenameOptions {
+                create_parents: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        *transport.thread_updates.lock().unwrap() = vec![update(
+            "h2",
+            vec![reply("Bea <bea@example.com>", "Count me in.", 5, false)],
+        )];
+        poll(cx);
+        let note = fs.load(filed).await.unwrap();
+        assert!(note.ends_with("Count me in.\n"), "{note}");
+        assert!(!fs.is_file(Path::new(IDEA_NOTE)).await);
+    }
+
+    #[gpui::test]
+    async fn an_open_note_takes_the_reply_through_its_buffer(cx: &mut TestAppContext) {
+        let (fs, project, transport) = refresh_harness(cx).await;
+        let path = project
+            .read_with(cx, |project, cx| {
+                project.find_project_path(Path::new(IDEA_NOTE), cx)
+            })
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(path, cx))
+            .await
+            .unwrap();
+        *transport.thread_updates.lock().unwrap() = vec![update(
+            "h2",
+            vec![reply("Bea <bea@example.com>", "Count me in.", 5, false)],
+        )];
+        poll(cx);
+        // Past the typing guard.
+        cx.executor().advance_clock(TYPING_GUARD_QUIET * 2);
+        cx.run_until_parked();
+        buffer.read_with(cx, |buffer, _| {
+            assert!(
+                buffer.text().ends_with("Count me in.\n"),
+                "{}",
+                buffer.text()
+            );
+            assert!(!buffer.is_dirty(), "a saved note is saved again");
+        });
+        let note = fs.load(Path::new(IDEA_NOTE)).await.unwrap();
+        assert!(note.ends_with("Count me in.\n"), "{note}");
+    }
+
+    #[gpui::test]
+    async fn a_failed_refresh_shows_and_does_not_hold_the_archive_back(cx: &mut TestAppContext) {
+        let (fs, service, transport, clock) = archive_harness(archive_on(), cx).await;
+        *transport.refresh_error.lock().unwrap() = Some("Gmail said 503".to_string());
+        write_log(&fs, &decided_line()).await;
+        advance(&clock, 301, cx);
+        service.read_with(cx, |service, _| {
+            assert!(
+                matches!(service.state(), SyncState::Failing { .. }),
+                "the poll says the replies didn't come in"
+            );
+        });
+        // The pass that saw the decision started its grace; the next one,
+        // a backed-off poll later, archives.
+        advance(&clock, 601, cx);
+        assert_eq!(
+            *transport.modified.lock().unwrap(),
+            vec![("t-q4".to_string(), ThreadMove::Archive)]
+        );
+    }
+
+    #[gpui::test]
+    async fn a_note_with_unsaved_words_keeps_its_thread_open_until_saved(cx: &mut TestAppContext) {
+        let (fs, project, transport) = refresh_harness(cx).await;
+        let path = project
+            .read_with(cx, |project, cx| {
+                project.find_project_path(Path::new(IDEA_NOTE), cx)
+            })
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(path, cx))
+            .await
+            .unwrap();
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(buffer.len()..buffer.len(), "\nmine\n")], None, cx)
+        });
+        *transport.thread_updates.lock().unwrap() = vec![update(
+            "h2",
+            vec![reply("Bea <bea@example.com>", "Count me in.", 5, false)],
+        )];
+        poll(cx);
+        cx.executor().advance_clock(TYPING_GUARD_QUIET * 2);
+        cx.run_until_parked();
+        buffer.read_with(cx, |buffer, _| {
+            assert!(
+                buffer.text().ends_with("Count me in.\n"),
+                "{}",
+                buffer.text()
+            );
+            assert!(buffer.is_dirty(), "the user's words are theirs to save");
+        });
+        // Not on disk yet, so the thread isn't recorded as read.
+        let marked = |state: String| state.contains("\"history\":\"h2\"");
+        assert!(!marked(
+            load_if_present(&(fs.clone() as Arc<dyn Fs>), Path::new(THREADS_STATE))
+                .await
+                .unwrap()
+        ));
+
+        project
+            .update(cx, |project, cx| project.save_buffer(buffer.clone(), cx))
+            .await
+            .unwrap();
+        poll(cx);
+        cx.executor().advance_clock(TYPING_GUARD_QUIET * 2);
+        cx.run_until_parked();
+        assert!(marked(fs.load(Path::new(THREADS_STATE)).await.unwrap()));
+        let note = fs.load(Path::new(IDEA_NOTE)).await.unwrap();
+        assert_eq!(note.matches("Count me in.").count(), 1, "{note}");
+    }
+
+    #[gpui::test]
+    async fn a_captured_thread_starts_from_what_gmail_had_not_from_the_clock(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(Path::new("/vault")).await.unwrap();
+        let project = Project::test(fs.clone(), [Path::new("/vault")], cx).await;
+        cx.run_until_parked();
+        let service = cx.new(|cx| GmailService::new(project.clone(), cx));
+        let transport = Arc::new(StubTransport {
+            items: Mutex::new(vec![
+                vec![],
+                vec![email("t-idea", "An idea from the road", "Two thoughts.")],
+            ]),
+            // The thread as fetched: one message, long before this poll.
+            fetched_threads: Mutex::new(
+                [(
+                    "t-idea".to_string(),
+                    KnownThread {
+                        history: Some("h1".to_string()),
+                        through: 1_000,
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        });
+        // A reply that reached Gmail before the capture was stamped.
+        let mut early = reply("Bea <bea@example.com>", "Count me in.", 0, false);
+        early.sent = Some(Utc::now() - chrono::Duration::minutes(5));
+        *transport.thread_updates.lock().unwrap() = vec![update("h2", vec![early])];
+        service.update(cx, |service, cx| {
+            service.configure_for_test(test_vault(), test_config(), transport.clone(), cx)
+        });
+        cx.run_until_parked();
+        let note = fs.load(Path::new(IDEA_NOTE)).await.unwrap();
+        assert!(note.ends_with("Count me in.\n"), "{note}");
+        // One line per thread, its last.
+        let state = fs.load(Path::new(THREADS_STATE)).await.unwrap();
+        assert_eq!(state.lines().count(), 1, "{state}");
+        assert!(state.contains("\"history\":\"h2\""), "{state}");
+    }
+
+    #[gpui::test]
+    async fn a_reply_on_its_way_is_sent_though_nobody_waits(cx: &mut TestAppContext) {
+        let (_fs, _project, transport) = refresh_harness(cx).await;
+        let (open, gate) = futures::channel::oneshot::channel();
+        *transport.send_gate.lock().unwrap() = Some(gate);
+        let service = cx.update(|cx| cx.global::<KeepService>().0.clone());
+        let reply = OutgoingReply {
+            thread: "t-idea".to_string(),
+            from: "diego@example.com".to_string(),
+            to: vec!["ana@example.com".to_string()],
+            cc: Vec::new(),
+            subject: "Re: An idea from the road".to_string(),
+            in_reply_to: None,
+            references: None,
+            body: "On it.\n".to_string(),
+        };
+        let waiting = service.update(cx, |service, cx| service.send_reply(reply.clone(), cx));
+        cx.run_until_parked();
+        drop(waiting);
+        open.send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(transport.sent.lock().unwrap().as_slice(), [reply]);
+    }
+
+    #[gpui::test]
+    async fn a_reply_with_mail_line_endings_lands_once_in_an_open_note(cx: &mut TestAppContext) {
+        let (fs, project, transport) = refresh_harness(cx).await;
+        let path = project
+            .read_with(cx, |project, cx| {
+                project.find_project_path(Path::new(IDEA_NOTE), cx)
+            })
+            .unwrap();
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(path, cx))
+            .await
+            .unwrap();
+        // Mail is CRLF; a buffer never is.
+        *transport.thread_updates.lock().unwrap() = vec![update(
+            "h2",
+            vec![reply(
+                "Bea <bea@example.com>",
+                "Count me in.\r\n\r\nSee you there.\r\n",
+                5,
+                false,
+            )],
+        )];
+        for _ in 0..2 {
+            poll(cx);
+            cx.executor().advance_clock(TYPING_GUARD_QUIET * 2);
+            cx.run_until_parked();
+        }
+        buffer.read_with(cx, |buffer, _| {
+            assert_eq!(
+                buffer.text().matches("Count me in.").count(),
+                1,
+                "{}",
+                buffer.text()
+            );
+            assert!(!buffer.is_dirty());
+        });
+        let note = fs.load(Path::new(IDEA_NOTE)).await.unwrap();
+        assert!(
+            note.ends_with("Count me in.\n\nSee you there.\n"),
+            "{note:?}"
+        );
+        assert!(
+            fs.load(Path::new(THREADS_STATE))
+                .await
+                .unwrap()
+                .contains("\"h2\"")
+        );
     }
 }

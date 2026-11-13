@@ -599,6 +599,15 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   cache and queues writes. Spec `specs/v55-agents-bridge.md`. _(shipped 2026-11-05: merged as #190,
   TestFlight build 25)_
 
+- [x] **An email is a conversation wherever it lives, and can be answered:** a note captured from
+  Gmail opens as the Inbox's reader in its own tab (a card per message, the newest open, repeats
+  folded), with `o` for the Markdown behind it. Gmail sync appends replies to threads it already
+  captured, and a reply from someone else brings a triaged note back to the Inbox unless it was
+  archived. `r`, `a` and `alt-r` reply to the author, to everyone or to one address of the
+  thread; nothing is sent before a second keystroke on a line naming every recipient, and only to
+  addresses already on the thread. Spec `specs/v56-email-reader-and-reply.md`. _(shipped
+  2026-11-11: merged as #199, by-hand checks passed)_
+
 ---
 
 _This is a starting point, not a spec. It exists to give designers and engineers a shared picture of the destination so we can argue productively about the route._

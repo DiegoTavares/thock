@@ -36,6 +36,8 @@ the thread's `INBOX` label. Undo, which removes the log line, puts `INBOX` back.
 - **G3: Gmail archive only.** Thock removes the `INBOX` label from the thread, nothing else. The
   `thock/inbox` label, read state, and every other label are untouched. Nothing is ever deleted
   or trashed in Gmail.
+  _Amended by V56 §7.1 (2026-11-11):_ the same `gmail.modify` grant also sends a reply the person
+  writes and confirms in Thock. Archiving is still all that happens without a keystroke.
 - **G4: Not retroactive.** Turning it on acts only on decisions made afterwards. Mail already
   triaged before the opt-in stays where it is in Gmail.
 - **G5: Undo reaches Gmail.** Undoing a decision (desk `u`, the toast, the phone's undo) before the

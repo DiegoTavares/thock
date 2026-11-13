@@ -1697,7 +1697,7 @@ impl InboxService {
             .gmail
             .as_ref()
             .and_then(|gmail| gmail.upgrade())
-            .and_then(|gmail| gmail.read(cx).account().map(str::to_string));
+            .and_then(|gmail| gmail.read(cx).account());
         let account = account.or_else(|| self.account.clone());
         let mut names = vault.config.inbox.names.clone();
         if let Some(account) = &account {
