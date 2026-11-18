@@ -1,6 +1,7 @@
 # Thock V57 - Auto-archive: the Inbox clears what isn't yours before you sit down
 
-**Status:** Implemented (2026-11-08): PR #197; §15 lists where the code differs from the text
+**Status:** Shipped (2026-11-18): merged as #197, by-hand checks skipped; §15 lists where the code
+differs from the text
 **Owner:** Diego · **Date:** 2026-11-08
 **Companion docs:** `v41-inbox-desk-view.md` §7 (Jev, the request, the cache, the decision log),
 `v53-gmail-archive-on-triage.md` (the triage log as the Gmail trigger, the undo horizon),
