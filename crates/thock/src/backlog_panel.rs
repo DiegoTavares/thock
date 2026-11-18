@@ -2657,7 +2657,7 @@ impl BacklogPanel {
             gmail.and_then(sync_status::gmail_status),
             self.inbox_service
                 .as_ref()
-                .and_then(|service| sync_status::inbox_status(service.read(cx), gmail)),
+                .and_then(|service| sync_status::inbox_status(service.read(cx), gmail, cx)),
             self.readwise_service
                 .as_ref()
                 .and_then(|service| sync_status::readwise_status(service.read(cx))),

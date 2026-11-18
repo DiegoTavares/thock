@@ -108,6 +108,10 @@ pub struct VaultSnapshot {
     /// The days of the reviewed week that have a daily note, by existence
     /// alone.
     pub week_days: BTreeSet<NaiveDate>,
+    /// `[inbox] auto_archive` is on (V57 §6.1).
+    pub inbox_auto_archive: bool,
+    /// `triage-policy.md`'s `refreshed:` stamp.
+    pub inbox_policy_refreshed: Option<NaiveDate>,
 }
 
 impl VaultSnapshot {
@@ -156,11 +160,22 @@ impl VaultSnapshot {
                 week_days.insert(day);
             }
         }
+        // Only the refresh nudge reads the stamp, and only with auto-archive on.
+        let inbox_policy_refreshed = if vault.config.inbox.auto_archive {
+            fs.load(&vault.root.join(crate::inbox_service::POLICY_PATH))
+                .await
+                .ok()
+                .and_then(|text| crate::inbox_auto_archive::policy_refreshed(&text))
+        } else {
+            None
+        };
         Self {
             skills,
             daily,
             week,
             week_days,
+            inbox_auto_archive: vault.config.inbox.auto_archive,
+            inbox_policy_refreshed,
         }
     }
 }
@@ -180,7 +195,7 @@ pub struct NudgeOffer {
 }
 
 /// The nudges, in priority order (§5).
-pub const REGISTRY: &[Nudge] = &[WRAP_YESTERDAY, WEEK_REVIEW];
+pub const REGISTRY: &[Nudge] = &[WRAP_YESTERDAY, WEEK_REVIEW, REFRESH_INBOX_POLICY];
 
 const WRAP_YESTERDAY: Nudge = Nudge {
     id: "wrap-yesterday",
@@ -193,6 +208,30 @@ const WEEK_REVIEW: Nudge = Nudge {
     skill: "week-review",
     due: week_review_due,
 };
+
+/// The Inbox Routine's weekly refresh (V57 §6.1). Its skill being enabled is
+/// what "the Inbox Routine is installed" means here.
+const REFRESH_INBOX_POLICY: Nudge = Nudge {
+    id: "refresh-inbox-policy",
+    skill: "refresh-inbox-policy",
+    due: refresh_inbox_policy_due,
+};
+
+/// How old the policy's stamp may get before the refresh is offered.
+const INBOX_POLICY_REFRESH_DAYS: i64 = 7;
+
+fn refresh_inbox_policy_due(moment: &Moment, snapshot: &VaultSnapshot) -> Option<SharedString> {
+    if !snapshot.inbox_auto_archive {
+        return None;
+    }
+    let stale = snapshot
+        .inbox_policy_refreshed
+        .is_none_or(|refreshed| (moment.today - refreshed).num_days() >= INBOX_POLICY_REFRESH_DAYS);
+    stale.then(|| {
+        "The inbox policy hasn't been refreshed in a week. Should I go over your decisions and update it?"
+            .into()
+    })
+}
 
 /// The most recent day before today, within the lookback, whose note is
 /// more than the template. The Wrap nudge's day, and the ritual's (§5.1).
@@ -427,7 +466,40 @@ mod tests {
             daily: daily.iter().cloned().collect(),
             week: None,
             week_days: BTreeSet::new(),
+            inbox_auto_archive: false,
+            inbox_policy_refreshed: None,
         }
+    }
+
+    #[test]
+    fn the_inbox_refresh_is_due_a_week_after_the_last_one() {
+        // 2026-11-04 is a Wednesday, outside the review window.
+        let wednesday = moment(2026, 11, 4, 10, 0);
+        let mut snapshot = snapshot(&[]);
+        snapshot.skills.insert("refresh-inbox-policy".to_string());
+        snapshot.inbox_auto_archive = true;
+        snapshot.inbox_policy_refreshed = Some(date(2026, 10, 28));
+        assert_eq!(
+            ids(&evaluate(REGISTRY, &wednesday, &snapshot)),
+            ["refresh-inbox-policy"]
+        );
+        snapshot.inbox_policy_refreshed = Some(date(2026, 10, 29));
+        assert!(
+            evaluate(REGISTRY, &wednesday, &snapshot).is_empty(),
+            "six days"
+        );
+        // No stamp at all is as stale as it gets.
+        snapshot.inbox_policy_refreshed = None;
+        assert_eq!(
+            ids(&evaluate(REGISTRY, &wednesday, &snapshot)),
+            ["refresh-inbox-policy"]
+        );
+        // Not with auto-archive off, and not without the Inbox Routine.
+        snapshot.inbox_auto_archive = false;
+        assert!(evaluate(REGISTRY, &wednesday, &snapshot).is_empty());
+        snapshot.inbox_auto_archive = true;
+        snapshot.skills.remove("refresh-inbox-policy");
+        assert!(evaluate(REGISTRY, &wednesday, &snapshot).is_empty());
     }
 
     fn ids(offers: &[NudgeOffer]) -> Vec<&'static str> {
@@ -633,6 +705,25 @@ mod tests {
         assert!(!wrap.contains("**The target day is yesterday**"));
         let review = include_str!("../assets/routines/timeline/skills/week-review.md");
         assert!(review.contains("the ISO week that contains today when today is Friday"));
+        // Like the refresh nudge, Week Review refreshes the inbox policy only
+        // with auto-archive on (V57 §6.1).
+        let step = review
+            .split("## 11. Refresh the inbox policy")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .expect("Week Review's refresh step");
+        assert!(
+            step.contains("`routines/inbox/routine.toml` exists"),
+            "{step}"
+        );
+        assert!(
+            step.contains("`auto_archive = true` in its `[inbox]` table"),
+            "{step}"
+        );
+        assert!(
+            step.contains("Otherwise skip this step without a word"),
+            "{step}"
+        );
         assert!(!review.contains("Monday–Sunday of the week before today"));
     }
 

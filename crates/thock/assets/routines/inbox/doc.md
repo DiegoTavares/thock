@@ -51,10 +51,29 @@ that must empty to work, and invisible history checkpoints every batch so nothin
 unrecoverable. Every handled item gets a line in `archives/inbox/triage-log.md`, so the vault
 can always answer "what happened to that thing I sent myself" — even with Thock closed.
 
+## Auto-archive
+
+Some of the Inbox needs nothing from you: notifications, tickets filed against the wrong team,
+things another group owns. Run `thock: turn on inbox auto archive` and, once a day after the first
+Gmail sync, Thock asks about each item that arrived since the last run and archives the ones it
+is sure about (0.95 or more), exactly as `e` would, in Gmail too when Gmail archive is on. A
+thread you wrote in is never touched. What it filed waits in a collapsed **Auto-archived** group
+at the bottom of the Inbox list until the next run: `u` sends an item back, `t`, `s` and
+`shift-s` re-file it, and either way Gmail puts the thread back.
+
+Turning it on first runs **Refresh Inbox Policy**, a weekly ritual that reads your notes and your
+past decisions (corrections first), keeps a map of your work in `memory/work.md`, and rewrites the
+policy's Proposals and Criteria so a miscategorised ticket is judged by what it's about. The run
+never works from the shipped defaults: until the refresh has stamped the policy, the group says
+it is waiting. `[inbox] auto_archive_threshold` in `.thock/config.toml` sets the bar (never below
+0.85), `[inbox] names` lists how ticket systems spell you, and
+`thock: turn off inbox auto archive` stops it.
+
 ## Make it yours
 
 - `routines/inbox/triage-policy.md` — the judgment triage follows. **Set Up Inbox** writes it
-  from six questions; editing the file by hand changes the ritual with no re-setup.
+  from six questions; editing the file by hand changes the ritual with no re-setup. Its
+  `## Criteria` says what each of the suggestion's five answers means.
 - `.thock/inbox.toml` — the landing folder, poll interval, and the Google Tasks list. The
   Gmail label lives in `.thock/gmail.toml`'s label → folder map instead. Delete either file and
   that transport goes away; `inbox/` keeps working as a plain folder.

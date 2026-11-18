@@ -27,7 +27,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
-use thock_sync_core::{Operation, Write, apply, archive_path, inbox_task_line, triage_log_line};
+use thock_sync_core::{
+    ARCHIVED_AUTOMATICALLY, Operation, Write, apply, archive_path, inbox_task_line, triage_log_line,
+};
 use ui::{
     ActiveTheme as _, Button, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle,
     Clickable as _, Color, ContextMenu, FixedWidth as _, Icon, IconButton, IconName, IconSize,
@@ -43,11 +45,12 @@ use workspace::{OpenOptions, OpenVisible, Toast, Workspace};
 use crate::backlog::{self, DEFAULT_BACKLOG, SectionKind};
 use crate::email_reader::*;
 use crate::gmail::ReplyMode;
-use crate::inbox::{TRIAGE_LOG_PATH, sanitize_title};
+use crate::inbox::{InboxItem, TRIAGE_LOG_PATH, sanitize_title};
+use crate::inbox_auto_archive::{RunStatus, group_title, status_line};
 use crate::inbox_email::{ticket_prefix, trailing_ticket};
 use crate::inbox_service::{
-    self, InboxEntry, InboxEvent, InboxService, MoveOutcome, SuggestionAvailability, TriageInbox,
-    move_note,
+    self, AutoArchivedEntry, InboxEntry, InboxEvent, InboxService, MoveOutcome, RefreshInboxPolicy,
+    RunInboxAutoArchive, SuggestionAvailability, TriageInbox, move_note,
 };
 use crate::inbox_suggest::{DecisionRecord, Destination, Tier, format_cost, tier};
 use crate::notes::{EnsureNoteOutcome, NoteKind, ensure_note};
@@ -185,6 +188,8 @@ actions!(
         /// Shows or hides what the inbox email folded away: older messages,
         /// repeated text, quotes, signatures and field tables.
         ToggleInboxFolds,
+        /// Shows or hides what the inbox archived on its own this morning.
+        ToggleInboxAutoArchived,
     ]
 );
 
@@ -246,6 +251,27 @@ type FilingPlan = Vec<(InboxEntry, Destination)>;
 /// The one toast a decision shows; undo dismisses it by this id.
 struct InboxDecisionToast;
 
+/// Where the selection is when it is in the Auto-archived group (V57 §8.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GroupCursor {
+    Header,
+    Row(String),
+}
+
+/// What the group header's status line offers (§5.1, §7.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusAction {
+    Refresh,
+    Retry,
+}
+
+/// The group header's status line, when a run is waiting or stopped.
+#[derive(Debug, Clone, PartialEq)]
+struct GroupStatus {
+    text: String,
+    action: Option<StatusAction>,
+}
+
 pub struct InboxView {
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
@@ -293,6 +319,19 @@ pub struct InboxView {
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     /// The tab that was active when the view opened; `escape` returns to it.
     previous_item: Option<Box<dyn WeakItemHandle>>,
+    /// The Auto-archived group's rows as shown, filtered (V57 §8.1).
+    group: Vec<AutoArchivedEntry>,
+    group_expanded: bool,
+    group_status: Option<GroupStatus>,
+    /// The selection while it is in the group; `selected` is `None` then.
+    group_cursor: Option<GroupCursor>,
+    group_marked: HashSet<String>,
+    /// Rows a correction is taking out, hidden from the keystroke until the
+    /// service stops listing them.
+    group_leaving: HashSet<String>,
+    /// Where the selection goes once the corrected rows leave.
+    group_landing: Option<GroupCursor>,
+    group_in_flight: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -391,8 +430,12 @@ impl InboxView {
             subscriptions.push(cx.subscribe(
                 service,
                 |this, _, event: &InboxEvent, cx| match event {
-                    InboxEvent::ItemsChanged => this.items_changed(cx),
-                    InboxEvent::SuggestionsChanged => cx.notify(),
+                    InboxEvent::ItemsChanged => {
+                        this.items_changed(cx);
+                        this.refresh_group(cx);
+                    }
+                    // The run's status rides with the suggestions.
+                    InboxEvent::SuggestionsChanged => this.refresh_group(cx),
                 },
             ));
             service.update(cx, |service, cx| service.view_opened(cx));
@@ -442,9 +485,18 @@ impl InboxView {
             keys_sheet: false,
             context_menu: None,
             previous_item: None,
+            group: Vec::new(),
+            group_expanded: false,
+            group_status: None,
+            group_cursor: None,
+            group_marked: HashSet::new(),
+            group_leaving: HashSet::new(),
+            group_landing: None,
+            group_in_flight: false,
             _subscriptions: subscriptions,
         };
         this.refresh_visible(cx);
+        this.refresh_group(cx);
         this.load_layout(cx);
         this
     }
@@ -501,20 +553,7 @@ impl InboxView {
         let leaving = |entry: &InboxEntry| {
             self.filing.contains(&entry.item.stem) || self.departed.contains(&entry.item.stem)
         };
-        let matches = |entry: &InboxEntry| {
-            if self.filter.is_empty() {
-                return true;
-            }
-            let item = &entry.item;
-            [
-                Some(item.title.as_str()),
-                item.from.as_deref(),
-                item.source.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            .any(|field| field.to_lowercase().contains(&self.filter))
-        };
+        let matches = |entry: &InboxEntry| self.matches_filter(&entry.item);
         let staying: Vec<InboxEntry> = items.into_iter().filter(|entry| !leaving(entry)).collect();
         let unfiltered_count = staying.len();
         let (new, carried): (Vec<InboxEntry>, Vec<InboxEntry>) = staying
@@ -533,12 +572,13 @@ impl InboxView {
             && stems.contains(pending.as_str())
         {
             self.selected = self.pending_selection.take();
+            self.group_cursor = None;
         }
         let still_there = self
             .selected
             .as_deref()
             .is_some_and(|stem| stems.contains(stem));
-        if !still_there {
+        if !still_there && self.group_cursor.is_none() {
             let position = match self.selected_position {
                 Some(position) if !self.visible.is_empty() => {
                     Some(position.min(self.visible.len() - 1))
@@ -555,6 +595,21 @@ impl InboxView {
         cx.notify();
     }
 
+    /// Whether `item` shows under the filter: its title, sender or source.
+    fn matches_filter(&self, item: &InboxItem) -> bool {
+        if self.filter.is_empty() {
+            return true;
+        }
+        [
+            Some(item.title.as_str()),
+            item.from.as_deref(),
+            item.source.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|field| field.to_lowercase().contains(&self.filter))
+    }
+
     fn selected_index(&self) -> Option<usize> {
         let stem = self.selected.as_deref()?;
         self.visible
@@ -562,9 +617,391 @@ impl InboxView {
             .position(|entry| entry.item.stem == stem)
     }
 
+    /// The selected row's note, in the queue or in the Auto-archived group.
     fn selected_entry(&self) -> Option<&InboxEntry> {
-        self.selected_index()
-            .and_then(|index| self.visible.get(index))
+        match &self.group_cursor {
+            Some(GroupCursor::Row(stem)) => self
+                .group
+                .iter()
+                .find(|row| &row.entry.item.stem == stem)
+                .map(|row| &row.entry),
+            Some(GroupCursor::Header) => None,
+            None => self
+                .selected_index()
+                .and_then(|index| self.visible.get(index)),
+        }
+    }
+
+    // ----- The Auto-archived group (V57 §8) -----
+
+    /// Re-reads the group from the service, filtered like the rows, and
+    /// keeps the selection on its row, or moves it where a correction said
+    /// it lands.
+    fn refresh_group(&mut self, cx: &mut Context<Self>) {
+        let Some(service) = self.service.clone() else {
+            return;
+        };
+        let service = service.read(cx);
+        let rows = service.auto_archived().to_vec();
+        let status = service.auto_archive_status(cx);
+        let stems: HashSet<String> = rows.iter().map(|row| row.entry.item.stem.clone()).collect();
+        self.group_leaving.retain(|stem| stems.contains(stem));
+        self.group_marked.retain(|stem| stems.contains(stem));
+        self.group = rows
+            .into_iter()
+            .filter(|row| {
+                !self.group_leaving.contains(&row.entry.item.stem)
+                    && self.matches_filter(&row.entry.item)
+            })
+            .collect();
+        self.group_status = group_status(&status);
+        if self.group.is_empty() {
+            self.group_expanded = false;
+        }
+        let in_group = |cursor: &GroupCursor, group: &[AutoArchivedEntry]| match cursor {
+            GroupCursor::Header => true,
+            GroupCursor::Row(stem) => group.iter().any(|row| &row.entry.item.stem == stem),
+        };
+        if let Some(cursor) = self.group_cursor.clone()
+            && !in_group(&cursor, &self.group)
+        {
+            let landing = self
+                .group_landing
+                .take()
+                .filter(|landing| in_group(landing, &self.group));
+            self.group_cursor = Some(landing.unwrap_or(GroupCursor::Header));
+        }
+        if !self.group_shown() && self.group_cursor.take().is_some() {
+            let last = self.visible.len().checked_sub(1);
+            self.select_position(last, cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether the group has a header row: rows to show, or a status.
+    fn group_shown(&self) -> bool {
+        !self.group.is_empty() || self.group_status.is_some()
+    }
+
+    fn group_rows_shown(&self) -> usize {
+        if self.group_expanded {
+            self.group.len()
+        } else {
+            0
+        }
+    }
+
+    /// The list's rows in order: the queue, then the group's header and its
+    /// rows when it is open.
+    fn flat_len(&self) -> usize {
+        self.visible.len()
+            + if self.group_shown() {
+                1 + self.group_rows_shown()
+            } else {
+                0
+            }
+    }
+
+    fn flat_position(&self) -> Option<usize> {
+        match &self.group_cursor {
+            None => self.selected_index(),
+            Some(GroupCursor::Header) => Some(self.visible.len()),
+            Some(GroupCursor::Row(stem)) => self
+                .group
+                .iter()
+                .position(|row| &row.entry.item.stem == stem)
+                .map(|index| self.visible.len() + 1 + index),
+        }
+    }
+
+    fn select_flat(&mut self, position: Option<usize>, cx: &mut Context<Self>) {
+        let queue = self.visible.len();
+        let Some(position) = position.filter(|position| *position >= queue) else {
+            self.group_cursor = None;
+            self.select_position(position, cx);
+            return;
+        };
+        if !self.group_shown() {
+            return;
+        }
+        let cursor = match position - queue {
+            0 => GroupCursor::Header,
+            row => match self.group.get(row - 1).filter(|_| self.group_expanded) {
+                Some(row) => GroupCursor::Row(row.entry.item.stem.clone()),
+                None => return,
+            },
+        };
+        self.selected = None;
+        self.group_cursor = Some(cursor);
+        if let Some(row) = self.layout().row_of(2, position - queue) {
+            self.scroll
+                .scroll_to_item(row, gpui::ScrollStrategy::Nearest);
+        }
+        cx.notify();
+    }
+
+    fn in_group(&self) -> bool {
+        self.group_cursor.is_some()
+    }
+
+    fn set_group_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        let expanded = expanded && !self.group.is_empty();
+        self.group_expanded = expanded;
+        if !expanded && matches!(self.group_cursor, Some(GroupCursor::Row(_))) {
+            self.group_cursor = Some(GroupCursor::Header);
+        }
+        cx.notify();
+    }
+
+    fn toggle_auto_archived(
+        &mut self,
+        _: &ToggleInboxAutoArchived,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_group_expanded(!self.group_expanded, cx);
+    }
+
+    /// `l`/`right`: opens the group from its header.
+    fn select_child(&mut self, _: &menu::SelectChild, window: &mut Window, cx: &mut Context<Self>) {
+        if self.group_cursor == Some(GroupCursor::Header) {
+            self.open_group_header(window, cx);
+        }
+    }
+
+    /// `h`/`left`: closes the group, from its header or any of its rows.
+    fn select_parent(&mut self, _: &menu::SelectParent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.in_group() {
+            self.set_group_expanded(false, cx);
+        }
+    }
+
+    /// The header's own verb: open the rows, or with none, the status
+    /// line's action.
+    fn open_group_header(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.group.is_empty() {
+            self.set_group_expanded(true, cx);
+            return;
+        }
+        if let Some(action) = self.group_status.as_ref().and_then(|status| status.action) {
+            dispatch_status_action(action, window, cx);
+        }
+    }
+
+    /// What a group verb applies to: the marked rows in order, else the
+    /// selected row.
+    fn group_targets(&self) -> Vec<AutoArchivedEntry> {
+        if !self.group_marked.is_empty() {
+            return self
+                .group
+                .iter()
+                .filter(|row| self.group_marked.contains(&row.entry.item.stem))
+                .cloned()
+                .collect();
+        }
+        match &self.group_cursor {
+            Some(GroupCursor::Row(stem)) => self
+                .group
+                .iter()
+                .filter(|row| &row.entry.item.stem == stem)
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The rows leave at the keystroke, and the selection moves to the next
+    /// row left in the group, or its header when none is.
+    fn leave_group(&mut self, targets: &[AutoArchivedEntry], cx: &mut Context<Self>) {
+        let leaving: HashSet<&str> = targets
+            .iter()
+            .map(|row| row.entry.item.stem.as_str())
+            .collect();
+        let last = self
+            .group
+            .iter()
+            .rposition(|row| leaving.contains(row.entry.item.stem.as_str()));
+        let first = self
+            .group
+            .iter()
+            .position(|row| leaving.contains(row.entry.item.stem.as_str()));
+        let staying = |row: &&AutoArchivedEntry| !leaving.contains(row.entry.item.stem.as_str());
+        let landing = last
+            .and_then(|last| self.group[last + 1..].iter().find(staying))
+            .or_else(|| first.and_then(|first| self.group[..first].iter().rfind(staying)))
+            .map(|row| GroupCursor::Row(row.entry.item.stem.clone()))
+            .unwrap_or(GroupCursor::Header);
+        for stem in leaving {
+            self.group_leaving.insert(stem.to_string());
+            self.group_marked.remove(stem);
+        }
+        self.group_cursor = Some(landing.clone());
+        self.group_landing = Some(landing);
+        self.refresh_group(cx);
+    }
+
+    /// `u` on a group row (§8.2): the V41 §6.2 reversal for each target —
+    /// the note back in the inbox, its auto line out of the log — and the
+    /// run's record marked `undone`. The view's last decision is untouched.
+    fn send_back_from_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.group_in_flight {
+            return;
+        }
+        let targets = self.group_targets();
+        let (Some(vault), Some(service)) = (self.vault(cx), self.service.clone()) else {
+            return;
+        };
+        if targets.is_empty() {
+            return;
+        }
+        let inbox_dir = service.read(cx).inbox_dir();
+        self.leave_group(&targets, cx);
+        self.group_in_flight = true;
+        self.status = None;
+        let project = self.project.clone();
+        let fs = self.fs(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let mut failure: Option<anyhow::Error> = None;
+            for row in &targets {
+                let item = &row.entry.item;
+                let name = item.path.rsplit('/').next().unwrap_or(&item.path);
+                let back = vault
+                    .root
+                    .join(format!("{}/{name}", inbox_dir.trim_matches('/')));
+                let result = async {
+                    match move_note(&fs, &vault.root.join(&item.path), &back)
+                        .await
+                        .context("moving the note back to the inbox")?
+                    {
+                        MoveOutcome::Moved | MoveOutcome::SourceGone => {}
+                        MoveOutcome::DestinationExists => {
+                            anyhow::bail!("a note named {name} is already in the inbox")
+                        }
+                    }
+                    let line = row.line.clone();
+                    edit_buffer(
+                        &project,
+                        vault.root.join(TRIAGE_LOG_PATH),
+                        move |text| single_edit(text, &without_line(text, &line)?),
+                        cx,
+                    )
+                    .await
+                    .context("removing the triage-log line")?;
+                    anyhow::Ok(())
+                }
+                .await;
+                if let Err(error) = result {
+                    failure = Some(error);
+                    break;
+                }
+                service.update(cx, |service, cx| {
+                    service.mark_automatic_undone(&item.stem, &row.run, cx)
+                });
+            }
+            this.update(cx, |this, cx| {
+                this.finish_group_correction(failure, cx);
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    /// `t`/`s`/`shift-s` on a group row (§8.2): the task line, the auto line
+    /// replaced by the new destination's, and a record that `corrects` the
+    /// run. The note stays in the archive.
+    fn refile_from_group(
+        &mut self,
+        destination: Destination,
+        via: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.group_in_flight || destination == Destination::Archive {
+            return;
+        }
+        let targets = self.group_targets();
+        let (Some(vault), Some(service)) = (self.vault(cx), self.service.clone()) else {
+            return;
+        };
+        if targets.is_empty() {
+            return;
+        }
+        self.leave_group(&targets, cx);
+        self.group_in_flight = true;
+        self.status = None;
+        let project = self.project.clone();
+        let fs = self.fs(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let mut failure: Option<anyhow::Error> = None;
+            for row in &targets {
+                let item = &row.entry.item;
+                let result = async {
+                    write_task(&project, &fs, &vault, item, destination, cx).await?;
+                    let new_line = log_line_for(item, &log_destination(destination, &vault));
+                    let old_line = row.line.clone();
+                    let replaced = edit_buffer(
+                        &project,
+                        vault.root.join(TRIAGE_LOG_PATH),
+                        {
+                            let new_line = new_line.clone();
+                            move |text| {
+                                single_edit(text, &with_line_replaced(text, &old_line, &new_line)?)
+                            }
+                        },
+                        cx,
+                    )
+                    .await
+                    .context("writing the triage log")?;
+                    // A log edited by hand may have lost the auto line; the
+                    // decision is still logged.
+                    if !replaced {
+                        append_log_line(
+                            &project,
+                            &fs,
+                            &vault,
+                            item,
+                            &log_destination(destination, &vault),
+                            cx,
+                        )
+                        .await?;
+                    }
+                    anyhow::Ok(())
+                }
+                .await;
+                if let Err(error) = result {
+                    failure = Some(error);
+                    break;
+                }
+                let record = DecisionRecord {
+                    stem: item.stem.clone(),
+                    suggested: Some(Destination::Archive.key().to_string()),
+                    confidence: Some(row.confidence),
+                    chosen: destination.key().to_string(),
+                    via: via.to_string(),
+                    at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    undone: false,
+                    run: None,
+                    corrects: Some(row.run.clone()),
+                };
+                service.update(cx, |service, cx| service.record_decision(&record, cx));
+            }
+            this.update(cx, |this, cx| {
+                this.finish_group_correction(failure, cx);
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    fn finish_group_correction(&mut self, failure: Option<anyhow::Error>, cx: &mut Context<Self>) {
+        self.group_in_flight = false;
+        if let Some(error) = failure {
+            // What didn't go through comes back.
+            self.group_leaving.clear();
+            self.status = Some(format!("Couldn't correct the item: {error:#}").into());
+        }
+        self.reconcile_gmail_archive(cx);
+        self.refresh_group(cx);
     }
 
     fn entry_at(&self, section: usize, index: usize) -> Option<&InboxEntry> {
@@ -589,6 +1026,7 @@ impl InboxView {
     }
 
     fn select_position(&mut self, position: Option<usize>, cx: &mut Context<Self>) {
+        self.group_cursor = None;
         self.selected = position.and_then(|position| {
             self.visible
                 .get(position)
@@ -605,20 +1043,28 @@ impl InboxView {
         cx.notify();
     }
 
+    /// One step through the queue and on into the Auto-archived group,
+    /// clamped to the ends.
     fn step_selection(&mut self, steps: isize, cx: &mut Context<Self>) {
-        let layout = self.layout();
-        let from = self
-            .selected_index()
-            .map(|position| self.section_of(position));
-        let target = layout
-            .step(from, steps)
-            .map(|(section, index)| self.position_of(section, index));
-        self.select_position(target, cx);
+        let length = self.flat_len();
+        if length == 0 {
+            return;
+        }
+        let target = match self.flat_position() {
+            Some(position) => (position as isize + steps).clamp(0, length as isize - 1) as usize,
+            None if steps < 0 => length - 1,
+            None => 0,
+        };
+        self.select_flat(Some(target), cx);
     }
 
     /// The items a verb applies to: every marked row in list order, else
-    /// the selected row (§4.3).
+    /// the selected row (§4.3). Never a row of the Auto-archived group,
+    /// which has verbs of its own.
     fn targets(&self) -> Vec<InboxEntry> {
+        if self.in_group() {
+            return Vec::new();
+        }
         if self.marked.is_empty() {
             self.selected_entry().cloned().into_iter().collect()
         } else {
@@ -676,18 +1122,22 @@ impl InboxView {
     }
 
     fn select_first(&mut self, _: &SelectFirst, _: &mut Window, cx: &mut Context<Self>) {
-        let first = (!self.visible.is_empty()).then_some(0);
-        self.select_position(first, cx);
+        let first = (self.flat_len() > 0).then_some(0);
+        self.select_flat(first, cx);
     }
 
     fn select_last(&mut self, _: &SelectLast, _: &mut Window, cx: &mut Context<Self>) {
-        let last = self.visible.len().checked_sub(1);
-        self.select_position(last, cx);
+        let last = self.flat_len().checked_sub(1);
+        self.select_flat(last, cx);
     }
 
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
         if self.filter_editor.focus_handle(cx).is_focused(window) {
             self.focus_handle.focus(window, cx);
+            return;
+        }
+        if self.group_cursor == Some(GroupCursor::Header) {
+            self.open_group_header(window, cx);
             return;
         }
         self.open_selected(window, cx);
@@ -714,8 +1164,9 @@ impl InboxView {
             cx.notify();
             return;
         }
-        if !self.marked.is_empty() {
+        if !self.marked.is_empty() || !self.group_marked.is_empty() {
             self.marked.clear();
+            self.group_marked.clear();
             cx.notify();
             return;
         }
@@ -741,6 +1192,10 @@ impl InboxView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // An auto-archived row is already archived.
+        if self.in_group() {
+            return;
+        }
         if !self.marked.is_empty() {
             // Each marked row goes where its own chip points; rows without
             // one are skipped and stay marked (§4.3).
@@ -779,6 +1234,10 @@ impl InboxView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.in_group() {
+            self.refile_from_group(Destination::Today, "t", window, cx);
+            return;
+        }
         let plan = self.plan_for(Destination::Today);
         self.file(plan, "t", window, cx);
     }
@@ -789,6 +1248,10 @@ impl InboxView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.in_group() {
+            self.refile_from_group(Destination::Soon, "s", window, cx);
+            return;
+        }
         let plan = self.plan_for(Destination::Soon);
         self.file(plan, "s", window, cx);
     }
@@ -799,6 +1262,10 @@ impl InboxView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.in_group() {
+            self.refile_from_group(Destination::Someday, "S", window, cx);
+            return;
+        }
         let plan = self.plan_for(Destination::Someday);
         self.file(plan, "S", window, cx);
     }
@@ -818,11 +1285,26 @@ impl InboxView {
         }
     }
 
+    /// `u`: on a group row it sends that row back; anywhere else it takes
+    /// back the last decision.
     fn undo(&mut self, _: &UndoInboxMove, window: &mut Window, cx: &mut Context<Self>) {
+        if self.in_group() {
+            self.send_back_from_group(window, cx);
+            return;
+        }
         self.undo_last(window, cx);
     }
 
     fn mark(&mut self, _: &MarkInboxItem, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(cursor) = &self.group_cursor {
+            if let GroupCursor::Row(stem) = cursor
+                && !self.group_marked.remove(stem)
+            {
+                self.group_marked.insert(stem.clone());
+            }
+            cx.notify();
+            return;
+        }
         let Some(stem) = self.selected.clone() else {
             return;
         };
@@ -833,6 +1315,9 @@ impl InboxView {
     }
 
     fn suggest(&mut self, _: &SuggestInboxDestinations, _: &mut Window, cx: &mut Context<Self>) {
+        if self.in_group() {
+            return;
+        }
         let Some(service) = self.service.clone() else {
             return;
         };
@@ -996,6 +1481,22 @@ impl InboxView {
         cx: &mut Context<Self>,
     ) {
         let focus = self.focus_handle.clone();
+        if self.in_group() {
+            let menu = ContextMenu::build(window, cx, move |menu, _, _| {
+                menu.context(focus)
+                    .action("Send back to the Inbox", UndoInboxMove.boxed_clone())
+                    .separator()
+                    .action("Today instead", SendInboxItemToToday.boxed_clone())
+                    .action("Soon instead", SendInboxItemToSoon.boxed_clone())
+                    .action("Someday instead", SendInboxItemToSomeday.boxed_clone())
+                    .separator()
+                    .action("Open note", OpenInboxItem.boxed_clone())
+                    .action("Mark", MarkInboxItem.boxed_clone())
+                    .action("Close the group", ToggleInboxAutoArchived.boxed_clone())
+            });
+            self.show_context_menu(menu, position, window, cx);
+            return;
+        }
         let view = cx.weak_entity();
         let suggested = self
             .selected_entry()
@@ -1052,6 +1553,16 @@ impl InboxView {
             .action("Suggest again", SuggestInboxDestinations.boxed_clone())
             .action("Undo last decision", UndoInboxMove.boxed_clone())
         });
+        self.show_context_menu(menu, position, window, cx);
+    }
+
+    fn show_context_menu(
+        &mut self,
+        menu: Entity<ContextMenu>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         window.focus(&menu.focus_handle(cx), cx);
         let subscription =
             cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
@@ -1258,6 +1769,8 @@ impl InboxView {
                         via: via.to_string(),
                         at: item.at.clone(),
                         undone: false,
+                        run: None,
+                        corrects: None,
                     },
                     cx,
                 );
@@ -1457,6 +1970,36 @@ impl InboxView {
     /// suggestion, or with suggestions off, nothing is highlighted and no
     /// probabilities show; an `unsure` answer still shows its spread.
     fn bar_state(&self, entry: &InboxEntry, cx: &App) -> BarState {
+        // An auto-archived row shows what the run decided on, Archive filled,
+        // whatever the policy or the grant say now (V57 §8.1).
+        if let Some(row) = self
+            .group
+            .iter()
+            .find(|row| row.entry.item.stem == entry.item.stem)
+            .filter(|_| self.in_group())
+        {
+            let recorded = self
+                .service
+                .as_ref()
+                .and_then(|service| service.read(cx).recorded_suggestion_for(&entry.hash));
+            return BarState {
+                suggested: Some((Destination::Archive, Tier::Filled)),
+                leaning: None,
+                probabilities: recorded.map(|suggestion| {
+                    Destination::ALL.map(|destination| {
+                        suggestion
+                            .probabilities
+                            .get(destination.key())
+                            .copied()
+                            .unwrap_or(if destination == Destination::Archive {
+                                row.confidence
+                            } else {
+                                0.0
+                            })
+                    })
+                }),
+            };
+        }
         // The cache may hold answers from when the vault had a grant; without
         // one today there is nothing to show.
         if self.availability(cx) != Some(SuggestionAvailability::On) {
@@ -1518,6 +2061,13 @@ impl InboxView {
 
     /// The marked rows a decision would reach now.
     fn marked_rows(&self) -> usize {
+        if self.in_group() {
+            return self
+                .group
+                .iter()
+                .filter(|row| self.group_marked.contains(&row.entry.item.stem))
+                .count();
+        }
         self.visible
             .iter()
             .filter(|entry| self.marked.contains(&entry.item.stem))
@@ -1980,18 +2530,35 @@ impl InboxView {
         }
     }
 
+    /// A row of the queue, or with `group_row` one of the Auto-archived
+    /// group's, which shows the run's confidence where a chip goes.
     fn render_row(
         &self,
         section: usize,
         index: usize,
         entry: &InboxEntry,
+        group_row: Option<&AutoArchivedEntry>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let item = &entry.item;
-        let position = self.position_of(section, index);
-        let selected = self.selected_index() == Some(position);
-        let marked = self.marked.contains(&item.stem);
+        let in_group = group_row.is_some();
+        let position = if in_group {
+            self.visible.len() + 1 + index
+        } else {
+            self.position_of(section, index)
+        };
+        let selected = if in_group {
+            self.group_cursor == Some(GroupCursor::Row(item.stem.clone()))
+        } else {
+            self.selected_index() == Some(position)
+        };
+        let marked = if in_group {
+            self.group_marked.contains(&item.stem)
+        } else {
+            self.marked.contains(&item.stem)
+        };
+        let confidence = group_row.map(|row| row.confidence);
         let list_focused = self.focus_handle.is_focused(window);
         let stem = item.stem.clone();
         // A ticket's number says more than the one address every ticket comes
@@ -2037,7 +2604,17 @@ impl InboxView {
             })
         };
         let chip = |view: &Self, cx: &App| {
-            view.render_chip(entry, cx).map(|chip| {
+            let chip = match confidence {
+                Some(confidence) => Some(
+                    Label::new(format!("archive {confidence:.2}"))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .single_line()
+                        .into_any_element(),
+                ),
+                None => view.render_chip(entry, cx),
+            };
+            chip.map(|chip| {
                 div()
                     .debug_selector(|| format!("INBOX_CHIP-{position}"))
                     .flex_none()
@@ -2104,11 +2681,7 @@ impl InboxView {
             .on_click(cx.listener({
                 let stem = stem.clone();
                 move |this, event: &ClickEvent, window, cx| {
-                    let position = this
-                        .visible
-                        .iter()
-                        .position(|entry| entry.item.stem == stem);
-                    this.select_position(position, cx);
+                    this.select_row(&stem, in_group, cx);
                     if event.click_count() == 2 {
                         this.open_selected(window, cx);
                     } else {
@@ -2119,11 +2692,7 @@ impl InboxView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    let position = this
-                        .visible
-                        .iter()
-                        .position(|entry| entry.item.stem == stem);
-                    this.select_position(position, cx);
+                    this.select_row(&stem, in_group, cx);
                     this.deploy_context_menu(event.position, window, cx);
                 }),
             )
@@ -2209,6 +2778,116 @@ impl InboxView {
             .into_any_element()
     }
 
+    fn select_row(&mut self, stem: &str, in_group: bool, cx: &mut Context<Self>) {
+        if in_group {
+            let position = self
+                .group
+                .iter()
+                .position(|row| row.entry.item.stem == stem)
+                .map(|index| self.visible.len() + 1 + index);
+            self.select_flat(position, cx);
+        } else {
+            let position = self
+                .visible
+                .iter()
+                .position(|entry| entry.item.stem == stem);
+            self.select_position(position, cx);
+        }
+    }
+
+    /// The Auto-archived group's header (§8.1): one muted line at a row's
+    /// height, the run's day and count, or the run's status in its place.
+    fn render_group_header(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.group_cursor == Some(GroupCursor::Header);
+        let list_focused = self.focus_handle.is_focused(window);
+        let colors = cx.theme().colors();
+        let today = Local::now().date_naive();
+        let day = self
+            .service
+            .as_ref()
+            .and_then(|service| service.read(cx).auto_archive_day())
+            .unwrap_or(today);
+        let text = match &self.group_status {
+            Some(status) => status.text.clone(),
+            None => group_title(day, today, self.group.len()),
+        };
+        let action = self.group_status.as_ref().and_then(|status| status.action);
+        let chevron = (!self.group.is_empty()).then(|| {
+            Icon::new(if self.group_expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .size(IconSize::XSmall)
+            .color(Color::Muted)
+        });
+        let selected_background =
+            colors
+                .ghost_element_selected
+                .opacity(if list_focused { 1. } else { 0.5 });
+        v_flex()
+            .debug_selector(|| "INBOX_GROUP_HEADER".to_string())
+            .h(ROW_HEIGHT)
+            .w_full()
+            .justify_end()
+            .py(ROW_GAP)
+            .child(
+                h_flex()
+                    .id("inbox-group-header")
+                    .w_full()
+                    .gap_1p5()
+                    .px_4()
+                    .py_1()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(if selected && list_focused {
+                        colors.text_accent.opacity(0.4)
+                    } else {
+                        transparent_black()
+                    })
+                    .cursor_pointer()
+                    .when(selected, |this| this.bg(selected_background))
+                    .when(!selected, |this| {
+                        this.hover(|style| style.bg(colors.ghost_element_hover))
+                    })
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        let header = this.visible.len();
+                        this.select_flat(Some(header), cx);
+                        this.focus_handle.focus(window, cx);
+                        if !this.group.is_empty() {
+                            this.set_group_expanded(!this.group_expanded, cx);
+                        }
+                    }))
+                    .children(chevron)
+                    .child(
+                        div().min_w_0().child(
+                            Label::new(text)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate(),
+                        ),
+                    )
+                    .children(action.map(|action| {
+                        let (label, id) = match action {
+                            StatusAction::Refresh => ("Refresh", "inbox-group-refresh"),
+                            StatusAction::Retry => ("Retry", "inbox-group-retry"),
+                        };
+                        h_flex()
+                            .gap_1p5()
+                            .child(Label::new("·").size(LabelSize::Small).color(Color::Muted))
+                            .child(
+                                Button::new(id, label)
+                                    .label_size(LabelSize::Small)
+                                    .style(ButtonStyle::Transparent)
+                                    .on_click(move |_, window, cx| {
+                                        dispatch_status_action(action, window, cx)
+                                    }),
+                            )
+                    })),
+            )
+            .into_any_element()
+    }
+
     /// **Carried over**'s quiet divider row, laid out at a row's height so
     /// `uniform_list` can give every row the same slot.
     fn render_divider(&self, cx: &App) -> AnyElement {
@@ -2239,11 +2918,11 @@ impl InboxView {
     }
 
     fn render_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        if self.inbox_is_empty() {
+        if self.inbox_is_empty() && !self.group_shown() {
             // The reader says so, once.
             return div().size_full().into_any_element();
         }
-        if self.visible.is_empty() {
+        if self.visible.is_empty() && !self.group_shown() {
             return v_flex()
                 .size_full()
                 .px_5()
@@ -2366,9 +3045,10 @@ impl InboxView {
         // With a filter up `escape` clears that first, so the marks can't
         // promise it.
         if self.marked_rows() > 0 && self.filter.is_empty() {
-            let on_marked_row = self
-                .selected_entry()
-                .is_some_and(|entry| self.marked.contains(&entry.item.stem));
+            let on_marked_row = self.selected_entry().is_some_and(|entry| {
+                self.marked.contains(&entry.item.stem)
+                    || self.group_marked.contains(&entry.item.stem)
+            });
             let toggle = if on_marked_row { "unmark" } else { "mark" };
             let clear = self.move_keycap(
                 &["menu::Cancel"],
@@ -2384,6 +3064,43 @@ impl InboxView {
             );
         }
         let keys = FooterHint::new("keys", key(&ShowInboxKeys));
+        match &self.group_cursor {
+            Some(GroupCursor::Header) => {
+                let verb = if self.group.is_empty() {
+                    "run"
+                } else if self.group_expanded {
+                    "close"
+                } else {
+                    "open"
+                };
+                let open = self.move_keycap(
+                    &["menu::Confirm"],
+                    ["enter", "enter"],
+                    &Confirm,
+                    context.clone(),
+                    window,
+                    cx,
+                );
+                return (
+                    vec![
+                        FooterHint::new("move", self.row_keycaps(window, cx)),
+                        FooterHint::new(verb, vec![open]),
+                    ],
+                    Some(keys),
+                );
+            }
+            Some(GroupCursor::Row(_)) => {
+                return (
+                    vec![
+                        FooterHint::new("move", self.row_keycaps(window, cx)),
+                        FooterHint::new("back", key(&UndoInboxMove)),
+                        FooterHint::new("mark", key(&MarkInboxItem)),
+                    ],
+                    Some(keys),
+                );
+            }
+            None => {}
+        }
         if self.visible.is_empty() {
             return (Vec::new(), Some(keys));
         }
@@ -2586,6 +3303,24 @@ impl InboxView {
                 .relative()
                 .size_full()
                 .child(self.render_keys_sheet(window, cx))
+                .into_any_element();
+        }
+        if self.group_cursor == Some(GroupCursor::Header) {
+            return v_flex()
+                .debug_selector(|| "INBOX_GROUP_ABOUT".to_string())
+                .size_full()
+                .px_10()
+                .pt_2p5()
+                .gap_1()
+                .child(Label::new("Auto-archived"))
+                .child(
+                    Label::new(
+                        "What the inbox archived on its own, sure it needs nothing from you. \
+                         Send one back with u, or file it to Today, Soon or Someday instead.",
+                    )
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+                )
                 .into_any_element();
         }
         // Selection follows the list, so this is an empty list. A filter's
@@ -2910,8 +3645,44 @@ impl InboxView {
     }
 
     fn render_keys_sheet(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let (decide_heading, decide) = if self.in_group() {
+            ("Auto-archived", self.group_keys(window, cx))
+        } else {
+            ("Decide", self.decide_keys(window, cx))
+        };
+        self.render_keys_sheet_with(decide_heading, decide, window, cx)
+    }
+
+    /// The group's rows of the keys sheet (V57 §8.2). Showing and hiding the
+    /// group is the keys that open and close it, `→`/`←` or `l`/`h`.
+    fn group_keys(&self, window: &Window, cx: &App) -> Vec<(Vec<KeyBinding>, &'static str)> {
         let key = |action: &dyn Action| vec![self.keycap(action, list_key_context(), window, cx)];
-        let decide = vec![
+        let row_key = |name: &str, keys: [&str; 2], fallback: &dyn Action| {
+            self.move_keycap(&[name], keys, fallback, list_key_context(), window, cx)
+        };
+        vec![
+            (key(&UndoInboxMove), "Send back to the Inbox"),
+            (key(&SendInboxItemToToday), "File to Today instead"),
+            (key(&SendInboxItemToSoon), "File to Soon instead"),
+            (key(&SendInboxItemToSomeday), "File to Someday instead"),
+            (key(&MarkInboxItem), "Mark rows to correct together"),
+            (
+                vec![row_key("menu::Confirm", ["enter", "enter"], &Confirm)],
+                "Open the group, or the note",
+            ),
+            (
+                vec![
+                    row_key("menu::SelectChild", ["l", "right"], &menu::SelectChild),
+                    row_key("menu::SelectParent", ["h", "left"], &menu::SelectParent),
+                ],
+                "Show or hide the group",
+            ),
+        ]
+    }
+
+    fn decide_keys(&self, window: &Window, cx: &App) -> Vec<(Vec<KeyBinding>, &'static str)> {
+        let key = |action: &dyn Action| vec![self.keycap(action, list_key_context(), window, cx)];
+        vec![
             (key(&AcceptInboxSuggestion), "Take the suggestion"),
             (key(&SendInboxItemToToday), "File to Today"),
             (key(&SendInboxItemToSoon), "File to Soon"),
@@ -2921,7 +3692,17 @@ impl InboxView {
             (key(&MarkInboxItem), "Mark rows to file together"),
             (key(&SuggestInboxDestinations), "Ask for a suggestion"),
             (key(&TriageInbox), "Let the agent sort the rest"),
-        ];
+        ]
+    }
+
+    fn render_keys_sheet_with(
+        &self,
+        decide_heading: &'static str,
+        decide: Vec<(Vec<KeyBinding>, &'static str)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = |action: &dyn Action| vec![self.keycap(action, list_key_context(), window, cx)];
         let moving = vec![
             (self.row_keycaps(window, cx), "Move through the list"),
             (key(&FocusInboxReader), "Switch list and note"),
@@ -2995,7 +3776,7 @@ impl InboxView {
                     .items_start()
                     .gap_x_8()
                     .gap_y_3()
-                    .child(column(decide_width).child(group("Decide", decide)))
+                    .child(column(decide_width).child(group(decide_heading, decide)))
                     .child(
                         column(moving_width)
                             .child(group("Move", moving))
@@ -3203,6 +3984,29 @@ fn reader_key_context() -> KeyContext {
     context
 }
 
+/// The header's status line and the action it offers, if one can work:
+/// Retry only with a grant and allowance to retry with.
+fn group_status(status: &RunStatus) -> Option<GroupStatus> {
+    status_line(status).map(|text| GroupStatus {
+        text,
+        action: match status {
+            RunStatus::WaitingForPolicy => Some(StatusAction::Refresh),
+            RunStatus::Stopped {
+                retryable: true, ..
+            } => Some(StatusAction::Retry),
+            _ => None,
+        },
+    })
+}
+
+fn dispatch_status_action(action: StatusAction, window: &mut Window, cx: &mut App) {
+    let action = match action {
+        StatusAction::Refresh => RefreshInboxPolicy.boxed_clone(),
+        StatusAction::Retry => RunInboxAutoArchive.boxed_clone(),
+    };
+    window.dispatch_action(action, cx);
+}
+
 fn destination_action(destination: Destination) -> Box<dyn Action> {
     match destination {
         Destination::Today => SendInboxItemToToday.boxed_clone(),
@@ -3213,22 +4017,25 @@ fn destination_action(destination: Destination) -> Box<dyn Action> {
 }
 
 impl SectionedListDelegate for InboxView {
+    /// New, Carried over, and the Auto-archived group (V57 §8.1).
     fn sections(&self) -> usize {
-        2
+        3
     }
 
     fn items_in(&self, section: usize) -> usize {
-        if section == 0 {
-            self.new_count
-        } else {
-            self.carried_count()
+        match section {
+            0 => self.new_count,
+            1 => self.carried_count(),
+            // The group's header is a row of its own, so it can be selected.
+            _ if self.group_shown() => 1 + self.group_rows_shown(),
+            _ => 0,
         }
     }
 
     /// **New** is named by the list header, so only **Carried over** gets a
-    /// row of its own.
+    /// row of its own; the group's header is its first item.
     fn has_header(&self, section: usize) -> bool {
-        section != 0
+        section == 1
     }
 
     fn render_header(
@@ -3247,8 +4054,19 @@ impl SectionedListDelegate for InboxView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if section == 2 {
+            let Some(row_index) = index.checked_sub(1) else {
+                return self.render_group_header(window, cx);
+            };
+            return match self.group.get(row_index).cloned() {
+                Some(row) => {
+                    self.render_row(section, row_index, &row.entry, Some(&row), window, cx)
+                }
+                None => div().h(ROW_HEIGHT).into_any_element(),
+            };
+        }
         match self.entry_at(section, index).cloned() {
-            Some(entry) => self.render_row(section, index, &entry, window, cx),
+            Some(entry) => self.render_row(section, index, &entry, None, window, cx),
             None => div().h(ROW_HEIGHT).into_any_element(),
         }
     }
@@ -3323,6 +4141,9 @@ impl gpui::Render for InboxView {
                     .on_action(cx.listener(Self::reply_all))
                     .on_action(cx.listener(Self::reply_to_recipient))
                     .on_action(cx.listener(Self::triage))
+                    .on_action(cx.listener(Self::toggle_auto_archived))
+                    .on_action(cx.listener(Self::select_child))
+                    .on_action(cx.listener(Self::select_parent))
             })
             .when(keys_sheet, |this| {
                 this.on_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
@@ -3604,6 +4425,26 @@ fn without_line(text: &str, line: &str) -> Option<String> {
     Some(out)
 }
 
+/// The text with the last line that reads exactly `old` replaced by `new`;
+/// `None` when no line does.
+fn with_line_replaced(text: &str, old: &str, new: &str) -> Option<String> {
+    let mut found = None;
+    let mut offset = 0;
+    for candidate in text.split_inclusive('\n') {
+        let line = candidate.trim_end_matches(['\n', '\r']);
+        if line == old {
+            found = Some((offset, line.len()));
+        }
+        offset += candidate.len();
+    }
+    let (start, len) = found?;
+    let mut out = String::with_capacity(text.len() + new.len());
+    out.push_str(&text[..start]);
+    out.push_str(new);
+    out.push_str(&text[start + len..]);
+    Some(out)
+}
+
 /// The destination the triage log names (V40 §5).
 fn log_destination(destination: Destination, vault: &Vault) -> String {
     match destination {
@@ -3630,11 +4471,11 @@ async fn ensure_file(fs: &Arc<dyn Fs>, path: &Path, contents: &str) -> Result<()
 /// Edits an open (or opened) buffer with `edit` applied to its current text
 /// and saves it, so a note open in the editor sees the change and a dirty
 /// buffer is never overwritten from underneath.
-async fn edit_buffer(
+async fn edit_buffer<C: gpui::AppContext>(
     project: &Entity<Project>,
     path: PathBuf,
     edit: impl Fn(&str) -> Option<(Range<usize>, String)> + Send + 'static,
-    cx: &mut gpui::AsyncWindowContext,
+    cx: &mut C,
 ) -> Result<bool> {
     let buffer = project
         .update(cx, |project, cx| project.open_local_buffer(&path, cx))
@@ -3680,11 +4521,60 @@ async fn file_one(
         return Ok((None, FilingNote::AlreadyArchived));
     }
 
+    let task = write_task(project, fs, vault, item, destination, cx).await?;
+
+    // The phone may have archived the note between the check above and now;
+    // the task line is then the spec's accepted worst case (§6.1), and undo
+    // must not pull the phone's copy back.
+    let (moved, note) = match move_note(fs, &inbox_path, &archived)
+        .await
+        .context("moving the note into the archive")?
+    {
+        MoveOutcome::Moved => (true, FilingNote::Filed),
+        MoveOutcome::SourceGone => (false, FilingNote::AlreadyGone),
+        MoveOutcome::DestinationExists => (false, FilingNote::AlreadyArchived),
+    };
+
+    let log_line = append_log_line(
+        project,
+        fs,
+        vault,
+        item,
+        &log_destination(destination, vault),
+        cx,
+    )
+    .await?;
+
+    Ok((
+        Some(FiledItem {
+            stem: item.stem.clone(),
+            destination,
+            inbox_path,
+            archive_path: archived,
+            moved,
+            task,
+            log_line,
+            at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }),
+        note,
+    ))
+}
+
+/// The task line a decision appends for `destination`, through the buffer
+/// so an open note sees it; `None` for Archive, which adds no task.
+async fn write_task(
+    project: &Entity<Project>,
+    fs: &Arc<dyn Fs>,
+    vault: &Vault,
+    item: &InboxItem,
+    destination: Destination,
+    cx: &mut gpui::AsyncWindowContext,
+) -> Result<Option<TaskWrite>> {
     let title = sanitize_title(&item.title);
     let task_line = inbox_task_line(&title, &item.stem, item.has_body);
     let now = Local::now();
     let today = now.date_naive();
-    let task = match destination {
+    Ok(match destination {
         Destination::Today => {
             let (path, outcome) = ensure_note(fs, vault, NoteKind::Daily, today, now.time())
                 .await
@@ -3742,26 +4632,30 @@ async fn file_one(
             })
         }
         Destination::Archive => None,
-    };
+    })
+}
 
-    // The phone may have archived the note between the check above and now;
-    // the task line is then the spec's accepted worst case (§6.1), and undo
-    // must not pull the phone's copy back.
-    let (moved, note) = match move_note(fs, &inbox_path, &archived)
-        .await
-        .context("moving the note into the archive")?
-    {
-        MoveOutcome::Moved => (true, FilingNote::Filed),
-        MoveOutcome::SourceGone => (false, FilingNote::AlreadyGone),
-        MoveOutcome::DestinationExists => (false, FilingNote::AlreadyArchived),
-    };
-
-    let log_line = triage_log_line(
-        &today.format("%Y-%m-%d").to_string(),
-        &title,
-        &log_destination(destination, vault),
+/// The triage-log line for `item` going to `destination`, today.
+fn log_line_for(item: &InboxItem, destination: &str) -> String {
+    triage_log_line(
+        &Local::now().date_naive().format("%Y-%m-%d").to_string(),
+        &sanitize_title(&item.title),
+        destination,
         item.digest.as_deref(),
-    );
+    )
+}
+
+/// Appends `item`'s line to the triage log, through the buffer like the task
+/// line, with the bytes the phone's applier gives. Returns the line.
+async fn append_log_line<C: gpui::AppContext>(
+    project: &Entity<Project>,
+    fs: &Arc<dyn Fs>,
+    vault: &Vault,
+    item: &InboxItem,
+    destination: &str,
+    cx: &mut C,
+) -> Result<String> {
+    let log_line = log_line_for(item, destination);
     let log_path = vault.root.join(TRIAGE_LOG_PATH);
     ensure_file(fs, &log_path, "").await?;
     let write = Write::new(
@@ -3789,20 +4683,55 @@ async fn file_one(
     )
     .await
     .context("writing the triage log")?;
+    Ok(log_line)
+}
 
-    Ok((
-        Some(FiledItem {
-            stem: item.stem.clone(),
-            destination,
-            inbox_path,
-            archive_path: archived,
-            moved,
-            task,
-            log_line,
-            at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        }),
-        note,
-    ))
+/// What the morning run's filing wrote.
+pub(crate) struct AutoFiled {
+    /// Where the note went, vault-relative.
+    pub path: String,
+    pub line: String,
+}
+
+/// The morning run's filing (V57 §7.1): `e`'s move and log line, with the
+/// automatic destination word, and no task. `None` when the note is gone or
+/// its name is already taken in the archive; nothing is written then. A log
+/// line that can't be written puts the note back in the inbox, so nothing
+/// leaves it without a trace (G7).
+pub(crate) async fn archive_automatically<C: gpui::AppContext>(
+    project: &Entity<Project>,
+    fs: &Arc<dyn Fs>,
+    vault: &Vault,
+    item: &InboxItem,
+    cx: &mut C,
+) -> Result<Option<AutoFiled>> {
+    let relative = archive_path(&item.path);
+    let inbox_path = vault.root.join(&item.path);
+    let archived = vault.root.join(&relative);
+    match move_note(fs, &inbox_path, &archived)
+        .await
+        .context("moving the note into the archive")?
+    {
+        MoveOutcome::Moved => {}
+        MoveOutcome::SourceGone | MoveOutcome::DestinationExists => return Ok(None),
+    }
+    let line = match append_log_line(project, fs, vault, item, ARCHIVED_AUTOMATICALLY, cx).await {
+        Ok(line) => line,
+        Err(error) => {
+            let back = match move_note(fs, &archived, &inbox_path).await {
+                Ok(MoveOutcome::Moved) => return Err(error),
+                Ok(outcome) => format!("{outcome:?}"),
+                Err(back) => format!("{back:#}"),
+            };
+            return Err(error.context(format!(
+                "and the note couldn't go back to the inbox ({back}); it is at {relative}"
+            )));
+        }
+    };
+    Ok(Some(AutoFiled {
+        path: relative,
+        line,
+    }))
 }
 
 /// Reverses one filed item (§6.2): the note back, the task line out (a
@@ -3863,6 +4792,8 @@ mod tests {
     const Q4: &str = "---\nsource:   gmail\ncapture:  a1a1a1a1a1a1\ncaptured: 2026-10-09T19:00:00Z\ntitle:    Re: Q4 planning doc\nfrom:     Marta <marta@example.com>\n---\n\n# Re: Q4 planning doc\n\nCan you look at the numbers before Friday?\n";
     const CALL_ANA: &str = "---\nsource:   thock-ios\ncapture:  4d1f9a02c7b3\ncaptured: 2026-10-10T09:31:00Z\ntitle:    Call Ana\n---\n\n# Call Ana\n";
     const TICKET: &str = "---\nsource:   gmail\ncapture:  b2b2b2b2b2b2\ncaptured: 2026-10-09T19:30:00Z\ntitle:    Ticket 42\nfrom:     helpdesk@example.com\n---\n\n# Ticket 42\n\n## helpdesk@example.com — 2026-10-09 08:55\n\nComment #1 (by rsilva on 10/09/26 07:55am):\n\nThe farm stopped taking jobs.\nCould someone look?\nIt's urgent.\n\nStatus:  OPEN\n\nTeam:  render-ops\n\nHost:  N/A\n\n## helpdesk@example.com — 2026-10-09 09:13\n\nComment #2 (by jlopes on 10/09/26 08:13am):\n\nThe print server is down again.\n\nComment #1 (by rsilva on 10/09/26 07:55am):\n\nThe farm stopped taking jobs.\nCould someone look?\nIt's urgent.\n\nStatus:  IN PROGRESS\n\nTeam:  render-ops\n\nHost:  N/A\n";
+    const TEST_POLICY: &str =
+        "## Proposals\n\n| a | b |\n| --- | --- |\n| A link | Backlog · Someday |\n";
     const IDEA: &str = "# idea: routines could carry state\n\n![sketch](/images/sketch.png)\n";
     const TODAY_NOTE: &str =
         "# Today\n\n## Journal\n\n## Day planner\n\n- [ ] 09:00 - 09:30 Standup\n\n## Personal\n";
@@ -3926,6 +4857,95 @@ mod tests {
         vim: bool,
         grant: bool,
         cached: Vec<(&'static str, &'static str, f64)>,
+        /// A morning run that filed [`MAYA`] and [`HOUDINI`] (V57).
+        auto_archived: bool,
+    }
+
+    const MAYA: &str = "---\nsource:   gmail\ncapture:  d1d1d1d1d1d1\ncaptured: 2026-11-07T07:00:00Z\ntitle:    HD 1: Maya licence expired\nfrom:     helpdesk@example.com\n---\n\n# HD 1: Maya licence expired\n\nThe Maya licence server is down.\n";
+    const HOUDINI: &str = "---\nsource:   gmail\ncapture:  d2d2d2d2d2d2\ncaptured: 2026-11-07T06:00:00Z\ntitle:    HD 2: Houdini seat\nfrom:     helpdesk@example.com\n---\n\n# HD 2: Houdini seat\n\nAnother Houdini seat, please.\n";
+    const MAYA_STEM: &str = "2026-11-07-0700-hd-1-maya";
+    const HOUDINI_STEM: &str = "2026-11-07-0600-hd-2-houdini";
+    const MAYA_LINE: &str =
+        "- 2026-11-08 · HD 1: Maya licence expired → Archived · auto <!--inbox:d1d1d1d1d1d1-->";
+    const HOUDINI_LINE: &str =
+        "- 2026-11-08 · HD 2: Houdini seat → Archived · auto <!--inbox:d2d2d2d2d2d2-->";
+
+    /// The files a morning run leaves: the notes in the archive, their auto
+    /// lines, the run's record and its decisions.
+    async fn insert_auto_archived(fs: &FakeFs, root: &Path) {
+        use crate::inbox_auto_archive::RunEvent;
+        let at = |text: &str| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        fs.create_dir(&root.join("archives/inbox")).await.unwrap();
+        for (stem, content) in [(MAYA_STEM, MAYA), (HOUDINI_STEM, HOUDINI)] {
+            fs.insert_file(
+                root.join(format!("archives/inbox/{stem}.md")),
+                content.as_bytes().to_vec(),
+            )
+            .await;
+        }
+        fs.insert_file(
+            root.join(TRIAGE_LOG_PATH),
+            format!("{MAYA_LINE}\n{HOUDINI_LINE}\n").into_bytes(),
+        )
+        .await;
+        let mut run = vec![RunEvent::Started {
+            run: "r-1".to_string(),
+            at: at("2026-11-08T07:00:00Z"),
+            watermark: at("2026-11-07T00:00:00Z"),
+            policy: "p".to_string(),
+            threshold: 0.95,
+            candidates: 2,
+        }];
+        let mut decisions = String::new();
+        for (stem, line) in [(MAYA_STEM, MAYA_LINE), (HOUDINI_STEM, HOUDINI_LINE)] {
+            run.push(RunEvent::Archived {
+                run: "r-1".to_string(),
+                stem: stem.to_string(),
+                path: format!("archives/inbox/{stem}.md"),
+                confidence: 0.97,
+                line: line.to_string(),
+            });
+            decisions.push_str(
+                &serde_json::to_string(&DecisionRecord {
+                    stem: stem.to_string(),
+                    suggested: Some("archive".to_string()),
+                    confidence: Some(0.97),
+                    chosen: "archive".to_string(),
+                    via: "auto".to_string(),
+                    at: "2026-11-08T07:00:30Z".to_string(),
+                    undone: false,
+                    run: Some("r-1".to_string()),
+                    corrects: None,
+                })
+                .unwrap(),
+            );
+            decisions.push('\n');
+        }
+        run.push(RunEvent::Finished {
+            run: "r-1".to_string(),
+            at: at("2026-11-08T07:01:00Z"),
+            archived: 2,
+            skipped: 0,
+            stopped: None,
+        });
+        let run: String = run
+            .iter()
+            .map(|event| event.to_json_line().unwrap() + "\n")
+            .collect();
+        fs.insert_file(
+            root.join(".thock/state/inbox/auto-archive.jsonl"),
+            run.into_bytes(),
+        )
+        .await;
+        fs.insert_file(
+            root.join(".thock/state/inbox/decisions.jsonl"),
+            decisions.into_bytes(),
+        )
+        .await;
     }
 
     fn entitlement_json() -> String {
@@ -3961,6 +4981,7 @@ mod tests {
                 "stem",
                 &suggestion,
                 "2026-10-10T09:00:00Z",
+                &inbox_service::LoadedPolicy::from_text(Some(TEST_POLICY)).hash,
             );
             cache.push_str(&serde_json::to_string(&record).unwrap());
             cache.push('\n');
@@ -3984,10 +5005,13 @@ mod tests {
                 },
                 "daily": { (today_note_name()): TODAY_NOTE },
                 "backlog.md": DEFAULT_BACKLOG,
-                "routines": { "inbox": { "triage-policy.md": "## Proposals\n\n| a | b |\n| --- | --- |\n| A link | Backlog · Someday |\n" } },
+                "routines": { "inbox": { "triage-policy.md": TEST_POLICY } },
             }),
         )
         .await;
+        if options.auto_archived {
+            insert_auto_archived(&fs, &root).await;
+        }
         // `idea.md` is hand-written: its mtime decides the section, and the
         // fake fs stamps files with the (frozen) test clock.
         if options.grant {
@@ -7549,6 +8573,347 @@ mod tests {
         assert_eq!(age_label(Some("not a date"), now), None);
         assert_eq!(source_label("google-tasks"), "Google Tasks");
         assert_eq!(source_label("readwise"), "readwise");
+    }
+
+    fn group_titles(setup: &Setup) -> Vec<String> {
+        setup.view.read_with(&setup.cx, |view, _| {
+            view.group
+                .iter()
+                .map(|row| row.entry.item.title.clone())
+                .collect()
+        })
+    }
+
+    fn cursor(setup: &Setup) -> Option<GroupCursor> {
+        setup
+            .view
+            .read_with(&setup.cx, |view, _| view.group_cursor.clone())
+    }
+
+    async fn setup_group(cx: &mut TestAppContext) -> Setup {
+        setup(
+            cx,
+            Options {
+                vim: true,
+                auto_archived: true,
+                ..Options::default()
+            },
+        )
+        .await
+    }
+
+    #[gpui::test]
+    async fn the_auto_archived_group_sits_collapsed_below_carried_over(cx: &mut TestAppContext) {
+        let mut setup = setup_group(cx).await;
+        assert_eq!(
+            group_titles(&setup),
+            ["HD 1: Maya licence expired", "HD 2: Houdini seat"]
+        );
+        // The list header counts the queue only: the group is history.
+        assert_eq!(titles(&setup).len(), 4);
+        let layout = setup.view.read_with(&setup.cx, |view, _| view.layout());
+        assert_eq!(
+            layout.row(layout.len() - 1),
+            Some(crate::ui::sectioned_list::SectionedRow::Item {
+                section: 2,
+                index: 0
+            }),
+            "one header row, collapsed, last"
+        );
+        let divider = drawn(&mut setup, "INBOX_DIVIDER");
+        let header = drawn(&mut setup, "INBOX_GROUP_HEADER");
+        assert!(header.top() > divider.top());
+
+        setup.cx.simulate_keystrokes("shift-g");
+        assert_eq!(cursor(&setup), Some(GroupCursor::Header));
+        assert_eq!(selected(&setup), None);
+        setup.cx.simulate_keystrokes("l");
+        assert!(
+            setup
+                .view
+                .read_with(&setup.cx, |view, _| view.group_expanded)
+        );
+        setup.cx.simulate_keystrokes("j");
+        assert_eq!(
+            selected(&setup).as_deref(),
+            Some("HD 1: Maya licence expired")
+        );
+        assert_eq!(
+            cursor(&setup),
+            Some(GroupCursor::Row(MAYA_STEM.to_string()))
+        );
+        // `e` and `space` do nothing to a row that is already archived.
+        setup.cx.simulate_keystrokes("e space");
+        setup.cx.run_until_parked();
+        assert_eq!(group_titles(&setup).len(), 2);
+        setup.cx.simulate_keystrokes("h");
+        assert!(
+            !setup
+                .view
+                .read_with(&setup.cx, |view, _| view.group_expanded)
+        );
+        assert_eq!(cursor(&setup), Some(GroupCursor::Header));
+        // Back up into the queue, and down again.
+        setup.cx.simulate_keystrokes("k");
+        assert_eq!(cursor(&setup), None);
+        assert_eq!(
+            selected(&setup).as_deref(),
+            Some("idea: routines could carry state")
+        );
+        setup.cx.simulate_keystrokes("j enter");
+        assert!(
+            setup
+                .view
+                .read_with(&setup.cx, |view, _| view.group_expanded)
+        );
+    }
+
+    #[gpui::test]
+    async fn u_on_a_group_row_sends_it_back_to_the_inbox(cx: &mut TestAppContext) {
+        let mut setup = setup_group(cx).await;
+        setup.cx.simulate_keystrokes("shift-g l j u");
+        setup.cx.run_until_parked();
+        assert_eq!(
+            load(&setup, &format!("inbox/{MAYA_STEM}.md"))
+                .await
+                .as_deref(),
+            Some(MAYA)
+        );
+        assert!(
+            load(&setup, &format!("archives/inbox/{MAYA_STEM}.md"))
+                .await
+                .is_none()
+        );
+        let log = load(&setup, TRIAGE_LOG_PATH).await.unwrap();
+        assert_eq!(log, format!("{HOUDINI_LINE}\n"));
+        let decisions = load(&setup, ".thock/state/inbox/decisions.jsonl")
+            .await
+            .unwrap();
+        let records: Vec<DecisionRecord> = decisions
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(records[0].undone, "{decisions}");
+        assert!(!records[1].undone, "{decisions}");
+        assert_eq!(group_titles(&setup), ["HD 2: Houdini seat"]);
+        assert!(titles(&setup).contains(&"HD 1: Maya licence expired".to_string()));
+        // The selection moved to the next row of the group, and the view's
+        // own last decision was never touched.
+        assert_eq!(
+            cursor(&setup),
+            Some(GroupCursor::Row(HOUDINI_STEM.to_string()))
+        );
+        assert!(
+            setup
+                .view
+                .read_with(&setup.cx, |view, _| view.last_decision.is_none())
+        );
+    }
+
+    #[gpui::test]
+    async fn s_on_a_group_row_re_files_it_to_soon(cx: &mut TestAppContext) {
+        let mut setup = setup_group(cx).await;
+        setup.cx.simulate_keystrokes("shift-g l j s");
+        setup.cx.run_until_parked();
+        let backlog = load(&setup, "backlog.md").await.unwrap();
+        assert!(
+            backlog.contains(&format!(
+                "## Soon\n\n- [ ] HD 1: Maya licence expired [[{MAYA_STEM}]]\n"
+            )),
+            "{backlog}"
+        );
+        // The note stays archived; its auto line became the Soon line.
+        assert!(
+            load(&setup, &format!("archives/inbox/{MAYA_STEM}.md"))
+                .await
+                .is_some()
+        );
+        let log = load(&setup, TRIAGE_LOG_PATH).await.unwrap();
+        let today = Local::now().format("%Y-%m-%d");
+        assert_eq!(
+            log,
+            format!(
+                "- {today} · HD 1: Maya licence expired → Backlog · Soon <!--inbox:d1d1d1d1d1d1-->\n{HOUDINI_LINE}\n"
+            )
+        );
+        let decisions = load(&setup, ".thock/state/inbox/decisions.jsonl")
+            .await
+            .unwrap();
+        let last: DecisionRecord = serde_json::from_str(decisions.lines().last().unwrap()).unwrap();
+        assert_eq!(last.stem, MAYA_STEM);
+        assert_eq!(last.chosen, "soon");
+        assert_eq!(last.via, "s");
+        assert_eq!(last.corrects.as_deref(), Some("r-1"));
+        assert_eq!(group_titles(&setup), ["HD 2: Houdini seat"]);
+        assert_eq!(titles(&setup).len(), 4, "the queue is untouched");
+    }
+
+    #[gpui::test]
+    async fn marked_group_rows_go_back_as_one_batch(cx: &mut TestAppContext) {
+        let mut setup = setup_group(cx).await;
+        setup.cx.simulate_keystrokes("shift-g l j x j x u");
+        setup.cx.run_until_parked();
+        for (stem, content) in [(MAYA_STEM, MAYA), (HOUDINI_STEM, HOUDINI)] {
+            assert_eq!(
+                load(&setup, &format!("inbox/{stem}.md")).await.as_deref(),
+                Some(content)
+            );
+        }
+        assert_eq!(load(&setup, TRIAGE_LOG_PATH).await.unwrap(), "");
+        assert!(group_titles(&setup).is_empty());
+        assert_eq!(titles(&setup).len(), 6);
+        // An empty group hides, and the selection comes back to the queue.
+        assert_eq!(cursor(&setup), None);
+        assert!(selected(&setup).is_some());
+    }
+
+    #[gpui::test]
+    async fn the_group_selection_survives_a_file_event_mid_correction(cx: &mut TestAppContext) {
+        let mut setup = setup_group(cx).await;
+        setup.cx.simulate_keystrokes("shift-g l j s");
+        // While the correction writes, a capture lands in the inbox.
+        setup
+            .fs
+            .insert_file(
+                setup._vault_dir.path().join("inbox/2026-11-08-0800-new.md"),
+                b"# Something new\n".to_vec(),
+            )
+            .await;
+        setup.cx.run_until_parked();
+        assert_eq!(titles(&setup).len(), 5);
+        assert_eq!(
+            cursor(&setup),
+            Some(GroupCursor::Row(HOUDINI_STEM.to_string()))
+        );
+        assert_eq!(selected(&setup).as_deref(), Some("HD 2: Houdini seat"));
+    }
+
+    #[test]
+    fn a_stopped_run_offers_retry_only_when_it_can_work() {
+        let stopped = |retryable| RunStatus::Stopped {
+            processed: 4,
+            candidates: 11,
+            reason: "Thock Plus allowance spent for this cycle".to_string(),
+            retryable,
+        };
+        assert_eq!(
+            group_status(&stopped(true)),
+            Some(GroupStatus {
+                text: "Auto-archive stopped after 4 of 11".to_string(),
+                action: Some(StatusAction::Retry),
+            })
+        );
+        assert_eq!(
+            group_status(&stopped(false)),
+            Some(GroupStatus {
+                text: "Auto-archive stopped after 4 of 11 · allowance spent".to_string(),
+                action: None,
+            })
+        );
+    }
+
+    async fn show_hide_keys(setup: &mut Setup) -> Vec<String> {
+        setup.cx.simulate_keystrokes("end");
+        assert_eq!(cursor(setup), Some(GroupCursor::Header));
+        setup.view.update_in(&mut setup.cx, |view, window, cx| {
+            let rows = view.group_keys(window, cx);
+            let (keycaps, _) = rows
+                .into_iter()
+                .find(|(_, what)| *what == "Show or hide the group")
+                .expect("the row");
+            keycaps
+                .iter()
+                .map(|keycap| {
+                    keycap
+                        .keyboard_shortcut_text(window, cx)
+                        .map(|text| text.to_string())
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    async fn the_keys_sheet_shows_the_keys_that_open_and_close_the_group(cx: &mut TestAppContext) {
+        let mut setup = setup(
+            cx,
+            Options {
+                auto_archived: true,
+                ..Options::default()
+            },
+        )
+        .await;
+        let keys = show_hide_keys(&mut setup).await;
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().all(|key| !key.is_empty()), "{keys:?}");
+        assert!(keys[0].to_lowercase().contains("right"), "{keys:?}");
+        assert!(keys[1].to_lowercase().contains("left"), "{keys:?}");
+    }
+
+    #[gpui::test]
+    async fn the_keys_sheet_shows_l_and_h_with_vim(cx: &mut TestAppContext) {
+        let mut setup = setup_group(cx).await;
+        let keys = show_hide_keys(&mut setup).await;
+        let keys: Vec<String> = keys.iter().map(|key| key.to_lowercase()).collect();
+        assert_eq!(keys, ["l", "h"]);
+    }
+
+    #[gpui::test]
+    async fn a_run_that_archives_nothing_keeps_the_group(cx: &mut TestAppContext) {
+        use crate::inbox_auto_archive::RunEvent;
+        let mut setup = setup_group(cx).await;
+        assert_eq!(group_titles(&setup).len(), 2);
+        // A manual run later the same morning clears nothing.
+        let at = |text: &str| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let path = setup
+            ._vault_dir
+            .path()
+            .join(".thock/state/inbox/auto-archive.jsonl");
+        let mut log = setup.fs.load(&path).await.unwrap();
+        for event in [
+            RunEvent::Started {
+                run: "r-2".to_string(),
+                at: at("2026-11-09T09:00:00Z"),
+                watermark: at("2026-11-08T07:00:00Z"),
+                policy: "p".to_string(),
+                threshold: 0.95,
+                candidates: 0,
+            },
+            RunEvent::Finished {
+                run: "r-2".to_string(),
+                at: at("2026-11-09T09:00:01Z"),
+                archived: 0,
+                skipped: 0,
+                stopped: None,
+            },
+        ] {
+            log.push_str(&(event.to_json_line().unwrap() + "\n"));
+        }
+        let service = setup
+            .view
+            .read_with(&setup.cx, |view, _| view.service.clone().unwrap());
+        service.update(&mut setup.cx, |service, cx| {
+            service.replace_run_log_for_test(&log, cx)
+        });
+        setup.cx.run_until_parked();
+        assert_eq!(
+            group_titles(&setup),
+            ["HD 1: Maya licence expired", "HD 2: Houdini seat"]
+        );
+        // The header's day is that run's, not the empty one's.
+        let day = service.read_with(&setup.cx, |service, _| service.auto_archive_day());
+        assert_eq!(
+            day,
+            Some(
+                at("2026-11-08T07:01:00Z")
+                    .with_timezone(&Local)
+                    .date_naive()
+            )
+        );
     }
 
     /// A linked email selected in the Inbox, with Gmail connected.

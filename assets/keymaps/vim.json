@@ -1192,6 +1192,8 @@
       "k": "vim::MenuSelectPrevious",
       "down": "vim::MenuSelectNext",
       "up": "vim::MenuSelectPrevious",
+      "h": "menu::SelectParent",
+      "l": "menu::SelectChild",
       "shift-g": "menu::SelectLast",
       "g g": "menu::SelectFirst",
       "0": ["vim::Number", 0],

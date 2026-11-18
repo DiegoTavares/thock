@@ -24,6 +24,7 @@ pub mod google_auth;
 pub mod history;
 pub mod hosted_agent;
 pub mod inbox;
+pub mod inbox_auto_archive;
 pub mod inbox_email;
 pub mod inbox_service;
 pub mod inbox_suggest;

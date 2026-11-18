@@ -582,6 +582,12 @@ _Source pointers:_ `zed-industries/zed` `crates/extension_api/src/extension_api.
   never opts in stays read-only toward Google; which decisions count is a list in
   `.thock/gmail.toml`, and nothing decided before the opt-in moves. Spec
   `specs/v53-gmail-archive-on-triage.md`. _(shipped 2026-11-02: merged as #179)_
+- [ ] **The Inbox clears what isn't yours:** once a day, after the first Gmail sync, items Jev
+  is sure need nothing from you are archived (in Gmail too) and wait in a collapsed group at the
+  bottom of the Inbox until the next run, one key from being sent back. A weekly ritual keeps a
+  map of your work in memory and rewrites the triage policy from your notes and your past
+  decisions, so a miscategorised ticket is judged by what it's about. Opt-in. Spec
+  `specs/v57-inbox-auto-archive.md`. _(planned)_
 
 - [x] **Your other agents share the vault's memory:** an opt-in **Agents** Routine makes the
   running desk serve the vault's memory on the local network, and a small `thock-bridge` client

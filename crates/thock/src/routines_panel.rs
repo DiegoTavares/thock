@@ -2704,6 +2704,7 @@ impl RoutinesPanel {
     ) -> AnyElement {
         let run = RunSkill {
             skill: Some(skill.id.clone()),
+            mode: None,
         };
         let title = self.skill_run_title(&manifest.id, skill);
         let running = self.chat.as_ref().is_some_and(|chat| {

@@ -1,7 +1,7 @@
 schema  = 2
 id      = "inbox"
 name    = "Inbox"
-version = 2
+version = 3
 summary = "A front door for the vault — capture anywhere, decide at the desk."
 icon    = "envelope"
 doc     = "routines/inbox/Inbox.md"
@@ -51,6 +51,16 @@ file    = "routines/inbox/skills/setup-inbox.md"
 summary = "Six questions that teach triage where things go in this vault."
 reads   = ["routines/**", ".thock/config.toml", "the vault's folder layout"]
 writes  = ["routines/inbox/triage-policy.md", ".thock/state/onboarded/inbox"]
+
+[[skill]]
+id      = "refresh-inbox-policy"
+name    = "Refresh Inbox Policy"
+file    = "routines/inbox/skills/refresh-inbox-policy.md"
+# A weekly read of notes and decisions into two files, like Reflect.
+model   = "fast"
+summary = "Rewrite the triage policy and the map of your work from your notes and your decisions."
+reads   = ["profile.md", "memory/**", "daily/**", "weekly/**", "backlog.md", ".thock/state/inbox/decisions.jsonl", "archives/inbox/**", "routines/inbox/triage-policy.md"]
+writes  = ["memory/work.md (section by section)", "memory/index.md (one pointer line)", "routines/inbox/triage-policy.md (Proposals, Criteria)", ".thock/config.toml (enable mode: one key)"]
 
 [onboarding]
 skill = "routines/inbox/skills/setup-inbox.md"
