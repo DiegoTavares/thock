@@ -350,6 +350,27 @@ final class SyncTests: XCTestCase {
         XCTAssertTrue(harness.store.content("daily/2026-10-02.md")?.hasSuffix("- A line added at the desk\n") ?? false)
     }
 
+    func testAFullPullPagesPastPrunedTombstones() async throws {
+        let harness = try Harness()
+        try await harness.desk.open()
+        try await harness.desk.edit { disk in
+            for index in 0..<600 {
+                disk["notes/note-\(index).md"] = "# Note \(index)\n"
+            }
+        }
+        try await harness.desk.edit { disk in
+            disk["welcome.md"] = nil
+        }
+        await harness.backend.pruneTombstones()
+
+        try await harness.engine.pair(link: try await harness.desk.pairingLink(), deviceName: "Test iPhone")
+        await harness.assertConverged()
+        let state = await harness.engine.state
+        XCTAssertEqual(state, .upToDate)
+        let latest = await harness.backend.state.latestVersion
+        XCTAssertEqual(harness.store.cursor, latest)
+    }
+
     func testAnUntouchedNoteIsByteIdenticalAfterAnyNumberOfRounds() async throws {
         let harness = try Harness()
         let odd = "---\r\nx: 1\r\n---\r\n\r\n| a |\r\n| - |\r\n\r\nno newline at the end"

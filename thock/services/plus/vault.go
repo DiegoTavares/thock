@@ -741,7 +741,11 @@ func (s *server) handleFilesList(w http.ResponseWriter, r *http.Request, p princ
 	if !ok {
 		return
 	}
-	if since >= 0 && since < p.vault.TombstoneHorizon {
+	// A full pull's later pages continue from its last listed row. The
+	// tombstones pruned below the horizon are deletions that pull never
+	// needed, so only an incremental cursor can expire.
+	continuingFullPull := r.URL.Query().Get("full") == "1"
+	if since >= 0 && since < p.vault.TombstoneHorizon && !continuingFullPull {
 		writeErrorCode(w, http.StatusGone, "cursor_expired", "That position is too old to continue from. Fetch the whole list again.")
 		return
 	}

@@ -920,6 +920,44 @@ func TestTombstonesAgeOutAndExpireCursors(t *testing.T) {
 	}
 }
 
+func TestFullPullContinuesPastTheHorizon(t *testing.T) {
+	h := newSyncHarness(t)
+	h.mustUpload("a.md", 0, "a")
+	h.mustUpload("b.md", 0, "b")
+	h.mustUpload("gone.md", 0, "gone")
+	h.call("DELETE", "/v1/vault/files/gone.md", h.desk, map[string]any{"expected_version": 3})
+	h.clock = h.clock.Add(31 * 24 * time.Hour)
+	h.server.sweepOnce(context.Background())
+	h.mustUpload("c.md", 0, "c")
+
+	first := h.files(h.phone, "?limit=1")
+	if first["has_more"] != true || first["next_since"].(float64) != 1 {
+		t.Fatalf("first page of the full pull: %v", first)
+	}
+	status, body := h.call("GET", "/v1/vault/files?limit=1&since=1", h.phone, nil)
+	if status != 410 {
+		t.Fatalf("an incremental cursor under the horizon still expires: %d %v", status, body)
+	}
+	var listed []string
+	for _, row := range first["files"].([]any) {
+		listed = append(listed, row.(map[string]any)["path"].(string))
+	}
+	since := first["next_since"].(float64)
+	for {
+		page := h.files(h.phone, fmt.Sprintf("?limit=1&full=1&since=%d", int64(since)))
+		for _, row := range page["files"].([]any) {
+			listed = append(listed, row.(map[string]any)["path"].(string))
+		}
+		since = page["next_since"].(float64)
+		if page["has_more"] != true {
+			break
+		}
+	}
+	if strings.Join(listed, ",") != "a.md,b.md,c.md" || since != 5 {
+		t.Fatalf("the full pull should list every live file and end at the head: %v at %v", listed, since)
+	}
+}
+
 func TestResetRotatesTheKeyAndDisconnectsThePhone(t *testing.T) {
 	h := newSyncHarness(t)
 	h.mustUpload("a.md", 0, "a")
