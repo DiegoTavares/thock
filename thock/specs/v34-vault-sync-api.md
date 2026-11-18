@@ -380,6 +380,9 @@ working at once. Revoking the desk device is `400 bad_request`; use `DELETE /v1/
 - `size_bytes` is the envelope size (what the quota counts).
 - `410 cursor_expired` when `since` is below the oldest retained tombstone; the client performs a full
   pull.
+- A full pull's later pages send `since` (the previous page's `next_since`) with `full=1`. Those never
+  answer `410`: the tombstones pruned below that cursor are deletions the full pull does not need, and
+  any deletion during the pull is still listed as a tombstone above it.
 - On the last page `next_since` is the vault's `latest_version`, so a cursor never lags behind the head
   because of pruned tombstones or a full pull.
 

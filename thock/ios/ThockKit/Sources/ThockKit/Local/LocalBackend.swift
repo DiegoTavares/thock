@@ -97,6 +97,18 @@ public actor LocalBackend: SyncTransport {
         saved()
     }
 
+    /// Forgets every deletion the way the server's sweep does once they
+    /// outlive their retention, so older cursors expire.
+    public func pruneTombstones() {
+        let pruned = state.files.filter { $0.value.deleted }
+        guard let horizon = pruned.values.map(\.version).max() else { return }
+        state.oldestTombstoneCursor = max(state.oldestTombstoneCursor, horizon)
+        for path in pruned.keys {
+            state.files[path] = nil
+        }
+        saved()
+    }
+
     private func saved() {
         onChange?(state)
     }
@@ -410,7 +422,7 @@ public actor LocalBackend: SyncTransport {
         let limit = min(max(Int(query["limit"] ?? "") ?? 500, 1), 2000)
         var rows = state.files.map { (path: $0.key, file: $0.value) }
         if let since = query["since"].flatMap(Int.init) {
-            guard since >= state.oldestTombstoneCursor else {
+            guard since >= state.oldestTombstoneCursor || query["full"] == "1" else {
                 throw Reply.error(410, "cursor_expired", "Too much has changed. Starting over.")
             }
             rows = rows.filter { $0.file.version > since }

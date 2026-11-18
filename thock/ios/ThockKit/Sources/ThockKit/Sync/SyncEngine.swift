@@ -349,11 +349,16 @@ public actor SyncEngine {
             var query = ["limit": "500"]
             if let since {
                 query["since"] = String(since)
+                // Later pages of a full pull continue from its last row, which
+                // the server lets outlive pruned tombstones.
+                if fullPull {
+                    query["full"] = "1"
+                }
             }
             let page: FilesPage
             do {
                 page = try await call("GET", "/v1/vault/files", query: query, credential: credential, as: FilesPage.self)
-            } catch let error as APIError where error.code == "cursor_expired" {
+            } catch let error as APIError where error.code == "cursor_expired" && !fullPull {
                 since = nil
                 fullPull = true
                 listed = []
