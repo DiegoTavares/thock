@@ -257,16 +257,24 @@ public actor SyncEngine {
             return
         }
         running = true
-        repeat {
-            again = false
-            await round()
-        } while again
+        // A task of the engine's own, not the caller's: the feed loop is
+        // cancelled when the app leaves, and rounds cancelled with it would
+        // fail every request, the send of a note written on the way out
+        // included.
+        await Task { await self.rounds() }.value
         running = false
         let finished = waiting
         waiting = []
         for continuation in finished {
             continuation.resume()
         }
+    }
+
+    private func rounds() async {
+        repeat {
+            again = false
+            await round()
+        } while again
     }
 
     private func round() async {
@@ -278,8 +286,16 @@ public actor SyncEngine {
         diagnostics.lastRound = Date()
         diagnostics.failures = []
         do {
+            // A write that can't be sent yet must not keep the desk's
+            // changes from arriving: the pull runs either way, and the
+            // round still ends as failed so the send is tried again.
+            var unsent: Error?
             if !store.isReadOnly {
-                try await flush(credential: credential, key: key)
+                do {
+                    try await flush(credential: credential, key: key)
+                } catch {
+                    unsent = error
+                }
             }
             try await pull(credential: credential, key: key)
             let vault = try await call("GET", "/v1/vault", credential: credential, as: VaultInfo.self)
@@ -291,6 +307,9 @@ public actor SyncEngine {
             diagnostics.serverLatestVersion = vault.latestVersion
             diagnostics.serverPendingWrites = vault.writes?.pending
             diagnostics.cursor = store.cursor
+            if let unsent {
+                throw unsent
+            }
             diagnostics.lastError = nil
             set(vault.status == "lapsed" ? .paused : .upToDate)
         } catch let error as APIError {
@@ -339,12 +358,15 @@ public actor SyncEngine {
 
     private func pull(credential: String, key: Data) async throws {
         // No cursor means a full pull: every live note, after which anything
-        // the desk no longer has is removed here too.
-        let retrying = store.refetchPaths
-        var since: Int? = store.cursor > 0 && retrying.isEmpty ? store.cursor : nil
+        // the desk no longer has is removed here too. A snapshot that didn't
+        // arrive last round is asked for again by starting just below it,
+        // which lists what changed since and not the whole vault.
+        let cursor = store.cursor
+        var since: Int? = cursor > 0 ? min(cursor, store.refetchSince ?? cursor) : nil
         var fullPull = since == nil
         var listed: Set<String> = []
         var failed: Set<String> = []
+        var retryFrom: Int?
         while true {
             var query = ["limit": "500"]
             if let since {
@@ -362,53 +384,34 @@ public actor SyncEngine {
                 since = nil
                 fullPull = true
                 listed = []
+                failed = []
+                retryFrom = nil
                 continue
             }
             for row in page.files {
+                let taken: Taken
                 if row.deleted == true {
-                    try store.applyTombstone(path: row.path, version: row.version)
-                    continue
+                    do {
+                        try store.applyTombstone(path: row.path, version: row.version)
+                        taken = .stored
+                    } catch {
+                        taken = .retry("could not be removed, \(error.localizedDescription)")
+                    }
+                } else {
+                    listed.insert(row.path)
+                    taken = await take(row, key: key)
                 }
-                listed.insert(row.path)
-                // Pictures are bytes the phone does not draw yet (V39 §7.5):
-                // listed, so a full pull keeps nothing stale, never fetched.
-                if SyncCore.isSyncableImagePath(row.path, imagesDir: store.config.imagesDir) { continue }
-                guard let hash = row.contentHash, let blobID = row.blobID else { continue }
-                if store.contentHash(row.path) == hash {
-                    continue
-                }
-                guard let url = row.downloadURL else {
-                    diagnostics.failures.append("\(row.path): no download address")
+                switch taken {
+                case .stored:
+                    break
+                case .retry(let why):
+                    diagnostics.failures.append("\(row.path): \(why)")
                     failed.insert(row.path)
-                    continue
-                }
-                // A blob that does not arrive, hash or open is a corrupt
-                // version, to fetch again on the next round, never a note
-                // to show.
-                let envelope: Data
-                do {
-                    envelope = try await transport.download(url)
-                } catch {
-                    diagnostics.failures.append("\(row.path): download failed, \(error.localizedDescription)")
+                    retryFrom = min(retryFrom ?? row.version - 1, row.version - 1)
+                case .unreadable(let why):
+                    diagnostics.failures.append("\(row.path): \(why)")
                     failed.insert(row.path)
-                    continue
                 }
-                guard SyncCore.contentHash(envelope: envelope) == hash else {
-                    diagnostics.failures.append("\(row.path): \(envelope.count) bytes arrived but hash differs")
-                    failed.insert(row.path)
-                    continue
-                }
-                guard let plaintext = try? SyncCore.open(key: key, context: .file(path: row.path, blobID: blobID), envelope: envelope) else {
-                    diagnostics.failures.append("\(row.path): did not open with this phone's key")
-                    failed.insert(row.path)
-                    continue
-                }
-                guard let text = String(data: plaintext, encoding: .utf8) else {
-                    diagnostics.failures.append("\(row.path): not text")
-                    failed.insert(row.path)
-                    continue
-                }
-                try store.applySnapshot(path: row.path, version: row.version, content: text, contentHash: hash, blobID: blobID)
             }
             since = page.nextSince ?? page.files.map(\.version).max() ?? since ?? 0
             if page.hasMore != true { break }
@@ -418,7 +421,51 @@ public actor SyncEngine {
         if fullPull {
             try store.removeFiles(notIn: listed)
         }
-        store.cursor = since ?? 0
+        store.cursor = fullPull ? since ?? 0 : max(since ?? 0, cursor)
         store.refetchPaths = failed
+        store.refetchSince = retryFrom
+    }
+
+    /// What became of one listed snapshot.
+    private enum Taken {
+        case stored
+        /// It did not arrive whole; asking again can help.
+        case retry(String)
+        /// It arrived as the server holds it and still can't be read. Only a
+        /// new version from the desk changes that, and a new version is
+        /// listed anyway, so it is not asked for again.
+        case unreadable(String)
+    }
+
+    /// Downloads, checks, opens and stores one live row. A failure is this
+    /// note's alone: the rest of the listing still lands.
+    private func take(_ row: FileRow, key: Data) async -> Taken {
+        // Pictures are bytes the phone does not draw yet (V39 §7.5): listed,
+        // so a full pull keeps nothing stale, never fetched.
+        if SyncCore.isSyncableImagePath(row.path, imagesDir: store.config.imagesDir) { return .stored }
+        guard let hash = row.contentHash, let blobID = row.blobID else { return .stored }
+        if store.contentHash(row.path) == hash { return .stored }
+        guard let url = row.downloadURL else { return .retry("no download address") }
+        let envelope: Data
+        do {
+            envelope = try await transport.download(url)
+        } catch {
+            return .retry("download failed, \(error.localizedDescription)")
+        }
+        guard SyncCore.contentHash(envelope: envelope) == hash else {
+            return .retry("\(envelope.count) bytes arrived but hash differs")
+        }
+        guard let plaintext = try? SyncCore.open(key: key, context: .file(path: row.path, blobID: blobID), envelope: envelope) else {
+            return .unreadable("did not open with this phone's key")
+        }
+        guard let text = String(data: plaintext, encoding: .utf8) else {
+            return .unreadable("not text")
+        }
+        do {
+            try store.applySnapshot(path: row.path, version: row.version, content: text, contentHash: hash, blobID: blobID)
+        } catch {
+            return .retry("could not be stored, \(error.localizedDescription)")
+        }
+        return .stored
     }
 }
