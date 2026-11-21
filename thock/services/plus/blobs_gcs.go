@@ -41,8 +41,9 @@ const (
 	// A kept download URL is reused only while it still has this long to
 	// live, enough for a phone to fetch a full page of notes with it.
 	downloadReuseFloor = 10 * time.Minute
-	// Above this many kept URLs the expired ones are dropped, and if that
-	// isn't enough, all of them: the cache saves work, it holds no truth.
+	// Above this many kept URLs the ones too old to hand out again are
+	// dropped, and if that isn't enough, all of them: the cache saves work,
+	// it holds no truth.
 	maxCachedDownloads = 20000
 )
 
@@ -129,7 +130,7 @@ func (b *gcsBlobStore) downloadURL(_ context.Context, vaultID, blobID string, ex
 	}
 	if len(b.downloads) >= maxCachedDownloads {
 		for name, entry := range b.downloads {
-			if !entry.expires.After(now) {
+			if entry.expires.Sub(now) < downloadReuseFloor {
 				delete(b.downloads, name)
 			}
 		}

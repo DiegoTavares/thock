@@ -766,7 +766,10 @@ func (s *server) handleFilesList(w http.ResponseWriter, r *http.Request, p princ
 	}
 	downloads, err := s.signDownloads(r.Context(), p.vault.ID, rows, s.now().Add(signedURLLifetime))
 	if err != nil {
-		logf("error: signing downloads for %s: %v", p.vault.ID, err)
+		// A phone that gave up waiting is not a failure of the service.
+		if r.Context().Err() == nil {
+			logf("error: signing downloads for %s: %v", p.vault.ID, err)
+		}
 		writeErrorCode(w, http.StatusServiceUnavailable, "unavailable", "Couldn't prepare the downloads. Try again.")
 		return
 	}

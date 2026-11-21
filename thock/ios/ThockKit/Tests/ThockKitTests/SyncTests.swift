@@ -621,6 +621,50 @@ final class SyncTests: XCTestCase {
         XCTAssertEqual(state, .upToDate)
     }
 
+    func testARoundEndsWithAnEngineThatIsSetAside() async throws {
+        var recording: RecordingTransport?
+        let harness = try Harness { backend in
+            let transport = RecordingTransport(backend)
+            recording = transport
+            return transport
+        }
+        let transport = try XCTUnwrap(recording)
+        try await harness.pair()
+        try await harness.desk.edit { disk in
+            disk["notes/late.md"] = "# Late\n"
+        }
+        let cursor = harness.store.cursor
+        transport.listingDelay = 200_000_000
+        let started = transport.roundsStarted
+        let asking = Task { await harness.engine.sync() }
+        try await waitUntil("a round is running") { transport.roundsStarted > started }
+        // What pairing again or disconnecting does to the engine it replaces:
+        // the store is about to belong to another vault, or to none.
+        await harness.engine.stop(endingRound: true)
+        await asking.value
+
+        XCTAssertNil(harness.store.content("notes/late.md"))
+        XCTAssertEqual(harness.store.cursor, cursor)
+    }
+
+    func testANoteStillOwedStaysOwedUntilItIsListedAgain() async throws {
+        let harness = try Harness()
+        try await harness.pair()
+        let backlog = harness.store.config.backlogFile
+        // What a snapshot that arrived and could not be read leaves behind:
+        // owed, and not asked for again.
+        harness.store.refetchPaths = [backlog]
+        await harness.engine.sync()
+        XCTAssertEqual(harness.store.refetchPaths, [backlog], "a listing that never reached it settles nothing")
+
+        try await harness.desk.edit { disk in
+            disk[backlog, default: ""] += "\n- [ ] Added at the desk\n"
+        }
+        await harness.engine.sync()
+        XCTAssertEqual(harness.store.refetchPaths, [])
+        await harness.assertConverged()
+    }
+
     func testTheSameLineEditedTwiceKeepsBoth() async throws {
         let harness = try Harness()
         try await harness.pair()
