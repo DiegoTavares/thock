@@ -267,7 +267,7 @@ final class AppModel {
     /// stopped first: left running, it would keep syncing over its old
     /// transport while reading the new pairing's Keychain secrets.
     private func install(_ newEngine: SyncEngine?) async {
-        await engine?.stop()
+        await engine?.stop(endingRound: true)
         engine = newEngine
         await newEngine?.start()
     }
@@ -688,14 +688,14 @@ final class AppModel {
         saveResumePoint(leaving?())
         isUnlocked = false
         needsGreeting = true
-        // A suspended app would hold the stream open (SyncEngine.start).
-        // Something written on the way out is sent first, under a background
-        // task, or it would wait on the phone until Thock is opened again.
+        // A suspended app would hold the stream open (SyncEngine.start), so
+        // the feed goes first: a round doesn't need it. Something written on
+        // the way out is then sent under a background task, or it would wait
+        // on the phone until Thock is opened again.
         Task {
+            await engine?.stop()
             if store?.hasUnsentWrites == true {
                 await syncInBackground()
-            } else {
-                await engine?.stop()
             }
         }
     }

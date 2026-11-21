@@ -3452,7 +3452,7 @@ mod tests {
         let sent_a = server
             .requests
             .iter()
-            .filter(|r| r.contains("/v1/vault/files/a.md"))
+            .filter(|request| request.contains("/v1/vault/files/a.md"))
             .count();
         assert_eq!(sent_a, 2, "a.md goes up once: {:?}", server.requests);
     }

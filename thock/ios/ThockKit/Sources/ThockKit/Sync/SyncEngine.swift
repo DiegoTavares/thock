@@ -56,6 +56,8 @@ public actor SyncEngine {
     private let transport: SyncTransport
     private let secrets: SecretStore
     private var feedTask: Task<Void, Never>?
+    /// The rounds in flight, so an engine that is set aside can end them.
+    private var roundsTask: Task<Void, Never>?
     private var running = false
     private var again = false
     /// Callers that asked for a round while one was running, resumed when
@@ -166,7 +168,7 @@ public actor SyncEngine {
 
     /// Forgets the vault on this phone. The desk's copy is untouched.
     public func disconnect() {
-        stop()
+        stop(endingRound: true)
         secrets.setSecret(Self.keyName, nil)
         secrets.setSecret(Self.credentialName, nil)
         store.wipe()
@@ -220,9 +222,16 @@ public actor SyncEngine {
         }
     }
 
-    public func stop() {
+    /// Lets go of the feed. A round in flight finishes on its own, so a note
+    /// written as the app leaves is still sent. `endingRound` cancels it
+    /// too, for an engine that is being replaced or forgotten: its round
+    /// would go on writing to a store that is no longer its own.
+    public func stop(endingRound: Bool = false) {
         feedTask?.cancel()
         feedTask = nil
+        if endingRound {
+            roundsTask?.cancel()
+        }
     }
 
     private func handle(_ event: FeedEvent) async {
@@ -261,7 +270,10 @@ public actor SyncEngine {
         // cancelled when the app leaves, and rounds cancelled with it would
         // fail every request, the send of a note written on the way out
         // included.
-        await Task { await self.rounds() }.value
+        let task = Task { await self.rounds() }
+        roundsTask = task
+        await task.value
+        roundsTask = nil
         running = false
         let finished = waiting
         waiting = []
@@ -274,7 +286,7 @@ public actor SyncEngine {
         repeat {
             again = false
             await round()
-        } while again
+        } while again && !Task.isCancelled
     }
 
     private func round() async {
@@ -367,6 +379,11 @@ public actor SyncEngine {
         var listed: Set<String> = []
         var failed: Set<String> = []
         var retryFrom: Int?
+        // A note owed from an earlier round that this listing never reaches
+        // (it arrived and couldn't be read, so it isn't asked for again) is
+        // still owed: its writes are kept until a version that reads lands.
+        let owed = store.refetchPaths
+        var seen: Set<String> = []
         while true {
             var query = ["limit": "500"]
             if let since {
@@ -386,9 +403,14 @@ public actor SyncEngine {
                 listed = []
                 failed = []
                 retryFrom = nil
+                seen = []
                 continue
             }
             for row in page.files {
+                // A failed download is only noted, so without this a round
+                // ended with its engine would run on and record the pull.
+                try Task.checkCancellation()
+                seen.insert(row.path)
                 let taken: Taken
                 if row.deleted == true {
                     do {
@@ -416,13 +438,16 @@ public actor SyncEngine {
             since = page.nextSince ?? page.files.map(\.version).max() ?? since ?? 0
             if page.hasMore != true { break }
         }
+        try Task.checkCancellation()
         // A path whose snapshot failed was still listed, so it survives this;
         // desk deletions keep arriving while it is fetched again.
         if fullPull {
             try store.removeFiles(notIn: listed)
         }
         store.cursor = fullPull ? since ?? 0 : max(since ?? 0, cursor)
-        store.refetchPaths = failed
+        // A full pull lists every live note, so what failed in it is all
+        // that is owed.
+        store.refetchPaths = fullPull ? failed : failed.union(owed.subtracting(seen))
         store.refetchSince = retryFrom
     }
 
