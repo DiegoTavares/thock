@@ -424,11 +424,23 @@ public final class VaultStore: @unchecked Sendable {
     }
 
     /// Notes whose latest snapshot could not be taken. The cursor moves past
-    /// them so one bad version cannot hold every other note back; they are
-    /// fetched again by a full pull, and their writes are kept until then.
+    /// them so one bad version cannot hold every other note back, and their
+    /// writes are kept until the snapshot arrives.
     public var refetchPaths: Set<String> {
         get { Set((meta("refetch") ?? "").split(separator: "\n").map(String.init)) }
         set { setMeta("refetch", newValue.isEmpty ? nil : newValue.sorted().joined(separator: "\n")) }
+    }
+
+    /// Where the next pull starts so that it lists those notes again: just
+    /// below the oldest of them. `nil` when nothing is owed.
+    public var refetchSince: Int? {
+        get { meta("refetch_since").flatMap { Int($0) } }
+        set { setMeta("refetch_since", newValue.map { String($0) }) }
+    }
+
+    /// Whether a write made here has not reached the service yet.
+    public var hasUnsentWrites: Bool {
+        pending().contains { $0.seq == nil }
     }
 
     public var deviceID: String {

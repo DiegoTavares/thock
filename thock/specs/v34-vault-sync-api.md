@@ -947,6 +947,18 @@ retries reuse `client_id`; a lapsed vault goes read-only without losing the loca
 
 ## 13. Changelog
 
+- **2026-11-21** — Sync reliability, no wire change. *Service:* a listing signs its download URLs
+  sixteen at a time and hands a URL out again while it has ten minutes left, so `download_expires_at`
+  may be sooner than fifteen minutes away; in production each signature is a remote call, and a page
+  of 500 signed in sequence outlasted the phone's request timeout. *Phone:* a snapshot that did not
+  arrive is asked for again with `since` just below its version instead of a full pull; a write that
+  can't be sent no longer stops the pull (§10.5 still ends the round as failed); a round is not
+  cancelled with the task that asked for it; a write made as the app leaves is sent under a
+  background task. *Desk:* a file the service refuses for good (`path_not_allowed`, `too_large`,
+  `quota_exceeded`) is listed as not sent and the pass goes on, where it used to fail the whole
+  pass and hold every later file and the ack; a failed pass keeps the record of what it did
+  publish; requests time out; the pause between retries tops out at two minutes and *Sync now*
+  ends it; a pass that changed nothing skips `GET /v1/vault`.
 - **2026-10-21** — V45 reminders: §7.5 names them a reading over existing kinds, and §9.2 lists their
   vectors. The core gains `reminder.rs` (grammar, daily-path day rule, mirror lines, state, home-line
   edits) and the moment-style `format_date`/`parse_date` the desk used to keep to itself. No protocol

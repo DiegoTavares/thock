@@ -25,7 +25,10 @@ import (
 type blobStore interface {
 	// uploadURL signs a PUT for exactly size bytes.
 	uploadURL(ctx context.Context, vaultID, blobID string, size int64, expires time.Time) (signedURL, error)
-	downloadURL(ctx context.Context, vaultID, blobID string, expires time.Time) (string, error)
+	// downloadURL signs a GET good until expires, or hands back one it
+	// signed earlier that still has most of its life; the time returned is
+	// when the URL it gives stops working.
+	downloadURL(ctx context.Context, vaultID, blobID string, expires time.Time) (string, time.Time, error)
 	// stat returns the object's size, or errNotFound.
 	stat(ctx context.Context, vaultID, blobID string) (int64, error)
 	delete(ctx context.Context, vaultID, blobID string) error
@@ -118,12 +121,12 @@ func (b *localBlobStore) uploadURL(_ context.Context, vaultID, blobID string, si
 	}, nil
 }
 
-func (b *localBlobStore) downloadURL(_ context.Context, vaultID, blobID string, expires time.Time) (string, error) {
+func (b *localBlobStore) downloadURL(_ context.Context, vaultID, blobID string, expires time.Time) (string, time.Time, error) {
 	token, err := b.sign(blobToken{Op: "get", Vault: vaultID, Blob: blobID, Expires: expires.Unix()})
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
-	return b.publicURL() + "/v1/vault/blobs/" + token, nil
+	return b.publicURL() + "/v1/vault/blobs/" + token, expires, nil
 }
 
 func (b *localBlobStore) stat(_ context.Context, vaultID, blobID string) (int64, error) {

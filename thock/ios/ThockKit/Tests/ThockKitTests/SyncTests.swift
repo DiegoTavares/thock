@@ -67,6 +67,10 @@ final class LossyTransport: SyncTransport, @unchecked Sendable {
     var refuseWritesTo: String?
     /// Hands back bytes that do not match the index for this note.
     var corruptDownloadsOf: String?
+    /// Answers `500` to every write: the service is there and can't take it.
+    var failWrites = false
+    /// The `since` of every listing asked for, `full` for one without.
+    var listings: [String] = []
 
     init(_ inner: LocalBackend) {
         self.inner = inner
@@ -76,6 +80,12 @@ final class LossyTransport: SyncTransport, @unchecked Sendable {
         if let refused = refuseWritesTo, method == "POST", path == "/v1/vault/writes",
            let body, String(decoding: body, as: UTF8.self).contains(refused) {
             return HTTPResult(status: 413, body: Data(#"{"error":"too large","code":"too_large"}"#.utf8))
+        }
+        if failWrites, method == "POST", path == "/v1/vault/writes" {
+            return HTTPResult(status: 500, body: Data(#"{"error":"try again","code":"internal"}"#.utf8))
+        }
+        if method == "GET", path == "/v1/vault/files" {
+            listings.append(query["since"] ?? "full")
         }
         var result = try await inner.send(method: method, path: path, query: query, body: body, credential: credential)
         if let corrupt = corruptDownloadsOf, method == "GET", path == "/v1/vault/files",
@@ -528,6 +538,87 @@ final class SyncTests: XCTestCase {
         await harness.engine.sync()
         XCTAssertEqual(harness.store.refetchPaths, [])
         await harness.assertConverged()
+    }
+
+    func testAFailedSnapshotIsAskedForAgainWithoutListingTheWholeVault() async throws {
+        var lossy: LossyTransport?
+        let harness = try Harness { backend in
+            let transport = LossyTransport(backend)
+            lossy = transport
+            return transport
+        }
+        let transport = try XCTUnwrap(lossy)
+        try await harness.pair()
+        let backlog = harness.store.config.backlogFile
+        transport.corruptDownloadsOf = backlog
+        try await harness.desk.edit { disk in
+            disk[backlog, default: ""] += "\n- [ ] Added at the desk\n"
+        }
+        await harness.engine.sync()
+        XCTAssertEqual(harness.store.refetchPaths, [backlog])
+        let floor = try XCTUnwrap(harness.store.refetchSince)
+        XCTAssertLessThan(floor, harness.store.cursor)
+
+        transport.corruptDownloadsOf = nil
+        let asked = transport.listings.count
+        await harness.engine.sync()
+        XCTAssertEqual(Array(transport.listings.dropFirst(asked)), [String(floor)], "one listing, from just below the note that failed")
+        XCTAssertNil(harness.store.refetchSince)
+        XCTAssertEqual(harness.store.refetchPaths, [])
+        await harness.assertConverged()
+    }
+
+    func testAWriteThatCannotBeSentDoesNotHoldBackTheDesksChanges() async throws {
+        var lossy: LossyTransport?
+        let harness = try Harness { backend in
+            let transport = LossyTransport(backend)
+            lossy = transport
+            return transport
+        }
+        let transport = try XCTUnwrap(lossy)
+        try await harness.pair()
+        transport.failWrites = true
+        let item = try XCTUnwrap(harness.planner().items.first { $0.label.hasPrefix("Read 20") })
+        try harness.store.record([try XCTUnwrap(harness.writes.tick(item, note: .day(harness.day)))])
+        try await harness.desk.edit { disk in
+            disk["notes/from-the-desk.md"] = "# From the desk\n"
+        }
+        await harness.engine.sync()
+        XCTAssertEqual(harness.store.content("notes/from-the-desk.md"), "# From the desk\n")
+        var state = await harness.engine.state
+        XCTAssertEqual(state, .offline, "the round still counts as failed, so the write is sent again")
+        XCTAssertTrue(harness.store.hasUnsentWrites)
+
+        transport.failWrites = false
+        await harness.engine.sync()
+        state = await harness.engine.state
+        XCTAssertEqual(state, .upToDate)
+        XCTAssertFalse(harness.store.hasUnsentWrites)
+    }
+
+    func testARoundOutlivesTheTaskThatAskedForIt() async throws {
+        var recording: RecordingTransport?
+        let harness = try Harness { backend in
+            let transport = RecordingTransport(backend)
+            recording = transport
+            return transport
+        }
+        let transport = try XCTUnwrap(recording)
+        try await harness.pair()
+        try await harness.desk.edit { disk in
+            disk["notes/late.md"] = "# Late\n"
+        }
+        transport.listingDelay = 200_000_000
+        let started = transport.roundsStarted
+        // What leaving the app does to the feed loop while its round runs.
+        let asking = Task { await harness.engine.sync() }
+        try await waitUntil("a round is running") { transport.roundsStarted > started }
+        asking.cancel()
+        await asking.value
+
+        XCTAssertEqual(harness.store.content("notes/late.md"), "# Late\n")
+        let state = await harness.engine.state
+        XCTAssertEqual(state, .upToDate)
     }
 
     func testTheSameLineEditedTwiceKeepsBoth() async throws {

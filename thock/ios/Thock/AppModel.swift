@@ -277,8 +277,12 @@ final class AppModel {
         scheduleWidgetReload()
         scheduleWatchSnapshot()
         scheduleReminderRefresh()
-        // A write just landed locally; send it on without waiting for the feed.
-        Task { await engine?.sync() }
+        // A write just landed locally; send it on without waiting for the
+        // feed. A change the pull itself stored has nothing to send, and a
+        // round for it would be requests spent on nothing.
+        if store?.hasUnsentWrites == true {
+            Task { await engine?.sync() }
+        }
     }
 
     @ObservationIgnored private var widgetReload: Task<Void, Never>?
@@ -685,7 +689,15 @@ final class AppModel {
         isUnlocked = false
         needsGreeting = true
         // A suspended app would hold the stream open (SyncEngine.start).
-        Task { await engine?.stop() }
+        // Something written on the way out is sent first, under a background
+        // task, or it would wait on the phone until Thock is opened again.
+        Task {
+            if store?.hasUnsentWrites == true {
+                await syncInBackground()
+            } else {
+                await engine?.stop()
+            }
+        }
     }
 
     // MARK: Entry points

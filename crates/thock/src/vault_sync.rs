@@ -13,10 +13,11 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use base64::Engine as _;
 use chrono::Local;
 use fs::{Fs, RemoveOptions};
+use futures::channel::oneshot;
 use futures::{AsyncReadExt as _, StreamExt as _};
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, SharedString,
-    Task, TaskExt as _,
+    App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, EntityId, EventEmitter,
+    Global, SharedString, Task, TaskExt as _,
 };
 use http_client::{AsyncBody, HttpClient, Request, http};
 use project::Project;
@@ -48,7 +49,14 @@ pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const KEYCHAIN_URL: &str = "https://plus.thethock.com/vault-key";
 const UPLOAD_DEBOUNCE: Duration = Duration::from_secs(2);
 const RETRY_FLOOR: Duration = Duration::from_secs(5);
-const RETRY_CEILING: Duration = Duration::from_secs(10 * 60);
+const RETRY_CEILING: Duration = Duration::from_secs(2 * 60);
+/// The HTTP client bounds only the connect; without these a connection that
+/// went quiet (sleep, a changed network) would hold the worker for good.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const BLOB_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+/// Failed passes in a row before a background failure is announced: a
+/// network that is briefly away on wake shouldn't raise a toast.
+const FAILURES_BEFORE_WARNING: u32 = 3;
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// Directories the catch-up scan never enters: the history repository, the
 /// caches and this service's own state.
@@ -294,6 +302,18 @@ fn sync_error(error: &anyhow::Error) -> Option<&SyncError> {
     error.downcast_ref::<SyncError>()
 }
 
+/// Why the service will never take this one file, when that is what `error`
+/// says. Such a file is listed as not sent and the rest of the pass goes on;
+/// failing the pass would hold every other note back behind it.
+fn file_refusal(error: &anyhow::Error) -> Option<SharedString> {
+    match sync_error(error)?.code.as_str() {
+        "path_not_allowed" => Some("its name can't be sent".into()),
+        "too_large" => Some("too large to send (over 2 MB)".into()),
+        "quota_exceeded" => Some("your Thock Plus storage is full".into()),
+        _ => None,
+    }
+}
+
 // --- the HTTP client (contract §3, §6) ---
 
 #[derive(Clone)]
@@ -301,6 +321,8 @@ pub struct SyncApi {
     http: Arc<dyn HttpClient>,
     base_url: String,
     credential: String,
+    /// Times requests out when set.
+    executor: Option<BackgroundExecutor>,
 }
 
 impl SyncApi {
@@ -309,6 +331,31 @@ impl SyncApi {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
             credential,
+            executor: None,
+        }
+    }
+
+    /// Gives up on a request the service doesn't answer in time, so a stalled
+    /// connection fails the pass and is retried instead of hanging it.
+    pub fn with_timeouts(mut self, executor: BackgroundExecutor) -> Self {
+        self.executor = Some(executor);
+        self
+    }
+
+    async fn bounded<T>(
+        &self,
+        limit: Duration,
+        request: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let Some(executor) = &self.executor else {
+            return request.await;
+        };
+        match futures::future::select(std::pin::pin!(request), executor.timer(limit)).await {
+            futures::future::Either::Left((result, _)) => result,
+            futures::future::Either::Right(_) => bail!(
+                "the Thock Plus service didn't answer within {} seconds",
+                limit.as_secs()
+            ),
         }
     }
 
@@ -343,14 +390,17 @@ impl SyncApi {
                 .header("Content-Length", bytes.len().to_string())
                 .body(AsyncBody::from(bytes))?
         };
-        let mut response = self
-            .http
-            .send(request)
-            .await
-            .with_context(|| format!("reaching the Thock Plus service at {url}"))?;
-        let mut text = String::new();
-        response.body_mut().read_to_string(&mut text).await?;
-        Ok((response.status(), text))
+        self.bounded(REQUEST_TIMEOUT, async {
+            let mut response = self
+                .http
+                .send(request)
+                .await
+                .with_context(|| format!("reaching the Thock Plus service at {url}"))?;
+            let mut text = String::new();
+            response.body_mut().read_to_string(&mut text).await?;
+            Ok((response.status(), text))
+        })
+        .await
     }
 
     async fn call<T: DeserializeOwned>(
@@ -499,21 +549,24 @@ impl SyncApi {
             builder = builder.header(name.as_str(), value.as_str());
         }
         let request = builder.body(AsyncBody::from(bytes))?;
-        let mut response = self
-            .http
-            .send(request)
-            .await
-            .context("sending a note to the Thock Plus service")?;
-        if !response.status().is_success() {
-            let mut text = String::new();
-            response.body_mut().read_to_string(&mut text).await.ok();
-            bail!(
-                "the upload was refused with status {}: {}",
-                response.status(),
-                text.trim()
-            );
-        }
-        Ok(())
+        self.bounded(BLOB_TIMEOUT, async {
+            let mut response = self
+                .http
+                .send(request)
+                .await
+                .context("sending a note to the Thock Plus service")?;
+            if !response.status().is_success() {
+                let mut text = String::new();
+                response.body_mut().read_to_string(&mut text).await.ok();
+                bail!(
+                    "the upload was refused with status {}: {}",
+                    response.status(),
+                    text.trim()
+                );
+            }
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -735,6 +788,25 @@ struct JobOutcome {
     blocked: Option<anyhow::Error>,
 }
 
+/// A pass that stopped early. The work goes back in the queue.
+struct JobFailure {
+    job: Job,
+    error: anyhow::Error,
+    /// The record after what the pass did publish, so a retry doesn't send
+    /// those files again.
+    progress: Option<LocalState>,
+}
+
+impl JobFailure {
+    fn new(job: Job, error: anyhow::Error) -> Self {
+        Self {
+            job,
+            error,
+            progress: None,
+        }
+    }
+}
+
 /// Why a phone write was not applied.
 enum ApplyFailure {
     /// The write itself is unreadable or not one the desk accepts. Retrying
@@ -776,6 +848,9 @@ pub struct VaultSyncService {
     pending: Job,
     worker_running: bool,
     retry_delay: Duration,
+    /// Ends the wait before a retry early; set while the worker waits.
+    retry_wake: Option<oneshot::Sender<()>>,
+    failures_in_a_row: u32,
     /// Sync-wide announcements requested by `sync_now`.
     announce_next: bool,
     /// The keychain reads a reload starts; the newest wins.
@@ -802,6 +877,8 @@ impl VaultSyncService {
             pending: Job::default(),
             worker_running: false,
             retry_delay: RETRY_FLOOR,
+            retry_wake: None,
+            failures_in_a_row: 0,
             announce_next: false,
             start_task: None,
             debounce_task: None,
@@ -921,6 +998,8 @@ impl VaultSyncService {
         self.poll_task = None;
         self.debounce_task = None;
         self.start_task = None;
+        self.retry_wake = None;
+        self.failures_in_a_row = 0;
         self.pending = Job::default();
         self.status = status;
     }
@@ -949,7 +1028,8 @@ impl VaultSyncService {
                 };
                 match key {
                     Ok(Some(key)) => {
-                        let api = SyncApi::new(http, base_url, credential);
+                        let api = SyncApi::new(http, base_url, credential)
+                            .with_timeouts(cx.background_executor().clone());
                         service.start_session(api, key, cx);
                     }
                     Ok(None) => service.status = PhoneSyncState::Off,
@@ -974,6 +1054,7 @@ impl VaultSyncService {
         });
         self.status = PhoneSyncState::Working;
         self.retry_delay = RETRY_FLOOR;
+        self.failures_in_a_row = 0;
         self.pending.catch_up = true;
         self.pending.drain = true;
         self.schedule_work(cx);
@@ -990,6 +1071,12 @@ impl VaultSyncService {
         self.announce_next = true;
         self.pending.catch_up = true;
         self.pending.drain = true;
+        // Asking by hand doesn't wait out the pause after a failed pass.
+        self.retry_delay = RETRY_FLOOR;
+        if let Some(wake) = self.retry_wake.take() {
+            // The worker already moved on if nobody is listening.
+            wake.send(()).ok();
+        }
         self.schedule_work(cx);
     }
 
@@ -1013,8 +1100,8 @@ impl VaultSyncService {
         self.worker_running = true;
         cx.spawn(async move |this, cx| {
             loop {
-                let Ok(Some((job, announce, session, vault, fs, state, info))) =
-                    this.update(cx, |service, cx| {
+                let Ok(Some((job, announce, session, vault, fs, state, info, not_sent))) = this
+                    .update(cx, |service, cx| {
                         if service.pending.is_empty() || service.session.is_none() {
                             service.worker_running = false;
                             cx.notify();
@@ -1036,17 +1123,26 @@ impl VaultSyncService {
                             service.project.read(cx).fs().clone(),
                             service.state.clone(),
                             service.info.clone(),
+                            (service.skipped.clone(), service.held_back.clone()),
                         ))
                     })
                 else {
                     break;
                 };
-                let outcome = run_job(&this, job, session, vault, fs, state, info, cx).await;
+                let outcome =
+                    run_job(&this, job, session, vault, fs, state, info, not_sent, cx).await;
                 let delay = this
                     .update(cx, |service, cx| service.finish_job(outcome, announce, cx))
                     .unwrap_or(None);
                 if let Some(delay) = delay {
-                    cx.background_executor().timer(delay).await;
+                    let (wake, woken) = oneshot::channel();
+                    if this
+                        .update(cx, |service, _| service.retry_wake = Some(wake))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    futures::future::select(cx.background_executor().timer(delay), woken).await;
                 }
             }
         })
@@ -1057,10 +1153,11 @@ impl VaultSyncService {
     /// the next pass when the pass failed.
     fn finish_job(
         &mut self,
-        outcome: Result<JobOutcome, (Job, anyhow::Error)>,
+        outcome: Result<JobOutcome, JobFailure>,
         announce: bool,
         cx: &mut Context<Self>,
     ) -> Option<Duration> {
+        self.retry_wake = None;
         let delay = match outcome {
             Ok(outcome) => {
                 self.state = outcome.state;
@@ -1071,6 +1168,7 @@ impl VaultSyncService {
                 self.held_back = outcome.held_back;
                 if outcome.blocked.is_none() {
                     self.retry_delay = RETRY_FLOOR;
+                    self.failures_in_a_row = 0;
                 }
                 self.status = match &self.info {
                     Some(info) if info.is_lapsed() => PhoneSyncState::Paused,
@@ -1095,7 +1193,8 @@ impl VaultSyncService {
                     self.status = PhoneSyncState::Failing {
                         error: format!("{error:#}").into(),
                     };
-                    if announce {
+                    let news = self.failure_is_news();
+                    if announce || news {
                         cx.emit(ManualSyncFinished {
                             message: format!("Phone sync stopped: {error:#}").into(),
                             icon: IconName::Warning,
@@ -1124,7 +1223,14 @@ impl VaultSyncService {
                 }
                 None
             }
-            Err((job, error)) => {
+            Err(JobFailure {
+                job,
+                error,
+                progress,
+            }) => {
+                if let Some(state) = progress {
+                    self.state = state;
+                }
                 // Put the work back so the retry sees the same paths.
                 self.pending.catch_up |= job.catch_up;
                 self.pending.drain |= job.drain;
@@ -1143,6 +1249,10 @@ impl VaultSyncService {
                         self.stop_session(PhoneSyncState::Failing {
                             error: format!("{error:#}").into(),
                         });
+                        cx.emit(ManualSyncFinished {
+                            message: format!("Phone sync stopped: {error:#}").into(),
+                            icon: IconName::Warning,
+                        });
                         None
                     }
                     Some("vault_missing") => {
@@ -1156,9 +1266,18 @@ impl VaultSyncService {
                         self.status = PhoneSyncState::Failing {
                             error: format!("{error:#}").into(),
                         };
+                        let news = self.failure_is_news();
                         if announce {
                             cx.emit(ManualSyncFinished {
                                 message: format!("Phone sync failed: {error:#}").into(),
+                                icon: IconName::Warning,
+                            });
+                        } else if news {
+                            cx.emit(ManualSyncFinished {
+                                message: format!(
+                                    "Phone sync keeps failing and will keep trying: {error:#}"
+                                )
+                                .into(),
                                 icon: IconName::Warning,
                             });
                         }
@@ -1169,6 +1288,13 @@ impl VaultSyncService {
         };
         cx.notify();
         delay
+    }
+
+    /// Counts a failed pass and says whether it is the one to announce: once
+    /// per run of failures, after enough of them that it isn't a blip.
+    fn failure_is_news(&mut self) -> bool {
+        self.failures_in_a_row += 1;
+        self.failures_in_a_row == FAILURES_BEFORE_WARNING
     }
 
     /// Drains the phone's queue every `POLL_INTERVAL`. The desk polls rather
@@ -1219,7 +1345,8 @@ impl VaultSyncService {
                     };
                     let key_check = thock_sync_core::key_check(&key);
                     (
-                        SyncApi::new(http, base_url.clone(), credential),
+                        SyncApi::new(http, base_url.clone(), credential)
+                            .with_timeouts(cx.background_executor().clone()),
                         key,
                         key_check,
                     )
@@ -1423,12 +1550,19 @@ async fn run_job(
     fs: Arc<dyn Fs>,
     mut state: LocalState,
     info: Option<VaultInfo>,
+    not_sent: (Vec<SkippedFile>, Vec<String>),
     cx: &mut AsyncApp,
-) -> Result<JobOutcome, (Job, anyhow::Error)> {
+) -> Result<JobOutcome, JobFailure> {
     let saved_state = state.clone();
     let mut dirty = job.dirty.clone();
     let mut removed = job.removed.clone();
-    let mut skipped = Vec::new();
+    // Only a catch-up looks at every file, so any other pass keeps what the
+    // last one listed as not sent, apart from the paths it handles itself.
+    let (mut skipped, mut held_back) = if job.catch_up {
+        (Vec::new(), Vec::new())
+    } else {
+        not_sent
+    };
 
     // Catch up with what changed while Thock was closed (`v34` §10.2).
     if job.catch_up {
@@ -1445,7 +1579,7 @@ async fn run_job(
                 removed.extend(result.removed);
                 skipped = result.skipped;
             }
-            Err(error) => return Err((job, error)),
+            Err(error) => return Err(JobFailure::new(job, error)),
         }
     }
 
@@ -1462,7 +1596,7 @@ async fn run_job(
         };
         let writes = match fetch.await {
             Ok(writes) => writes,
-            Err(error) => return Err((job, error)),
+            Err(error) => return Err(JobFailure::new(job, error)),
         };
         if !writes.is_empty() {
             // One checkpoint per batch, so "undo what the phone did" is a
@@ -1543,6 +1677,9 @@ async fn run_job(
         }
     }
 
+    skipped.retain(|file| !dirty.contains(&file.path) && !removed.contains(&file.path));
+    held_back.retain(|path| !dirty.contains(path) && !removed.contains(path));
+
     // Upload what changed, tombstone what vanished.
     let upload = {
         let api = session.api.clone();
@@ -1556,77 +1693,109 @@ async fn run_job(
             .unwrap_or((0, 0));
         cx.background_spawn(async move {
             let mut uploaded = 0;
-            let mut held_back = Vec::new();
             let mut used = quota.1;
-            for path in &dirty {
-                let abs = root.join(path);
-                let bytes = match fs.load_bytes(&abs).await {
-                    Ok(bytes) => bytes,
-                    // Changed and gone before we got to it: the Removed event
-                    // will follow, or the next catch-up tombstones it.
-                    Err(_) => continue,
-                };
-                if let Some(reason) =
-                    unsendable_reason(&bytes, is_syncable_image_path(path, &images_dir))
-                {
-                    skipped.push(SkippedFile {
-                        path: path.clone(),
-                        reason,
-                    });
-                    continue;
-                }
-                let hash = plaintext_hash(&bytes);
-                let record = state.files.get(path).cloned();
-                if record.as_ref().is_some_and(|r| r.plaintext_hash == hash) {
-                    continue;
-                }
-                let is_new = record.is_none();
-                if is_new && quota.0 > 0 && path.starts_with("reference/") {
-                    let envelope_size = bytes.len() as u64 + 32;
-                    if used + envelope_size > quota.0 {
-                        held_back.push(path.clone());
+            let sent: Result<()> = async {
+                for path in &dirty {
+                    let abs = root.join(path);
+                    let bytes = match fs.load_bytes(&abs).await {
+                        Ok(bytes) => bytes,
+                        // Changed and gone before we got to it: the Removed
+                        // event will follow, or the next catch-up tombstones it.
+                        Err(_) => continue,
+                    };
+                    if let Some(reason) =
+                        unsendable_reason(&bytes, is_syncable_image_path(path, &images_dir))
+                    {
+                        skipped.push(SkippedFile {
+                            path: path.clone(),
+                            reason,
+                        });
                         continue;
                     }
-                }
-                let expected = record.as_ref().map(|r| r.version).unwrap_or(0);
-                let record = upload_file(&api, &key, path, expected, &bytes, hash).await?;
-                used += bytes.len() as u64 + 32;
-                state.cursor = state.cursor.max(record.version);
-                state.files.insert(path.clone(), record);
-                uploaded += 1;
-            }
-            for path in &removed {
-                let Some(record) = state.files.get(path).cloned() else {
-                    continue;
-                };
-                let mut attempt = api.tombstone(path, record.version).await;
-                if let Err(error) = &attempt
-                    && let Some(e) = sync_error(error)
-                    && e.code == "stale_version"
-                {
-                    let current = e.current_version.unwrap_or(record.version);
-                    attempt = api.tombstone(path, current).await;
-                }
-                // The server never had the path (or lost it): nothing to delete.
-                let version = match attempt {
-                    Ok(version) => version,
-                    Err(error) if sync_error(&error).is_some_and(|e| e.code == "not_found") => {
-                        record.version
+                    let hash = plaintext_hash(&bytes);
+                    let record = state.files.get(path).cloned();
+                    if record.as_ref().is_some_and(|r| r.plaintext_hash == hash) {
+                        continue;
                     }
-                    Err(error) => return Err(error),
-                };
-                state.cursor = state.cursor.max(version);
-                state.files.remove(path);
+                    let is_new = record.is_none();
+                    if is_new && quota.0 > 0 && path.starts_with("reference/") {
+                        let envelope_size = bytes.len() as u64 + 32;
+                        if used + envelope_size > quota.0 {
+                            held_back.push(path.clone());
+                            continue;
+                        }
+                    }
+                    let expected = record.as_ref().map(|r| r.version).unwrap_or(0);
+                    let record = match upload_file(&api, &key, path, expected, &bytes, hash).await {
+                        Ok(record) => record,
+                        Err(error) => match file_refusal(&error) {
+                            Some(reason) => {
+                                log::warn!("Thock: {path} was not sent: {error:#}");
+                                skipped.push(SkippedFile {
+                                    path: path.clone(),
+                                    reason,
+                                });
+                                continue;
+                            }
+                            None => return Err(error),
+                        },
+                    };
+                    used += bytes.len() as u64 + 32;
+                    state.cursor = state.cursor.max(record.version);
+                    state.files.insert(path.clone(), record);
+                    uploaded += 1;
+                }
+                for path in &removed {
+                    let Some(record) = state.files.get(path).cloned() else {
+                        continue;
+                    };
+                    let mut attempt = api.tombstone(path, record.version).await;
+                    if let Err(error) = &attempt
+                        && let Some(e) = sync_error(error)
+                        && e.code == "stale_version"
+                    {
+                        let current = e.current_version.unwrap_or(record.version);
+                        attempt = api.tombstone(path, current).await;
+                    }
+                    let version = match attempt {
+                        Ok(version) => version,
+                        // The server never had the path, lost it, or would
+                        // never have taken it: nothing there to delete.
+                        Err(error)
+                            if sync_error(&error).is_some_and(|e| e.code == "not_found")
+                                || file_refusal(&error).is_some() =>
+                        {
+                            record.version
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    state.cursor = state.cursor.max(version);
+                    state.files.remove(path);
+                }
+                Ok(())
             }
-            Ok::<_, anyhow::Error>((state, uploaded, skipped, held_back))
+            .await;
+            (state, uploaded, skipped, held_back, sent)
         })
     };
-    let (mut state, uploaded, skipped, held_back) = match upload.await {
-        Ok(result) => result,
-        Err(error) => return Err((job, error)),
-    };
+    let (mut state, uploaded, skipped, held_back, sent) = upload.await;
+    if let Err(error) = sent {
+        let progress = keep_progress(&fs, &vault.root, state, &saved_state).await;
+        return Err(JobFailure {
+            job,
+            error,
+            progress,
+        });
+    }
 
     // Ack only after the snapshots carrying the writes' effects are up.
+    let published = state.clone();
+    // A pass that published and acked nothing (most minute polls, and the
+    // echo of a file this desk just wrote) asks for the summary only when
+    // the last one could be out of date in a way the status row shows;
+    // every request counts against the service's free allowance.
+    let quiet = !job.catch_up && last_seq.is_none() && state == saved_state;
+    let known = info.filter(|info| quiet && !info.is_lapsed() && info.phone().is_some());
     let finish = {
         let api = session.api.clone();
         cx.background_spawn(async move {
@@ -1635,19 +1804,29 @@ async fn run_job(
                 state.acked_through_seq = acked.through_seq;
                 state.cursor = state.cursor.max(acked.at_version);
             }
-            let info = api.vault().await?;
+            let info = match known {
+                Some(info) => info,
+                None => api.vault().await?,
+            };
             Ok::<_, anyhow::Error>((state, info))
         })
     };
     let (state, info) = match finish.await {
         Ok(result) => result,
-        Err(error) => return Err((job, error)),
+        Err(error) => {
+            let progress = keep_progress(&fs, &vault.root, published, &saved_state).await;
+            return Err(JobFailure {
+                job,
+                error,
+                progress,
+            });
+        }
     };
     // Most minute polls find nothing; don't touch the vault for them.
     if state != saved_state
         && let Err(error) = save_state(&fs, &vault.root, &state).await
     {
-        return Err((job, error));
+        return Err(JobFailure::new(job, error));
     }
     Ok(JobOutcome {
         state,
@@ -1659,6 +1838,26 @@ async fn run_job(
         refused: refused_writes,
         blocked: blocked_write,
     })
+}
+
+/// Records what a pass published before it failed, so the retry starts
+/// where the pass stopped instead of sending those notes again.
+async fn keep_progress(
+    fs: &Arc<dyn Fs>,
+    root: &Path,
+    state: LocalState,
+    saved_state: &LocalState,
+) -> Option<LocalState> {
+    if &state == saved_state {
+        return None;
+    }
+    match save_state(fs, root, &state).await {
+        Ok(()) => Some(state),
+        Err(error) => {
+            log::warn!("Thock: couldn't record what was sent: {error:#}");
+            None
+        }
+    }
 }
 
 struct ScanResult {
@@ -2145,6 +2344,12 @@ mod tests {
         vault_gone: bool,
         /// Holds the next `GET /v1/vault/writes` until the sender fires.
         writes_gate: Option<futures::channel::oneshot::Receiver<()>>,
+        /// Answer every call with a 503.
+        unavailable: bool,
+        /// Paths whose upload is always refused, with the status and code.
+        refused: HashMap<String, (u16, &'static str)>,
+        /// Paths whose next upload fails with a 503, once.
+        fails_once: BTreeSet<String>,
     }
 
     impl StubServer {
@@ -2209,6 +2414,10 @@ mod tests {
                 let body = serde_json::json!({"error": "gone", "code": "vault_missing"});
                 return (404, body.to_string().into_bytes());
             }
+            if self.unavailable {
+                let body = serde_json::json!({"error": "down", "code": "unavailable"});
+                return (503, body.to_string().into_bytes());
+            }
             let path_and_query = uri.trim_start_matches("http://stub");
             let (route, _query) = path_and_query
                 .split_once('?')
@@ -2259,6 +2468,14 @@ mod tests {
                         None => (rest, false),
                     };
                     let path = path.replace("%20", " ");
+                    if method == "POST" && !commit {
+                        if let Some((status, code)) = self.refused.get(&path) {
+                            return error(*status, code, serde_json::Value::Null);
+                        }
+                        if self.fails_once.remove(&path) {
+                            return error(503, "unavailable", serde_json::Value::Null);
+                        }
+                    }
                     let expected = body_json["expected_version"].as_u64().unwrap_or(0);
                     let current = self.files.get(&path).map(|f| f.version).unwrap_or(0);
                     if expected != current {
@@ -2633,6 +2850,11 @@ mod tests {
                     .any(|r| r.contains("/v1/vault/writes"))
             );
             assert!(!server.requests.iter().any(|r| r.contains("/feed")));
+            assert_eq!(
+                server.requests[asked..],
+                ["GET http://stub/v1/vault/writes?after=1&limit=1000"],
+                "a poll that finds nothing is one request"
+            );
         }
         assert_eq!(
             fs.metadata(&state_file).await.unwrap().unwrap().mtime,
@@ -3111,6 +3333,206 @@ mod tests {
                 vec!["images/notes.txt"]
             );
         });
+    }
+
+    fn warnings(
+        service: &Entity<VaultSyncService>,
+        cx: &mut TestAppContext,
+    ) -> Rc<RefCell<Vec<String>>> {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            let seen = seen.clone();
+            cx.subscribe(service, move |_, event: &ManualSyncFinished, _| {
+                if event.icon == IconName::Warning {
+                    seen.borrow_mut().push(event.message.to_string());
+                }
+            })
+            .detach();
+        });
+        seen
+    }
+
+    #[gpui::test]
+    async fn a_file_the_service_refuses_is_listed_and_the_rest_still_go(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "archive": {"odd.md": "refused\n", "big.md": "no room\n"},
+                "daily": {"2026-10-02.md": "# Today\n"},
+            }),
+        )
+        .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        {
+            let mut server = server.lock().unwrap();
+            server.phone_paired = true;
+            server
+                .refused
+                .insert("archive/odd.md".to_string(), (422, "path_not_allowed"));
+            server
+                .refused
+                .insert("archive/big.md".to_string(), (507, "quota_exceeded"));
+        }
+        let service = start_service(&fs, server.clone(), cx).await;
+
+        assert_eq!(
+            server
+                .lock()
+                .unwrap()
+                .plaintext("daily/2026-10-02.md")
+                .as_deref(),
+            Some("# Today\n"),
+            "a note sorted after the refused ones still goes up"
+        );
+        service.read_with(cx, |service, _| {
+            assert!(matches!(service.status(), PhoneSyncState::UpToDate { .. }));
+            let skipped: Vec<_> = service
+                .skipped()
+                .iter()
+                .map(|file| (file.path.as_str(), file.reason.to_string()))
+                .collect();
+            assert_eq!(
+                skipped,
+                [
+                    (
+                        "archive/big.md",
+                        "your Thock Plus storage is full".to_string()
+                    ),
+                    ("archive/odd.md", "its name can't be sent".to_string()),
+                ]
+            );
+        });
+
+        // A poll looks at no file, so it must not empty the list.
+        cx.executor().advance_clock(POLL_INTERVAL);
+        cx.run_until_parked();
+        service.read_with(cx, |service, _| assert_eq!(service.skipped().len(), 2));
+    }
+
+    #[gpui::test]
+    async fn a_failed_pass_keeps_what_it_sent_and_sync_now_retries_at_once(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "a.md": "first\n",
+                "b.md": "second\n",
+            }),
+        )
+        .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        {
+            let mut server = server.lock().unwrap();
+            server.phone_paired = true;
+            server.fails_once.insert("b.md".to_string());
+        }
+        let service = start_service(&fs, server.clone(), cx).await;
+        service.read_with(cx, |service, _| {
+            assert!(matches!(service.status(), PhoneSyncState::Failing { .. }));
+            assert!(service.state.files.contains_key("a.md"));
+        });
+        let recorded = load_state(&(fs.clone() as Arc<dyn Fs>), Path::new("/vault")).await;
+        assert!(recorded.files.contains_key("a.md"));
+
+        // No clock moves: asking by hand ends the wait before the retry.
+        service.update(cx, |service, cx| service.sync_now(cx));
+        cx.run_until_parked();
+        service.read_with(cx, |service, _| {
+            assert!(matches!(service.status(), PhoneSyncState::UpToDate { .. }));
+        });
+        let server = server.lock().unwrap();
+        assert_eq!(server.plaintext("b.md").as_deref(), Some("second\n"));
+        let sent_a = server
+            .requests
+            .iter()
+            .filter(|r| r.contains("/v1/vault/files/a.md"))
+            .count();
+        assert_eq!(sent_a, 2, "a.md goes up once: {:?}", server.requests);
+    }
+
+    #[gpui::test]
+    async fn a_run_of_failures_is_announced_once_and_retried_until_it_passes(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/vault",
+            serde_json::json!({
+                ".thock": {"config.toml": ""},
+                "a.md": "first\n",
+            }),
+        )
+        .await;
+        let server = Arc::new(Mutex::new(StubServer::default()));
+        server.lock().unwrap().phone_paired = true;
+        let service = start_service(&fs, server.clone(), cx).await;
+        let warnings = warnings(&service, cx);
+
+        server.lock().unwrap().unavailable = true;
+        fs.save(
+            Path::new("/vault/a.md"),
+            &"first\nsecond\n".into(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        cx.executor().advance_clock(UPLOAD_DEBOUNCE);
+        cx.run_until_parked();
+        service.read_with(cx, |service, _| {
+            assert!(matches!(service.status(), PhoneSyncState::Failing { .. }));
+        });
+        assert!(warnings.borrow().is_empty(), "one failure is not news");
+
+        let mut waited = Duration::ZERO;
+        while waited < Duration::from_secs(20 * 60) {
+            cx.executor().advance_clock(RETRY_CEILING);
+            cx.run_until_parked();
+            waited += RETRY_CEILING;
+        }
+        assert_eq!(
+            warnings.borrow().len(),
+            1,
+            "announced once: {:?}",
+            warnings.borrow()
+        );
+
+        // The pause between retries never outgrows the ceiling.
+        server.lock().unwrap().unavailable = false;
+        cx.executor().advance_clock(RETRY_CEILING);
+        cx.run_until_parked();
+        service.read_with(cx, |service, _| {
+            assert!(matches!(service.status(), PhoneSyncState::UpToDate { .. }));
+        });
+        assert_eq!(
+            server.lock().unwrap().plaintext("a.md").as_deref(),
+            Some("first\nsecond\n")
+        );
+    }
+
+    #[gpui::test]
+    async fn a_request_the_service_never_answers_fails_instead_of_hanging(cx: &mut TestAppContext) {
+        let http = FakeHttpClient::create(|_| async move {
+            futures::future::pending::<()>().await;
+            Ok(Response::builder()
+                .status(200)
+                .body(AsyncBody::default())
+                .unwrap())
+        });
+        let api = SyncApi::new(http, "http://stub".to_string(), "tpk_test".to_string())
+            .with_timeouts(cx.executor());
+        let call = cx.executor().spawn(async move { api.vault().await });
+        cx.run_until_parked();
+        cx.executor().advance_clock(REQUEST_TIMEOUT);
+        let error = call.await.unwrap_err();
+        assert!(format!("{error:#}").contains("didn't answer"), "{error:#}");
     }
 
     #[gpui::test]

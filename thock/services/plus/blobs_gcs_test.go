@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,6 +44,7 @@ func fakeGCSStore(objects map[string]int64) (*gcsBlobStore, *fakeBucket, *[]stor
 	var signed []storage.SignedURLOptions
 	store := &gcsBlobStore{
 		bucket: bucket,
+		now:    time.Now,
 		signURL: func(object string, options *storage.SignedURLOptions) (string, error) {
 			signed = append(signed, *options)
 			return "https://storage.example/" + object + "?signature=x", nil
@@ -64,11 +67,11 @@ func TestGCSStoreNamesObjectsByVaultAndBlobAndSignsV4(t *testing.T) {
 	if upload.Headers["Content-Type"] != "application/octet-stream" || !upload.Expires.Equal(expires) {
 		t.Fatalf("unexpected upload %+v", upload)
 	}
-	download, err := store.downloadURL(context.Background(), "v1", "b1", expires)
+	download, until, err := store.downloadURL(context.Background(), "v1", "b1", expires)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if download != "https://storage.example/v1/b1?signature=x" {
+	if download != "https://storage.example/v1/b1?signature=x" || !until.Equal(expires) {
 		t.Fatalf("unexpected download %q", download)
 	}
 	if len(*signed) != 2 {
@@ -166,7 +169,7 @@ func TestGCSStoreRoundTripsThroughARealBucket(t *testing.T) {
 	if err != nil || size != int64(len(body)) {
 		t.Fatalf("stat after upload: %d, %v", size, err)
 	}
-	download, err := store.downloadURL(ctx, vaultID, blobID, expires)
+	download, _, err := store.downloadURL(ctx, vaultID, blobID, expires)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,5 +187,125 @@ func TestGCSStoreRoundTripsThroughARealBucket(t *testing.T) {
 	}
 	if _, err := store.stat(ctx, vaultID, blobID); !errors.Is(err, errNotFound) {
 		t.Fatalf("the object must be gone after delete, got %v", err)
+	}
+}
+
+func TestGCSStoreHandsOutADownloadURLAgainWhileItHasLifeLeft(t *testing.T) {
+	store, bucket, signed := fakeGCSStore(map[string]int64{"v1/b1": 10})
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	ctx := context.Background()
+
+	first, until, err := store.downloadURL(ctx, "v1", "b1", now.Add(signedURLLifetime))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A listing repeated a few minutes later signs nothing and tells the
+	// truth about when the URL it repeats runs out.
+	now = now.Add(4 * time.Minute)
+	again, againUntil, err := store.downloadURL(ctx, "v1", "b1", now.Add(signedURLLifetime))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != first || !againUntil.Equal(until) || len(*signed) != 1 {
+		t.Fatalf("expected the kept URL until %v, got until %v after %d signatures", until, againUntil, len(*signed))
+	}
+	if _, _, err := store.downloadURL(ctx, "v1", "other", now.Add(signedURLLifetime)); err != nil || len(*signed) != 2 {
+		t.Fatalf("another blob needs its own signature: %d, %v", len(*signed), err)
+	}
+
+	// With less than the floor left it is signed afresh.
+	now = now.Add(2 * time.Minute)
+	_, fresh, err := store.downloadURL(ctx, "v1", "b1", now.Add(signedURLLifetime))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*signed) != 3 || !fresh.Equal(now.Add(signedURLLifetime)) {
+		t.Fatalf("expected a fresh signature, got %d until %v", len(*signed), fresh)
+	}
+
+	// A deleted blob's URL is not handed out again.
+	if err := store.delete(ctx, "v1", "b1"); err != nil {
+		t.Fatal(err)
+	}
+	bucket.objects["v1/b1"] = 10
+	if _, _, err := store.downloadURL(ctx, "v1", "b1", now.Add(signedURLLifetime)); err != nil || len(*signed) != 4 {
+		t.Fatalf("expected a signature after the delete: %d, %v", len(*signed), err)
+	}
+}
+
+// countingBlobs signs slowly enough to overlap and records how many
+// signatures ran at once.
+type countingBlobs struct {
+	blobStore
+	mu       sync.Mutex
+	running  int
+	peak     int
+	signed   int
+	failBlob string
+}
+
+func (c *countingBlobs) downloadURL(_ context.Context, _, blobID string, expires time.Time) (string, time.Time, error) {
+	c.mu.Lock()
+	c.running++
+	c.signed++
+	c.peak = max(c.peak, c.running)
+	c.mu.Unlock()
+	time.Sleep(time.Millisecond)
+	c.mu.Lock()
+	c.running--
+	c.mu.Unlock()
+	if blobID == c.failBlob {
+		return "", time.Time{}, errors.New("signing is down")
+	}
+	return "https://storage.example/" + blobID, expires, nil
+}
+
+func TestAListingSignsItsDownloadsSideBySideAndInOrder(t *testing.T) {
+	rows := make([]fileRow, 200)
+	for i := range rows {
+		rows[i] = fileRow{Path: fmt.Sprintf("notes/%03d.md", i), BlobID: fmt.Sprintf("blob%03d", i), Deleted: i%50 == 7}
+	}
+	blobs := &countingBlobs{}
+	s := &server{blobs: blobs}
+	expires := time.Date(2026, 11, 21, 12, 15, 0, 0, time.UTC)
+
+	downloads, err := s.signDownloads(context.Background(), "v1", rows, expires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, row := range rows {
+		want := "https://storage.example/" + row.BlobID
+		if row.Deleted {
+			want = ""
+		}
+		if downloads[i].url != want {
+			t.Fatalf("row %d got %q, want %q", i, downloads[i].url, want)
+		}
+	}
+	if blobs.signed != 196 {
+		t.Fatalf("a tombstone needs no signature: %d signed", blobs.signed)
+	}
+	if blobs.peak < 2 || blobs.peak > signConcurrency {
+		t.Fatalf("expected between 2 and %d signatures at once, saw %d", signConcurrency, blobs.peak)
+	}
+
+	// One failure fails the listing and stops the rest from being signed.
+	failing := &countingBlobs{failBlob: "blob003"}
+	s = &server{blobs: failing}
+	if _, err := s.signDownloads(context.Background(), "v1", rows, expires); err == nil {
+		t.Fatal("a signature that fails must fail the listing")
+	}
+	if failing.signed > 3+2*signConcurrency {
+		t.Fatalf("signing went on after the failure: %d signed", failing.signed)
+	}
+
+	// A caller that has gone is not signed for.
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	idle := &countingBlobs{}
+	s = &server{blobs: idle}
+	if _, err := s.signDownloads(gone, "v1", rows, expires); err == nil || idle.signed != 0 {
+		t.Fatalf("expected no signatures for a caller that left: %d, %v", idle.signed, err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -34,6 +35,10 @@ const (
 	defaultWritesPage   = 200
 	maxWritesPage       = 1000
 	tombstoneRetention  = 30 * 24 * time.Hour
+	// How many download URLs one listing signs at a time. In production a
+	// signature is a call to another service, and a page of 500 signed one
+	// after another outlasts the phone's patience.
+	signConcurrency = 16
 )
 
 var (
@@ -759,26 +764,25 @@ func (s *server) handleFilesList(w http.ResponseWriter, r *http.Request, p princ
 	if hasMore {
 		rows = rows[:limit]
 	}
-	expires := s.now().Add(signedURLLifetime)
+	downloads, err := s.signDownloads(r.Context(), p.vault.ID, rows, s.now().Add(signedURLLifetime))
+	if err != nil {
+		logf("error: signing downloads for %s: %v", p.vault.ID, err)
+		writeErrorCode(w, http.StatusServiceUnavailable, "unavailable", "Couldn't prepare the downloads. Try again.")
+		return
+	}
 	files := make([]fileResponse, 0, len(rows))
 	nextSince := since
 	if since < 0 {
 		nextSince = 0
 	}
-	for _, row := range rows {
+	for i, row := range rows {
 		item := fileResponse{Path: row.Path, Version: row.Version, Deleted: row.Deleted, UpdatedBy: row.UpdatedBy, UpdatedAt: row.UpdatedAt}
 		if !row.Deleted {
 			item.BlobID = row.BlobID
 			item.SizeBytes = row.SizeBytes
 			item.ContentHash = row.ContentHash
-			url, err := s.blobs.downloadURL(r.Context(), p.vault.ID, row.BlobID, expires)
-			if err != nil {
-				logf("error: signing a download for %s/%s: %v", p.vault.ID, row.Path, err)
-				writeErrorCode(w, http.StatusServiceUnavailable, "unavailable", "Couldn't prepare the downloads. Try again.")
-				return
-			}
-			item.DownloadURL = url
-			item.DownloadExpiresAt = &expires
+			item.DownloadURL = downloads[i].url
+			item.DownloadExpiresAt = &downloads[i].expires
 		}
 		files = append(files, item)
 		nextSince = row.Version
@@ -790,6 +794,62 @@ func (s *server) handleFilesList(w http.ResponseWriter, r *http.Request, p princ
 		nextSince = p.vault.LatestVersion
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"files": files, "next_since": nextSince, "has_more": hasMore})
+}
+
+type signedDownload struct {
+	url     string
+	expires time.Time
+}
+
+// signDownloads signs a download URL for every live row, signConcurrency at
+// a time, and answers in the rows' order. It stops starting new signatures
+// once one fails or the caller is gone.
+func (s *server) signDownloads(ctx context.Context, vaultID string, rows []fileRow, expires time.Time) ([]signedDownload, error) {
+	downloads := make([]signedDownload, len(rows))
+	var (
+		wait     sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+	)
+	slots := make(chan struct{}, signConcurrency)
+	failed := func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		return firstErr
+	}
+	for i, row := range rows {
+		if row.Deleted {
+			continue
+		}
+		slots <- struct{}{}
+		if failed() != nil || ctx.Err() != nil {
+			<-slots
+			break
+		}
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			defer func() { <-slots }()
+			url, until, err := s.blobs.downloadURL(ctx, vaultID, row.BlobID, expires)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("%s: %w", row.Path, err)
+				}
+				mu.Unlock()
+				return
+			}
+			downloads[i] = signedDownload{url: url, expires: until}
+		}()
+	}
+	wait.Wait()
+	if err := failed(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return downloads, nil
 }
 
 func pageLimit(w http.ResponseWriter, r *http.Request, fallback, ceiling int) (int, bool) {
